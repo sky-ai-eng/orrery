@@ -1,0 +1,20 @@
+# Determinism tripwires (spec/README.md rules 4-6: the world has no hidden inputs).
+# Wall-clock time and randomness are compile-time errors everywhere; the world's
+# only time source is the virtual clock in world.db. A site that legitimately
+# needs real time (operator-facing CLI edges only) carries an #[allow] with a
+# justification comment.
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "the world's time source is the virtual clock (orrery-world); real time is a hidden input that breaks replay" },
+    { path = "std::time::Instant::now", reason = "the world's time source is the virtual clock; use it, or justify an #[allow] at an operator-facing edge" },
+    { path = "jiff::Timestamp::now", reason = "the world's time source is the virtual clock" },
+    { path = "jiff::Zoned::now", reason = "the world's time source is the virtual clock" },
+]
+
+# BTreeMap/BTreeSet are house style for anything that is iterated, serialized,
+# or diffed: HashMap iteration order is randomized per process and silently
+# breaks byte-identical replay. Request-scoped lookups that are never iterated
+# may #[allow] with a justification comment.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is nondeterministic; use BTreeMap (house style), or justify an #[allow] for a never-iterated lookup" },
+    { path = "std::collections::HashSet", reason = "iteration order is nondeterministic; use BTreeSet (house style), or justify an #[allow] for a never-iterated lookup" },
+]

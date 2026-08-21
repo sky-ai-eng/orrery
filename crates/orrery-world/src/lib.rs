@@ -1,0 +1,489 @@
+//! The world kernel: one directory holding everything a world is.
+//!
+//! Layout (spec/usage.md — rule 10: delete the directory and the world is gone):
+//!
+//! ```text
+//! <root>/            # the world root, owned exclusively by this kernel
+//! ├── world.db       # SQLite: clock, actors, repos, pulls, reviews, log, ...
+//! └── repos/         # bare git repositories, managed by the git face
+//! ```
+//!
+//! This crate has no HTTP dependencies and no vendor vocabulary. Faces adapt
+//! vendors onto it; nothing else opens `world.db`.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
+
+mod checks;
+mod error;
+mod pulls;
+mod queries;
+mod reader;
+mod schema;
+mod types;
+
+pub use checks::{CheckRunPatch, NewCheckRun};
+pub use error::WorldError;
+pub use pulls::NewPull;
+pub use reader::{ViewMeta, WorldReader, WorldView};
+pub use types::*;
+
+pub type Result<T> = std::result::Result<T, WorldError>;
+
+/// Fallback T0 when a new world's config doesn't name one: 2020-01-01T00:00:00Z.
+/// A fixed constant rather than "now" so that two worlds created from the same
+/// config are byte-identical (rule 5).
+pub const DEFAULT_T0_UNIX: i64 = 1_577_836_800;
+
+/// The reserved actor that attributes control-plane and engine-internal
+/// mutations in the action log. Seeded at world creation; holds no token.
+pub const SYSTEM_ACTOR_LOGIN: &str = "orrery";
+
+const DB_FILE: &str = "world.db";
+const REPOS_DIR: &str = "repos";
+
+pub struct World {
+    root: PathBuf,
+    conn: Mutex<Connection>,
+}
+
+impl World {
+    /// Create a new world at `root` (which must not already contain one) with
+    /// the clock at `t0_unix`, and seed the system actor.
+    pub fn create(root: &Path, t0_unix: i64) -> Result<World> {
+        if root.join(DB_FILE).exists() {
+            return Err(WorldError::AlreadyExists(root.to_path_buf()));
+        }
+        std::fs::create_dir_all(root.join(REPOS_DIR))?;
+        let world = World::connect(root)?;
+        {
+            let conn = world.lock();
+            conn.execute(
+                "INSERT INTO world (id, clock_unix) VALUES (1, ?1)",
+                params![t0_unix],
+            )?;
+            conn.execute(
+                "INSERT INTO actors (login, kind, created_clock_unix) VALUES (?1, 'system', ?2)",
+                params![SYSTEM_ACTOR_LOGIN, t0_unix],
+            )?;
+        }
+        let system = world
+            .actor_by_login(SYSTEM_ACTOR_LOGIN)?
+            .expect("system actor was just seeded");
+        world.log_action(
+            system.id,
+            "world.init",
+            &serde_json::json!({ "t0_unix": t0_unix }),
+        )?;
+        Ok(world)
+    }
+
+    /// Open an existing world at `root`.
+    pub fn open(root: &Path) -> Result<World> {
+        if !root.join(DB_FILE).exists() {
+            return Err(WorldError::NotFound(root.to_path_buf()));
+        }
+        World::connect(root)
+    }
+
+    /// Open the world at `root`, creating it with `t0_unix` if absent.
+    pub fn open_or_create(root: &Path, t0_unix: i64) -> Result<World> {
+        if root.join(DB_FILE).exists() {
+            World::open(root)
+        } else {
+            World::create(root, t0_unix)
+        }
+    }
+
+    fn connect(root: &Path) -> Result<World> {
+        let conn = open_conn(root)?;
+        Ok(World {
+            root: root.to_path_buf(),
+            conn: Mutex::new(conn),
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The directory the git face keeps bare repositories in.
+    pub fn repos_dir(&self) -> PathBuf {
+        self.root.join(REPOS_DIR)
+    }
+
+    // ---- clock ----
+
+    pub fn clock(&self) -> Result<i64> {
+        queries::clock(&self.lock())
+    }
+
+    /// Advance the virtual clock. Forward-only: the clock never rewinds in a
+    /// live world (spec/usage.md — rollback is a snapshot operation).
+    pub fn advance_clock(&self, seconds: i64, actor_id: i64) -> Result<i64> {
+        if seconds <= 0 {
+            return Err(WorldError::ClockRegression(seconds));
+        }
+        let (from, to) = {
+            let conn = self.lock();
+            let from = queries::clock(&conn)?;
+            let to: i64 = conn.query_row(
+                "UPDATE world SET clock_unix = clock_unix + ?1 WHERE id = 1 RETURNING clock_unix",
+                params![seconds],
+                |r| r.get(0),
+            )?;
+            (from, to)
+        };
+        self.log_action(
+            actor_id,
+            "clock.advance",
+            &serde_json::json!({ "seconds": seconds, "from_unix": from, "to_unix": to }),
+        )?;
+        Ok(to)
+    }
+
+    // ---- actors & tokens ----
+
+    /// Create an actor and mint its token. The token is derived, not random
+    /// (rule 5: replay must reproduce it; rule 12: it is fake by construction).
+    pub fn create_actor(&self, login: &str, kind: ActorKind) -> Result<(Actor, String)> {
+        validate_login(login)?;
+        if kind == ActorKind::System {
+            return Err(WorldError::InvalidActorKind);
+        }
+        let conn = self.lock();
+        let clock = queries::clock(&conn)?;
+        let actor = conn
+            .query_row(
+                "INSERT INTO actors (login, kind, created_clock_unix) VALUES (?1, ?2, ?3)
+                 RETURNING id, login, kind, created_clock_unix",
+                params![login, kind.as_str(), clock],
+                queries::row_to_actor,
+            )
+            .map_err(|e| match constraint_violation(&e) {
+                true => WorldError::ActorExists(login.to_string()),
+                false => WorldError::from(e),
+            })?;
+        let token = derive_token(&actor.login, actor.id);
+        conn.execute(
+            "INSERT INTO tokens (token, actor_id, created_clock_unix) VALUES (?1, ?2, ?3)",
+            params![token, actor.id, clock],
+        )?;
+        log_locked(
+            &conn,
+            actor.id,
+            "actor.create",
+            &serde_json::json!({ "login": actor.login, "kind": kind.as_str() }),
+        )?;
+        Ok((actor, token))
+    }
+
+    pub fn actor_by_login(&self, login: &str) -> Result<Option<Actor>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                &format!("{} WHERE login = ?1", queries::ACTOR_SELECT),
+                params![login],
+                queries::row_to_actor,
+            )
+            .optional()?)
+    }
+
+    pub fn actor_by_token(&self, token: &str) -> Result<Option<Actor>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT a.id, a.login, a.kind, a.created_clock_unix
+                 FROM tokens t JOIN actors a ON a.id = t.actor_id
+                 WHERE t.token = ?1",
+                params![token],
+                queries::row_to_actor,
+            )
+            .optional()?)
+    }
+
+    // ---- repos ----
+
+    /// Insert the repo row. Disk-side initialization of the bare repository is
+    /// the git face's job; the kernel records only state.
+    pub fn create_repo(
+        &self,
+        owner_id: i64,
+        name: &str,
+        description: Option<&str>,
+        private: bool,
+        default_branch: &str,
+        created_by: i64,
+    ) -> Result<Repo> {
+        validate_repo_name(name)?;
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction()?;
+        let clock = queries::clock(&tx)?;
+        let id: i64 = tx
+            .query_row(
+                "INSERT INTO repos (owner_id, name, description, private, default_branch,
+                                    created_by, created_clock_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 RETURNING id",
+                params![
+                    owner_id,
+                    name,
+                    description,
+                    private,
+                    default_branch,
+                    created_by,
+                    clock
+                ],
+                |r| r.get(0),
+            )
+            .map_err(|e| match constraint_violation(&e) {
+                true => WorldError::RepoExists(name.to_string()),
+                false => WorldError::from(e),
+            })?;
+        let repo = tx
+            .query_row(
+                &format!("{} WHERE r.id = ?1", queries::REPO_SELECT),
+                params![id],
+                queries::row_to_repo,
+            )
+            .map_err(WorldError::from)?;
+        log_locked(
+            &tx,
+            created_by,
+            "repo.create",
+            &serde_json::json!({
+                "owner": repo.owner_login,
+                "name": repo.name,
+                "private": repo.private,
+            }),
+        )?;
+        tx.commit()?;
+        Ok(repo)
+    }
+
+    pub fn repo_by_owner_name(&self, owner: &str, name: &str) -> Result<Option<Repo>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                &format!(
+                    "{} WHERE a.login = ?1 AND r.name = ?2",
+                    queries::REPO_SELECT
+                ),
+                params![owner, name],
+                queries::row_to_repo,
+            )
+            .optional()?)
+    }
+
+    pub fn repo_by_id(&self, id: i64) -> Result<Option<Repo>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                &format!("{} WHERE r.id = ?1", queries::REPO_SELECT),
+                params![id],
+                queries::row_to_repo,
+            )
+            .optional()?)
+    }
+
+    /// Record that a push landed: bump `pushed_at` to the current clock.
+    pub fn touch_pushed(&self, repo_id: i64) -> Result<()> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE repos
+             SET pushed_at_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+             WHERE id = ?1",
+            params![repo_id],
+        )?;
+        if n == 0 {
+            return Err(WorldError::NoSuchRepo(repo_id));
+        }
+        Ok(())
+    }
+
+    pub fn set_default_branch(&self, repo_id: i64, branch: &str) -> Result<()> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE repos SET default_branch = ?1 WHERE id = ?2",
+            params![branch, repo_id],
+        )?;
+        if n == 0 {
+            return Err(WorldError::NoSuchRepo(repo_id));
+        }
+        Ok(())
+    }
+
+    // ---- action log ----
+
+    /// Append to the action log, stamped with the current clock. The log is
+    /// append-only; nothing in the kernel updates or deletes its rows.
+    pub fn log_action(
+        &self,
+        actor_id: i64,
+        action: &str,
+        details: &serde_json::Value,
+    ) -> Result<LogEntry> {
+        let conn = self.lock();
+        log_locked(&conn, actor_id, action, details)
+    }
+
+    /// Log entries with `seq > after_seq`, oldest first, at most `limit`.
+    /// `seq` is a total order by construction, so pagination is stable.
+    pub fn log_after(&self, after_seq: i64, limit: usize) -> Result<Vec<LogEntry>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT l.seq, l.clock_unix, a.login, l.action, l.details
+             FROM action_log l JOIN actors a ON a.id = l.actor_id
+             WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after_seq, limit as i64], |r| {
+            Ok(LogEntry {
+                seq: r.get(0)?,
+                clock_unix: r.get(1)?,
+                actor_login: r.get(2)?,
+                action: r.get(3)?,
+                details: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(4)?)
+                    .unwrap_or(serde_json::Value::Null),
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    // ---- snapshot support ----
+
+    /// Run `f` with the database quiesced: the WAL checkpointed into the main
+    /// file and the connection lock held, so no write can land while `f` runs.
+    /// This is the moment a snapshot copy of the world directory is exact.
+    pub fn quiesce<T>(&self, f: impl FnOnce() -> T) -> Result<T> {
+        let conn = self.lock();
+        checkpoint(&conn)?;
+        Ok(f())
+    }
+
+    /// Close the database, run `f` (which replaces the world directory's
+    /// contents — a snapshot restore), then reopen. The connection lock is
+    /// held throughout, so no query can observe the closed state. If `f`
+    /// fails, the reopen still runs against whatever `f` left behind; the
+    /// reopen error (world unusable) outranks `f`'s.
+    pub fn swap_state(&self, f: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
+        let mut guard = self.lock();
+        checkpoint(&guard)?;
+        let old = std::mem::replace(&mut *guard, Connection::open_in_memory()?);
+        drop(old);
+        let swap_result = f();
+        *guard = open_conn(&self.root)?;
+        swap_result?;
+        Ok(())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().expect("world.db mutex poisoned")
+    }
+
+    pub(crate) fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        f(&self.lock())
+    }
+}
+
+fn open_conn(root: &Path) -> Result<Connection> {
+    let conn = Connection::open(root.join(DB_FILE))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    schema::migrate(&conn)?;
+    Ok(conn)
+}
+
+fn checkpoint(conn: &Connection) -> Result<()> {
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(())
+}
+
+/// Append to the action log through an already-held connection (or an open
+/// transaction — the clock subselect and the insert see the same state).
+pub(crate) fn log_locked(
+    conn: &Connection,
+    actor_id: i64,
+    action: &str,
+    details: &serde_json::Value,
+) -> Result<LogEntry> {
+    let entry = conn.query_row(
+        "INSERT INTO action_log (clock_unix, actor_id, action, details)
+         VALUES ((SELECT clock_unix FROM world WHERE id = 1), ?1, ?2, ?3)
+         RETURNING seq, clock_unix, actor_id, action, details",
+        params![actor_id, action, details.to_string()],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        },
+    )?;
+    let login: String = conn.query_row(
+        "SELECT login FROM actors WHERE id = ?1",
+        params![entry.2],
+        |r| r.get(0),
+    )?;
+    Ok(LogEntry {
+        seq: entry.0,
+        clock_unix: entry.1,
+        actor_login: login,
+        action: entry.3,
+        details: serde_json::from_str(&entry.4).unwrap_or(serde_json::Value::Null),
+    })
+}
+
+fn constraint_violation(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, _)
+            if f.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
+
+/// Tokens are derived from stable inputs so replay reproduces them exactly.
+/// The `orr_` prefix keeps them visibly fake and outside every real GitHub
+/// token namespace (`ghp_`, `ghs_`, `gho_`, ...).
+fn derive_token(login: &str, actor_id: i64) -> String {
+    let digest = Sha256::digest(format!("{login}:{actor_id}"));
+    format!("orr_{}", hex::encode(&digest[..16]))
+}
+
+/// GitHub login rules: alphanumeric and hyphens, no leading/trailing hyphen,
+/// at most 39 chars. The system actor's login is reserved.
+fn validate_login(login: &str) -> Result<()> {
+    let valid = !login.is_empty()
+        && login.len() <= 39
+        && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !login.starts_with('-')
+        && !login.ends_with('-')
+        && !login.eq_ignore_ascii_case(SYSTEM_ACTOR_LOGIN);
+    if valid {
+        Ok(())
+    } else {
+        Err(WorldError::InvalidLogin(login.to_string()))
+    }
+}
+
+/// GitHub repo-name rules, plus the shapes the git face's path gate refuses.
+fn validate_repo_name(name: &str) -> Result<()> {
+    let reserved: BTreeSet<&str> = [".", ".."].into();
+    let valid = !name.is_empty()
+        && name.len() <= 100
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && !reserved.contains(name)
+        && !name.to_ascii_lowercase().ends_with(".git");
+    if valid {
+        Ok(())
+    } else {
+        Err(WorldError::InvalidRepoName(name.to_string()))
+    }
+}

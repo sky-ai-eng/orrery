@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/orrery-world",
+    "crates/orrery-face-git",
+    "crates/orrery-face-github",
+    "crates/orrery-snapshot",
+    "crates/orrery-server",
+    "crates/orrery",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/sky-ai-eng/orrery"
+
+[workspace.dependencies]
+orrery-world = { path = "crates/orrery-world" }
+orrery-face-git = { path = "crates/orrery-face-git" }
+orrery-face-github = { path = "crates/orrery-face-github" }
+orrery-snapshot = { path = "crates/orrery-snapshot" }
+orrery-server = { path = "crates/orrery-server" }
+
+anyhow = "1"
+axum = "0.8"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+jiff = "0.2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "process",
+    "io-util",
+    "sync",
+    "signal",
+] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# dev
+tempfile = "3"
+ureq = { version = "3", features = ["json"] }
+
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+disallowed_types = "deny"

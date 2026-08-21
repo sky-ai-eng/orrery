@@ -1,0 +1,15 @@
+# An Orrery instance is one config file plus one seed (spec/README.md rule 7).
+# Unknown keys are rejected, not ignored.
+
+[instance]
+# Directory holding this instance's world/ (and, later, snapshots/).
+dir = "./instance"
+# RFC3339 T0 for a newly created world. Ignored when the world already exists —
+# the clock lives in the world, not the config. Omit for the fixed default
+# (2020-01-01T00:00:00Z).
+t0 = "2026-01-01T00:00:00Z"
+
+[server]
+listen = "127.0.0.1:4180"
+# External base URL rendered into clone/html URLs; defaults to http://<listen>.
+# base_url = "http://127.0.0.1:4180"

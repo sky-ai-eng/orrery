@@ -1,0 +1,199 @@
+//! The `/_orrery/` control plane: the operations reality performs that no
+//! public GitHub API can express (spec/usage.md — door two). Never duplicates
+//! a face capability.
+//!
+//! Unlike the faces, these are our own routes, so house API style applies
+//! strictly: one intent per route, strict body decoding (unknown fields
+//! rejected), invalid values rejected with the field named — never clamped —
+//! and the one error shape `{"errors":[{"reason","message","field?"}]}`.
+
+use axum::Router;
+use axum::body::{Body, Bytes};
+use axum::extract::State;
+use axum::http::{Response, StatusCode};
+use axum::routing::{get, post};
+use orrery_world::{ActorKind, SYSTEM_ACTOR_LOGIN, WorldError};
+
+use crate::{AppState, json};
+
+const LOG_PAGE_MAX: usize = 500;
+const LOG_PAGE_DEFAULT: usize = 100;
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/clock", get(get_clock))
+        .route("/clock/advance", post(advance_clock))
+        .route("/actors", post(create_actor))
+        .route("/log/list", post(log_list))
+        .merge(crate::snapshots::router())
+        .with_state(state)
+}
+
+async fn healthz(State(state): State<AppState>) -> Response<Body> {
+    match state.world.clock() {
+        Ok(clock) => json(
+            StatusCode::OK,
+            serde_json::json!({ "status": "ok", "clock_unix": clock }),
+        ),
+        Err(e) => internal(e),
+    }
+}
+
+async fn get_clock(State(state): State<AppState>) -> Response<Body> {
+    match state.world.clock() {
+        Ok(clock) => json(StatusCode::OK, clock_body(clock)),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdvanceClockBody {
+    seconds: i64,
+}
+
+async fn advance_clock(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    let parsed: AdvanceClockBody = match decode_strict(&body) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
+    };
+    if parsed.seconds <= 0 {
+        return errors(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "the clock only moves forward; seconds must be positive",
+            Some("seconds"),
+        );
+    }
+    let system = match state.world.actor_by_login(SYSTEM_ACTOR_LOGIN) {
+        Ok(Some(a)) => a,
+        Ok(None) => return internal("system actor missing"),
+        Err(e) => return internal(e),
+    };
+    match state.world.advance_clock(parsed.seconds, system.id) {
+        Ok(clock) => json(StatusCode::OK, clock_body(clock)),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateActorBody {
+    login: String,
+    kind: ActorKind,
+}
+
+async fn create_actor(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    let parsed: CreateActorBody = match decode_strict(&body) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
+    };
+    match state.world.create_actor(&parsed.login, parsed.kind) {
+        Ok((actor, token)) => json(
+            StatusCode::CREATED,
+            serde_json::json!({
+                "actor": { "id": actor.id, "login": actor.login, "kind": actor.kind },
+                "token": token,
+            }),
+        ),
+        Err(e @ (WorldError::InvalidLogin(_) | WorldError::InvalidActorKind)) => errors(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            &e.to_string(),
+            Some("login"),
+        ),
+        Err(e @ WorldError::ActorExists(_)) => errors(
+            StatusCode::CONFLICT,
+            "ALREADY_EXISTS",
+            &e.to_string(),
+            Some("login"),
+        ),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogListBody {
+    #[serde(default)]
+    after_seq: i64,
+    page_size: Option<usize>,
+}
+
+async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    let parsed: LogListBody = match decode_strict(&body) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
+    };
+    let page_size = parsed.page_size.unwrap_or(LOG_PAGE_DEFAULT);
+    if page_size == 0 || page_size > LOG_PAGE_MAX {
+        return errors(
+            StatusCode::BAD_REQUEST,
+            "OUT_OF_RANGE",
+            &format!("page_size must be 1..={LOG_PAGE_MAX}"),
+            Some("page_size"),
+        );
+    }
+    match state.world.log_after(parsed.after_seq, page_size) {
+        Ok(items) => {
+            // Keyset pagination over seq, which is a total order by
+            // construction; a full page signals a possible next page.
+            let next_after_seq = (items.len() == page_size)
+                .then(|| items.last().map(|e| e.seq))
+                .flatten();
+            json(
+                StatusCode::OK,
+                serde_json::json!({ "items": items, "next_after_seq": next_after_seq }),
+            )
+        }
+        Err(e) => internal(e),
+    }
+}
+
+fn clock_body(clock: i64) -> serde_json::Value {
+    let rfc3339 = jiff::Timestamp::from_second(clock)
+        .map(|t| t.to_string())
+        .unwrap_or_else(|_| "invalid".to_string());
+    serde_json::json!({ "clock_unix": clock, "rfc3339": rfc3339 })
+}
+
+/// An empty body is a valid spelling of "all defaults" for bodies whose fields
+/// are all optional; callers with required fields still fail on the missing
+/// field, named by serde.
+pub(crate) fn decode_strict<T: serde::de::DeserializeOwned>(
+    body: &[u8],
+) -> Result<T, Box<Response<Body>>> {
+    let raw: &[u8] = if body.is_empty() { b"{}" } else { body };
+    serde_json::from_slice(raw).map_err(|e| {
+        Box::new(errors(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            &e.to_string(),
+            None,
+        ))
+    })
+}
+
+pub(crate) fn errors(
+    status: StatusCode,
+    reason: &str,
+    message: &str,
+    field: Option<&str>,
+) -> Response<Body> {
+    let mut err = serde_json::json!({ "reason": reason, "message": message });
+    if let Some(f) = field {
+        err["field"] = serde_json::Value::String(f.to_string());
+    }
+    json(status, serde_json::json!({ "errors": [err] }))
+}
+
+pub(crate) fn internal(e: impl std::fmt::Display) -> Response<Body> {
+    tracing::error!(error = %e, "control plane internal error");
+    errors(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INTERNAL",
+        "internal error",
+        None,
+    )
+}
