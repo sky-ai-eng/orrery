@@ -34,26 +34,31 @@ Extracted by six parallel read-only code sweeps over the triage-factory tree at 
 Settled in design discussion 2026-08-21; the design pass elaborates these.
 
 **Honesty**
+
 1. **The surface is a list that grows on demand.** Every endpoint enters the inventory when a consumer needs it, backed by an observed real call — never speculatively. Unknown endpoints fail loudly and self-describe ("not mocked: add X to the inventory"), never a plausible 404 — "known endpoint, no data" and "not implemented" are distinct answers. The state model stores objects generously (near GitHub's own representation: fields liberal, endpoints strict). Cross-cutting grammar (`grammar.md`) is built once engine-wide, not per endpoint.
 2. **Real tools judge realness.** Fidelity = real `git`, real `gh`, and TF's real poller working unmodified. A contract-test job in triage-factory's CI runs the poller against Orrery.
 3. **The people in the world are scripted, never AI.** No LLM inside the engine; chatty NPCs, if ever, are a driver plugin outside the determinism boundary.
 
 **Determinism**
+
 4. **Only three things change the world:** a scenario step, a driver (scenario steps on a timer), or an outside actor's API call. No spontaneous mutation.
 5. **Replay is free** — seed snapshot + action log rebuilds the exact world, or something snuck in a hidden input (bug).
 6. **The world never touches the internet.**
 
 **Shape**
+
 7. **An instance is one config file plus one seed** (faces mounted, seed snapshot, driver schedule).
 8. **State is vendor-neutral; vendors are faces.** One stored idea of "a pull request"; GHES vs GHEC is serving-layer variation. Adding a face never adds a table.
 9. **The persistent ring is not special** — same binary, same config, plus longevity and a reset schedule.
 10. **Delete the directory and it's gone** — no state outside the world root.
 
 **Judgment**
+
 11. **The engine's verdict is the diff; judgment lives above the engine.** Factual questions resolve from two snapshots + the action log, deterministically; the engine never calls an LLM. Benchmarks authored on top may add anchored binary-question judge rubrics — judges score *how well*, never settle *whether*, and their evidence is the diff/log/stored bodies, not agent transcripts.
 12. **A snapshot is always safe to share** — every credential in the world is fake by construction.
 
 **Scope**
+
 13. **Triage Factory is the only customer until TF's integration suite runs green against Orrery.** The RL affordances kept are exactly the free ones (snapshot, fork, diff, clock, log); task authoring, reward design, rollout orchestration are out of scope until a real second customer exists.
 
 ## Prior art in the triage-factory repo
