@@ -11,7 +11,7 @@ A standalone service that mocks the external world Triage Factory consumes, so T
 - **Ephemeral** — booted per CI job / per test, seeded, driven by a scenario script, torn down. Deterministic; assertions live here.
 - **Persistent per environment ring** — dev/test/staging each run one long-lived instance with a churn driver producing ambient events. Nothing asserts against it; weekly reset from a seed snapshot.
 
-V1 face: GitHub (REST + GraphQL + git smart-HTTP over real bare repos), presenting as a GHES host so TF's existing base-URL config is the integration seam. Jira/Slack faces deferred (a free Jira Cloud site + free Slack workspace cover those tiers meanwhile).
+V1 face: GitHub, presenting as a GHES host so TF's existing base-URL config is the integration seam — the git smart-HTTP surface plus the thin REST write path that makes worlds authorable (see `usage.md` for the two-door usage model and the exact cut). GraphQL deferred past V1; Jira/Slack faces deferred (a free Jira Cloud site + free Slack workspace cover those tiers meanwhile).
 
 Designed with benchmark/RL affordances that fall out free of the architecture — snapshot, fork, semantic diff, virtual clock, actor-attributed action log — without productizing any of that.
 
@@ -19,6 +19,7 @@ Designed with benchmark/RL affordances that fall out free of the architecture �
 
 | File | Contents |
 | --- | --- |
+| `usage.md` | The two-door usage model (face vs control plane), clock/snapshot/replay semantics, determinism addenda, and the revised V1 cut |
 | `surface-github.md` | Every GitHub API call TF makes or proxies: REST reads, GraphQL, the three write producers, App/auth endpoints, the inbound webhook contract |
 | `surface-git.md` | The git protocol surface and the exact server recipe (`git http-backend` config) |
 | `surface-jira-slack.md` | The full Jira surface (both `/rest/api/2` and `/3` trees, OAuth, writes) and the Slack method list |
