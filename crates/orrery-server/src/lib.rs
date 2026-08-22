@@ -75,8 +75,17 @@ pub async fn run(listener: tokio::net::TcpListener, app: Router) -> std::io::Res
 /// request. Accepted spellings mirror what real clients send (spec/grammar.md):
 /// `Basic` with the token as the password (git's `x-access-token:<tok>`
 /// convention — username ignored), `Bearer <tok>`, and `token <tok>`.
+///
+/// Git *read* traffic may pass anonymously — real GitHub serves public-repo
+/// clones without credentials, and consumers rely on it (TF deliberately
+/// clones public repos with no token). The request proceeds with no actor
+/// attached; the git face itself refuses anonymous access to private repos.
+/// Pushes and the REST face always require a token.
 async fn face_auth(State(state): State<AppState>, mut req: Request, next: Next) -> Response<Body> {
     let Some(token) = extract_token(req.headers()) else {
+        if is_anonymous_git_read(&req) {
+            return next.run(req).await;
+        }
         return bad_credentials();
     };
     match state.world.actor_by_token(&token) {
@@ -93,6 +102,21 @@ async fn face_auth(State(state): State<AppState>, mut req: Request, next: Next) 
             )
         }
     }
+}
+
+/// Fetch-side git smart-HTTP only: the upload-pack POST, or an info/refs
+/// negotiation *for* upload-pack. Receive-pack traffic (either leg) never
+/// qualifies.
+fn is_anonymous_git_read(req: &Request) -> bool {
+    let path = req.uri().path();
+    if path.ends_with("/git-upload-pack") {
+        return true;
+    }
+    path.ends_with("/info/refs")
+        && req
+            .uri()
+            .query()
+            .is_some_and(|q| q.split('&').any(|kv| kv == "service=git-upload-pack"))
 }
 
 fn extract_token(headers: &HeaderMap) -> Option<String> {

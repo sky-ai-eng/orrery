@@ -131,6 +131,11 @@ impl World {
         })
     }
 
+    /// Check runs attached to one commit, oldest first.
+    pub fn list_check_runs_for_sha(&self, repo_id: i64, head_sha: &str) -> Result<Vec<CheckRun>> {
+        self.with_conn(|conn| queries::list_check_runs_for_sha(conn, repo_id, head_sha))
+    }
+
     pub fn check_run_by_id(&self, id: i64) -> Result<Option<CheckRun>> {
         self.with_conn(|conn| queries::check_run_by_id(conn, id))
     }

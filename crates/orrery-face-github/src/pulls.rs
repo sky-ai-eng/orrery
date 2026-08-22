@@ -499,7 +499,7 @@ pub(crate) async fn create_comment(
 /// A pull addressed by its number path segment. Non-numeric segments are a
 /// GitHub 404, not a routing error — the route matched, the resource doesn't
 /// exist. A store failure stays a 500, never a plausible 404.
-fn pull_by_path_number(
+pub(crate) fn pull_by_path_number(
     face: &GithubFace,
     repo: &Repo,
     number: &str,

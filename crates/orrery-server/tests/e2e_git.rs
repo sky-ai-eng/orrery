@@ -193,3 +193,71 @@ async fn first_push_adopts_default_branch() {
     let head = git(&dst, clock, &["rev-parse", "--abbrev-ref", "HEAD"]);
     assert_eq!(head.trim(), "trunk");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn anonymous_git_reads_follow_github_rules() {
+    let inst = boot().await;
+    let base = &inst.base;
+    let token = mint_actor(base, "erin", "user");
+    for (name, private) in [("open", false), ("secret", true)] {
+        ureq::post(format!("{base}/api/v3/user/repos"))
+            .header("authorization", &format!("token {token}"))
+            .send_json(serde_json::json!({ "name": name, "private": private }))
+            .unwrap();
+    }
+    let clock = inst.world.clock().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    for name in ["open", "secret"] {
+        let src = work.path().join(format!("src-{name}"));
+        std::fs::create_dir(&src).unwrap();
+        git(&src, clock, &["init", "-b", "main", "."]);
+        std::fs::write(src.join("f"), name).unwrap();
+        git(&src, clock, &["add", "."]);
+        git(&src, clock, &["commit", "-m", "init"]);
+        git(
+            &src,
+            clock,
+            &[
+                "push",
+                &format!("{base}/erin/{name}.git")
+                    .replace("http://", &format!("http://x-access-token:{token}@")),
+                "main",
+            ],
+        );
+    }
+
+    // A public repo clones with no credentials at all — GitHub's rule, and
+    // what TF relies on (it never sends tokens over plain http).
+    let dst = work.path().join("anon-clone");
+    git(
+        work.path(),
+        clock,
+        &[
+            "clone",
+            &format!("{base}/erin/open.git"),
+            dst.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(std::fs::read_to_string(dst.join("f")).unwrap(), "open");
+
+    // A private repo refuses anonymously (401, credential-shaped), and an
+    // anonymous push refuses even on the public repo.
+    let refused = ureq::get(format!(
+        "{base}/erin/secret.git/info/refs?service=git-upload-pack"
+    ))
+    .call()
+    .expect_err("private repo refuses anonymous fetch");
+    match refused {
+        ureq::Error::StatusCode(code) => assert_eq!(code, 401),
+        other => panic!("expected status error, got {other:?}"),
+    }
+    let refused = ureq::get(format!(
+        "{base}/erin/open.git/info/refs?service=git-receive-pack"
+    ))
+    .call()
+    .expect_err("anonymous push negotiation refuses");
+    match refused {
+        ureq::Error::StatusCode(code) => assert_eq!(code, 401),
+        other => panic!("expected status error, got {other:?}"),
+    }
+}

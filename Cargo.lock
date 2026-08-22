@@ -938,11 +938,14 @@ name = "orrery-face-github"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "hex",
  "jiff",
  "orrery-face-git",
  "orrery-world",
  "serde",
  "serde_json",
+ "sha2",
  "tracing",
 ]
 

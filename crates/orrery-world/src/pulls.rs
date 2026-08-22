@@ -334,6 +334,22 @@ impl World {
         })
     }
 
+    /// A repo's pulls, optionally filtered by state, in GitHub's default
+    /// listing order (created descending, id tiebreaker).
+    pub fn list_pulls_for_repo(&self, repo_id: i64, state: Option<PullState>) -> Result<Vec<Pull>> {
+        self.with_conn(|conn| {
+            queries::list_pulls_for_repo(conn, repo_id, state.map(PullState::as_str))
+        })
+    }
+
+    pub fn list_reviews_for_pull(&self, pull_id: i64) -> Result<Vec<Review>> {
+        self.with_conn(|conn| queries::list_reviews_for_pull(conn, pull_id))
+    }
+
+    pub fn list_issue_comments_for_pull(&self, pull_id: i64) -> Result<Vec<IssueComment>> {
+        self.with_conn(|conn| queries::list_comments_for_pull(conn, pull_id))
+    }
+
     /// Shared shape of close/reopen: guard the current state, run one UPDATE,
     /// bump `updated`, log, return the stored row.
     fn transition(

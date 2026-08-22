@@ -172,7 +172,7 @@ pub fn is_smart_http_path(path: &str) -> bool {
 async fn info_refs(
     State(face): State<Arc<GitFace>>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
-    Extension(actor): Extension<Actor>,
+    actor: Option<Extension<Actor>>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
@@ -191,7 +191,7 @@ async fn info_refs(
         face,
         &owner,
         &repo_name,
-        &actor,
+        actor.as_deref(),
         "GET",
         "info/refs",
         &query,
@@ -204,7 +204,7 @@ async fn info_refs(
 async fn upload_pack(
     State(face): State<Arc<GitFace>>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
-    Extension(actor): Extension<Actor>,
+    actor: Option<Extension<Actor>>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Bytes,
@@ -214,7 +214,7 @@ async fn upload_pack(
         face,
         &owner,
         &repo_name,
-        &actor,
+        actor.as_deref(),
         "POST",
         "git-upload-pack",
         &query,
@@ -227,7 +227,7 @@ async fn upload_pack(
 async fn receive_pack(
     State(face): State<Arc<GitFace>>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
-    Extension(actor): Extension<Actor>,
+    actor: Option<Extension<Actor>>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Bytes,
@@ -237,7 +237,7 @@ async fn receive_pack(
         face,
         &owner,
         &repo_name,
-        &actor,
+        actor.as_deref(),
         "POST",
         "git-receive-pack",
         &query,
@@ -252,7 +252,7 @@ async fn serve(
     face: Arc<GitFace>,
     owner: &str,
     repo_name: &str,
-    actor: &Actor,
+    actor: Option<&Actor>,
     method: &str,
     tail: &str,
     query: &str,
@@ -275,6 +275,14 @@ async fn serve(
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
 
     let is_push = tail == "git-receive-pack";
+    // GitHub's anonymous-access rule: public repos serve fetch traffic with
+    // no credentials; pushes and private repos never do. 401 (not 404) so a
+    // real git client knows credentials would change the answer. The auth
+    // middleware already refuses anonymous non-read traffic; this re-check
+    // makes the face safe on its own terms.
+    if actor.is_none() && (repo.private || is_push) {
+        return plain_unauthorized();
+    }
     let lock = is_push.then(|| face.repo_lock(repo.id));
     let _guard = match &lock {
         Some(l) => Some(l.lock().await),
@@ -301,7 +309,7 @@ async fn serve(
         content_type: header(headers, "content-type"),
         content_encoding: header(headers, "content-encoding"),
         git_protocol: header(headers, "git-protocol"),
-        remote_user: &actor.login,
+        remote_user: actor.map(|a| a.login.as_str()),
         body,
     };
     let cgi_resp = match cgi::run_http_backend(&face.world.repos_dir(), req).await {
@@ -315,8 +323,9 @@ async fn serve(
     if let Some(before) = before
         && cgi_resp.status == 200
     {
+        let pusher = actor.expect("pushes are refused without an actor above");
         let observed = store::list_refs(&bare)
-            .and_then(|after| face.observe_push(&repo, actor, &before, &after));
+            .and_then(|after| face.observe_push(&repo, pusher, &before, &after));
         if let Err(e) = observed {
             tracing::error!(error = %e, "push observation failed");
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
@@ -335,6 +344,17 @@ async fn serve(
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+/// The git-flavored 401: WWW-Authenticate so a real client retries with
+/// credentials rather than reporting a missing repo.
+fn plain_unauthorized() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header("www-authenticate", "Basic realm=\"orrery\"")
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(Body::from("Authentication required"))
+        .expect("static response parts are valid")
 }
 
 fn plain(status: StatusCode, msg: &str) -> Response<Body> {

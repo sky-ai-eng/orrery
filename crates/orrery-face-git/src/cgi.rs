@@ -20,7 +20,8 @@ pub struct CgiRequest<'a> {
     /// The `Git-Protocol` request header; forwarding it is what enables
     /// protocol v2 through http-backend.
     pub git_protocol: Option<&'a str>,
-    pub remote_user: &'a str,
+    /// Absent on anonymous (public-repo fetch) requests.
+    pub remote_user: Option<&'a str>,
     pub body: &'a [u8],
 }
 
@@ -46,11 +47,13 @@ pub async fn run_http_backend(
         .env("REQUEST_METHOD", req.method)
         .env("PATH_INFO", &req.path_info)
         .env("QUERY_STRING", req.query)
-        .env("REMOTE_USER", req.remote_user)
         .env("REMOTE_ADDR", "127.0.0.1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(user) = req.remote_user {
+        cmd.env("REMOTE_USER", user);
+    }
     if let Some(ct) = req.content_type {
         cmd.env("CONTENT_TYPE", ct);
     }

@@ -17,12 +17,13 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{Response, StatusCode};
-use axum::routing::{patch, post, put};
+use axum::routing::{get, patch, post, put};
 use orrery_face_git::GitFace;
 use orrery_world::{Actor, ActorKind, Repo, World, WorldError};
 
 mod checks;
 mod pulls;
+mod reads;
 mod render;
 
 pub use render::repo_json;
@@ -39,11 +40,20 @@ pub struct GithubFace {
 pub fn router(face: GithubFace) -> Router {
     Router::new()
         .route("/orgs/{org}/repos", post(create_org_repo))
-        .route("/user/repos", post(create_user_repo))
-        .route("/repos/{owner}/{repo}/pulls", post(pulls::create_pull))
+        .route("/user", get(reads::get_user))
+        .route("/user/emails", get(reads::get_user_emails))
+        .route(
+            "/user/repos",
+            get(reads::list_user_repos).post(create_user_repo),
+        )
+        .route("/repos/{owner}/{repo}", get(reads::get_repo))
+        .route(
+            "/repos/{owner}/{repo}/pulls",
+            get(reads::list_pulls).post(pulls::create_pull),
+        )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}",
-            patch(pulls::patch_pull),
+            get(reads::get_pull).patch(pulls::patch_pull),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/merge",
@@ -51,12 +61,25 @@ pub fn router(face: GithubFace) -> Router {
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/reviews",
-            post(pulls::create_review),
+            get(reads::list_reviews).post(pulls::create_review),
+        )
+        .route(
+            "/repos/{owner}/{repo}/pulls/{number}/comments",
+            get(reads::list_review_comments),
         )
         .route(
             "/repos/{owner}/{repo}/issues/{number}/comments",
-            post(pulls::create_comment),
+            get(reads::list_issue_comments).post(pulls::create_comment),
         )
+        .route(
+            "/repos/{owner}/{repo}/commits/{sha}/check-runs",
+            get(reads::list_check_runs_for_ref),
+        )
+        .route(
+            "/repos/{owner}/{repo}/contents/{*path}",
+            get(reads::get_contents),
+        )
+        .route("/repos/{owner}/{repo}/branches", get(reads::list_branches))
         .route(
             "/repos/{owner}/{repo}/check-runs",
             post(checks::create_check_run),

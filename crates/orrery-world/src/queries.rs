@@ -176,6 +176,66 @@ pub(crate) fn list_check_runs(conn: &Connection) -> Result<Vec<CheckRun>> {
     )
 }
 
+/// A repo's pulls in GitHub's default listing order — created descending —
+/// with an id tiebreaker for a deterministic total order. That order is
+/// load-bearing: TF's ETag fast path hashes page 1 of exactly this listing.
+pub(crate) fn list_pulls_for_repo(
+    conn: &Connection,
+    repo_id: i64,
+    state: Option<&str>,
+) -> Result<Vec<Pull>> {
+    let mut sql = format!("{PULL_SELECT} WHERE p.repo_id = ?1");
+    if state.is_some() {
+        sql.push_str(" AND p.state = ?2");
+    }
+    sql.push_str(" ORDER BY p.created_clock_unix DESC, p.id DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = match state {
+        Some(s) => stmt.query_map(params![repo_id, s], row_to_pull)?,
+        None => stmt.query_map(params![repo_id], row_to_pull)?,
+    };
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn list_reviews_for_pull(conn: &Connection, pull_id: i64) -> Result<Vec<Review>> {
+    let mut stmt = conn.prepare(&format!(
+        "{REVIEW_SELECT} WHERE v.pull_id = ?1 ORDER BY v.id"
+    ))?;
+    let rows = stmt.query_map(params![pull_id], row_to_review)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn list_comments_for_pull(conn: &Connection, pull_id: i64) -> Result<Vec<IssueComment>> {
+    let mut stmt = conn.prepare(&format!(
+        "{COMMENT_SELECT} WHERE c.pull_id = ?1 ORDER BY c.id"
+    ))?;
+    let rows = stmt.query_map(params![pull_id], row_to_comment)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn list_check_runs_for_sha(
+    conn: &Connection,
+    repo_id: i64,
+    head_sha: &str,
+) -> Result<Vec<CheckRun>> {
+    let mut stmt = conn.prepare(&format!(
+        "{CHECK_RUN_SELECT} WHERE k.repo_id = ?1 AND k.head_sha = ?2 ORDER BY k.id"
+    ))?;
+    let rows = stmt.query_map(params![repo_id, head_sha], row_to_check_run)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// An owner's repos in `sort=pushed&direction=desc` order — what TF's
+/// reachable-mirror walk requests — never-pushed repos last, id tiebreaker.
+pub(crate) fn list_repos_for_owner(conn: &Connection, owner_id: i64) -> Result<Vec<Repo>> {
+    let mut stmt = conn.prepare(&format!(
+        "{REPO_SELECT} WHERE r.owner_id = ?1
+         ORDER BY r.pushed_at_clock_unix DESC NULLS LAST, r.id DESC"
+    ))?;
+    let rows = stmt.query_map(params![owner_id], row_to_repo)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub(crate) fn pull_by_id(conn: &Connection, id: i64) -> Result<Option<Pull>> {
     Ok(conn
         .query_row(

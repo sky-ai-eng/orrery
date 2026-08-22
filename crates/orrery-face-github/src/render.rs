@@ -106,6 +106,7 @@ pub(crate) fn pull_json(
         },
         "labels": [],
         "requested_reviewers": [],
+        "requested_teams": [],
         "assignees": [],
         "milestone": serde_json::Value::Null,
     })

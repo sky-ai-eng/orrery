@@ -86,6 +86,19 @@ pub fn rev_parse(bare: &Path, rev: &str) -> Result<Option<String>, GitFaceError>
     Ok(Some(stdout.trim().to_string()))
 }
 
+/// Raw bytes of the blob at `spec` (e.g. `HEAD:README.md`); `None` when the
+/// path doesn't resolve to a blob — a missing file, a directory, or an empty
+/// repo all read as absent, which is the 404 the contents endpoint owes.
+pub fn cat_file_blob(bare: &Path, spec: &str) -> Result<Option<Vec<u8>>, GitFaceError> {
+    let out = hermetic_git(bare)
+        .args(["cat-file", "blob", spec])
+        .output()?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(out.stdout))
+}
+
 /// Commits reachable from `to` and not from `from` — zero means "nothing to
 /// pull-request", GitHub's "No commits between" case.
 pub fn rev_list_count(bare: &Path, from: &str, to: &str) -> Result<u64, GitFaceError> {

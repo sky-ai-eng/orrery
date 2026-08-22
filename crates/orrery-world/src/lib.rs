@@ -290,6 +290,14 @@ impl World {
             .optional()?)
     }
 
+    /// An owner's repos in `sort=pushed&direction=desc` order. Ownership is
+    /// the only affiliation the world models — there are no collaborators or
+    /// org memberships (yet), so "repos visible to this actor" and "repos
+    /// this actor owns" are the same set.
+    pub fn list_repos_owned_by(&self, owner_id: i64) -> Result<Vec<Repo>> {
+        self.with_conn(|conn| queries::list_repos_for_owner(conn, owner_id))
+    }
+
     /// Record that a push landed: bump `pushed_at` to the current clock.
     pub fn touch_pushed(&self, repo_id: i64) -> Result<()> {
         let conn = self.lock();
