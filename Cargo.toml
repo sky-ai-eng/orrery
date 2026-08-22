@@ -22,6 +22,7 @@ orrery-snapshot = { path = "crates/orrery-snapshot" }
 orrery-server = { path = "crates/orrery-server" }
 
 anyhow = "1"
+async-graphql = { version = "7", default-features = false }
 axum = "0.8"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }

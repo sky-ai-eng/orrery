@@ -22,6 +22,8 @@ use orrery_face_git::GitFace;
 use orrery_world::{Actor, ActorKind, Repo, World, WorldError};
 
 mod checks;
+pub mod graphql;
+pub mod nodeid;
 mod pulls;
 mod reads;
 mod render;

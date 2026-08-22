@@ -34,22 +34,31 @@ pub struct AppState {
     pub git: Arc<GitFace>,
     /// `<instance>/snapshots` — a sibling of the world root.
     pub snapshots_dir: PathBuf,
+    /// The GitHub GraphQL executor, built once per instance.
+    pub schema: orrery_face_github::graphql::GithubSchema,
 }
 
 /// Build the full application router for one world instance.
 pub fn app(world: Arc<World>, base_url: String, snapshots_dir: PathBuf) -> Router {
     let git = GitFace::new(world.clone());
-    let state = AppState {
-        world: world.clone(),
-        base_url: base_url.clone(),
-        git: git.clone(),
-        snapshots_dir,
-    };
     let github = GithubFace {
         world: world.clone(),
         git: git.clone(),
-        base_url,
+        base_url: base_url.clone(),
     };
+    let state = AppState {
+        world: world.clone(),
+        base_url,
+        git: git.clone(),
+        snapshots_dir,
+        schema: orrery_face_github::graphql::schema(github.clone()),
+    };
+
+    // GraphQL mounts at the GHES address — `/api/graphql`, a sibling of
+    // `/api/v3`, never nested under it. Consumers derive it exactly there.
+    let graphql = Router::new()
+        .route("/api/graphql", axum::routing::post(graphql_handler))
+        .with_state(state.clone());
 
     let faces = Router::new()
         .merge(orrery_face_git::router(git))
@@ -57,6 +66,7 @@ pub fn app(world: Arc<World>, base_url: String, snapshots_dir: PathBuf) -> Route
             "/api/v3",
             orrery_face_github::router(github).fallback(not_mocked),
         )
+        .merge(graphql)
         .layer(middleware::from_fn_with_state(state.clone(), face_auth));
 
     Router::new()
@@ -69,6 +79,18 @@ pub fn app(world: Arc<World>, base_url: String, snapshots_dir: PathBuf) -> Route
 /// use an ephemeral port and read it back before starting.
 pub async fn run(listener: tokio::net::TcpListener, app: Router) -> std::io::Result<()> {
     axum::serve(listener, app).await
+}
+
+/// Reads and writes alike hold the world write gate for read (the git face's
+/// discipline): resolution reads the bare repos, so a snapshot copy must wait
+/// for an in-flight query and block new ones for its duration.
+async fn graphql_handler(
+    State(state): State<AppState>,
+    axum::extract::Extension(actor): axum::extract::Extension<orrery_world::Actor>,
+    body: axum::body::Bytes,
+) -> Response<Body> {
+    let _gate = state.git.gate().read_owned().await;
+    orrery_face_github::graphql::handle(&state.schema, actor, &body).await
 }
 
 /// Face auth: resolve the caller's token to an actor and attach it to the

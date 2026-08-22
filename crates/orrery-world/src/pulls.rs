@@ -100,6 +100,54 @@ impl World {
         })
     }
 
+    pub fn pull_by_id(&self, id: i64) -> Result<Option<Pull>> {
+        self.with_conn(|conn| queries::pull_by_id(conn, id))
+    }
+
+    pub fn review_by_id(&self, id: i64) -> Result<Option<Review>> {
+        self.with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    &format!("{} WHERE v.id = ?1", queries::REVIEW_SELECT),
+                    params![id],
+                    queries::row_to_review,
+                )
+                .optional()?)
+        })
+    }
+
+    /// Flip the draft flag — GitHub's ready-for-review / convert-to-draft
+    /// pair. Refused on a non-open pull, and refused when the pull is already
+    /// in the target state: GitHub errors there rather than succeeding as a
+    /// no-op, and a silent no-op would also leave a phantom log entry.
+    pub fn set_pull_draft(&self, pull_id: i64, actor_id: i64, draft: bool) -> Result<Pull> {
+        let action = if draft {
+            "pull.convert_to_draft"
+        } else {
+            "pull.ready_for_review"
+        };
+        self.transition(pull_id, actor_id, action, |p| {
+            if p.state != PullState::Open {
+                return Err(WorldError::InvalidTransition(format!(
+                    "pull #{} is not open",
+                    p.number
+                )));
+            }
+            if p.draft == draft {
+                return Err(WorldError::InvalidTransition(if draft {
+                    format!("pull #{} is already a draft", p.number)
+                } else {
+                    format!("pull #{} is not a draft", p.number)
+                }));
+            }
+            Ok(if draft {
+                "UPDATE pulls SET draft = 1 WHERE id = ?1"
+            } else {
+                "UPDATE pulls SET draft = 0 WHERE id = ?1"
+            })
+        })
+    }
+
     /// Edit title/body/base. `body` distinguishes absent (keep) from explicit
     /// clear; `base` carries the retargeted ref together with its freshly
     /// pinned sha, resolved by the caller who owns the git side.

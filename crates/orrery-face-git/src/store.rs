@@ -108,6 +108,47 @@ pub fn rev_list_count(bare: &Path, from: &str, to: &str) -> Result<u64, GitFaceE
         .map_err(|_| GitFaceError::Cgi(format!("rev-list --count returned {out:?}")))
 }
 
+/// Totals of `git diff --numstat base...head` — GitHub's additions /
+/// deletions / changed-files triple, three-dot so the comparison base is the
+/// merge base. Binary files report `-` counts, which contribute 0 lines but
+/// still count as a changed file, matching GitHub.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffStats {
+    pub additions: i64,
+    pub deletions: i64,
+    pub changed_files: i64,
+}
+
+pub fn diff_stats(bare: &Path, base: &str, head: &str) -> Result<DiffStats, GitFaceError> {
+    let out = run(hermetic_git(bare).args(["diff", "--numstat", &format!("{base}...{head}")]))?;
+    let mut stats = DiffStats::default();
+    for line in out.lines() {
+        let mut parts = line.split('\t');
+        let (Some(add), Some(del)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        stats.changed_files += 1;
+        stats.additions += add.parse::<i64>().unwrap_or(0);
+        stats.deletions += del.parse::<i64>().unwrap_or(0);
+    }
+    Ok(stats)
+}
+
+/// A commit's committer date as unix seconds; `None` when `sha` doesn't
+/// resolve to a commit.
+pub fn commit_date_unix(bare: &Path, sha: &str) -> Result<Option<i64>, GitFaceError> {
+    let (status, stdout, _) = run_raw(hermetic_git(bare).args([
+        "show",
+        "-s",
+        "--format=%ct",
+        &format!("{sha}^{{commit}}"),
+    ]))?;
+    if !status.success() {
+        return Ok(None);
+    }
+    Ok(stdout.trim().parse().ok())
+}
+
 /// Compute the merge of two commits without a worktree. `Ok(Some(tree))` on a
 /// clean merge, `Ok(None)` on content conflicts — git's exit code 1.
 pub fn merge_tree(bare: &Path, base: &str, head: &str) -> Result<Option<String>, GitFaceError> {

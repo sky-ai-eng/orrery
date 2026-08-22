@@ -10,7 +10,7 @@ pub(crate) fn actor_json(actor: &Actor) -> serde_json::Value {
     serde_json::json!({
         "login": actor.login,
         "id": actor.id,
-        "node_id": format!("O_actor_{}", actor.id),
+        "node_id": crate::nodeid::actor(actor.id),
         "type": owner_type(actor.kind),
         "site_admin": false,
     })
@@ -33,7 +33,7 @@ pub fn repo_json(face: &GithubFace, repo: &Repo, owner: &Actor) -> serde_json::V
     let full_name = repo.full_name();
     serde_json::json!({
         "id": repo.id,
-        "node_id": format!("O_repo_{}", repo.id),
+        "node_id": crate::nodeid::repo(repo.id),
         "name": repo.name,
         "full_name": full_name,
         "owner": actor_json(owner),
@@ -71,7 +71,7 @@ pub(crate) fn pull_json(
     let n = pull.number;
     serde_json::json!({
         "id": pull.id,
-        "node_id": format!("O_pull_{}", pull.id),
+        "node_id": crate::nodeid::pull(pull.id),
         "number": n,
         "state": pull.state.as_str(),
         "locked": false,
@@ -125,7 +125,7 @@ pub(crate) fn review_json(
     let full_name = repo.full_name();
     serde_json::json!({
         "id": review.id,
-        "node_id": format!("O_review_{}", review.id),
+        "node_id": crate::nodeid::review(review.id),
         "user": user_json(face, &review.author_login),
         "body": review.body,
         "state": review.state.as_str().to_ascii_uppercase(),
@@ -147,7 +147,7 @@ pub(crate) fn comment_json(
     let full_name = repo.full_name();
     serde_json::json!({
         "id": comment.id,
-        "node_id": format!("O_comment_{}", comment.id),
+        "node_id": crate::nodeid::comment(comment.id),
         "user": user_json(face, &comment.author_login),
         "body": comment.body,
         "html_url": format!("{base}/{full_name}/pull/{}#issuecomment-{}", pull.number, comment.id),
@@ -164,7 +164,7 @@ pub(crate) fn check_run_json(face: &GithubFace, repo: &Repo, run: &CheckRun) -> 
     let full_name = repo.full_name();
     serde_json::json!({
         "id": run.id,
-        "node_id": format!("O_check_{}", run.id),
+        "node_id": crate::nodeid::check(run.id),
         "name": run.name,
         "head_sha": run.head_sha,
         "status": run.status.as_str(),

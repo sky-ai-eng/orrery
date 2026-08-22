@@ -7,6 +7,7 @@ repository.workspace = true
 description = "The GitHub REST face, grown strictly on demand per spec/surface-github.md"
 
 [dependencies]
+async-graphql.workspace = true
 axum.workspace = true
 base64.workspace = true
 hex.workspace = true
