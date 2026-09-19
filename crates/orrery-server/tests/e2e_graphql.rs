@@ -14,6 +14,7 @@ const PR_BASE_FIELDS: &str = r#"
 	id
 	number
 	title
+	body
 	author { login }
 	state
 	isDraft
@@ -278,6 +279,7 @@ async fn tf_refresh_full_fragment_round_trip() {
     assert_eq!(pr["id"], "O_pull_1");
     assert_eq!(pr["number"], 1);
     assert_eq!(pr["title"], "Add feature");
+    assert_eq!(pr["body"], "does the thing");
     assert_eq!(pr["author"]["login"], "alice");
     assert_eq!(pr["state"], "OPEN");
     assert_eq!(pr["isDraft"], false);

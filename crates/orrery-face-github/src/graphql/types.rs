@@ -588,6 +588,12 @@ impl PullRequest {
         &self.pull.title
     }
 
+    /// GitHub's GraphQL `body` is non-null: an unset body reads as the empty
+    /// string here, while the REST face renders it as `null`.
+    async fn body(&self) -> &str {
+        self.pull.body.as_deref().unwrap_or("")
+    }
+
     async fn author(&self) -> Option<GqlActor> {
         Some(author(&self.pull.author_login))
     }
