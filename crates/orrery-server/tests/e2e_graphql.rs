@@ -928,7 +928,12 @@ async fn bot_actors_render_as_github_apps() {
     assert_eq!(pr["data"]["node"]["author"]["__typename"], "User");
     assert_eq!(pr["data"]["node"]["author"]["login"], "alice");
 
-    for path in ["/api/v3/user", "/api/v3/user/emails", "/api/v3/user/repos"] {
+    for path in [
+        "/api/v3/user",
+        "/api/v3/user/emails",
+        "/api/v3/user/repos",
+        "/api/v3/user/teams",
+    ] {
         assert_eq!(
             common::face(
                 "GET",

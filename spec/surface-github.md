@@ -110,7 +110,7 @@ Consumers: review freshness annotation (every review-artifact GET, best-effort),
 ### 1.17 Teams
 
 - `GET /orgs/{org}/teams?per_page=100&page=N` (`teams.go:354`): poller group-prune, once per distinct repo owner per cycle. Fields: `slug` (used), `name` (decoded). Cap 20 pages. An error must NOT prune — 403/404 behavior is load-bearing. Orrery models no teams: an org answers `[]` (GitHub's answer for an org that never made one, which the poller skips rather than prunes against), any other login 404.
-- `GET /user/teams?per_page=100&page=N` (`teams.go:68,111`): local/PAT only — poll cycle (`slug`, `organization.login`) and the include-membership settings read (`slug, name, members_count, organization.login`). App tokens can't answer this; failure non-fatal.
+- `GET /user/teams?per_page=100&page=N` (`teams.go:68,111`): local/PAT only — poll cycle (`slug`, `organization.login`) and the include-membership settings read (`slug, name, members_count, organization.login`). App tokens can't answer this; failure non-fatal. Orrery models no teams: a user is in none (`[]`), and a bot (App) token is refused 403 "Resource not accessible by integration", as GitHub refuses an installation token.
 - GraphQL `organization.teams` — see § 3.
 
 ### 1.18 `GET /repos/{o}/{r}/branches?per_page={n}&page={n}` — branch picker

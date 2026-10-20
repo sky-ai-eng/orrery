@@ -407,6 +407,15 @@ pub(crate) async fn list_org_teams(
     }
 }
 
+/// The teams the authenticated user belongs to. Teams are unmodeled, so a user
+/// belongs to none. An installation token has no user to ask about.
+pub(crate) async fn list_user_teams(Extension(actor): Extension<Actor>) -> Response<Body> {
+    if let Some(refused) = refuse_integration(&actor) {
+        return refused;
+    }
+    json_response(StatusCode::OK, serde_json::json!([]))
+}
+
 pub(crate) async fn list_user_repos(
     State(face): State<GithubFace>,
     Extension(actor): Extension<Actor>,

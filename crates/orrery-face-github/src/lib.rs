@@ -46,6 +46,7 @@ pub fn router(face: GithubFace) -> Router {
         .route("/orgs/{org}/teams", get(reads::list_org_teams))
         .route("/user", get(reads::get_user))
         .route("/user/emails", get(reads::get_user_emails))
+        .route("/user/teams", get(reads::list_user_teams))
         .route(
             "/user/repos",
             get(reads::list_user_repos).post(create_user_repo),

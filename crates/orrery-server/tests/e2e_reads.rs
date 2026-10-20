@@ -325,8 +325,9 @@ async fn poll_path_reads() {
     assert!(bobs.as_array().unwrap().is_empty());
 }
 
-/// The poller's per-cycle team reconcile reads an org's teams. Teams are not
-/// modeled, so an org has none; a user login is not an org.
+/// The poller's per-cycle team reconcile reads an org's teams, and the local
+/// PAT path reads the user's own. Teams are not modeled, so an org has none and
+/// a user is in none; a user login is not an org.
 #[tokio::test(flavor = "multi_thread")]
 async fn org_teams() {
     let inst = boot().await;
@@ -337,6 +338,15 @@ async fn org_teams() {
         face_ok(
             "GET",
             &format!("{base}/api/v3/orgs/acme/teams?per_page=100&page=1"),
+            &alice,
+            serde_json::json!(null)
+        ),
+        serde_json::json!([])
+    );
+    assert_eq!(
+        face_ok(
+            "GET",
+            &format!("{base}/api/v3/user/teams?per_page=100&page=1"),
             &alice,
             serde_json::json!(null)
         ),
