@@ -1,6 +1,7 @@
 //! The HTTP host. Mounts the faces (git smart-HTTP at the root, the GitHub
-//! REST face under `/api/v3` — the GHES mount shape), the `/_orrery/` control
-//! plane, face auth, and the NOT-MOCKED fallback.
+//! REST face under `/api/v3` — the GHES mount shape — and GitHub's OAuth web
+//! flow under `/login/oauth`), the `/_orrery/` control plane, face auth, and the
+//! NOT-MOCKED fallback.
 //!
 //! Route classes and their failure behavior (spec/README.md rule 1):
 //! - matched face route, missing data → vendor-faithful 404
@@ -60,6 +61,10 @@ pub fn app(world: Arc<World>, base_url: String, snapshots_dir: PathBuf) -> Route
         .route("/api/graphql", axum::routing::post(graphql_handler))
         .with_state(state.clone());
 
+    // The OAuth web flow lives on the web host and authenticates with client
+    // credentials or a signed-in actor, never an API token.
+    let oauth = orrery_face_github::oauth::web_router(github.clone());
+
     let faces = Router::new()
         .merge(orrery_face_git::router(git))
         .nest(
@@ -71,6 +76,7 @@ pub fn app(world: Arc<World>, base_url: String, snapshots_dir: PathBuf) -> Route
 
     Router::new()
         .nest("/_orrery", control::router(state))
+        .merge(oauth)
         .merge(faces)
         .fallback(not_mocked)
 }

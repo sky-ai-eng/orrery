@@ -30,6 +30,21 @@ pub enum WorldError {
     NoSuchCheckRun(i64),
     #[error("invalid state transition: {0}")]
     InvalidTransition(String),
+    #[error("no actor {0:?}")]
+    NoSuchActor(String),
+    #[error("invalid emails: {0}")]
+    InvalidEmails(String),
+    #[error("invalid OAuth app {field}: {message}")]
+    InvalidOAuthApp {
+        field: &'static str,
+        message: String,
+    },
+    #[error("the client id and secret do not name an OAuth app")]
+    OAuthClientCredentials,
+    #[error("the authorization code is unknown, already used, or expired")]
+    OAuthBadCode,
+    #[error("the redirect_uri does not match the one the code was issued for")]
+    OAuthRedirectMismatch,
     #[error("world schema version {found} does not match this binary's {expected}")]
     SchemaVersion { found: i64, expected: i64 },
     #[error("world.db: {0}")]

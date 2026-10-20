@@ -9,10 +9,10 @@
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{Path as UrlPath, State};
 use axum::http::{Response, StatusCode};
-use axum::routing::{get, post};
-use orrery_world::{ActorKind, SYSTEM_ACTOR_LOGIN, WorldError};
+use axum::routing::{get, post, put};
+use orrery_world::{Actor, ActorEmail, ActorKind, SYSTEM_ACTOR_LOGIN, WorldError};
 
 use crate::{AppState, json};
 
@@ -25,6 +25,8 @@ pub fn router(state: AppState) -> Router {
         .route("/clock", get(get_clock))
         .route("/clock/advance", post(advance_clock))
         .route("/actors", post(create_actor))
+        .route("/actors/{login}/emails", put(set_actor_emails))
+        .route("/oauth-apps", post(create_oauth_app))
         .route("/log/list", post(log_list))
         .merge(crate::snapshots::router())
         .with_state(state)
@@ -66,10 +68,9 @@ async fn advance_clock(State(state): State<AppState>, body: Bytes) -> Response<B
             Some("seconds"),
         );
     }
-    let system = match state.world.actor_by_login(SYSTEM_ACTOR_LOGIN) {
-        Ok(Some(a)) => a,
-        Ok(None) => return internal("system actor missing"),
-        Err(e) => return internal(e),
+    let system = match system_actor(&state) {
+        Ok(a) => a,
+        Err(resp) => return *resp,
     };
     match state.world.advance_clock(parsed.seconds, system.id) {
         Ok(clock) => json(StatusCode::OK, clock_body(clock)),
@@ -110,6 +111,86 @@ async fn create_actor(State(state): State<AppState>, body: Bytes) -> Response<Bo
             Some("login"),
         ),
         Err(e) => internal(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetEmailsBody {
+    emails: Vec<ActorEmail>,
+}
+
+/// Replace an actor's addresses: verifying one and choosing the primary are
+/// things a person does in GitHub's settings, with no API behind them.
+async fn set_actor_emails(
+    State(state): State<AppState>,
+    UrlPath(login): UrlPath<String>,
+    body: Bytes,
+) -> Response<Body> {
+    let parsed: SetEmailsBody = match decode_strict(&body) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
+    };
+    let system = match system_actor(&state) {
+        Ok(a) => a,
+        Err(resp) => return *resp,
+    };
+    match state
+        .world
+        .set_actor_emails(&login, &parsed.emails, system.id)
+    {
+        Ok(emails) => json(StatusCode::OK, serde_json::json!({ "emails": emails })),
+        Err(e @ WorldError::InvalidEmails(_)) => errors(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            &e.to_string(),
+            Some("emails"),
+        ),
+        Err(e @ WorldError::NoSuchActor(_)) => {
+            errors(StatusCode::NOT_FOUND, "NOT_FOUND", &e.to_string(), None)
+        }
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateOAuthAppBody {
+    name: String,
+    callback_url: String,
+}
+
+/// Register an OAuth app. GitHub offers this only in its web settings, so it
+/// is reality's to do, and the control plane's.
+async fn create_oauth_app(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    let parsed: CreateOAuthAppBody = match decode_strict(&body) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
+    };
+    let system = match system_actor(&state) {
+        Ok(a) => a,
+        Err(resp) => return *resp,
+    };
+    match state
+        .world
+        .create_oauth_app(&parsed.name, &parsed.callback_url, system.id)
+    {
+        Ok(app) => json(StatusCode::CREATED, serde_json::json!(app)),
+        Err(WorldError::InvalidOAuthApp { field, message }) => errors(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            &message,
+            Some(field),
+        ),
+        Err(e) => internal(e),
+    }
+}
+
+fn system_actor(state: &AppState) -> Result<Actor, Box<Response<Body>>> {
+    match state.world.actor_by_login(SYSTEM_ACTOR_LOGIN) {
+        Ok(Some(a)) => Ok(a),
+        Ok(None) => Err(Box::new(internal("system actor missing"))),
+        Err(e) => Err(Box::new(internal(e))),
     }
 }
 

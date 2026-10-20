@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 mod checks;
 mod error;
+mod identity;
 mod pulls;
 mod queries;
 mod reader;
@@ -28,6 +29,7 @@ mod types;
 
 pub use checks::{CheckRunPatch, NewCheckRun};
 pub use error::WorldError;
+pub use identity::OAUTH_CODE_TTL_SECONDS;
 pub use pulls::NewPull;
 pub use reader::{ViewMeta, WorldReader, WorldView};
 pub use types::*;
@@ -173,6 +175,7 @@ impl World {
             "INSERT INTO tokens (token, actor_id, created_clock_unix) VALUES (?1, ?2, ?3)",
             params![token, actor.id, clock],
         )?;
+        identity::insert_email(&conn, actor.id, &identity::default_email(&actor.login))?;
         log_locked(
             &conn,
             actor.id,
@@ -401,7 +404,7 @@ fn open_conn(root: &Path) -> Result<Connection> {
     let conn = Connection::open(root.join(DB_FILE))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    schema::migrate(&conn)?;
+    schema::apply(&conn)?;
     Ok(conn)
 }
 

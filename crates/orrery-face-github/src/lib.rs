@@ -24,6 +24,7 @@ use orrery_world::{Actor, ActorKind, Repo, World, WorldError};
 mod checks;
 pub mod graphql;
 pub mod nodeid;
+pub mod oauth;
 mod pulls;
 mod reads;
 mod render;

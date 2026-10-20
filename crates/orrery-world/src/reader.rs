@@ -64,9 +64,8 @@ impl WorldView for World {
 }
 
 /// A read-only connection to a world directory that is not being served —
-/// a snapshot. Requires the current schema version: a snapshot made by an
-/// older binary is refused loudly (restore it and let migration run) rather
-/// than half-read.
+/// a snapshot. Requires the current schema version: a snapshot made under
+/// another schema is refused loudly rather than half-read.
 pub struct WorldReader {
     conn: Connection,
 }
@@ -82,10 +81,10 @@ impl WorldReader {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         let version = schema::schema_version(&conn)?;
-        if version != schema::CURRENT_VERSION {
+        if version != schema::SCHEMA_VERSION {
             return Err(WorldError::SchemaVersion {
                 found: version,
-                expected: schema::CURRENT_VERSION,
+                expected: schema::SCHEMA_VERSION,
             });
         }
         Ok(WorldReader { conn })

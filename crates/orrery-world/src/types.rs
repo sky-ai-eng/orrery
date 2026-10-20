@@ -248,3 +248,33 @@ pub struct CheckRun {
     pub completed_clock_unix: Option<i64>,
     pub created_clock_unix: i64,
 }
+
+/// One of an actor's email addresses. Every actor but the system actor holds
+/// exactly one primary address.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActorEmail {
+    pub email: String,
+    pub primary: bool,
+    pub verified: bool,
+}
+
+/// An OAuth application actors can authorize. Its client secret is fake by
+/// construction (rule 12), like every credential in a world.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OAuthApp {
+    pub id: i64,
+    pub name: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub callback_url: String,
+    pub created_clock_unix: i64,
+}
+
+/// The result of trading an authorization code: a token acting as `actor`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthToken {
+    pub actor: Actor,
+    pub token: String,
+    pub scope: String,
+}

@@ -1,14 +1,21 @@
-//! Forward-only migrations, tracked by `PRAGMA user_version`. New migrations
-//! append to the list; existing entries never change (the TF schema rule,
-//! minus goose: a world created by an older binary migrates forward on open).
+//! The world schema, applied whole when a world is created. Orrery has no
+//! deployed worlds to carry forward, so the schema changes in place and its
+//! version is bumped with it; a world written under another version is refused
+//! at open rather than migrated.
 
 use rusqlite::Connection;
 
-use crate::Result;
+use crate::{Result, WorldError};
 
-pub(crate) const MIGRATIONS: &[&str] = &[
-    // 1: the M0 schema.
-    r#"
+/// Bumped on every schema change.
+pub(crate) const SCHEMA_VERSION: i64 = 1;
+
+// State vocabulary is neutral (rule 9: vendor-neutral state, vendor faces) —
+// faces render casing like "APPROVED" or "CHANGES_REQUESTED" at the wire,
+// never the store. `pulls.base_sha` is pinned at PR creation (and on base
+// retarget), matching GitHub's static `base.sha`; `head_sha` tracks the branch
+// via push observation, matching GitHub's synchronize behavior.
+const SCHEMA: &str = r#"
     CREATE TABLE world (
         id         INTEGER PRIMARY KEY CHECK (id = 1),
         clock_unix INTEGER NOT NULL
@@ -47,14 +54,38 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         action     TEXT NOT NULL,
         details    TEXT NOT NULL DEFAULT '{}'
     ) STRICT;
-    "#,
-    // 2: the M3 collaboration objects. State vocabulary is neutral (rule 9:
-    // vendor-neutral state, vendor faces) — faces render casing like
-    // "APPROVED" or "CHANGES_REQUESTED" at the wire, never the store.
-    // `base_sha` is pinned at PR creation (and on base retarget), matching
-    // GitHub's static `base.sha`; `head_sha` tracks the branch via push
-    // observation, matching GitHub's synchronize behavior.
-    r#"
+
+    CREATE TABLE actor_emails (
+        actor_id INTEGER NOT NULL REFERENCES actors(id),
+        email    TEXT NOT NULL COLLATE NOCASE,
+        is_primary INTEGER NOT NULL CHECK (is_primary IN (0, 1)),
+        verified INTEGER NOT NULL CHECK (verified IN (0, 1)),
+        PRIMARY KEY (actor_id, email)
+    ) STRICT;
+    CREATE UNIQUE INDEX actor_emails_one_primary ON actor_emails (actor_id) WHERE is_primary = 1;
+
+    CREATE TABLE oauth_apps (
+        id                 INTEGER PRIMARY KEY,
+        name               TEXT NOT NULL,
+        client_id          TEXT NOT NULL UNIQUE,
+        client_secret      TEXT NOT NULL,
+        callback_url       TEXT NOT NULL,
+        created_clock_unix INTEGER NOT NULL
+    ) STRICT;
+
+    -- An authorization grant: issued when an actor authorizes an app, spent
+    -- (exchanged_clock_unix set) when the app trades it for a token.
+    CREATE TABLE oauth_codes (
+        id                   INTEGER PRIMARY KEY,
+        code                 TEXT NOT NULL UNIQUE,
+        app_id               INTEGER NOT NULL REFERENCES oauth_apps(id),
+        actor_id             INTEGER NOT NULL REFERENCES actors(id),
+        redirect_uri         TEXT NOT NULL,
+        scope                TEXT NOT NULL,
+        created_clock_unix   INTEGER NOT NULL,
+        exchanged_clock_unix INTEGER
+    ) STRICT;
+
     CREATE TABLE pulls (
         id                 INTEGER PRIMARY KEY,
         repo_id            INTEGER NOT NULL REFERENCES repos(id),
@@ -112,21 +143,23 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         completed_clock_unix   INTEGER,
         created_clock_unix     INTEGER NOT NULL
     ) STRICT;
-    "#,
-];
+"#;
 
-pub(crate) const CURRENT_VERSION: i64 = MIGRATIONS.len() as i64;
-
-pub(crate) fn migrate(conn: &Connection) -> Result<()> {
-    let version = schema_version(conn)?;
-    for (i, sql) in MIGRATIONS.iter().enumerate() {
-        let target = (i + 1) as i64;
-        if version < target {
-            conn.execute_batch(sql)?;
-            conn.pragma_update(None, "user_version", target)?;
+/// Create the schema on an empty database, or check an existing one's
+/// version.
+pub(crate) fn apply(conn: &Connection) -> Result<()> {
+    match schema_version(conn)? {
+        0 => {
+            conn.execute_batch(SCHEMA)?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            Ok(())
         }
+        SCHEMA_VERSION => Ok(()),
+        found => Err(WorldError::SchemaVersion {
+            found,
+            expected: SCHEMA_VERSION,
+        }),
     }
-    Ok(())
 }
 
 pub(crate) fn schema_version(conn: &Connection) -> Result<i64> {

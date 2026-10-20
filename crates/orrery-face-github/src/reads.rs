@@ -342,18 +342,31 @@ pub(crate) async fn get_user(Extension(actor): Extension<Actor>) -> Response<Bod
     )
 }
 
-/// One primary verified address per actor, derived like everything else —
-/// `.invalid` TLD so it can never route (rule 12: worlds are safe to share).
-pub(crate) async fn get_user_emails(Extension(actor): Extension<Actor>) -> Response<Body> {
-    json_response(
-        StatusCode::OK,
-        serde_json::json!([{
-            "email": format!("{}@orrery.invalid", actor.login),
-            "primary": true,
-            "verified": true,
-            "visibility": "private",
-        }]),
-    )
+/// The actor's stored addresses, primary first. Every actor starts with one
+/// derived `.invalid` address; the control plane sets the rest.
+pub(crate) async fn get_user_emails(
+    State(face): State<GithubFace>,
+    Extension(actor): Extension<Actor>,
+) -> Response<Body> {
+    match face.world.actor_emails(actor.id) {
+        Ok(emails) => json_response(
+            StatusCode::OK,
+            serde_json::Value::Array(
+                emails
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "email": e.email,
+                            "primary": e.primary,
+                            "verified": e.verified,
+                            "visibility": if e.primary { serde_json::json!("private") } else { serde_json::Value::Null },
+                        })
+                    })
+                    .collect(),
+            ),
+        ),
+        Err(e) => internal(e),
+    }
 }
 
 pub(crate) async fn list_user_repos(

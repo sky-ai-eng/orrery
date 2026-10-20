@@ -119,7 +119,7 @@ Consumers: review freshness annotation (every review-artifact GET, best-effort),
 
 ### 1.19 Identity & validation
 
-- `GET /user` + `GET /user/emails` (`validate.go:128,183`): `id, login, avatar_url, name`; emails `email, primary, verified` — first primary+verified wins, else hard error. Status contract: 200 / 401 bad token / 403 missing scopes (`/user/emails` 403 → dedicated error). ⚠️ Builds its own URL, hardcoding `{base}/api/v3/user` for non-github.com — diverges from `github.APIBase` on `.ghe.com` hosts (probable bug; `findings.md`).
+- `GET /user` + `GET /user/emails` (`validate.go:128,183`; also GoTrue, §2.1): `id, login, avatar_url, name`; emails `email, primary, verified` (Orrery serves an actor's stored addresses, primary first; every actor starts with `<login>@orrery.invalid`, and the control plane sets the rest) — first primary+verified wins, else hard error. Status contract: 200 / 401 bad token / 403 missing scopes (`/user/emails` 403 → dedicated error). ⚠️ Builds its own URL, hardcoding `{base}/api/v3/user` for non-github.com — diverges from `github.APIBase` on `.ghe.com` hosts (probable bug; `findings.md`).
 - `GET /users/{login}` (`client.go:254`; `github_app_register.go:715`): App bot user id (`"<slug>[bot]"` path-escaped). **Unauthenticated** — no Authorization header; the mock must accept anonymous requests here. Field: `id`. Failure non-fatal.
 - API-root reachability probe (`reachability.go:66`): bare `GET {APIBase(url)}`, UA `triage-factory-reachability`, redirects not followed; ANY HTTP status = reachable.
 
@@ -142,6 +142,18 @@ All `internal/githubapp` calls carry `Accept: application/vnd.github+json`, `X-G
 | `POST {webBase}/login/oauth/access_token` | none | Web host, not API base. Form: `client_id, client_secret, code, redirect_uri`; `Accept: application/json`. Reads `access_token, token_type, error, error_description` — 200 even on logical failure, `error` checked independently. |
 
 JWT shape (mint side, for reference): RS256, claims exactly `{iss: <numeric app id>, iat: now-60s, exp: now+9m}`; PKCS#1 and PKCS#8 keys both accepted.
+
+### 2.1 The OAuth web flow (GoTrue's GitHub provider)
+
+TF's multi mode signs people in through GoTrue, whose GitHub provider runs GitHub's OAuth web flow against `GOTRUE_EXTERNAL_GITHUB_URL`. With that URL set to a GHES-style host, GoTrue sends the browser to `{url}/login/oauth/authorize`, exchanges at `{url}/login/oauth/access_token`, and reads identity at `{url}/api/v3/user` and `{url}/api/v3/user/emails` (§1.19). Observed in GoTrue v2.189.0 (`internal/api/provider/github.go`) and in TF's SSO end-to-end suite (`e2e/sso`).
+
+| Endpoint | Auth | Contract |
+| --- | --- | --- |
+| `GET {webBase}/login/oauth/authorize` | none (browser) | Query: `client_id, redirect_uri, scope, state` (GoTrue's scope is `user:email`). Unknown `client_id` → 404 page. `redirect_uri` optional, defaulting to the app's callback URL; when given, scheme, host and port must equal the callback's and the path must be the callback's or below it, else a 302 to the callback with `error=redirect_uri_mismatch, error_description, error_uri, state`. GitHub's sub-domain allowance and loopback-port exception are not modeled (refused). |
+| `POST {webBase}/login/oauth/authorize` | an actor's login (form) | Orrery's stand-in for GitHub's sign-in and consent pages: form fields as above plus `login`, naming an existing **user** actor (rule 12: no passwords exist). An unknown login or a non-user actor re-renders the page with "Incorrect username or password." Success → 302 to `redirect_uri` with `code` and `state`. |
+| `POST {webBase}/login/oauth/access_token` | `client_id` + `client_secret` | Params from the query, a form body or a JSON body; the client pair may instead be HTTP Basic. Response form-encoded unless `Accept: application/json` (`application/xml` is not mocked). Success: `access_token, token_type=bearer, scope`. Refusals are **200** with `error, error_description, error_uri`: `incorrect_client_credentials`, `bad_verification_code` (unknown, spent, or older than 10 minutes on the virtual clock), `redirect_uri_mismatch` (a `redirect_uri` that differs from the one the code was issued for). A code is spent by its first successful exchange. |
+
+Scopes are recorded and echoed, not enforced: no face route checks a token's scopes.
 
 ---
 

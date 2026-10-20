@@ -23,7 +23,7 @@ Clarification worth pinning: Triage Factory's credential injector refuses repo c
 
 Namespaced away from the face (its own path prefix/port) so it can never be mistaken for mocked surface. It holds only what no public GitHub API can express:
 
-- **Identity** — mint actors and their tokens (GitHub cannot create users via API).
+- **Identity** — mint actors and their tokens (GitHub cannot create users via API); set an actor's email addresses, which is verified and which is primary (`PUT /_orrery/actors/{login}/emails` — a verification link and the settings page do this, no API); register OAuth apps (`POST /_orrery/oauth-apps` — GitHub creates them only in its web settings). Signing in and authorizing an app are the face's (`/login/oauth/*`, `surface-github.md` §2.1).
 - **Time** — set and advance the virtual clock (see below).
 - **Fabricated subsystem state** — Actions workflow runs / jobs / logs, when a scenario needs the agent's log-reading tools to work. Real GitHub has no API to create a run in an arbitrary state; Actions itself does it.
 - **Engine operations** — snapshot, fork, diff, coverage report.
