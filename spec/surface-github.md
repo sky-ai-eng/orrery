@@ -109,7 +109,7 @@ Consumers: review freshness annotation (every review-artifact GET, best-effort),
 
 ### 1.17 Teams
 
-- `GET /orgs/{org}/teams?per_page=100&page=N` (`teams.go:354`): poller group-prune, once per distinct repo owner per cycle. Fields: `slug` (used), `name` (decoded). Cap 20 pages. An error must NOT prune — 403/404 behavior is load-bearing.
+- `GET /orgs/{org}/teams?per_page=100&page=N` (`teams.go:354`): poller group-prune, once per distinct repo owner per cycle. Fields: `slug` (used), `name` (decoded). Cap 20 pages. An error must NOT prune — 403/404 behavior is load-bearing. Orrery models no teams: an org answers `[]` (GitHub's answer for an org that never made one, which the poller skips rather than prunes against), any other login 404.
 - `GET /user/teams?per_page=100&page=N` (`teams.go:68,111`): local/PAT only — poll cycle (`slug`, `organization.login`) and the include-membership settings read (`slug, name, members_count, organization.login`). App tokens can't answer this; failure non-fatal.
 - GraphQL `organization.teams` — see § 3.
 
@@ -120,6 +120,7 @@ Consumers: review freshness annotation (every review-artifact GET, best-effort),
 ### 1.19 Identity & validation
 
 - `GET /user` + `GET /user/emails` (`validate.go:128,183`; also GoTrue, §2.1): `id, login, avatar_url, name`; emails `email, primary, verified` (Orrery serves an actor's stored addresses, primary first; every actor starts with `<login>@orrery.invalid`, and the control plane sets the rest) — first primary+verified wins, else hard error. Status contract: 200 / 401 bad token / 403 missing scopes (`/user/emails` 403 → dedicated error). ⚠️ Builds its own URL, hardcoding `{base}/api/v3/user` for non-github.com — diverges from `github.APIBase` on `.ghe.com` hosts (probable bug; `findings.md`).
+- **Bot actors.** A `bot` actor stands for a GitHub App: REST spells its login `<login>[bot]` with `"type": "Bot"`, GraphQL types its author `Bot` with the bare login (TF's `restLogin` reconciles the two spellings), and its token is refused on `GET /user`, `GET /user/emails` and `/user/repos` with 403 "Resource not accessible by integration", as GitHub refuses an installation token there. A PAT is not an actor of its own: it is a user actor's token, a machine user's included, so it renders as that user.
 - `GET /users/{login}` (`client.go:254`; `github_app_register.go:715`): App bot user id (`"<slug>[bot]"` path-escaped). **Unauthenticated** — no Authorization header; the mock must accept anonymous requests here. Field: `id`. Failure non-fatal.
 - API-root reachability probe (`reachability.go:66`): bare `GET {APIBase(url)}`, UA `triage-factory-reachability`, redirects not followed; ANY HTTP status = reachable.
 
@@ -159,21 +160,26 @@ Scopes are recorded and echoed, not enforced: no face route checks a token's sco
 
 ## 3. GraphQL surface (TF's own client)
 
+Updated at TF commit `a53a770e` (2026-10-20), where triage-factory's poller contract test (`internal/poller/orrery_contract_test.go`) found the queries had grown since the extraction: `fullDatabaseId`, backward paging on `reviews`/`comments`, and `rateLimit`.
+
 `PostGraphQL` (`client.go:472-542`): empty Accept header; queries only (never mutations except the two below); refused through the sidecar REST proxy (fails closed). **A 200 carrying both `data` and `errors[]` is partial success** — the mock must be able to produce this (e.g. FORBIDDEN `statusCheckRollup` on one node), and `null` entries in `nodes` are skipped.
 
 ### Queries
 
 - **`search(query,type:ISSUE,first:50)` — discovery/backfill** (`graphql.go:198`). Only when a viewer login exists (local/PAT; multi dashboard backfill once per user/host). Four query bases over 30 days, batched ≤3 `repo:` scopes / ≤256 chars each: `is:pr is:merged author:{u} merged:>=`, `is:pr is:merged reviewed-by:{u} merged:>=`, `is:pr is:closed is:unmerged author:{u} closed:>=`, same with `reviewed-by`. Single page, no cursor. Fragment: `prDiscoveryFragment` (below), no `statusCheckRollup`.
 - **`nodes(ids:[ID!]!)` — Phase-2 batch refresh** (`graphql.go:287`). Chunks of 20 ids. Open batch uses `prFullFragment`; terminal batch and reconcile use `prDiscoveryFragment`.
+- **`node(id:){...on PullRequest}{comments(last:50, before:$before)}`** — the tracker's new-comment read (`pr_comments.go`, query `PRComments`): `totalCount, pageInfo{hasPreviousPage, startCursor}, nodes{fullDatabaseId, createdAt, author{__typename, login}, body}`. Walks backwards from the newest comment through `startCursor` until it reaches what it saw last cycle.
+- **`node(id:){...on PullRequest}{reviews(last:50, before:$before, states:[APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED])}`** — the tracker's new-review read (`pr_reviews.go`, query `PRReviews`): `totalCount, pageInfo{hasPreviousPage, startCursor}, nodes{fullDatabaseId, state, submittedAt, author{__typename, login}, body, comments(first:100){totalCount, nodes{fullDatabaseId, path, body}}}`. `totalCount` counts the `states`-filtered set.
+- **`rateLimit { cost }`** is selected by every query document, and its cost is recorded per operation (`client.go` `recordQueryCost`). A null `rateLimit` is allowed — a GHES with rate limiting off sends it — and records nothing; Orrery, which presents as that GHES, answers null.
 - **`node(id:){...on PullRequestReview}`** (`pending_reviews.go:58`): `state, body, comments(first:100){pageInfo.hasNextPage, nodes{id, path, line, startLine, body}}` — `line`/`startLine` are nullable and null is meaningful (outdated comment), must not collapse to 0. `null` node = absence, not error.
 - **Aliased branch existence** (`branches.go:65`): batches of 50 aliases, `r{i}: repository(owner:$o{i}, name:$n{i}){ref(qualifiedName:$q{i}){id}}` with `q = refs/heads/<branch>`. Presence only; a null repository alias or an alias named in `errors[].path[0]` = unknown, never "deleted".
 - **`organization.teams`** (`teams.go:159,258`): with/without `userLogins:` filter; cursor-paged, cap 20; `pageInfo.{hasNextPage,endCursor}`, `nodes[].{slug,name,members.totalCount}`; null organization = empty result.
 
 ### Fragments (exact consumption)
 
-`prBaseFields` (`graphql.go:15`): `id, number, title, author.login, state, isDraft, merged, mergeable, headRefName, baseRefName, url, repository.nameWithOwner, headRepository.nameWithOwner, additions, deletions, changedFiles, reviewRequests(first:100){pageInfo.hasNextPage, nodes.requestedReviewer{User.login | Team.slug + Team.organization.login}}, latestReviews(first:20){nodes{id, author.login, state, submittedAt}}, reviews(first:1){totalCount}`.
+`prBaseFields` (`graphql.go:15`): `id, number, title, body, author{__typename, login}, state, isDraft, merged, mergeable, headRefName, baseRefName, url, repository.nameWithOwner, headRepository.nameWithOwner, additions, deletions, changedFiles, reviewRequests(first:100){pageInfo.hasNextPage, nodes.requestedReviewer{User.login | Team.slug + Team.organization.login}}, latestReviews(first:20){nodes{id, fullDatabaseId, author{__typename, login}, state, submittedAt, comments.totalCount}}, reviews(last:1, states:[APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]){totalCount, nodes{fullDatabaseId, submittedAt}}`. `fullDatabaseId` is GitHub's `BigInt` scalar, a string on the wire; TF also accepts a number.
 
-`prDiscoveryFragment` (`graphql.go:67`) = base + `commits(last:1){nodes.commit{oid, committedDate}}, labels(first:10){nodes.name}, comments.totalCount, createdAt, updatedAt, mergedAt, closedAt`.
+`prDiscoveryFragment` (`graphql.go:67`) = base + `commits(last:1){nodes.commit{oid, committedDate}}, labels(first:10){nodes.name}, comments(last:1){totalCount, nodes{fullDatabaseId, createdAt}}, createdAt, updatedAt, mergedAt, closedAt`.
 
 `prFullFragment` (`graphql.go:107`) = base + commits with `statusCheckRollup{contexts(first:100){pageInfo.hasNextPage, nodes{__typename, ...on CheckRun{databaseId, name, status, conclusion, completedAt, detailsUrl, checkSuite.workflowRun.databaseId}}}}` + labels/comments/timestamps + `timelineItems(last:20, itemTypes:[LABELED_EVENT, UNLABELED_EVENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT]){nodes{__typename, createdAt, label.name, requestedReviewer{User.login | Team.slug + Team.organization.login}}}`. `StatusContext` union members are decoded then dropped — legacy commit statuses are silently ignored; only CheckRun survives.
 

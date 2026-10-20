@@ -11,8 +11,10 @@
 use std::sync::OnceLock;
 
 use async_graphql::{
-    Context, Enum, Error, ID, InputObject, Interface, Object, SimpleObject, Union,
+    Context, Enum, Error, ID, InputObject, InputValueError, InputValueResult, Interface, Object,
+    Scalar, ScalarType, SimpleObject, Union, Value,
 };
+use base64::Engine as _;
 use orrery_face_git::store;
 use orrery_world as world;
 
@@ -86,7 +88,34 @@ pub enum PullRequestTimelineItemsItemType {
 #[derive(SimpleObject, Default)]
 pub struct PageInfo {
     pub has_next_page: bool,
+    pub has_previous_page: bool,
+    pub start_cursor: Option<String>,
     pub end_cursor: Option<String>,
+}
+
+/// GitHub's `BigInt`: a database id too wide for GraphQL's `Int`, serialized
+/// as a string.
+pub struct BigInt(pub i64);
+
+#[Scalar(name = "BigInt")]
+impl ScalarType for BigInt {
+    fn parse(value: Value) -> InputValueResult<Self> {
+        match &value {
+            Value::String(s) => s
+                .parse()
+                .map(BigInt)
+                .map_err(|_| InputValueError::expected_type(value)),
+            Value::Number(n) => n
+                .as_i64()
+                .map(BigInt)
+                .ok_or_else(|| InputValueError::expected_type(value)),
+            _ => Err(InputValueError::expected_type(value)),
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        Value::String(self.0.to_string())
+    }
 }
 
 fn face<'a>(ctx: &Context<'a>) -> &'a GithubFace {
@@ -103,6 +132,60 @@ fn unresolved(id: &str) -> Error {
     ))
 }
 
+/// A connection cursor: opaque to consumers, naming the row an item came from.
+fn cursor(id: i64) -> String {
+    base64::engine::general_purpose::STANDARD.encode(format!("orrery:{id}"))
+}
+
+fn cursor_id(c: &str) -> Option<i64> {
+    let raw = base64::engine::general_purpose::STANDARD.decode(c).ok()?;
+    String::from_utf8(raw)
+        .ok()?
+        .strip_prefix("orrery:")?
+        .parse()
+        .ok()
+}
+
+/// GitHub's connection paging over `items` in ascending id order: `first`
+/// from the front, or `last` from the back of whatever lies `before` a cursor.
+/// Asking for both ends is refused, as GitHub refuses it.
+fn page<T>(
+    connection: &str,
+    items: Vec<T>,
+    id: impl Fn(&T) -> i64,
+    first: Option<i32>,
+    last: Option<i32>,
+    before: Option<String>,
+) -> Result<(Vec<T>, PageInfo), Error> {
+    if first.is_some() && last.is_some() {
+        return Err(Error::new(format!(
+            "Passing both `first` and `last` to paginate the `{connection}` connection is not supported."
+        )));
+    }
+    let mut items = items;
+    if let Some(b) = before {
+        let bound = cursor_id(&b)
+            .ok_or_else(|| Error::new(format!("`{b}` does not appear to be a valid cursor.")))?;
+        items.retain(|item| id(item) < bound);
+    }
+    let (items, mut info) = match last {
+        Some(n) => {
+            let n = n.max(0) as usize;
+            let cut = items.len().saturating_sub(n);
+            let kept = items.split_off(cut);
+            let info = PageInfo {
+                has_previous_page: cut > 0,
+                ..PageInfo::default()
+            };
+            (kept, info)
+        }
+        None => take_first(items, first),
+    };
+    info.start_cursor = items.first().map(|i| cursor(id(i)));
+    info.end_cursor = items.last().map(|i| cursor(id(i)));
+    Ok((items, info))
+}
+
 /// Truncate `items` to GitHub's `first:` argument, reporting the cut on
 /// `pageInfo.hasNextPage` — consumers watchdog that flag, so a silent
 /// truncation here would defeat their logging.
@@ -114,7 +197,7 @@ fn take_first<T>(mut items: Vec<T>, first: Option<i32>) -> (Vec<T>, PageInfo) {
         items,
         PageInfo {
             has_next_page: truncated,
-            end_cursor: None,
+            ..PageInfo::default()
         },
     )
 }
@@ -126,16 +209,29 @@ pub struct User {
     pub login: String,
 }
 
+/// A GitHub App's bot. GraphQL spells its login as the bare slug, without
+/// the `[bot]` suffix REST adds.
+#[derive(SimpleObject)]
+pub struct Bot {
+    pub login: String,
+}
+
 #[derive(Interface)]
 #[graphql(name = "Actor", field(name = "login", ty = "String"))]
 pub enum GqlActor {
     User(User),
+    Bot(Bot),
 }
 
-fn author(login: &str) -> GqlActor {
-    GqlActor::User(User {
-        login: login.to_string(),
-    })
+/// The author a stored login names, typed by its actor's kind. Actors are
+/// never deleted, so a lookup miss is an anomaly; it degrades to a User
+/// rather than failing the whole query.
+fn author(face: &GithubFace, login: &str) -> GqlActor {
+    let login = login.to_string();
+    match face.world.actor_by_login(&login) {
+        Ok(Some(a)) if a.kind == world::ActorKind::Bot => GqlActor::Bot(Bot { login }),
+        _ => GqlActor::User(User { login }),
+    }
 }
 
 // ---- teams / organizations ------------------------------------------------
@@ -252,10 +348,42 @@ pub struct LabelConnection {
     pub nodes: Vec<Label>,
 }
 
+pub struct IssueComment {
+    pub comment: world::IssueComment,
+}
+
+#[Object]
+impl IssueComment {
+    async fn full_database_id(&self) -> BigInt {
+        BigInt(self.comment.id)
+    }
+
+    async fn author(&self, ctx: &Context<'_>) -> Option<GqlActor> {
+        Some(author(face(ctx), &self.comment.author_login))
+    }
+
+    async fn body(&self) -> &str {
+        &self.comment.body
+    }
+
+    async fn created_at(&self) -> String {
+        rfc3339(self.comment.created_clock_unix)
+    }
+}
+
 #[derive(SimpleObject)]
 pub struct IssueCommentConnection {
     pub page_info: PageInfo,
     pub total_count: i64,
+    pub nodes: Vec<IssueComment>,
+}
+
+/// GitHub's root `rateLimit` object. Orrery presents as a GHES with rate
+/// limiting off, whose `rateLimit` is null, so this type is never returned;
+/// it exists so consumer queries that select it validate.
+#[derive(SimpleObject)]
+pub struct RateLimit {
+    pub cost: i64,
 }
 
 #[derive(SimpleObject)]
@@ -309,16 +437,16 @@ impl PullRequestReview {
         ID(nodeid::review(self.review.id))
     }
 
-    async fn author(&self) -> Option<GqlActor> {
-        Some(author(&self.review.author_login))
+    async fn full_database_id(&self) -> BigInt {
+        BigInt(self.review.id)
+    }
+
+    async fn author(&self, ctx: &Context<'_>) -> Option<GqlActor> {
+        Some(author(face(ctx), &self.review.author_login))
     }
 
     async fn state(&self) -> PullRequestReviewState {
-        match self.review.state {
-            world::ReviewState::Approved => PullRequestReviewState::Approved,
-            world::ReviewState::ChangesRequested => PullRequestReviewState::ChangesRequested,
-            world::ReviewState::Commented => PullRequestReviewState::Commented,
-        }
+        review_state(self.review.state)
     }
 
     async fn submitted_at(&self) -> Option<String> {
@@ -334,14 +462,24 @@ impl PullRequestReview {
     async fn comments(&self, _first: Option<i32>) -> PullRequestReviewCommentConnection {
         PullRequestReviewCommentConnection {
             page_info: PageInfo::default(),
+            total_count: 0,
             nodes: Vec::new(),
         }
+    }
+}
+
+fn review_state(s: world::ReviewState) -> PullRequestReviewState {
+    match s {
+        world::ReviewState::Approved => PullRequestReviewState::Approved,
+        world::ReviewState::ChangesRequested => PullRequestReviewState::ChangesRequested,
+        world::ReviewState::Commented => PullRequestReviewState::Commented,
     }
 }
 
 #[derive(SimpleObject)]
 pub struct PullRequestReviewComment {
     pub id: ID,
+    pub full_database_id: Option<BigInt>,
     pub path: String,
     pub line: Option<i64>,
     pub start_line: Option<i64>,
@@ -351,6 +489,7 @@ pub struct PullRequestReviewComment {
 #[derive(SimpleObject)]
 pub struct PullRequestReviewCommentConnection {
     pub page_info: PageInfo,
+    pub total_count: i64,
     pub nodes: Vec<PullRequestReviewComment>,
 }
 
@@ -594,8 +733,8 @@ impl PullRequest {
         self.pull.body.as_deref().unwrap_or("")
     }
 
-    async fn author(&self) -> Option<GqlActor> {
-        Some(author(&self.pull.author_login))
+    async fn author(&self, ctx: &Context<'_>) -> Option<GqlActor> {
+        Some(author(face(ctx), &self.pull.author_login))
     }
 
     async fn state(&self) -> PullRequestState {
@@ -715,10 +854,16 @@ impl PullRequest {
         &self,
         ctx: &Context<'_>,
         first: Option<i32>,
+        last: Option<i32>,
+        before: Option<String>,
+        states: Option<Vec<PullRequestReviewState>>,
     ) -> Result<PullRequestReviewConnection, Error> {
-        let all = self.load_reviews(face(ctx))?;
+        let mut all = self.load_reviews(face(ctx))?;
+        if let Some(states) = states {
+            all.retain(|r| states.contains(&review_state(r.state)));
+        }
         let total = all.len() as i64;
-        let (nodes, page_info) = take_first(all, first);
+        let (nodes, page_info) = page("reviews", all, |r| r.id, first, last, before)?;
         Ok(PullRequestReviewConnection {
             page_info,
             total_count: total,
@@ -749,14 +894,26 @@ impl PullRequest {
         })
     }
 
-    async fn comments(&self, ctx: &Context<'_>) -> Result<IssueCommentConnection, Error> {
+    async fn comments(
+        &self,
+        ctx: &Context<'_>,
+        first: Option<i32>,
+        last: Option<i32>,
+        before: Option<String>,
+    ) -> Result<IssueCommentConnection, Error> {
         let comments = face(ctx)
             .world
             .list_issue_comments_for_pull(self.pull.id)
             .map_err(internal)?;
+        let total = comments.len() as i64;
+        let (nodes, page_info) = page("comments", comments, |c| c.id, first, last, before)?;
         Ok(IssueCommentConnection {
-            page_info: PageInfo::default(),
-            total_count: comments.len() as i64,
+            page_info,
+            total_count: total,
+            nodes: nodes
+                .into_iter()
+                .map(|comment| IssueComment { comment })
+                .collect(),
         })
     }
 
@@ -854,6 +1011,11 @@ impl QueryRoot {
 
     async fn node(&self, ctx: &Context<'_>, id: ID) -> Result<Option<Node>, Error> {
         resolve_node(face(ctx), &id)
+    }
+
+    /// Null: rate limiting is off, as on a GHES configured without it.
+    async fn rate_limit(&self) -> Option<RateLimit> {
+        None
     }
 
     async fn search(

@@ -15,7 +15,7 @@ const PR_BASE_FIELDS: &str = r#"
 	number
 	title
 	body
-	author { login }
+	author { __typename login }
 	state
 	isDraft
 	merged
@@ -40,12 +40,17 @@ const PR_BASE_FIELDS: &str = r#"
 	latestReviews(first: 20) {
 		nodes {
 			id
-			author { login }
+			fullDatabaseId
+			author { __typename login }
 			state
 			submittedAt
+			comments { totalCount }
 		}
 	}
-	reviews(first: 1) { totalCount }
+	reviews(last: 1, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
+		totalCount
+		nodes { fullDatabaseId submittedAt }
+	}
 "#;
 
 /// TF's `prDiscoveryFragment`, verbatim (base fields spliced the same way).
@@ -60,7 +65,10 @@ fragment PRDiscoveryFields on PullRequest {{
 		}}
 	}}
 	labels(first: 10) {{ nodes {{ name }} }}
-	comments {{ totalCount }}
+	comments(last: 1) {{
+		totalCount
+		nodes {{ fullDatabaseId createdAt }}
+	}}
 	createdAt
 	updatedAt
 	mergedAt
@@ -103,7 +111,10 @@ fragment PRFullFields on PullRequest {{
 		}}
 	}}
 	labels(first: 10) {{ nodes {{ name }} }}
-	comments {{ totalCount }}
+	comments(last: 1) {{
+		totalCount
+		nodes {{ fullDatabaseId createdAt }}
+	}}
 	createdAt
 	updatedAt
 	mergedAt
@@ -260,7 +271,7 @@ async fn tf_refresh_full_fragment_round_trip() {
     );
 
     let query = format!(
-        "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ...PRFullFields }} }}\n{}",
+        "query RefreshPRsWithChecks($ids: [ID!]!) {{ nodes(ids: $ids) {{ ...PRFullFields }} rateLimit {{ cost }} }}\n{}",
         pr_full_fragment()
     );
     let resp = gql(
@@ -270,6 +281,10 @@ async fn tf_refresh_full_fragment_round_trip() {
         serde_json::json!({ "ids": ["O_pull_1", "O_pull_999", "PR_kwDOjunk"] }),
     );
     assert!(resp.get("errors").is_none(), "unexpected errors: {resp}");
+    assert!(
+        resp["data"]["rateLimit"].is_null(),
+        "rate limiting is off, as on a GHES without it"
+    );
     let nodes = resp["data"]["nodes"].as_array().unwrap();
     assert_eq!(nodes.len(), 3);
     assert!(nodes[1].is_null(), "missing pull resolves to null");
@@ -302,10 +317,16 @@ async fn tf_refresh_full_fragment_round_trip() {
     let latest = pr["latestReviews"]["nodes"].as_array().unwrap();
     assert_eq!(latest.len(), 1, "latestReviews is per-author latest");
     assert_eq!(latest[0]["id"], "O_review_2");
+    assert_eq!(latest[0]["fullDatabaseId"], "2", "BigInt is a string");
+    assert_eq!(latest[0]["author"]["__typename"], "User");
+    assert_eq!(latest[0]["comments"]["totalCount"], 0);
     assert_eq!(latest[0]["author"]["login"], "bob");
     assert_eq!(latest[0]["state"], "APPROVED");
     assert_eq!(latest[0]["submittedAt"], "2020-01-01T00:00:00Z");
     assert_eq!(pr["reviews"]["totalCount"], 2);
+    let last_review = pr["reviews"]["nodes"].as_array().unwrap();
+    assert_eq!(last_review.len(), 1, "reviews(last: 1)");
+    assert_eq!(last_review[0]["fullDatabaseId"], "2");
 
     let commit = &pr["commits"]["nodes"][0]["commit"];
     assert_eq!(commit["oid"], s.feature_sha.as_str());
@@ -327,6 +348,11 @@ async fn tf_refresh_full_fragment_round_trip() {
 
     assert_eq!(pr["labels"]["nodes"].as_array().unwrap().len(), 0);
     assert_eq!(pr["comments"]["totalCount"], 1);
+    assert_eq!(pr["comments"]["nodes"][0]["fullDatabaseId"], "1");
+    assert_eq!(
+        pr["comments"]["nodes"][0]["createdAt"],
+        "2020-01-01T00:00:00Z"
+    );
     assert_eq!(pr["createdAt"], "2020-01-01T00:00:00Z");
     assert!(pr["mergedAt"].is_null());
     assert!(pr["closedAt"].is_null());
@@ -339,6 +365,171 @@ async fn tf_refresh_full_fragment_round_trip() {
         pr_full_fragment()
     );
     let _ = discovery; // same query text; rollup nullability is covered below.
+}
+
+/// TF's `prCommentsQuery` (internal/github/pr_comments.go), verbatim.
+const PR_COMMENTS_QUERY: &str = r#"
+	query PRComments($id: ID!, $before: String) {
+		node(id: $id) {
+			... on PullRequest {
+				comments(last: 50, before: $before) {
+					totalCount
+					pageInfo { hasPreviousPage startCursor }
+					nodes {
+						fullDatabaseId
+						createdAt
+						author { __typename login }
+						body
+					}
+				}
+			}
+		}
+		rateLimit { cost }
+	}
+"#;
+
+/// TF's `prReviewsQuery` (internal/github/pr_reviews.go), verbatim.
+const PR_REVIEWS_QUERY: &str = r#"
+	query PRReviews($id: ID!, $before: String) {
+		node(id: $id) {
+			... on PullRequest {
+				reviews(last: 50, before: $before, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
+					totalCount
+					pageInfo { hasPreviousPage startCursor }
+					nodes {
+						fullDatabaseId
+						state
+						submittedAt
+						author { __typename login }
+						body
+						comments(first: 100) {
+							totalCount
+							nodes { fullDatabaseId path body }
+						}
+					}
+				}
+			}
+		}
+		rateLimit { cost }
+	}
+"#;
+
+/// The tracker's new-comment and new-review reads page backwards from the
+/// newest item with `last:` and `before:`, so a world with more than a page
+/// is walked to its start through `startCursor`.
+#[tokio::test(flavor = "multi_thread")]
+async fn tf_comment_and_review_paging() {
+    let s = seed().await;
+    open_pr(&s);
+    for i in 0..52 {
+        face_ok(
+            "POST",
+            &format!("{}/issues/1/comments", s.api),
+            &s.bob_token,
+            serde_json::json!({ "body": format!("comment {i}") }),
+        );
+    }
+    for event in ["COMMENT", "REQUEST_CHANGES", "APPROVE"] {
+        face_ok(
+            "POST",
+            &format!("{}/pulls/1/reviews", s.api),
+            &s.bob_token,
+            serde_json::json!({ "event": event, "body": event }),
+        );
+    }
+
+    let page1 = gql(
+        &s.inst.base,
+        &s.token,
+        PR_COMMENTS_QUERY,
+        serde_json::json!({ "id": "O_pull_1", "before": null }),
+    );
+    assert!(page1.get("errors").is_none(), "unexpected errors: {page1}");
+    assert!(page1["data"]["rateLimit"].is_null());
+    let c1 = &page1["data"]["node"]["comments"];
+    assert_eq!(c1["totalCount"], 52);
+    assert_eq!(c1["pageInfo"]["hasPreviousPage"], true);
+    let nodes = c1["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 50, "the newest 50");
+    assert_eq!(nodes[0]["fullDatabaseId"], "3");
+    assert_eq!(nodes[49]["fullDatabaseId"], "52");
+    assert_eq!(nodes[49]["body"], "comment 51");
+    assert_eq!(nodes[49]["author"]["login"], "bob");
+
+    let page2 = gql(
+        &s.inst.base,
+        &s.token,
+        PR_COMMENTS_QUERY,
+        serde_json::json!({ "id": "O_pull_1", "before": c1["pageInfo"]["startCursor"] }),
+    );
+    let c2 = &page2["data"]["node"]["comments"];
+    assert_eq!(c2["pageInfo"]["hasPreviousPage"], false);
+    let older: Vec<&str> = c2["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["fullDatabaseId"].as_str().unwrap())
+        .collect();
+    assert_eq!(older, ["1", "2"]);
+
+    let reviews = gql(
+        &s.inst.base,
+        &s.token,
+        PR_REVIEWS_QUERY,
+        serde_json::json!({ "id": "O_pull_1", "before": null }),
+    );
+    assert!(
+        reviews.get("errors").is_none(),
+        "unexpected errors: {reviews}"
+    );
+    let r = &reviews["data"]["node"]["reviews"];
+    assert_eq!(r["totalCount"], 3);
+    assert_eq!(r["pageInfo"]["hasPreviousPage"], false);
+    let states: Vec<&str> = r["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["COMMENTED", "CHANGES_REQUESTED", "APPROVED"]);
+    assert_eq!(r["nodes"][0]["comments"]["totalCount"], 0);
+
+    // The states filter narrows the set and its count alike.
+    let approved = gql(
+        &s.inst.base,
+        &s.token,
+        "query($id: ID!) { node(id: $id) { ... on PullRequest { reviews(last: 5, states: [APPROVED]) { totalCount nodes { state } } } } }",
+        serde_json::json!({ "id": "O_pull_1" }),
+    );
+    assert_eq!(approved["data"]["node"]["reviews"]["totalCount"], 1);
+
+    // Both ends at once, and a cursor Orrery never issued, are refused.
+    let both = gql(
+        &s.inst.base,
+        &s.token,
+        "query($id: ID!) { node(id: $id) { ... on PullRequest { comments(first: 1, last: 1) { totalCount } } } }",
+        serde_json::json!({ "id": "O_pull_1" }),
+    );
+    assert!(
+        both["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Passing both"),
+        "{both}"
+    );
+    let junk = gql(
+        &s.inst.base,
+        &s.token,
+        PR_COMMENTS_QUERY,
+        serde_json::json!({ "id": "O_pull_1", "before": "not-a-cursor" }),
+    );
+    assert!(
+        junk["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("valid cursor"),
+        "{junk}"
+    );
 }
 
 /// TF's discovery/backfill search, all four template shapes plus `repo:`
@@ -681,4 +872,81 @@ async fn unknown_field_marked_not_mocked() {
         ureq::Error::StatusCode(code) => assert_eq!(code, 401),
         other => panic!("expected status error, got {other:?}"),
     }
+}
+
+/// A bot actor stands for a GitHub App: REST spells its login with the
+/// `[bot]` suffix and types it `Bot`, GraphQL types its author `Bot` with the
+/// bare slug, and the authenticated-user routes refuse its token, as GitHub
+/// refuses an installation token there. TF tells its own App's comments and
+/// reviews apart by exactly these spellings.
+#[tokio::test(flavor = "multi_thread")]
+async fn bot_actors_render_as_github_apps() {
+    let s = seed().await;
+    open_pr(&s);
+    let rest = face_ok(
+        "POST",
+        &format!("{}/issues/1/comments", s.api),
+        &s.ci_token,
+        serde_json::json!({ "body": "build failed" }),
+    );
+    assert_eq!(rest["user"]["login"], "ci[bot]");
+    assert_eq!(rest["user"]["type"], "Bot");
+    let review = face_ok(
+        "POST",
+        &format!("{}/pulls/1/reviews", s.api),
+        &s.ci_token,
+        serde_json::json!({ "event": "COMMENT", "body": "lint notes" }),
+    );
+    assert_eq!(review["user"]["login"], "ci[bot]");
+
+    let comments = gql(
+        &s.inst.base,
+        &s.token,
+        PR_COMMENTS_QUERY,
+        serde_json::json!({ "id": "O_pull_1", "before": null }),
+    );
+    let author = &comments["data"]["node"]["comments"]["nodes"][0]["author"];
+    assert_eq!(author["__typename"], "Bot");
+    assert_eq!(author["login"], "ci");
+    let reviews = gql(
+        &s.inst.base,
+        &s.token,
+        PR_REVIEWS_QUERY,
+        serde_json::json!({ "id": "O_pull_1", "before": null }),
+    );
+    let author = &reviews["data"]["node"]["reviews"]["nodes"][0]["author"];
+    assert_eq!(author["__typename"], "Bot");
+    assert_eq!(author["login"], "ci");
+
+    // A person stays a User in both.
+    let pr = gql(
+        &s.inst.base,
+        &s.token,
+        "query($id: ID!) { node(id: $id) { ... on PullRequest { author { __typename login } } } }",
+        serde_json::json!({ "id": "O_pull_1" }),
+    );
+    assert_eq!(pr["data"]["node"]["author"]["__typename"], "User");
+    assert_eq!(pr["data"]["node"]["author"]["login"], "alice");
+
+    for path in ["/api/v3/user", "/api/v3/user/emails", "/api/v3/user/repos"] {
+        assert_eq!(
+            common::face(
+                "GET",
+                &format!("{}{path}", s.inst.base),
+                &s.ci_token,
+                serde_json::json!(null)
+            ),
+            Err(403),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        common::face(
+            "POST",
+            &format!("{}/api/v3/user/repos", s.inst.base),
+            &s.ci_token,
+            serde_json::json!({ "name": "bots-own" })
+        ),
+        Err(403)
+    );
 }

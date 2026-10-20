@@ -43,6 +43,7 @@ pub struct GithubFace {
 pub fn router(face: GithubFace) -> Router {
     Router::new()
         .route("/orgs/{org}/repos", post(create_org_repo))
+        .route("/orgs/{org}/teams", get(reads::list_org_teams))
         .route("/user", get(reads::get_user))
         .route("/user/emails", get(reads::get_user_emails))
         .route(
@@ -135,6 +136,9 @@ async fn create_user_repo(
     Extension(actor): Extension<Actor>,
     body: axum::body::Bytes,
 ) -> Response<Body> {
+    if let Some(refused) = reads::refuse_integration(&actor) {
+        return refused;
+    }
     let owner = actor.clone();
     create_repo(face, owner, actor, &body).await
 }

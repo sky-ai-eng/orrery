@@ -328,18 +328,37 @@ pub(crate) async fn list_branches(
 }
 
 pub(crate) async fn get_user(Extension(actor): Extension<Actor>) -> Response<Body> {
+    if let Some(refused) = refuse_integration(&actor) {
+        return refused;
+    }
     json_response(
         StatusCode::OK,
         serde_json::json!({
-            "login": actor.login,
+            "login": crate::render::rest_login(&actor),
             "id": actor.id,
             "node_id": format!("O_actor_{}", actor.id),
             "name": actor.login,
             "avatar_url": format!("https://orrery.invalid/avatars/{}", actor.id),
-            "type": "User",
+            "type": crate::render::owner_type(actor.kind),
             "site_admin": false,
         }),
     )
+}
+
+/// A bot actor stands for a GitHub App installation, and GitHub refuses an
+/// installation token on the authenticated-user routes: there is no user
+/// behind it.
+pub(crate) fn refuse_integration(actor: &Actor) -> Option<Response<Body>> {
+    (actor.kind == orrery_world::ActorKind::Bot).then(|| {
+        json_response(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "message": "Resource not accessible by integration",
+                "documentation_url": "https://docs.github.com/rest",
+                "status": "403",
+            }),
+        )
+    })
 }
 
 /// The actor's stored addresses, primary first. Every actor starts with one
@@ -348,6 +367,9 @@ pub(crate) async fn get_user_emails(
     State(face): State<GithubFace>,
     Extension(actor): Extension<Actor>,
 ) -> Response<Body> {
+    if let Some(refused) = refuse_integration(&actor) {
+        return refused;
+    }
     match face.world.actor_emails(actor.id) {
         Ok(emails) => json_response(
             StatusCode::OK,
@@ -369,11 +391,30 @@ pub(crate) async fn get_user_emails(
     }
 }
 
+/// Teams are unmodeled in the kernel, so an organization truthfully has none:
+/// an empty page, as GitHub answers for an org that never created a team. A
+/// login that is not an organization is GitHub's 404.
+pub(crate) async fn list_org_teams(
+    State(face): State<GithubFace>,
+    UrlPath(org): UrlPath<String>,
+) -> Response<Body> {
+    match face.world.actor_by_login(&org) {
+        Ok(Some(a)) if a.kind == orrery_world::ActorKind::Org => {
+            json_response(StatusCode::OK, serde_json::json!([]))
+        }
+        Ok(_) => github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => internal(e),
+    }
+}
+
 pub(crate) async fn list_user_repos(
     State(face): State<GithubFace>,
     Extension(actor): Extension<Actor>,
     RawQuery(query): RawQuery,
 ) -> Response<Body> {
+    if let Some(refused) = refuse_integration(&actor) {
+        return refused;
+    }
     let query = query.unwrap_or_default();
     // Only the ordering TF requests is built; a different sort would be
     // silently wrong, so it refuses loudly instead.

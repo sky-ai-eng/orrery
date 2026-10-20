@@ -324,3 +324,34 @@ async fn poll_path_reads() {
     );
     assert!(bobs.as_array().unwrap().is_empty());
 }
+
+/// The poller's per-cycle team reconcile reads an org's teams. Teams are not
+/// modeled, so an org has none; a user login is not an org.
+#[tokio::test(flavor = "multi_thread")]
+async fn org_teams() {
+    let inst = boot().await;
+    let base = inst.base.clone();
+    mint_actor(&base, "acme", "org");
+    let alice = mint_actor(&base, "alice", "user");
+    assert_eq!(
+        face_ok(
+            "GET",
+            &format!("{base}/api/v3/orgs/acme/teams?per_page=100&page=1"),
+            &alice,
+            serde_json::json!(null)
+        ),
+        serde_json::json!([])
+    );
+    for login in ["alice", "ghost"] {
+        assert_eq!(
+            face(
+                "GET",
+                &format!("{base}/api/v3/orgs/{login}/teams"),
+                &alice,
+                serde_json::json!(null)
+            ),
+            Err(404),
+            "{login}"
+        );
+    }
+}

@@ -8,7 +8,7 @@ use crate::GithubFace;
 
 pub(crate) fn actor_json(actor: &Actor) -> serde_json::Value {
     serde_json::json!({
-        "login": actor.login,
+        "login": rest_login(actor),
         "id": actor.id,
         "node_id": crate::nodeid::actor(actor.id),
         "type": owner_type(actor.kind),
@@ -184,6 +184,16 @@ pub(crate) fn check_run_json(face: &GithubFace, repo: &Repo, run: &CheckRun) -> 
             "name": run.creator_login,
         },
     })
+}
+
+/// An actor's login as GitHub's REST API spells it. A bot actor stands for a
+/// GitHub App, whose REST login carries a `[bot]` suffix; GraphQL spells the
+/// bare slug, which is the stored login.
+pub(crate) fn rest_login(actor: &Actor) -> String {
+    match actor.kind {
+        ActorKind::Bot => format!("{}[bot]", actor.login),
+        _ => actor.login.clone(),
+    }
 }
 
 pub(crate) fn owner_type(kind: ActorKind) -> &'static str {
