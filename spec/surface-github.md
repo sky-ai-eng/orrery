@@ -160,7 +160,7 @@ Scopes are recorded and echoed, not enforced: no face route checks a token's sco
 
 ## 3. GraphQL surface (TF's own client)
 
-Updated at TF commit `a53a770e` (2026-10-20), where triage-factory's poller contract test (`internal/poller/orrery_contract_test.go`) found the queries had grown since the extraction: `fullDatabaseId`, backward paging on `reviews`/`comments`, and `rateLimit`.
+Updated at TF commit `a53a770e` (2026-10-20), where triage-factory's poll end-to-end test (`internal/poller/poll_e2e_test.go`, the `poll-e2e` workflow) found the queries had grown since the extraction: `fullDatabaseId`, backward paging on `reviews`/`comments`, and `rateLimit`.
 
 `PostGraphQL` (`client.go:472-542`): empty Accept header; queries only (never mutations except the two below); refused through the sidecar REST proxy (fails closed). **A 200 carrying both `data` and `errors[]` is partial success** — the mock must be able to produce this (e.g. FORBIDDEN `statusCheckRollup` on one node), and `null` entries in `nodes` are skipped.
 

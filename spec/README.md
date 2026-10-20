@@ -37,7 +37,7 @@ Settled in design discussion 2026-08-21; the design pass elaborates these.
 **Honesty**
 
 1. **The surface is a list that grows on demand.** Every endpoint enters the inventory when a consumer needs it, backed by an observed real call — never speculatively. Unknown endpoints fail loudly and self-describe ("not mocked: add X to the inventory"), never a plausible 404 — "known endpoint, no data" and "not implemented" are distinct answers. The state model stores objects generously (near GitHub's own representation: fields liberal, endpoints strict). Cross-cutting grammar (`grammar.md`) is built once engine-wide, not per endpoint.
-2. **Real tools judge realness.** Fidelity = real `git`, real `gh`, and TF's real poller working unmodified. A contract-test job in triage-factory's CI runs the poller against Orrery.
+2. **Real tools judge realness.** Fidelity = real `git`, real `gh`, and TF's real poller working unmodified. A contract-test job in triage-factory's CI runs the poller against Orrery: the `poll-e2e` workflow (`internal/poller/poll_e2e_test.go`).
 3. **The people in the world are scripted, never AI.** No LLM inside the engine; chatty NPCs, if ever, are a driver plugin outside the determinism boundary.
 
 **Determinism**

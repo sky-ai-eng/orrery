@@ -34,7 +34,7 @@ cargo fmt --all
 ## Coding conventions
 
 - Comments explain **why**, never what or how; they never narrate the history of a change ("formerly", "renamed from") — the codebase reads as a description of itself at this commit. Change stories live in commit messages and PR bodies.
-- No ticket references in code comments, with one exception: deferred work is marked `// TODO(#NN): <what is missing>` against an existing GitHub issue that actually describes the gap. If nothing tracks it, either do it now or file the issue first. A TODO pointing nowhere is worse than none.
+- No ticket references in code comments, with one exception: deferred work is marked `// TODO(ORR-NN): <what is missing>` against an existing issue in the Orrery (ORR) Linear team that actually describes the gap. If nothing tracks it, either do it now or file the issue first. A TODO pointing nowhere is worse than none.
 - Errors are typed (`thiserror`) in libraries; `anyhow` only in the binary. Map domain conflicts to typed variants (e.g., repo-exists), never string-match error text.
 - Tests exercise real tools where the spec's rule 2 applies: the git face's tests run real `git` against the served endpoint (the `blobless` clone recipe from `spec/surface-git.md`), not simulated requests.
 - Keep crate boundaries honest: `orrery-world` must never grow an HTTP or vendor-format dependency; faces must never open the DB directly.
