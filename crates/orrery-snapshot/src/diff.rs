@@ -5,15 +5,19 @@
 //!
 //! Rows correlate by primary key, which is sound because the two sides share
 //! a lineage (a snapshot and the world it came from, or two snapshots of one
-//! world) — ids never renumber within a lineage. The schema is fixed: every
+//! world) — ids never renumber within a lineage. Rows with no id of their
+//! own, or one that can be freed and handed out again (memberships, labels,
+//! addresses, review requests), correlate by what they name instead.
+//! Entries always name things by stable identity — a login, `owner/repo` and
+//! a pull number, `org/slug` — never by row id. The schema is fixed: every
 //! section always present, empty when nothing happened, so an assertion
 //! script never branches on shape.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use orrery_face_git::store;
-use orrery_world::{Pull, PullState, WorldView};
+use orrery_world::{ActorEmail, Pull, PullState, RequestedReviewer, Team, TimelineKind, WorldView};
 
 use crate::Result;
 
@@ -108,6 +112,109 @@ pub struct CheckRunChange {
 pub struct ActorAdded {
     pub login: String,
     pub kind: String,
+    /// The addresses it holds on the `to` side, primary first.
+    pub emails: Vec<ActorEmail>,
+}
+
+/// An existing actor whose addresses differ, with both whole sets, primary
+/// first.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EmailsChanged {
+    pub login: String,
+    pub from: Vec<ActorEmail>,
+    pub to: Vec<ActorEmail>,
+}
+
+/// An OAuth app, by its public identity; the client secret is never reported.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OAuthAppAdded {
+    pub name: String,
+    pub client_id: String,
+}
+
+/// An actor's authorization of an OAuth app. The code itself is never
+/// reported.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Authorization {
+    pub client_id: String,
+    pub app: String,
+    pub actor: String,
+    pub scope: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LabelChange {
+    pub repo: String,
+    pub number: i64,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DraftChange {
+    pub repo: String,
+    pub number: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadyForReview {
+    pub repo: String,
+    pub number: i64,
+    pub by: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OrgMembershipChange {
+    pub org: String,
+    pub login: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OrgRoleChange {
+    pub org: String,
+    pub login: String,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TeamRef {
+    pub org: String,
+    pub slug: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TeamMembershipChange {
+    pub org: String,
+    pub team: String,
+    pub login: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TeamRoleChange {
+    pub org: String,
+    pub team: String,
+    pub login: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// Whose review a request asks for: `{"user": login}` or
+/// `{"team": "org/slug"}`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reviewer {
+    User(String),
+    Team(String),
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewRequestChange {
+    pub repo: String,
+    pub number: i64,
+    pub reviewer: Reviewer,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -124,6 +231,12 @@ pub struct WorldDiff {
     pub from: SideMeta,
     pub to: SideMeta,
     pub actors_added: Vec<ActorAdded>,
+    pub emails_changed: Vec<EmailsChanged>,
+    pub oauth_apps_added: Vec<OAuthAppAdded>,
+    /// Issued between the two sides; one also exchanged there appears in
+    /// both lists, as a pull opened and merged in one interval does.
+    pub authorizations_issued: Vec<Authorization>,
+    pub authorizations_exchanged: Vec<Authorization>,
     pub repos_created: Vec<String>,
     pub repos_deleted: Vec<String>,
     pub default_branch_changes: Vec<DefaultBranchChange>,
@@ -134,10 +247,35 @@ pub struct WorldDiff {
     pub pulls_merged: Vec<PullMerged>,
     pub pulls_synchronized: Vec<PullSync>,
     pub pulls_edited: Vec<PullEdited>,
+    /// From the timeline, so a pull marked ready and converted back within
+    /// the interval still shows it was marked ready, and by whom.
+    pub pulls_ready_for_review: Vec<ReadyForReview>,
+    /// From the pull's state: the world keeps no timeline item for a
+    /// conversion. A pull marked ready and converted back within the
+    /// interval shows only in `pulls_ready_for_review`.
+    pub pulls_converted_to_draft: Vec<DraftChange>,
+    pub labels_added: Vec<LabelChange>,
+    pub labels_removed: Vec<LabelChange>,
+    /// Requests pending on `to` and not on `from`, and the reverse. A
+    /// request cleared by the reviewer's review, or by its team's deletion,
+    /// is removed like a withdrawn one.
+    pub review_requests_added: Vec<ReviewRequestChange>,
+    pub review_requests_removed: Vec<ReviewRequestChange>,
     pub reviews_added: Vec<ReviewAdded>,
     pub comments_added: Vec<CommentAdded>,
     pub check_runs_added: Vec<CheckRunChange>,
     pub check_runs_updated: Vec<CheckRunChange>,
+    pub org_memberships_added: Vec<OrgMembershipChange>,
+    pub org_memberships_removed: Vec<OrgMembershipChange>,
+    pub org_roles_changed: Vec<OrgRoleChange>,
+    /// Teams correlate by id, which is never reused: a team deleted and a
+    /// new one created under its slug is one deletion and one creation.
+    pub teams_created: Vec<TeamRef>,
+    pub teams_deleted: Vec<TeamRef>,
+    /// A deleted team's memberships are removed with it.
+    pub team_memberships_added: Vec<TeamMembershipChange>,
+    pub team_memberships_removed: Vec<TeamMembershipChange>,
+    pub team_roles_changed: Vec<TeamRoleChange>,
     pub log: LogSpan,
 }
 
@@ -151,16 +289,71 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         .into_iter()
         .map(|a| (a.id, a))
         .collect();
-    let actors_added = to
+    let from_emails = addresses(from.view)?;
+    let mut to_emails = addresses(to.view)?;
+    let mut actors_added = Vec::new();
+    let mut emails_changed = Vec::new();
+    for a in to.view.list_actors()? {
+        let now = to_emails.remove(&a.id).unwrap_or_default();
+        if !from_actors.contains_key(&a.id) {
+            actors_added.push(ActorAdded {
+                login: a.login,
+                kind: a.kind.as_str().to_string(),
+                emails: now,
+            });
+            continue;
+        }
+        let before = from_emails.get(&a.id).cloned().unwrap_or_default();
+        if !same_addresses(&before, &now) {
+            emails_changed.push(EmailsChanged {
+                login: a.login,
+                from: before,
+                to: now,
+            });
+        }
+    }
+
+    let from_apps: BTreeSet<String> = from
         .view
-        .list_actors()?
+        .list_oauth_apps()?
         .into_iter()
-        .filter(|a| !from_actors.contains_key(&a.id))
-        .map(|a| ActorAdded {
-            login: a.login,
-            kind: a.kind.as_str().to_string(),
+        .map(|a| a.client_id)
+        .collect();
+    let oauth_apps_added = to
+        .view
+        .list_oauth_apps()?
+        .into_iter()
+        .filter(|a| !from_apps.contains(&a.client_id))
+        .map(|a| OAuthAppAdded {
+            name: a.name,
+            client_id: a.client_id,
         })
         .collect();
+
+    let from_auths: BTreeMap<i64, _> = from
+        .view
+        .list_oauth_authorizations()?
+        .into_iter()
+        .map(|a| (a.id, a))
+        .collect();
+    let mut authorizations_issued = Vec::new();
+    let mut authorizations_exchanged = Vec::new();
+    for a in to.view.list_oauth_authorizations()? {
+        let old = from_auths.get(&a.id);
+        let entry = Authorization {
+            client_id: a.client_id.clone(),
+            app: a.app_name.clone(),
+            actor: a.actor_login.clone(),
+            scope: a.scope.clone(),
+        };
+        let was_exchanged = old.is_some_and(|o| o.exchanged_clock_unix.is_some());
+        if a.exchanged_clock_unix.is_some() && !was_exchanged {
+            authorizations_exchanged.push(entry.clone());
+        }
+        if old.is_none() {
+            authorizations_issued.push(entry);
+        }
+    }
 
     let from_repos: BTreeMap<i64, _> = from
         .view
@@ -200,16 +393,14 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
     // contributes an empty ref set there, so creations and deletions read as
     // refs appearing/disappearing wholesale.
     let mut ref_changes = Vec::new();
-    let repo_ids: std::collections::BTreeSet<i64> =
-        from_repos.keys().chain(to_repos.keys()).copied().collect();
+    let repo_ids: BTreeSet<i64> = from_repos.keys().chain(to_repos.keys()).copied().collect();
     for id in repo_ids {
         let repo = to_repos.get(&id).or_else(|| from_repos.get(&id));
         let Some(repo) = repo else { continue };
         let full = repo.full_name();
         let from_refs = side_refs(from.repos_dir, &full, from_repos.contains_key(&id))?;
         let to_refs = side_refs(to.repos_dir, &full, to_repos.contains_key(&id))?;
-        let names: std::collections::BTreeSet<&String> =
-            from_refs.keys().chain(to_refs.keys()).collect();
+        let names: BTreeSet<&String> = from_refs.keys().chain(to_refs.keys()).collect();
         for name in names {
             let old = from_refs.get(name);
             let new = to_refs.get(name);
@@ -246,6 +437,9 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
     let mut pulls_merged = Vec::new();
     let mut pulls_synchronized = Vec::new();
     let mut pulls_edited = Vec::new();
+    let mut pulls_converted_to_draft = Vec::new();
+    let mut labels_added = Vec::new();
+    let mut labels_removed = Vec::new();
     for p in to.view.list_pulls()? {
         let repo = repo_name(p.repo_id);
         let pull_ref = || PullRef {
@@ -255,6 +449,26 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
             author: p.author_login.clone(),
         };
         let old = from_pulls.get(&p.id);
+        let old_labels = old.map(|o| label_set(&o.labels)).unwrap_or_default();
+        let new_labels = label_set(&p.labels);
+        for (key, label) in &new_labels {
+            if !old_labels.contains_key(key) {
+                labels_added.push(LabelChange {
+                    repo: repo.clone(),
+                    number: p.number,
+                    label: label.clone(),
+                });
+            }
+        }
+        for (key, label) in &old_labels {
+            if !new_labels.contains_key(key) {
+                labels_removed.push(LabelChange {
+                    repo: repo.clone(),
+                    number: p.number,
+                    label: label.clone(),
+                });
+            }
+        }
         match old {
             None => {
                 pulls_opened.push(pull_ref());
@@ -271,6 +485,12 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
                     pulls_closed.push(pull_ref());
                 } else if old.state == PullState::Closed && p.state == PullState::Open {
                     pulls_reopened.push(pull_ref());
+                }
+                if !old.draft && p.draft {
+                    pulls_converted_to_draft.push(DraftChange {
+                        repo: repo.clone(),
+                        number: p.number,
+                    });
                 }
                 if old.head_sha != p.head_sha {
                     pulls_synchronized.push(PullSync {
@@ -318,7 +538,7 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         }
     };
 
-    let from_reviews: std::collections::BTreeSet<i64> = from
+    let from_reviews: BTreeSet<i64> = from
         .view
         .list_reviews()?
         .into_iter()
@@ -340,7 +560,7 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         })
         .collect();
 
-    let from_comments: std::collections::BTreeSet<i64> = from
+    let from_comments: BTreeSet<i64> = from
         .view
         .list_issue_comments()?
         .into_iter()
@@ -385,6 +605,184 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         }
     }
 
+    let from_timeline: BTreeSet<i64> = from
+        .view
+        .list_timeline()?
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    let pulls_ready_for_review = to
+        .view
+        .list_timeline()?
+        .into_iter()
+        .filter(|t| !from_timeline.contains(&t.id) && t.kind == TimelineKind::ReadyForReview)
+        .map(|t| {
+            let (repo, number) = locate(t.pull_id);
+            ReadyForReview {
+                repo,
+                number,
+                by: t.actor_login,
+            }
+        })
+        .collect();
+
+    let from_teams: BTreeMap<i64, Team> = from
+        .view
+        .list_teams()?
+        .into_iter()
+        .map(|t| (t.id, t))
+        .collect();
+    let to_teams: BTreeMap<i64, Team> = to
+        .view
+        .list_teams()?
+        .into_iter()
+        .map(|t| (t.id, t))
+        .collect();
+    let team_ref = |t: &Team| TeamRef {
+        org: t.org_login.clone(),
+        slug: t.slug.clone(),
+        name: t.name.clone(),
+    };
+    let teams_created = to_teams
+        .values()
+        .filter(|t| !from_teams.contains_key(&t.id))
+        .map(team_ref)
+        .collect();
+    let teams_deleted = from_teams
+        .values()
+        .filter(|t| !to_teams.contains_key(&t.id))
+        .map(team_ref)
+        .collect();
+    // Every row naming a team references it, so a team id read from either
+    // side is a team on that side.
+    let team_name = |id: i64| -> (String, String) {
+        let t = to_teams
+            .get(&id)
+            .or_else(|| from_teams.get(&id))
+            .expect("a referenced team exists on the side that references it");
+        (t.org_login.clone(), t.slug.clone())
+    };
+
+    let requests = |view: &dyn WorldView| -> Result<BTreeSet<(i64, RequestKey)>> {
+        Ok(view
+            .list_review_requests()?
+            .into_iter()
+            .map(|q| {
+                let key = match q.reviewer {
+                    RequestedReviewer::User(login) => RequestKey::User(login),
+                    RequestedReviewer::Team { id, .. } => RequestKey::Team(id),
+                };
+                (q.pull_id, key)
+            })
+            .collect())
+    };
+    let from_requests = requests(from.view)?;
+    let to_requests = requests(to.view)?;
+    let request_change = |(pull_id, key): &(i64, RequestKey)| {
+        let (repo, number) = locate(*pull_id);
+        let reviewer = match key {
+            RequestKey::User(login) => Reviewer::User(login.clone()),
+            RequestKey::Team(id) => {
+                let (org, slug) = team_name(*id);
+                Reviewer::Team(format!("{org}/{slug}"))
+            }
+        };
+        ReviewRequestChange {
+            repo,
+            number,
+            reviewer,
+        }
+    };
+    let review_requests_added = to_requests
+        .iter()
+        .filter(|k| !from_requests.contains(k))
+        .map(request_change)
+        .collect();
+    let review_requests_removed = from_requests
+        .iter()
+        .filter(|k| !to_requests.contains(k))
+        .map(request_change)
+        .collect();
+
+    let org_members = |view: &dyn WorldView| -> Result<BTreeMap<(String, String), String>> {
+        Ok(view
+            .list_org_members()?
+            .into_iter()
+            .map(|m| ((m.org_login, m.member_login), m.role.as_str().to_string()))
+            .collect())
+    };
+    let from_org = org_members(from.view)?;
+    let to_org = org_members(to.view)?;
+    let mut org_memberships_added = Vec::new();
+    let mut org_roles_changed = Vec::new();
+    for ((org, login), role) in &to_org {
+        match from_org.get(&(org.clone(), login.clone())) {
+            None => org_memberships_added.push(OrgMembershipChange {
+                org: org.clone(),
+                login: login.clone(),
+                role: role.clone(),
+            }),
+            Some(old) if old != role => org_roles_changed.push(OrgRoleChange {
+                org: org.clone(),
+                login: login.clone(),
+                from: old.clone(),
+                to: role.clone(),
+            }),
+            Some(_) => {}
+        }
+    }
+    let org_memberships_removed = from_org
+        .iter()
+        .filter(|(k, _)| !to_org.contains_key(*k))
+        .map(|((org, login), role)| OrgMembershipChange {
+            org: org.clone(),
+            login: login.clone(),
+            role: role.clone(),
+        })
+        .collect();
+
+    let team_members = |view: &dyn WorldView| -> Result<BTreeMap<(i64, String), String>> {
+        Ok(view
+            .list_team_members()?
+            .into_iter()
+            .map(|m| ((m.team_id, m.member_login), m.role.as_str().to_string()))
+            .collect())
+    };
+    let from_tm = team_members(from.view)?;
+    let to_tm = team_members(to.view)?;
+    let membership = |team_id: i64, login: &str, role: &str| {
+        let (org, team) = team_name(team_id);
+        TeamMembershipChange {
+            org,
+            team,
+            login: login.to_string(),
+            role: role.to_string(),
+        }
+    };
+    let mut team_memberships_added = Vec::new();
+    let mut team_roles_changed = Vec::new();
+    for ((team_id, login), role) in &to_tm {
+        match from_tm.get(&(*team_id, login.clone())) {
+            None => team_memberships_added.push(membership(*team_id, login, role)),
+            Some(old) if old != role => {
+                let (org, team) = team_name(*team_id);
+                team_roles_changed.push(TeamRoleChange {
+                    org,
+                    team,
+                    login: login.clone(),
+                    from: old.clone(),
+                    to: role.clone(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    let team_memberships_removed = from_tm
+        .iter()
+        .filter(|(k, _)| !to_tm.contains_key(*k))
+        .map(|((team_id, login), role)| membership(*team_id, login, role))
+        .collect();
+
     Ok(WorldDiff {
         from: SideMeta {
             name: from.name.to_string(),
@@ -397,6 +795,10 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
             last_seq: to_meta.last_seq,
         },
         actors_added,
+        emails_changed,
+        oauth_apps_added,
+        authorizations_issued,
+        authorizations_exchanged,
         repos_created,
         repos_deleted,
         default_branch_changes,
@@ -407,16 +809,63 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         pulls_merged,
         pulls_synchronized,
         pulls_edited,
+        pulls_ready_for_review,
+        pulls_converted_to_draft,
+        labels_added,
+        labels_removed,
+        review_requests_added,
+        review_requests_removed,
         reviews_added,
         comments_added,
         check_runs_added,
         check_runs_updated,
+        org_memberships_added,
+        org_memberships_removed,
+        org_roles_changed,
+        teams_created,
+        teams_deleted,
+        team_memberships_added,
+        team_memberships_removed,
+        team_roles_changed,
         log: LogSpan {
             from_seq: from_meta.last_seq,
             to_seq: to_meta.last_seq,
             appended: to_meta.last_seq - from_meta.last_seq,
         },
     })
+}
+
+/// A review request's subject. A user is keyed by login, since a request's
+/// row id can be freed and reused; a team by its id, which never is.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum RequestKey {
+    User(String),
+    Team(i64),
+}
+
+/// Each actor's addresses, primary first, as the list read orders them.
+fn addresses(view: &dyn WorldView) -> Result<BTreeMap<i64, Vec<ActorEmail>>> {
+    let mut by_actor: BTreeMap<i64, Vec<ActorEmail>> = BTreeMap::new();
+    for a in view.list_actor_addresses()? {
+        by_actor.entry(a.actor_id).or_default().push(a.email);
+    }
+    Ok(by_actor)
+}
+
+/// Addresses compare without regard to case, as the world stores them.
+fn same_addresses(a: &[ActorEmail], b: &[ActorEmail]) -> bool {
+    let key = |e: &ActorEmail| (e.email.to_ascii_lowercase(), e.primary, e.verified);
+    let a: BTreeSet<_> = a.iter().map(key).collect();
+    let b: BTreeSet<_> = b.iter().map(key).collect();
+    a == b
+}
+
+/// A pull's labels keyed without regard to case, as the world stores them.
+fn label_set(labels: &[String]) -> BTreeMap<String, String> {
+    labels
+        .iter()
+        .map(|l| (l.to_ascii_lowercase(), l.clone()))
+        .collect()
 }
 
 fn merged_entry(repo: &str, p: &Pull) -> PullMerged {

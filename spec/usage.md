@@ -52,6 +52,28 @@ orrery snapshot after
 orrery diff before after                   # → branch pushed by agent, check re-run, PR updated
 ```
 
+## What the diff reports
+
+`orrery diff` (`POST /_orrery/diff`) answers what happened between two world states, read from the states themselves (rule 11). Every section is present in every diff, empty when nothing happened. Entries name things by stable identity — a login, `owner/repo` with a pull number, `org/slug` — never by row id.
+
+| Area | Sections |
+| --- | --- |
+| Actors and identity | `actors_added` (with the addresses each holds), `emails_changed` (an existing actor's whole address set before and after, each address with `primary` and `verified`), `oauth_apps_added` (name and client id), `authorizations_issued`, `authorizations_exchanged` (per app and actor, with the scope) |
+| Repositories | `repos_created`, `repos_deleted`, `default_branch_changes`, `ref_changes` |
+| Pulls | `pulls_opened`, `pulls_closed`, `pulls_reopened`, `pulls_merged`, `pulls_synchronized`, `pulls_edited` (title, body, base), `pulls_ready_for_review` (with who marked it), `pulls_converted_to_draft`, `labels_added`, `labels_removed` |
+| Review | `review_requests_added`, `review_requests_removed` (each naming `{"user": login}` or `{"team": "org/slug"}`), `reviews_added`, `comments_added` |
+| Checks | `check_runs_added`, `check_runs_updated` |
+| Organizations | `org_memberships_added`, `org_memberships_removed`, `org_roles_changed`, `teams_created`, `teams_deleted`, `team_memberships_added`, `team_memberships_removed`, `team_roles_changed` |
+| Log | `log` — the span of action-log sequence numbers between the two sides |
+
+A few rules follow from reading states rather than events:
+
+- Something that began and finished within the interval reports both facts: a pull opened and merged, an authorization issued and exchanged.
+- A review request is removed however it ended: withdrawn, cleared by the reviewer's review, or deleted with its team. A deleted team's memberships are removed with it.
+- A team deleted and a new one created under its slug is a deletion and a creation, not an unchanged team.
+- `pulls_ready_for_review` comes from the pull's timeline, so it shows a pull marked ready and converted back within the interval. The world keeps no timeline item for a conversion, so `pulls_converted_to_draft` compares the two states, and that round trip does not appear there.
+- Credentials never appear: no client secret, authorization code or token.
+
 ## Time: the clock is an input, not a history mechanism
 
 The virtual clock is one value — what time the world believes it is — consulted whenever the engine stamps something (`created_at`, `merged_at`) or computes staleness. It is a row in `world.db`, part of the state like everything else. Two operations:

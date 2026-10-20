@@ -386,3 +386,32 @@ pub struct OAuthToken {
     pub token: String,
     pub scope: String,
 }
+
+/// One of an actor's addresses, keyed by the actor that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ActorAddress {
+    pub actor_id: i64,
+    pub email: ActorEmail,
+}
+
+/// An actor's grant of an OAuth app, without the code itself: issued when
+/// the actor authorizes the app, exchanged when the app trades it for a
+/// token.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OAuthAuthorization {
+    pub id: i64,
+    pub client_id: String,
+    pub app_name: String,
+    pub actor_login: String,
+    pub scope: String,
+    pub created_clock_unix: i64,
+    pub exchanged_clock_unix: Option<i64>,
+}
+
+/// A pending review request on a pull. A team is named by its id and its
+/// current slug.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReviewRequest {
+    pub pull_id: i64,
+    pub reviewer: RequestedReviewer,
+}

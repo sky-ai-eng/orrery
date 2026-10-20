@@ -10,7 +10,7 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::types::*;
-use crate::{Result, World, WorldError, queries, schema};
+use crate::{Result, World, WorldError, identity, queries, schema};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ViewMeta {
@@ -26,6 +26,14 @@ pub trait WorldView {
     fn list_reviews(&self) -> Result<Vec<Review>>;
     fn list_issue_comments(&self) -> Result<Vec<IssueComment>>;
     fn list_check_runs(&self) -> Result<Vec<CheckRun>>;
+    fn list_actor_addresses(&self) -> Result<Vec<ActorAddress>>;
+    fn list_oauth_apps(&self) -> Result<Vec<OAuthApp>>;
+    fn list_oauth_authorizations(&self) -> Result<Vec<OAuthAuthorization>>;
+    fn list_timeline(&self) -> Result<Vec<TimelineItem>>;
+    fn list_org_members(&self) -> Result<Vec<OrgMembership>>;
+    fn list_teams(&self) -> Result<Vec<Team>>;
+    fn list_team_members(&self) -> Result<Vec<TeamMembership>>;
+    fn list_review_requests(&self) -> Result<Vec<ReviewRequest>>;
 }
 
 impl WorldView for World {
@@ -60,6 +68,38 @@ impl WorldView for World {
 
     fn list_check_runs(&self) -> Result<Vec<CheckRun>> {
         self.with_conn(queries::list_check_runs)
+    }
+
+    fn list_actor_addresses(&self) -> Result<Vec<ActorAddress>> {
+        self.with_conn(queries::list_actor_addresses)
+    }
+
+    fn list_oauth_apps(&self) -> Result<Vec<OAuthApp>> {
+        self.with_conn(identity::list_oauth_apps)
+    }
+
+    fn list_oauth_authorizations(&self) -> Result<Vec<OAuthAuthorization>> {
+        self.with_conn(queries::list_oauth_authorizations)
+    }
+
+    fn list_timeline(&self) -> Result<Vec<TimelineItem>> {
+        self.with_conn(queries::list_timeline)
+    }
+
+    fn list_org_members(&self) -> Result<Vec<OrgMembership>> {
+        self.with_conn(queries::list_org_members)
+    }
+
+    fn list_teams(&self) -> Result<Vec<Team>> {
+        self.with_conn(queries::list_teams)
+    }
+
+    fn list_team_members(&self) -> Result<Vec<TeamMembership>> {
+        self.with_conn(queries::list_team_members)
+    }
+
+    fn list_review_requests(&self) -> Result<Vec<ReviewRequest>> {
+        self.with_conn(queries::list_review_requests)
     }
 }
 
@@ -121,5 +161,37 @@ impl WorldView for WorldReader {
 
     fn list_check_runs(&self) -> Result<Vec<CheckRun>> {
         queries::list_check_runs(&self.conn)
+    }
+
+    fn list_actor_addresses(&self) -> Result<Vec<ActorAddress>> {
+        queries::list_actor_addresses(&self.conn)
+    }
+
+    fn list_oauth_apps(&self) -> Result<Vec<OAuthApp>> {
+        identity::list_oauth_apps(&self.conn)
+    }
+
+    fn list_oauth_authorizations(&self) -> Result<Vec<OAuthAuthorization>> {
+        queries::list_oauth_authorizations(&self.conn)
+    }
+
+    fn list_timeline(&self) -> Result<Vec<TimelineItem>> {
+        queries::list_timeline(&self.conn)
+    }
+
+    fn list_org_members(&self) -> Result<Vec<OrgMembership>> {
+        queries::list_org_members(&self.conn)
+    }
+
+    fn list_teams(&self) -> Result<Vec<Team>> {
+        queries::list_teams(&self.conn)
+    }
+
+    fn list_team_members(&self) -> Result<Vec<TeamMembership>> {
+        queries::list_team_members(&self.conn)
+    }
+
+    fn list_review_requests(&self) -> Result<Vec<ReviewRequest>> {
+        queries::list_review_requests(&self.conn)
     }
 }

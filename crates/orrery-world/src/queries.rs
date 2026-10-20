@@ -278,48 +278,155 @@ pub(crate) fn list_comments_for_pull(conn: &Connection, pull_id: i64) -> Result<
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+const TIMELINE_SELECT: &str = "SELECT t.id, t.pull_id, t.kind, t.label, a.login, t.clock_unix,
+    rv.login, t.team_id, t.team_slug
+    FROM pull_timeline t JOIN actors a ON a.id = t.actor_id
+    LEFT JOIN actors rv ON rv.id = t.reviewer_id";
+
+fn row_to_timeline(r: &Row<'_>) -> rusqlite::Result<TimelineItem> {
+    let label: Option<String> = r.get(3)?;
+    let reviewer = match (
+        r.get::<_, Option<String>>(6)?,
+        r.get::<_, Option<i64>>(7)?,
+        r.get::<_, Option<String>>(8)?,
+    ) {
+        (Some(login), None, None) => Some(RequestedReviewer::User(login)),
+        (None, Some(id), Some(slug)) => Some(RequestedReviewer::Team { id, slug }),
+        _ => None,
+    };
+    let kind = match (r.get::<_, String>(2)?.as_str(), label, reviewer) {
+        ("labeled", Some(name), None) => TimelineKind::Labeled(name),
+        ("unlabeled", Some(name), None) => TimelineKind::Unlabeled(name),
+        ("ready_for_review", None, None) => TimelineKind::ReadyForReview,
+        ("review_requested", None, Some(rv)) => TimelineKind::ReviewRequested(rv),
+        ("review_request_removed", None, Some(rv)) => TimelineKind::ReviewRequestRemoved(rv),
+        (other, _, _) => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                format!("timeline kind {other:?} with those columns").into(),
+            ));
+        }
+    };
+    Ok(TimelineItem {
+        id: r.get(0)?,
+        pull_id: r.get(1)?,
+        kind,
+        actor_login: r.get(4)?,
+        clock_unix: r.get(5)?,
+    })
+}
+
 pub(crate) fn list_timeline_for_pull(conn: &Connection, pull_id: i64) -> Result<Vec<TimelineItem>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.pull_id, t.kind, t.label, a.login, t.clock_unix, rv.login, t.team_id,
-                t.team_slug
-         FROM pull_timeline t JOIN actors a ON a.id = t.actor_id
-         LEFT JOIN actors rv ON rv.id = t.reviewer_id
-         WHERE t.pull_id = ?1 ORDER BY t.id",
-    )?;
-    let rows = stmt.query_map(params![pull_id], |r| {
-        let label: Option<String> = r.get(3)?;
-        let reviewer = match (
-            r.get::<_, Option<String>>(6)?,
-            r.get::<_, Option<i64>>(7)?,
-            r.get::<_, Option<String>>(8)?,
-        ) {
-            (Some(login), None, None) => Some(RequestedReviewer::User(login)),
-            (None, Some(id), Some(slug)) => Some(RequestedReviewer::Team { id, slug }),
-            _ => None,
-        };
-        let kind = match (r.get::<_, String>(2)?.as_str(), label, reviewer) {
-            ("labeled", Some(name), None) => TimelineKind::Labeled(name),
-            ("unlabeled", Some(name), None) => TimelineKind::Unlabeled(name),
-            ("ready_for_review", None, None) => TimelineKind::ReadyForReview,
-            ("review_requested", None, Some(rv)) => TimelineKind::ReviewRequested(rv),
-            ("review_request_removed", None, Some(rv)) => TimelineKind::ReviewRequestRemoved(rv),
-            (other, _, _) => {
-                return Err(rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    rusqlite::types::Type::Text,
-                    format!("timeline kind {other:?} with those columns").into(),
-                ));
-            }
-        };
-        Ok(TimelineItem {
-            id: r.get(0)?,
-            pull_id: r.get(1)?,
-            kind,
-            actor_login: r.get(4)?,
-            clock_unix: r.get(5)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "{TIMELINE_SELECT} WHERE t.pull_id = ?1 ORDER BY t.id"
+    ))?;
+    let rows = stmt.query_map(params![pull_id], row_to_timeline)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn list_timeline(conn: &Connection) -> Result<Vec<TimelineItem>> {
+    list(
+        conn,
+        &format!("{TIMELINE_SELECT} ORDER BY t.id"),
+        row_to_timeline,
+    )
+}
+
+pub(crate) fn list_actor_addresses(conn: &Connection) -> Result<Vec<ActorAddress>> {
+    list(
+        conn,
+        "SELECT actor_id, email, is_primary, verified FROM actor_emails
+         ORDER BY actor_id, is_primary DESC, email",
+        |r| {
+            Ok(ActorAddress {
+                actor_id: r.get(0)?,
+                email: ActorEmail {
+                    email: r.get(1)?,
+                    primary: r.get(2)?,
+                    verified: r.get(3)?,
+                },
+            })
+        },
+    )
+}
+
+pub(crate) fn list_oauth_authorizations(conn: &Connection) -> Result<Vec<OAuthAuthorization>> {
+    list(
+        conn,
+        "SELECT c.id, ap.client_id, ap.name, a.login, c.scope, c.created_clock_unix,
+                c.exchanged_clock_unix
+         FROM oauth_codes c
+         JOIN oauth_apps ap ON ap.id = c.app_id
+         JOIN actors a ON a.id = c.actor_id
+         ORDER BY c.id",
+        |r| {
+            Ok(OAuthAuthorization {
+                id: r.get(0)?,
+                client_id: r.get(1)?,
+                app_name: r.get(2)?,
+                actor_login: r.get(3)?,
+                scope: r.get(4)?,
+                created_clock_unix: r.get(5)?,
+                exchanged_clock_unix: r.get(6)?,
+            })
+        },
+    )
+}
+
+pub(crate) fn list_org_members(conn: &Connection) -> Result<Vec<OrgMembership>> {
+    list(
+        conn,
+        &format!("SELECT {ORG_MEMBER_COLUMNS} FROM org_members ORDER BY org_id, member_id"),
+        row_to_org_member,
+    )
+}
+
+pub(crate) fn list_teams(conn: &Connection) -> Result<Vec<Team>> {
+    list(
+        conn,
+        &format!("SELECT {TEAM_COLUMNS} FROM teams ORDER BY id"),
+        row_to_team,
+    )
+}
+
+pub(crate) fn list_team_members(conn: &Connection) -> Result<Vec<TeamMembership>> {
+    list(
+        conn,
+        &format!("SELECT {TEAM_MEMBER_COLUMNS} FROM team_members ORDER BY team_id, member_id"),
+        row_to_team_member,
+    )
+}
+
+pub(crate) fn list_review_requests(conn: &Connection) -> Result<Vec<ReviewRequest>> {
+    list(
+        conn,
+        "SELECT q.pull_id, a.login, t.id, t.slug
+         FROM review_requests q
+         LEFT JOIN actors a ON a.id = q.reviewer_id
+         LEFT JOIN teams t ON t.id = q.team_id
+         ORDER BY q.id",
+        |r| {
+            let reviewer = match (r.get::<_, Option<String>>(1)?, r.get::<_, Option<i64>>(2)?) {
+                (Some(login), None) => RequestedReviewer::User(login),
+                (None, Some(id)) => RequestedReviewer::Team {
+                    id,
+                    slug: r.get(3)?,
+                },
+                _ => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Null,
+                        "a review request names exactly one user or team".into(),
+                    ));
+                }
+            };
+            Ok(ReviewRequest {
+                pull_id: r.get(0)?,
+                reviewer,
+            })
+        },
+    )
 }
 
 pub(crate) fn list_check_runs_for_sha(

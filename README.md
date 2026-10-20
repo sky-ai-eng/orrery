@@ -12,7 +12,7 @@ A deterministic mock of the software-development world. Orrery serves a GitHub-f
 
 - **The world is a directory.** Everything a world is — SQLite state, bare repos — lives under one root. So a snapshot is a quiesced copy, restore is the reverse copy, fork is a copy somewhere else, and cleanup is `rm -rf`. There is no hidden state anywhere else to disagree with the copy.
 
-- **The diff is the verdict.** Every mutation is attributed to an actor and appended to an action log, and the engine can semantically diff any two world states: PRs opened/merged, reviews posted, refs moved, actors added. "Did the thing actually happen?" is answered from state, never from transcripts or vibes — which is what makes a scenario simultaneously an integration test and a benchmark task.
+- **The diff is the verdict.** Every mutation is attributed to an actor and appended to an action log, and the engine can semantically diff any two world states: PRs opened/merged, labels and review requests, reviews posted, refs moved, teams and memberships, sign-ins (`spec/usage.md` lists every section). "Did the thing actually happen?" is answered from state, never from transcripts or vibes — which is what makes a scenario simultaneously an integration test and a benchmark task.
 
 - **Two doors, one door per operation.** Anything real GitHub has an API for goes through the face, performed by synthetic actors — including CI, since real CI systems are just GitHub Apps posting check runs. The `/_orrery/` control plane holds only what no public API can express: identity, time, snapshots. Nothing is reachable through both.
 

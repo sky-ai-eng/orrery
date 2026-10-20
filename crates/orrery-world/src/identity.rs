@@ -288,6 +288,12 @@ fn row_to_email(r: &Row<'_>) -> rusqlite::Result<ActorEmail> {
     })
 }
 
+pub(crate) fn list_oauth_apps(conn: &Connection) -> Result<Vec<OAuthApp>> {
+    let mut stmt = conn.prepare(&format!("{OAUTH_APP_SELECT} ORDER BY id"))?;
+    let rows = stmt.query_map([], row_to_oauth_app)?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
 fn row_to_oauth_app(r: &Row<'_>) -> rusqlite::Result<OAuthApp> {
     Ok(OAuthApp {
         id: r.get(0)?,

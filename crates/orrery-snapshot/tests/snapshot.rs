@@ -4,7 +4,10 @@
 //! routes over these are exercised in orrery-server's E2E suite.
 
 use orrery_snapshot::{DiffSide, SnapshotError, diff};
-use orrery_world::{ActorKind, DEFAULT_T0_UNIX, NewPull, World, WorldView};
+use orrery_world::{
+    ActorEmail, ActorKind, DEFAULT_T0_UNIX, NewPull, OrgRole, Pull, ReviewState, TeamRole, World,
+    WorldView,
+};
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -24,6 +27,73 @@ impl Instance {
 
     fn snapshots(&self) -> std::path::PathBuf {
         self.dir.path().join("snapshots")
+    }
+
+    fn snapshot(&self, name: &str) {
+        orrery_snapshot::create(&self.world, &self.snapshots(), name).expect("create snapshot");
+    }
+
+    /// The diff from snapshot `from` to snapshot `to`, or to the live world
+    /// when `to` is `None`.
+    fn diff(&self, from: &str, to: Option<&str>) -> orrery_snapshot::WorldDiff {
+        let open = |name: &str| {
+            orrery_world::WorldReader::open(&self.snapshots().join(name)).expect("open snapshot")
+        };
+        let from_view = open(from);
+        let from_repos = self.snapshots().join(from).join("repos");
+        let from_side = DiffSide {
+            name: from,
+            view: &from_view,
+            repos_dir: &from_repos,
+        };
+        match to {
+            Some(to) => {
+                let to_view = open(to);
+                let to_repos = self.snapshots().join(to).join("repos");
+                diff::diff(
+                    from_side,
+                    DiffSide {
+                        name: to,
+                        view: &to_view,
+                        repos_dir: &to_repos,
+                    },
+                )
+                .expect("diff")
+            }
+            None => diff::diff(
+                from_side,
+                DiffSide {
+                    name: "live",
+                    view: &self.world,
+                    repos_dir: &self.world.repos_dir(),
+                },
+            )
+            .expect("diff"),
+        }
+    }
+
+    fn pull(&self, repo_id: i64, author_id: i64, head_ref: &str, draft: bool) -> Pull {
+        self.world
+            .create_pull(NewPull {
+                repo_id,
+                author_id,
+                title: "change",
+                body: None,
+                head_ref,
+                head_sha: SHA_B,
+                base_ref: "main",
+                base_sha: SHA_A,
+                draft,
+            })
+            .expect("create pull")
+    }
+}
+
+fn email(address: &str, primary: bool, verified: bool) -> ActorEmail {
+    ActorEmail {
+        email: address.to_string(),
+        primary,
+        verified,
     }
 }
 
@@ -258,4 +328,458 @@ fn snapshot_captures_a_quiesced_database() {
         orrery_world::WorldReader::open(&inst.snapshots().join("busy")).expect("open copy");
     assert_eq!(reader.list_actors().unwrap().len(), 51, "50 users + system");
     assert_eq!(reader.view_meta().unwrap().last_seq, info.last_seq);
+}
+
+#[test]
+fn diff_reports_new_actors_with_their_addresses_and_changed_addresses() {
+    let inst = Instance::new();
+    let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
+    inst.snapshot("before");
+
+    inst.world.create_actor("bob", ActorKind::User).unwrap();
+    inst.world
+        .set_actor_emails(
+            "alice",
+            &[
+                email("alice@acme.test", true, true),
+                email("alice@old.test", false, false),
+            ],
+            alice.id,
+        )
+        .unwrap();
+
+    let d = inst.diff("before", None);
+    assert_eq!(d.actors_added.len(), 1);
+    assert_eq!(d.actors_added[0].login, "bob");
+    assert_eq!(
+        d.actors_added[0].emails,
+        vec![email("bob@orrery.invalid", true, true)]
+    );
+    assert_eq!(d.emails_changed.len(), 1, "bob's addresses arrive with bob");
+    let changed = &d.emails_changed[0];
+    assert_eq!(changed.login, "alice");
+    assert_eq!(
+        changed.from,
+        vec![email("alice@orrery.invalid", true, true)]
+    );
+    assert_eq!(
+        changed.to,
+        vec![
+            email("alice@acme.test", true, true),
+            email("alice@old.test", false, false)
+        ]
+    );
+
+    // Writing the same set again, in another case, is no change.
+    inst.snapshot("after");
+    inst.world
+        .set_actor_emails(
+            "alice",
+            &[
+                email("alice@old.test", false, false),
+                email("ALICE@acme.test", true, true),
+            ],
+            alice.id,
+        )
+        .unwrap();
+    assert!(inst.diff("after", None).emails_changed.is_empty());
+}
+
+#[test]
+fn diff_reports_oauth_apps_and_authorizations_without_their_secrets() {
+    let inst = Instance::new();
+    let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
+    inst.snapshot("before");
+
+    let app = inst
+        .world
+        .create_oauth_app("GoTrue", "https://auth.test/callback", alice.id)
+        .unwrap();
+    let code = inst
+        .world
+        .issue_oauth_code(&app, &alice, "https://auth.test/callback", "user:email")
+        .unwrap();
+    inst.snapshot("issued");
+    let token = inst
+        .world
+        .exchange_oauth_code(&app.client_id, &app.client_secret, &code, None)
+        .unwrap();
+
+    let issued = inst.diff("before", Some("issued"));
+    assert_eq!(issued.oauth_apps_added.len(), 1);
+    assert_eq!(issued.oauth_apps_added[0].name, "GoTrue");
+    assert_eq!(issued.oauth_apps_added[0].client_id, app.client_id);
+    assert_eq!(issued.authorizations_issued.len(), 1);
+    let grant = &issued.authorizations_issued[0];
+    assert_eq!(grant.client_id, app.client_id);
+    assert_eq!(grant.app, "GoTrue");
+    assert_eq!(grant.actor, "alice");
+    assert_eq!(grant.scope, "user:email");
+    assert!(issued.authorizations_exchanged.is_empty());
+
+    let exchanged = inst.diff("issued", None);
+    assert!(exchanged.oauth_apps_added.is_empty());
+    assert!(exchanged.authorizations_issued.is_empty());
+    assert_eq!(exchanged.authorizations_exchanged.len(), 1);
+    assert_eq!(exchanged.authorizations_exchanged[0].actor, "alice");
+
+    // Issued and exchanged within one interval: both facts reported.
+    let whole = inst.diff("before", None);
+    assert_eq!(whole.authorizations_issued.len(), 1);
+    assert_eq!(whole.authorizations_exchanged.len(), 1);
+
+    let wire = serde_json::to_string(&whole).unwrap();
+    for secret in [&app.client_secret, &code, &token.token] {
+        assert!(!wire.contains(secret.as_str()), "diff leaks {secret}");
+    }
+}
+
+#[test]
+fn diff_reports_labels_added_and_removed() {
+    let inst = Instance::new();
+    let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
+    let repo = inst
+        .world
+        .create_repo(alice.id, "webapp", None, false, "main", alice.id)
+        .unwrap();
+    let pull = inst.pull(repo.id, alice.id, "feature", false);
+    inst.world
+        .add_pull_labels(pull.id, alice.id, &["bug", "triage"])
+        .unwrap();
+    inst.snapshot("before");
+
+    inst.world
+        .remove_pull_label(pull.id, alice.id, "triage")
+        .unwrap();
+    inst.world
+        .add_pull_labels(pull.id, alice.id, &["needs-review", "BUG"])
+        .unwrap();
+    let fresh = inst.pull(repo.id, alice.id, "other", false);
+    inst.world
+        .add_pull_labels(fresh.id, alice.id, &["docs"])
+        .unwrap();
+
+    let d = inst.diff("before", None);
+    let added: Vec<(i64, &str)> = d
+        .labels_added
+        .iter()
+        .map(|l| {
+            assert_eq!(l.repo, "alice/webapp");
+            (l.number, l.label.as_str())
+        })
+        .collect();
+    assert_eq!(
+        added,
+        vec![(pull.number, "needs-review"), (fresh.number, "docs")],
+        "a label is one label whatever its case; a new pull's labels count"
+    );
+    let removed: Vec<(i64, &str)> = d
+        .labels_removed
+        .iter()
+        .map(|l| (l.number, l.label.as_str()))
+        .collect();
+    assert_eq!(removed, vec![(pull.number, "triage")]);
+}
+
+#[test]
+fn diff_reports_ready_for_review_and_conversion_to_draft() {
+    let inst = Instance::new();
+    let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
+    let (bob, _) = inst.world.create_actor("bob", ActorKind::User).unwrap();
+    let repo = inst
+        .world
+        .create_repo(alice.id, "webapp", None, false, "main", alice.id)
+        .unwrap();
+    let readied = inst.pull(repo.id, alice.id, "one", true);
+    let round_trip = inst.pull(repo.id, alice.id, "two", true);
+    let converted = inst.pull(repo.id, alice.id, "three", false);
+    inst.snapshot("before");
+
+    inst.world
+        .set_pull_draft(readied.id, alice.id, false)
+        .unwrap();
+    inst.world
+        .set_pull_draft(round_trip.id, bob.id, false)
+        .unwrap();
+    inst.world
+        .set_pull_draft(round_trip.id, bob.id, true)
+        .unwrap();
+    inst.world
+        .set_pull_draft(converted.id, alice.id, true)
+        .unwrap();
+
+    let d = inst.diff("before", None);
+    let ready: Vec<(i64, &str)> = d
+        .pulls_ready_for_review
+        .iter()
+        .map(|r| {
+            assert_eq!(r.repo, "alice/webapp");
+            (r.number, r.by.as_str())
+        })
+        .collect();
+    assert_eq!(
+        ready,
+        vec![(readied.number, "alice"), (round_trip.number, "bob")]
+    );
+    let drafted: Vec<i64> = d
+        .pulls_converted_to_draft
+        .iter()
+        .map(|c| c.number)
+        .collect();
+    assert_eq!(drafted, vec![converted.number]);
+    assert!(d.pulls_edited.is_empty(), "a draft flip is not an edit");
+}
+
+#[test]
+fn diff_reports_org_memberships_and_roles() {
+    let inst = Instance::new();
+    let (admin, _) = inst.world.create_actor("admin", ActorKind::User).unwrap();
+    inst.world.create_actor("acme", ActorKind::Org).unwrap();
+    inst.world.create_actor("dave", ActorKind::User).unwrap();
+    inst.world.create_actor("carol", ActorKind::User).unwrap();
+    inst.world
+        .set_org_membership("acme", "dave", OrgRole::Member, admin.id)
+        .unwrap();
+    inst.snapshot("before");
+
+    inst.world
+        .set_org_membership("acme", "dave", OrgRole::Admin, admin.id)
+        .unwrap();
+    inst.world
+        .set_org_membership("acme", "carol", OrgRole::Member, admin.id)
+        .unwrap();
+
+    let d = inst.diff("before", None);
+    assert_eq!(d.org_memberships_added.len(), 1);
+    let added = &d.org_memberships_added[0];
+    assert_eq!(
+        (
+            added.org.as_str(),
+            added.login.as_str(),
+            added.role.as_str()
+        ),
+        ("acme", "carol", "member")
+    );
+    assert_eq!(d.org_roles_changed.len(), 1);
+    let changed = &d.org_roles_changed[0];
+    assert_eq!(
+        (
+            changed.login.as_str(),
+            changed.from.as_str(),
+            changed.to.as_str()
+        ),
+        ("dave", "member", "admin")
+    );
+    assert!(d.org_memberships_removed.is_empty());
+}
+
+#[test]
+fn diff_reports_teams_and_team_memberships() {
+    let inst = Instance::new();
+    let (admin, _) = inst.world.create_actor("admin", ActorKind::User).unwrap();
+    inst.world.create_actor("acme", ActorKind::Org).unwrap();
+    for login in ["dave", "carol"] {
+        inst.world.create_actor(login, ActorKind::User).unwrap();
+        inst.world
+            .set_org_membership("acme", login, OrgRole::Member, admin.id)
+            .unwrap();
+    }
+    inst.world
+        .create_team("acme", "Platform", None, admin.id)
+        .unwrap();
+    inst.world
+        .set_team_membership("acme", "platform", "dave", TeamRole::Member, admin.id)
+        .unwrap();
+    inst.world
+        .set_team_membership("acme", "platform", "carol", TeamRole::Member, admin.id)
+        .unwrap();
+    inst.snapshot("before");
+
+    inst.world
+        .set_team_membership("acme", "platform", "dave", TeamRole::Maintainer, admin.id)
+        .unwrap();
+    inst.world
+        .remove_team_membership("acme", "platform", "carol", admin.id)
+        .unwrap();
+    inst.world
+        .create_team("acme", "Release", None, admin.id)
+        .unwrap();
+    inst.world
+        .set_team_membership("acme", "release", "carol", TeamRole::Maintainer, admin.id)
+        .unwrap();
+
+    let d = inst.diff("before", None);
+    let created: Vec<(&str, &str, &str)> = d
+        .teams_created
+        .iter()
+        .map(|t| (t.org.as_str(), t.slug.as_str(), t.name.as_str()))
+        .collect();
+    assert_eq!(created, vec![("acme", "release", "Release")]);
+    assert!(d.teams_deleted.is_empty());
+    let added: Vec<(&str, &str, &str)> = d
+        .team_memberships_added
+        .iter()
+        .map(|m| (m.team.as_str(), m.login.as_str(), m.role.as_str()))
+        .collect();
+    assert_eq!(added, vec![("release", "carol", "maintainer")]);
+    let removed: Vec<(&str, &str)> = d
+        .team_memberships_removed
+        .iter()
+        .map(|m| (m.team.as_str(), m.login.as_str()))
+        .collect();
+    assert_eq!(removed, vec![("platform", "carol")]);
+    assert_eq!(d.team_roles_changed.len(), 1);
+    let changed = &d.team_roles_changed[0];
+    assert_eq!(
+        (
+            changed.org.as_str(),
+            changed.team.as_str(),
+            changed.login.as_str(),
+            changed.from.as_str(),
+            changed.to.as_str()
+        ),
+        ("acme", "platform", "dave", "member", "maintainer")
+    );
+}
+
+#[test]
+fn diff_reports_a_reused_team_slug_as_a_deletion_and_a_creation() {
+    let inst = Instance::new();
+    let (admin, _) = inst.world.create_actor("admin", ActorKind::User).unwrap();
+    inst.world.create_actor("acme", ActorKind::Org).unwrap();
+    inst.world.create_actor("dave", ActorKind::User).unwrap();
+    inst.world
+        .set_org_membership("acme", "dave", OrgRole::Member, admin.id)
+        .unwrap();
+    inst.world
+        .create_team("acme", "Reviewers", None, admin.id)
+        .unwrap();
+    inst.world
+        .set_team_membership("acme", "reviewers", "dave", TeamRole::Member, admin.id)
+        .unwrap();
+    inst.snapshot("before");
+
+    inst.world
+        .delete_team("acme", "reviewers", admin.id)
+        .unwrap();
+    inst.world
+        .create_team("acme", "Reviewers", None, admin.id)
+        .unwrap();
+    inst.world
+        .set_team_membership("acme", "reviewers", "dave", TeamRole::Member, admin.id)
+        .unwrap();
+
+    let d = inst.diff("before", None);
+    let slugs = |ts: &[orrery_snapshot::diff::TeamRef]| -> Vec<String> {
+        ts.iter().map(|t| format!("{}/{}", t.org, t.slug)).collect()
+    };
+    assert_eq!(slugs(&d.teams_deleted), vec!["acme/reviewers"]);
+    assert_eq!(slugs(&d.teams_created), vec!["acme/reviewers"]);
+    // Dave's membership ended with the old team and began on the new one;
+    // it is not one unchanged membership.
+    let names = |ms: &[orrery_snapshot::diff::TeamMembershipChange]| -> Vec<String> {
+        ms.iter()
+            .map(|m| format!("{}/{} {}", m.org, m.team, m.login))
+            .collect()
+    };
+    assert_eq!(
+        names(&d.team_memberships_removed),
+        vec!["acme/reviewers dave"]
+    );
+    assert_eq!(
+        names(&d.team_memberships_added),
+        vec!["acme/reviewers dave"]
+    );
+    assert!(d.team_roles_changed.is_empty());
+}
+
+#[test]
+fn diff_reports_review_requests_added_and_removed() {
+    use orrery_snapshot::diff::Reviewer;
+
+    let inst = Instance::new();
+    let (admin, _) = inst.world.create_actor("admin", ActorKind::User).unwrap();
+    let (acme, _) = inst.world.create_actor("acme", ActorKind::Org).unwrap();
+    let mut people = std::collections::BTreeMap::new();
+    for login in ["alice", "dave", "carol", "erin"] {
+        let (actor, _) = inst.world.create_actor(login, ActorKind::User).unwrap();
+        inst.world
+            .set_org_membership("acme", login, OrgRole::Member, admin.id)
+            .unwrap();
+        people.insert(login, actor);
+    }
+    let alice = &people["alice"];
+    let repo = inst
+        .world
+        .create_repo(acme.id, "webapp", None, false, "main", alice.id)
+        .unwrap();
+    inst.world
+        .create_team("acme", "Reviewers", None, admin.id)
+        .unwrap();
+    inst.world
+        .create_team("acme", "Release", None, admin.id)
+        .unwrap();
+    let pull = inst.pull(repo.id, alice.id, "feature", false);
+    inst.snapshot("before");
+
+    inst.world
+        .request_reviewers(pull.id, alice.id, &["dave", "carol"], &["reviewers"])
+        .unwrap();
+    inst.snapshot("requested");
+
+    // Dave's review clears his request, carol's is withdrawn, the team's
+    // goes with the team, and erin and Release are newly asked.
+    inst.world
+        .create_review(
+            pull.id,
+            people["dave"].id,
+            ReviewState::Commented,
+            None,
+            None,
+        )
+        .unwrap();
+    inst.world
+        .remove_review_requests(pull.id, alice.id, &["carol"], &[])
+        .unwrap();
+    inst.world
+        .delete_team("acme", "reviewers", admin.id)
+        .unwrap();
+    inst.world
+        .request_reviewers(pull.id, alice.id, &["erin"], &["release"])
+        .unwrap();
+
+    let names = |rs: &[orrery_snapshot::diff::ReviewRequestChange]| -> Vec<String> {
+        rs.iter()
+            .map(|r| {
+                assert_eq!((r.repo.as_str(), r.number), ("acme/webapp", pull.number));
+                match &r.reviewer {
+                    Reviewer::User(login) => format!("user:{login}"),
+                    Reviewer::Team(team) => format!("team:{team}"),
+                }
+            })
+            .collect()
+    };
+
+    let first = inst.diff("before", Some("requested"));
+    assert_eq!(
+        names(&first.review_requests_added),
+        vec!["user:carol", "user:dave", "team:acme/reviewers"]
+    );
+    assert!(first.review_requests_removed.is_empty());
+
+    let second = inst.diff("requested", None);
+    assert_eq!(
+        names(&second.review_requests_added),
+        vec!["user:erin", "team:acme/release"]
+    );
+    assert_eq!(
+        names(&second.review_requests_removed),
+        vec!["user:carol", "user:dave", "team:acme/reviewers"]
+    );
+
+    let wire = serde_json::to_value(&second).unwrap();
+    assert_eq!(
+        wire["review_requests_added"][1]["reviewer"],
+        serde_json::json!({ "team": "acme/release" })
+    );
 }
