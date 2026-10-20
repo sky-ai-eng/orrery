@@ -4,7 +4,7 @@ Side discoveries from the 2026-08-21 surface sweep at commit `78c8bfd2`: TF docu
 
 ## Doc drift (`docs/concepts/tracked-events.md` vs code)
 
-1. **`github:pr:mentioned` has no producer.** The doc says it fires for PRs discovered via `mentions:{user}` search; no `mentions:` query exists anywhere in the codebase. The event type is registered and routable but nothing can emit it. Fix the doc (or build the producer) — do NOT build a mock endpoint for it.
+1. **`github:pr:mentioned` has no producer.** The doc says it fires for PRs discovered via `mentions:{user}` search; no `mentions:` query exists anywhere in the codebase. The event type is registered and routable but nothing can emit it. Fix the doc (or build the producer) — do NOT build a mock endpoint for it. TF has since built the producer: the tracker reads @-mentions out of the pull's body and its new comments and reviews (`internal/tracker/mentions.go`), which Orrery already serves, so it still needs no endpoint.
 2. **Search-based discovery is described but gone.** GitHub discovery is per-repo REST enumeration with ETags; the only surviving search is the GraphQL dashboard backfill (terminal history, no events). A mock built from the doc would implement `GET /search/issues` and never see a call.
 3. **`GET /user/teams` reads as universal but is local/PAT-only.** Multi/App orgs resolve reviewer known-ness from the DB (`team_github_groups` + `GET /orgs/{org}/teams`).
 4. **The snapshot field list is incomplete.** Missing but used: `node_id` (the batch-refresh key), `head_committed_at`, `created_at`, `merged_at`, `closed_at`, the transient `Timeline`; also missing several diff-emitted event types (`new_commits`, `label_added/removed`, `review_request_removed`, `closed`).
@@ -50,3 +50,12 @@ Code reading tells us what TF *sends and reads*; these upstream behaviors need o
 8. **Jira ADF**: minimal ADF document Jira accepts for v3 comment/description bodies (TF's `wikiToADF` output should round-trip).
 9. **timeline event payloads**: real shapes for `line-commented`, `head_ref_force_pushed`, `base_ref_changed` (sparsely documented).
 10. **`gh` version drift**: re-run the pinned-gh conformance suite against the mock once it exists (rule 2's contract test covers this permanently).
+11. **Teams and review requests** (Orrery's behavior below is chosen, not observed):
+    - whether a team member's review clears the team's pending request (Orrery keeps it);
+    - what GHES answers for adding someone outside the org to a team (Orrery refuses 422 with its own message);
+    - the exact 422 bodies for requesting the pull's author and a non-collaborator;
+    - whether deleting a team, or withdrawing a request, bumps the pull's `updated_at` (Orrery bumps it on a withdrawal and a request, not on a team deletion), which decides whether TF's tracker re-reads the pull;
+    - whether GitHub refuses a review request on a closed or merged pull (Orrery accepts it);
+    - `DELETE …/teams/{slug}/memberships/{username}` for a user not on the team: GitHub's reference lists only 204 and 403, so Orrery answers 204;
+    - team slugs for names with non-ASCII letters: Orrery keeps ASCII letters and digits only, so "Équipe" becomes `quipe` and "日本" has no slug (422 `invalid` on `name`), where GitHub may transliterate; and two names with one slug ("Café", "Caf") collide as `already_exists` on `name`. No length limit is applied;
+    - the error message for a negative `first`/`last` on a GraphQL connection (Orrery's wording is its own).

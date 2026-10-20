@@ -18,10 +18,34 @@ pub(crate) const PULL_SELECT: &str = "SELECT p.id, p.repo_id, p.number, p.title,
     p.merged, p.merge_commit_sha, mb.login, p.created_clock_unix, p.updated_clock_unix,
     p.closed_clock_unix,
     (SELECT json_group_array(name) FROM (
-        SELECT name FROM pull_labels WHERE pull_id = p.id ORDER BY name COLLATE NOCASE))
+        SELECT name FROM pull_labels WHERE pull_id = p.id ORDER BY name COLLATE NOCASE)),
+    (SELECT json_group_array(login) FROM (
+        SELECT a.login FROM review_requests q JOIN actors a ON a.id = q.reviewer_id
+        WHERE q.pull_id = p.id ORDER BY q.id)),
+    (SELECT json_group_array(slug) FROM (
+        SELECT t.slug FROM review_requests q JOIN teams t ON t.id = q.team_id
+        WHERE q.pull_id = p.id ORDER BY q.id))
     FROM pulls p
     JOIN actors au ON au.id = p.author_id
     LEFT JOIN actors mb ON mb.id = p.merged_by_id";
+
+// The projections below name only their own table's columns, reaching other
+// tables through scalar subqueries, so the same text serves a point read
+// (`SELECT {cols} FROM <table>`) and the RETURNING clause of a write to that
+// table: the write returns exactly what the read would.
+
+pub(crate) const TEAM_COLUMNS: &str = "id, org_id,
+    (SELECT login FROM actors WHERE actors.id = teams.org_id),
+    slug, name, description, created_clock_unix";
+
+pub(crate) const ORG_MEMBER_COLUMNS: &str =
+    "(SELECT login FROM actors WHERE actors.id = org_members.org_id),
+    (SELECT login FROM actors WHERE actors.id = org_members.member_id),
+    role, created_clock_unix";
+
+pub(crate) const TEAM_MEMBER_COLUMNS: &str = "team_id,
+    (SELECT login FROM actors WHERE actors.id = team_members.member_id),
+    role, created_clock_unix";
 
 pub(crate) const REVIEW_SELECT: &str = "SELECT v.id, v.pull_id, a.login, v.state, v.body,
     v.commit_sha, v.submitted_clock_unix
@@ -78,9 +102,45 @@ pub(crate) fn row_to_pull(r: &Row<'_>) -> rusqlite::Result<Pull> {
         created_clock_unix: r.get(15)?,
         updated_clock_unix: r.get(16)?,
         closed_clock_unix: r.get(17)?,
-        labels: serde_json::from_str(&r.get::<_, String>(18)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(18, rusqlite::types::Type::Text, Box::new(e))
-        })?,
+        labels: json_strings(r, 18)?,
+        requested_reviewers: json_strings(r, 19)?,
+        requested_teams: json_strings(r, 20)?,
+    })
+}
+
+fn json_strings(r: &Row<'_>, idx: usize) -> rusqlite::Result<Vec<String>> {
+    serde_json::from_str(&r.get::<_, String>(idx)?).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
+pub(crate) fn row_to_team(r: &Row<'_>) -> rusqlite::Result<Team> {
+    Ok(Team {
+        id: r.get(0)?,
+        org_id: r.get(1)?,
+        org_login: r.get(2)?,
+        slug: r.get(3)?,
+        name: r.get(4)?,
+        description: r.get(5)?,
+        created_clock_unix: r.get(6)?,
+    })
+}
+
+pub(crate) fn row_to_org_member(r: &Row<'_>) -> rusqlite::Result<OrgMembership> {
+    Ok(OrgMembership {
+        org_login: r.get(0)?,
+        member_login: r.get(1)?,
+        role: OrgRole::from_db(&r.get::<_, String>(2)?),
+        created_clock_unix: r.get(3)?,
+    })
+}
+
+pub(crate) fn row_to_team_member(r: &Row<'_>) -> rusqlite::Result<TeamMembership> {
+    Ok(TeamMembership {
+        team_id: r.get(0)?,
+        member_login: r.get(1)?,
+        role: TeamRole::from_db(&r.get::<_, String>(2)?),
+        created_clock_unix: r.get(3)?,
     })
 }
 
@@ -220,21 +280,34 @@ pub(crate) fn list_comments_for_pull(conn: &Connection, pull_id: i64) -> Result<
 
 pub(crate) fn list_timeline_for_pull(conn: &Connection, pull_id: i64) -> Result<Vec<TimelineItem>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.pull_id, t.kind, t.label, a.login, t.clock_unix
+        "SELECT t.id, t.pull_id, t.kind, t.label, a.login, t.clock_unix, rv.login, t.team_id,
+                t.team_slug
          FROM pull_timeline t JOIN actors a ON a.id = t.actor_id
+         LEFT JOIN actors rv ON rv.id = t.reviewer_id
          WHERE t.pull_id = ?1 ORDER BY t.id",
     )?;
     let rows = stmt.query_map(params![pull_id], |r| {
         let label: Option<String> = r.get(3)?;
-        let kind = match (r.get::<_, String>(2)?.as_str(), label) {
-            ("labeled", Some(name)) => TimelineKind::Labeled(name),
-            ("unlabeled", Some(name)) => TimelineKind::Unlabeled(name),
-            ("ready_for_review", None) => TimelineKind::ReadyForReview,
-            (other, _) => {
+        let reviewer = match (
+            r.get::<_, Option<String>>(6)?,
+            r.get::<_, Option<i64>>(7)?,
+            r.get::<_, Option<String>>(8)?,
+        ) {
+            (Some(login), None, None) => Some(RequestedReviewer::User(login)),
+            (None, Some(id), Some(slug)) => Some(RequestedReviewer::Team { id, slug }),
+            _ => None,
+        };
+        let kind = match (r.get::<_, String>(2)?.as_str(), label, reviewer) {
+            ("labeled", Some(name), None) => TimelineKind::Labeled(name),
+            ("unlabeled", Some(name), None) => TimelineKind::Unlabeled(name),
+            ("ready_for_review", None, None) => TimelineKind::ReadyForReview,
+            ("review_requested", None, Some(rv)) => TimelineKind::ReviewRequested(rv),
+            ("review_request_removed", None, Some(rv)) => TimelineKind::ReviewRequestRemoved(rv),
+            (other, _, _) => {
                 return Err(rusqlite::Error::FromSqlConversionFailure(
                     2,
                     rusqlite::types::Type::Text,
-                    format!("timeline kind {other:?} with that label").into(),
+                    format!("timeline kind {other:?} with those columns").into(),
                 ));
             }
         };

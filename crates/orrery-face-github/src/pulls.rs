@@ -1,5 +1,5 @@
-//! Pull request endpoints: open, edit/close/reopen, merge, reviews, issue
-//! comments and labels (a PR is an issue for commenting and labelling, so
+//! Pull request endpoints: open, edit/close/reopen, merge, reviews, review
+//! requests, issue comments and labels (a PR is an issue for commenting and labelling, so
 //! those routes live under `/issues/`, exactly as on GitHub).
 
 use std::collections::BTreeMap;
@@ -575,6 +575,108 @@ pub(crate) async fn remove_label(
         Err(WorldError::NoSuchLabel(_)) => {
             github_error(StatusCode::NOT_FOUND, "Label does not exist")
         }
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ReviewersBody {
+    reviewers: Option<Vec<String>>,
+    team_reviewers: Option<Vec<String>>,
+}
+
+/// `POST /repos/{o}/{r}/pulls/{n}/requested_reviewers`: 201 with the pull.
+/// GitHub refuses the pull's author, and refuses anyone or any team that
+/// cannot review the repository with one message naming none of them.
+pub(crate) async fn request_reviewers(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
+    Extension(actor): Extension<Actor>,
+    body: Bytes,
+) -> Response<Body> {
+    let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let pull = match pull_by_path_number(&face, &repo, &number) {
+        Ok(Some(p)) => p,
+        Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(resp) => return *resp,
+    };
+    let parsed: ReviewersBody = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
+    };
+    let users = parsed.reviewers.unwrap_or_default();
+    let teams = parsed.team_reviewers.unwrap_or_default();
+    if users.is_empty() && teams.is_empty() {
+        return validation_missing("PullRequest", "reviewers");
+    }
+    let users: Vec<&str> = users.iter().map(String::as_str).collect();
+    let teams: Vec<&str> = teams.iter().map(String::as_str).collect();
+    match face
+        .world
+        .request_reviewers(pull.id, actor.id, &users, &teams)
+    {
+        Ok(pull) => json_response(
+            StatusCode::CREATED,
+            pull_json(&face, &repo, &owner_actor, &pull),
+        ),
+        Err(WorldError::ReviewerIsAuthor) => json_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({
+                "message": "Validation Failed",
+                "errors": ["Review cannot be requested from pull request author."],
+            }),
+        ),
+        Err(WorldError::InvalidReviewer(_)) => github_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!(
+                "Reviews may only be requested from collaborators. One or more of the users or teams you specified is not a collaborator of the {} repository.",
+                repo.full_name()
+            ),
+        ),
+        Err(e) => internal(e),
+    }
+}
+
+/// `DELETE /repos/{o}/{r}/pulls/{n}/requested_reviewers`: 200 with the
+/// pull. GitHub requires `reviewers` (it may be empty); a name with no
+/// pending request is skipped.
+pub(crate) async fn remove_review_requests(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
+    Extension(actor): Extension<Actor>,
+    body: Bytes,
+) -> Response<Body> {
+    let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let pull = match pull_by_path_number(&face, &repo, &number) {
+        Ok(Some(p)) => p,
+        Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(resp) => return *resp,
+    };
+    let parsed: ReviewersBody = if body.iter().all(u8::is_ascii_whitespace) {
+        ReviewersBody::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(p) => p,
+            Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
+        }
+    };
+    let Some(users) = parsed.reviewers else {
+        return validation_missing("PullRequest", "reviewers");
+    };
+    let teams = parsed.team_reviewers.unwrap_or_default();
+    let users: Vec<&str> = users.iter().map(String::as_str).collect();
+    let teams: Vec<&str> = teams.iter().map(String::as_str).collect();
+    match face
+        .world
+        .remove_review_requests(pull.id, actor.id, &users, &teams)
+    {
+        Ok(pull) => json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull)),
         Err(e) => internal(e),
     }
 }

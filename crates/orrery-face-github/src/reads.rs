@@ -18,7 +18,9 @@ use orrery_world::{Actor, PullState};
 use sha2::{Digest, Sha256};
 
 use crate::pulls::pull_by_path_number;
-use crate::render::{check_run_json, comment_json, pull_json, repo_json, review_json};
+use crate::render::{
+    check_run_json, comment_json, pull_json, repo_json, review_json, team_full_json, team_json,
+};
 use crate::{GithubFace, github_error, internal, json_response, resolve_repo, validation_invalid};
 
 /// GitHub's listing defaults: 30 per page, cap 100, silently clamped —
@@ -391,29 +393,53 @@ pub(crate) async fn get_user_emails(
     }
 }
 
-/// Teams are unmodeled in the kernel, so an organization truthfully has none:
-/// an empty page, as GitHub answers for an org that never created a team. A
-/// login that is not an organization is GitHub's 404.
+/// An organization's teams, oldest first. A login that is not an
+/// organization is GitHub's 404.
 pub(crate) async fn list_org_teams(
     State(face): State<GithubFace>,
     UrlPath(org): UrlPath<String>,
+    RawQuery(query): RawQuery,
 ) -> Response<Body> {
-    match face.world.actor_by_login(&org) {
-        Ok(Some(a)) if a.kind == orrery_world::ActorKind::Org => {
-            json_response(StatusCode::OK, serde_json::json!([]))
-        }
-        Ok(_) => github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(e) => internal(e),
-    }
+    let org = match face.world.actor_by_login(&org) {
+        Ok(Some(a)) if a.kind == orrery_world::ActorKind::Org => a,
+        Ok(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => return internal(e),
+    };
+    let teams = match face.world.list_org_teams(org.id, None) {
+        Ok(t) => t,
+        Err(e) => return internal(e),
+    };
+    let (per_page, page) = page_params(&query.unwrap_or_default());
+    let items: Vec<serde_json::Value> = paginate(teams, per_page, page)
+        .iter()
+        .map(|t| team_json(&face, t))
+        .collect();
+    json_response(StatusCode::OK, serde_json::Value::Array(items))
 }
 
-/// The teams the authenticated user belongs to. Teams are unmodeled, so a user
-/// belongs to none. An installation token has no user to ask about.
-pub(crate) async fn list_user_teams(Extension(actor): Extension<Actor>) -> Response<Body> {
+/// The teams the authenticated user is on, across organizations, as full
+/// team objects. An installation token has no user to ask about.
+pub(crate) async fn list_user_teams(
+    State(face): State<GithubFace>,
+    Extension(actor): Extension<Actor>,
+    RawQuery(query): RawQuery,
+) -> Response<Body> {
     if let Some(refused) = refuse_integration(&actor) {
         return refused;
     }
-    json_response(StatusCode::OK, serde_json::json!([]))
+    let teams = match face.world.list_teams_for_member(actor.id) {
+        Ok(t) => t,
+        Err(e) => return internal(e),
+    };
+    let (per_page, page) = page_params(&query.unwrap_or_default());
+    let items = paginate(teams, per_page, page)
+        .iter()
+        .map(|t| team_full_json(&face, t))
+        .collect::<Result<Vec<_>, _>>();
+    match items {
+        Ok(items) => json_response(StatusCode::OK, serde_json::Value::Array(items)),
+        Err(e) => internal(e),
+    }
 }
 
 pub(crate) async fn list_user_repos(

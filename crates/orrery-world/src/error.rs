@@ -32,6 +32,20 @@ pub enum WorldError {
     InvalidLabel(String),
     #[error("pull has no label {0:?}")]
     NoSuchLabel(String),
+    #[error("no organization {0:?}")]
+    NoSuchOrg(String),
+    #[error("{login:?} is not a member of {org:?}")]
+    NotOrgMember { org: String, login: String },
+    #[error("no team {0:?}")]
+    NoSuchTeam(String),
+    #[error("a team named {0:?} already exists in this organization")]
+    TeamExists(String),
+    #[error("invalid team name {0:?}: it must hold at least one letter or digit")]
+    InvalidTeamName(String),
+    #[error("{0:?} cannot be requested to review this pull")]
+    InvalidReviewer(String),
+    #[error("a review cannot be requested from the pull's author")]
+    ReviewerIsAuthor,
     #[error("invalid state transition: {0}")]
     InvalidTransition(String),
     #[error("no actor {0:?}")]

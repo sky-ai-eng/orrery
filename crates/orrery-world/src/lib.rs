@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 mod checks;
 mod error;
 mod identity;
+mod orgs;
 mod pulls;
 mod queries;
 mod reader;
@@ -294,9 +295,10 @@ impl World {
     }
 
     /// An owner's repos in `sort=pushed&direction=desc` order. Ownership is
-    /// the only affiliation the world models — there are no collaborators or
-    /// org memberships (yet), so "repos visible to this actor" and "repos
-    /// this actor owns" are the same set.
+    /// the only repository affiliation the world models — there are no
+    /// collaborators, and org membership grants no repository access — so
+    /// "repos visible to this actor" and "repos this actor owns" are the
+    /// same set.
     pub fn list_repos_owned_by(&self, owner_id: i64) -> Result<Vec<Repo>> {
         self.with_conn(|conn| queries::list_repos_for_owner(conn, owner_id))
     }
@@ -450,7 +452,7 @@ pub(crate) fn log_locked(
     })
 }
 
-fn constraint_violation(e: &rusqlite::Error) -> bool {
+pub(crate) fn constraint_violation(e: &rusqlite::Error) -> bool {
     matches!(
         e,
         rusqlite::Error::SqliteFailure(f, _)

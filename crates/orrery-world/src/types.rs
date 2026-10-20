@@ -115,6 +115,11 @@ pub struct Pull {
     pub closed_clock_unix: Option<i64>,
     /// The pull's labels, ordered by name without regard to case.
     pub labels: Vec<String>,
+    /// Logins of the users whose review is pending, in request order.
+    pub requested_reviewers: Vec<String>,
+    /// Slugs of the teams, in the repository's organization, whose review is
+    /// pending, in request order.
+    pub requested_teams: Vec<String>,
 }
 
 /// One item on a pull's timeline (see `pull_timeline` in the schema).
@@ -132,6 +137,90 @@ pub enum TimelineKind {
     Labeled(String),
     Unlabeled(String),
     ReadyForReview,
+    ReviewRequested(RequestedReviewer),
+    ReviewRequestRemoved(RequestedReviewer),
+}
+
+/// Whose review a request asks for: a user by login, or a team by its id,
+/// with the slug it had in the pull's organization.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestedReviewer {
+    User(String),
+    Team { id: i64, slug: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrgRole {
+    Admin,
+    Member,
+}
+
+impl OrgRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OrgRole::Admin => "admin",
+            OrgRole::Member => "member",
+        }
+    }
+
+    pub(crate) fn from_db(s: &str) -> OrgRole {
+        match s {
+            "admin" => OrgRole::Admin,
+            _ => OrgRole::Member,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OrgMembership {
+    pub org_login: String,
+    pub member_login: String,
+    pub role: OrgRole,
+    pub created_clock_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Team {
+    pub id: i64,
+    pub org_id: i64,
+    pub org_login: String,
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_clock_unix: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamRole {
+    Member,
+    Maintainer,
+}
+
+impl TeamRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TeamRole::Member => "member",
+            TeamRole::Maintainer => "maintainer",
+        }
+    }
+
+    pub(crate) fn from_db(s: &str) -> TeamRole {
+        match s {
+            "maintainer" => TeamRole::Maintainer,
+            _ => TeamRole::Member,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TeamMembership {
+    pub team_id: i64,
+    pub member_login: String,
+    pub role: TeamRole,
+    pub created_clock_unix: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

@@ -2,7 +2,7 @@
 //! generously (rule 1: fields liberal, endpoints strict). Field values a
 //! consumer reads are listed in spec/surface-github.md.
 
-use orrery_world::{Actor, ActorKind, CheckRun, IssueComment, Pull, Repo, Review};
+use orrery_world::{Actor, ActorKind, CheckRun, IssueComment, Pull, Repo, Review, Team};
 
 use crate::GithubFace;
 
@@ -105,8 +105,17 @@ pub(crate) fn pull_json(
             "repo": repo_json(face, repo, owner),
         },
         "labels": pull.labels.iter().map(|n| label_json(n)).collect::<Vec<_>>(),
-        "requested_reviewers": [],
-        "requested_teams": [],
+        "requested_reviewers": pull
+            .requested_reviewers
+            .iter()
+            .map(|l| user_json(face, l))
+            .collect::<Vec<_>>(),
+        "requested_teams": pull
+            .requested_teams
+            .iter()
+            .filter_map(|slug| face.world.team_by_slug(&repo.owner_login, slug).ok().flatten())
+            .map(|t| team_json(face, &t))
+            .collect::<Vec<_>>(),
         "assignees": [],
         "milestone": serde_json::Value::Null,
     })
@@ -220,4 +229,59 @@ pub(crate) fn label_json(name: &str) -> serde_json::Value {
         "default": false,
         "description": serde_json::Value::Null,
     })
+}
+
+/// GitHub's organization object as it appears inside a team: the org-kind
+/// actor's identity plus its API addresses.
+pub(crate) fn org_json(face: &GithubFace, org_login: &str) -> serde_json::Value {
+    let base = face.base_url.trim_end_matches('/');
+    let mut json = user_json(face, org_login);
+    json["url"] = serde_json::json!(format!("{base}/api/v3/orgs/{org_login}"));
+    json["repos_url"] = serde_json::json!(format!("{base}/api/v3/orgs/{org_login}/repos"));
+    json["members_url"] =
+        serde_json::json!(format!("{base}/api/v3/orgs/{org_login}/members{{/member}}"));
+    json["description"] = serde_json::Value::Null;
+    json
+}
+
+/// GitHub's team object as an organization's team listing and a pull's
+/// `requested_teams` carry it. Orrery keeps no secret teams and no nesting,
+/// so every team is `closed` with no parent.
+pub(crate) fn team_json(face: &GithubFace, team: &Team) -> serde_json::Value {
+    let base = face.base_url.trim_end_matches('/');
+    let api = format!(
+        "{base}/api/v3/organizations/{}/team/{}",
+        team.org_id, team.id
+    );
+    serde_json::json!({
+        "id": team.id,
+        "node_id": crate::nodeid::team(team.id),
+        "url": api,
+        "html_url": format!("{base}/orgs/{}/teams/{}", team.org_login, team.slug),
+        "name": team.name,
+        "slug": team.slug,
+        "description": team.description,
+        "privacy": "closed",
+        "notification_setting": "notifications_enabled",
+        "permission": "pull",
+        "members_url": format!("{api}/members{{/member}}"),
+        "repositories_url": format!("{api}/repos"),
+        "parent": serde_json::Value::Null,
+    })
+}
+
+/// The full team object — what creating a team and the authenticated user's
+/// team listing answer with: the listing shape plus counts, timestamps and
+/// the organization.
+pub(crate) fn team_full_json(
+    face: &GithubFace,
+    team: &Team,
+) -> Result<serde_json::Value, orrery_world::WorldError> {
+    let mut json = team_json(face, team);
+    json["members_count"] = serde_json::json!(face.world.team_members_count(team.id)?);
+    json["repos_count"] = serde_json::json!(0);
+    json["created_at"] = serde_json::json!(rfc3339(team.created_clock_unix));
+    json["updated_at"] = serde_json::json!(rfc3339(team.created_clock_unix));
+    json["organization"] = org_json(face, &team.org_login);
+    Ok(json)
 }

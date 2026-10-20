@@ -1,9 +1,9 @@
 //! The GitHub GraphQL schema subset, grown strictly on demand (spec/README.md
 //! rule 1): every type and field exists because a consumer query in
 //! spec/surface-github.md §3 selects it. Fields the world genuinely has are
-//! resolved from it; fields whose *write surface* doesn't exist yet (labels,
-//! review requests, timeline events, inline review comments) resolve
-//! truthfully empty — a world with no label writes has no labels. A field
+//! resolved from it; fields whose *write surface* doesn't exist yet (inline
+//! review comments) resolve truthfully empty — a world with no way to write
+//! one has none. A field
 //! outside this subset fails validation, and the execution layer marks that
 //! error as a coverage gap (`graphql::mark_unmocked_errors`) so it can never
 //! read as "GitHub doesn't have this".
@@ -80,6 +80,7 @@ pub enum PullRequestTimelineItemsItemType {
     LabeledEvent,
     UnlabeledEvent,
     ReviewRequestedEvent,
+    ReviewRequestRemovedEvent,
     ReadyForReviewEvent,
 }
 
@@ -157,11 +158,7 @@ fn page<T>(
     last: Option<i32>,
     before: Option<String>,
 ) -> Result<(Vec<T>, PageInfo), Error> {
-    if first.is_some() && last.is_some() {
-        return Err(Error::new(format!(
-            "Passing both `first` and `last` to paginate the `{connection}` connection is not supported."
-        )));
-    }
+    page_size(connection, first, last)?;
     let mut items = items;
     if let Some(b) = before {
         let bound = cursor_id(&b)
@@ -179,27 +176,62 @@ fn page<T>(
             };
             (kept, info)
         }
-        None => take_first(items, first),
+        None => take_first(connection, items, first)?,
     };
     info.start_cursor = items.first().map(|i| cursor(id(i)));
     info.end_cursor = items.last().map(|i| cursor(id(i)));
     Ok((items, info))
 }
 
+/// GitHub's bounds on a connection's page: exactly one of `first` and
+/// `last`, neither negative nor above 100.
+fn page_size(connection: &str, first: Option<i32>, last: Option<i32>) -> Result<(), Error> {
+    let (arg, n) = match (first, last) {
+        (Some(_), Some(_)) => {
+            return Err(Error::new(format!(
+                "Passing both `first` and `last` to paginate the `{connection}` connection is not supported."
+            )));
+        }
+        (None, None) => {
+            return Err(Error::new(format!(
+                "You must provide a `first` or `last` value to properly paginate the `{connection}` connection."
+            )));
+        }
+        (Some(n), None) => ("first", n),
+        (None, Some(n)) => ("last", n),
+    };
+    if n < 0 {
+        return Err(Error::new(format!(
+            "`{arg}` on the `{connection}` connection cannot be less than zero."
+        )));
+    }
+    if n > 100 {
+        return Err(Error::new(format!(
+            "Requesting {n} records on the `{connection}` connection exceeds the `{arg}` limit of 100 records."
+        )));
+    }
+    Ok(())
+}
+
 /// Truncate `items` to GitHub's `first:` argument, reporting the cut on
 /// `pageInfo.hasNextPage` — consumers watchdog that flag, so a silent
 /// truncation here would defeat their logging.
-fn take_first<T>(mut items: Vec<T>, first: Option<i32>) -> (Vec<T>, PageInfo) {
-    let cap = first.map(|f| f.max(0) as usize).unwrap_or(items.len());
+fn take_first<T>(
+    connection: &str,
+    mut items: Vec<T>,
+    first: Option<i32>,
+) -> Result<(Vec<T>, PageInfo), Error> {
+    page_size(connection, first, None)?;
+    let cap = first.unwrap_or_default() as usize;
     let truncated = items.len() > cap;
     items.truncate(cap);
-    (
+    Ok((
         items,
         PageInfo {
             has_next_page: truncated,
             ..PageInfo::default()
         },
-    )
+    ))
 }
 
 // ---- actors ---------------------------------------------------------------
@@ -242,6 +274,7 @@ pub struct TeamMemberConnection {
 }
 
 pub struct Organization {
+    pub id: i64,
     pub login: String,
 }
 
@@ -251,29 +284,64 @@ impl Organization {
         &self.login
     }
 
-    /// Teams are unmodeled in the kernel, so every organization truthfully
-    /// has none — the same answer GitHub gives for an org that never created
-    /// teams, and the answer TF's team listing treats as "user is in no
-    /// teams" rather than an error.
+    /// The organization's teams, oldest first; `userLogins` keeps the teams
+    /// with at least one of those users on them.
     async fn teams(
         &self,
-        _first: Option<i32>,
-        _after: Option<String>,
-        _user_logins: Option<Vec<String>>,
-    ) -> TeamConnection {
-        TeamConnection {
-            page_info: PageInfo::default(),
-            nodes: Vec::new(),
+        ctx: &Context<'_>,
+        first: Option<i32>,
+        after: Option<String>,
+        user_logins: Option<Vec<String>>,
+    ) -> Result<TeamConnection, Error> {
+        let mut teams = face(ctx)
+            .world
+            .list_org_teams(self.id, user_logins.as_deref())
+            .map_err(internal)?;
+        if let Some(a) = after {
+            let bound = cursor_id(&a).ok_or_else(|| {
+                Error::new(format!("`{a}` does not appear to be a valid cursor."))
+            })?;
+            teams.retain(|t| t.id > bound);
         }
+        let (teams, mut page_info) = take_first("teams", teams, first)?;
+        page_info.start_cursor = teams.first().map(|t| cursor(t.id));
+        page_info.end_cursor = teams.last().map(|t| cursor(t.id));
+        Ok(TeamConnection {
+            page_info,
+            nodes: teams.into_iter().map(|team| Team { team }).collect(),
+        })
     }
 }
 
-#[derive(SimpleObject)]
 pub struct Team {
-    pub slug: String,
-    pub name: String,
-    pub organization: Organization,
-    pub members: TeamMemberConnection,
+    pub team: world::Team,
+}
+
+#[Object]
+impl Team {
+    async fn slug(&self) -> &str {
+        &self.team.slug
+    }
+
+    async fn name(&self) -> &str {
+        &self.team.name
+    }
+
+    async fn organization(&self) -> Organization {
+        Organization {
+            id: self.team.org_id,
+            login: self.team.org_login.clone(),
+        }
+    }
+
+    async fn members(&self, ctx: &Context<'_>) -> Result<TeamMemberConnection, Error> {
+        Ok(TeamMemberConnection {
+            total_count: face(ctx)
+                .world
+                .team_members_count(self.team.id)
+                .map_err(internal)?,
+        })
+    }
 }
 
 #[derive(SimpleObject)]
@@ -286,6 +354,25 @@ pub struct TeamConnection {
 pub enum RequestedReviewer {
     User(User),
     Team(Team),
+}
+
+/// A timeline item's reviewer. A team that has since been deleted resolves
+/// to null, as GitHub renders a request whose reviewer is gone, even when a
+/// later team took its slug.
+fn requested_reviewer(
+    face: &GithubFace,
+    reviewer: &world::RequestedReviewer,
+) -> Result<Option<RequestedReviewer>, Error> {
+    Ok(match reviewer {
+        world::RequestedReviewer::User(login) => Some(RequestedReviewer::User(User {
+            login: login.clone(),
+        })),
+        world::RequestedReviewer::Team { id, .. } => face
+            .world
+            .team_by_id(*id)
+            .map_err(internal)?
+            .map(|team| RequestedReviewer::Team(Team { team })),
+    })
 }
 
 #[derive(SimpleObject)]
@@ -405,6 +492,12 @@ pub struct ReviewRequestedEvent {
 }
 
 #[derive(SimpleObject)]
+pub struct ReviewRequestRemovedEvent {
+    pub created_at: String,
+    pub requested_reviewer: Option<RequestedReviewer>,
+}
+
+#[derive(SimpleObject)]
 pub struct ReadyForReviewEvent {
     pub created_at: String,
 }
@@ -416,6 +509,7 @@ pub enum PullRequestTimelineItems {
     LabeledEvent(LabeledEvent),
     UnlabeledEvent(UnlabeledEvent),
     ReviewRequestedEvent(ReviewRequestedEvent),
+    ReviewRequestRemovedEvent(ReviewRequestRemovedEvent),
     ReadyForReviewEvent(ReadyForReviewEvent),
 }
 
@@ -581,14 +675,17 @@ pub struct StatusCheckRollup {
 
 #[Object]
 impl StatusCheckRollup {
-    async fn contexts(&self, first: Option<i32>) -> StatusCheckRollupContextConnection {
+    async fn contexts(
+        &self,
+        first: Option<i32>,
+    ) -> Result<StatusCheckRollupContextConnection, Error> {
         let nodes: Vec<StatusCheckRollupContext> = self
             .runs
             .iter()
             .map(|r| StatusCheckRollupContext::CheckRun(GqlCheckRun { run: r.clone() }))
             .collect();
-        let (nodes, page_info) = take_first(nodes, first);
-        StatusCheckRollupContextConnection { page_info, nodes }
+        let (nodes, page_info) = take_first("contexts", nodes, first)?;
+        Ok(StatusCheckRollupContextConnection { page_info, nodes })
     }
 }
 
@@ -816,13 +913,34 @@ impl PullRequest {
         Ok(self.diff_stats(face(ctx))?.changed_files)
     }
 
-    /// Review requests have no write surface yet, so every pull truthfully
-    /// has none pending.
-    async fn review_requests(&self, _first: Option<i32>) -> ReviewRequestConnection {
-        ReviewRequestConnection {
-            page_info: PageInfo::default(),
-            nodes: Vec::new(),
+    /// The pull's pending requests: users, then teams, each in request order.
+    async fn review_requests(
+        &self,
+        ctx: &Context<'_>,
+        first: Option<i32>,
+    ) -> Result<ReviewRequestConnection, Error> {
+        let face = face(ctx);
+        let mut reviewers: Vec<ReviewRequest> = self
+            .pull
+            .requested_reviewers
+            .iter()
+            .map(|login| ReviewRequest {
+                requested_reviewer: Some(RequestedReviewer::User(User {
+                    login: login.clone(),
+                })),
+            })
+            .collect();
+        for slug in &self.pull.requested_teams {
+            let team = face
+                .world
+                .team_by_slug(&self.repo.owner_login, slug)
+                .map_err(internal)?;
+            reviewers.push(ReviewRequest {
+                requested_reviewer: team.map(|team| RequestedReviewer::Team(Team { team })),
+            });
         }
+        let (nodes, page_info) = take_first("reviewRequests", reviewers, first)?;
+        Ok(ReviewRequestConnection { page_info, nodes })
     }
 
     /// GitHub's latest-review-per-author connection.
@@ -839,7 +957,7 @@ impl PullRequest {
         let mut nodes: Vec<world::Review> = latest.into_values().collect();
         nodes.sort_by_key(|r| r.id);
         let total = nodes.len() as i64;
-        let (nodes, page_info) = take_first(nodes, first);
+        let (nodes, page_info) = take_first("latestReviews", nodes, first)?;
         Ok(PullRequestReviewConnection {
             page_info,
             total_count: total,
@@ -886,13 +1004,13 @@ impl PullRequest {
         }
     }
 
-    async fn labels(&self, first: Option<i32>) -> Option<LabelConnection> {
+    async fn labels(&self, first: Option<i32>) -> Result<Option<LabelConnection>, Error> {
         let names = self.pull.labels.clone();
-        let (names, page_info) = take_first(names, first);
-        Some(LabelConnection {
+        let (names, page_info) = take_first("labels", names, first)?;
+        Ok(Some(LabelConnection {
             page_info,
             nodes: names.into_iter().map(|name| Label { name }).collect(),
-        })
+        }))
     }
 
     async fn comments(
@@ -938,7 +1056,6 @@ impl PullRequest {
         self.pull.closed_clock_unix.map(rfc3339)
     }
 
-    /// Review requests are not modelled, so no `ReviewRequestedEvent` exists.
     async fn timeline_items(
         &self,
         ctx: &Context<'_>,
@@ -955,9 +1072,13 @@ impl PullRequest {
             items.retain(|i| types.contains(&timeline_item_type(&i.kind)));
         }
         let (items, page_info) = page("timelineItems", items, |i| i.id, first, last, before)?;
+        let face = face(ctx);
         Ok(PullRequestTimelineItemsConnection {
             page_info,
-            nodes: items.into_iter().map(timeline_item).collect(),
+            nodes: items
+                .into_iter()
+                .map(|i| timeline_item(face, i))
+                .collect::<Result<_, Error>>()?,
         })
     }
 }
@@ -969,12 +1090,21 @@ fn timeline_item_type(kind: &world::TimelineKind) -> PullRequestTimelineItemsIte
         world::TimelineKind::ReadyForReview => {
             PullRequestTimelineItemsItemType::ReadyForReviewEvent
         }
+        world::TimelineKind::ReviewRequested(_) => {
+            PullRequestTimelineItemsItemType::ReviewRequestedEvent
+        }
+        world::TimelineKind::ReviewRequestRemoved(_) => {
+            PullRequestTimelineItemsItemType::ReviewRequestRemovedEvent
+        }
     }
 }
 
-fn timeline_item(item: world::TimelineItem) -> PullRequestTimelineItems {
+fn timeline_item(
+    face: &GithubFace,
+    item: world::TimelineItem,
+) -> Result<PullRequestTimelineItems, Error> {
     let created_at = rfc3339(item.clock_unix);
-    match item.kind {
+    Ok(match item.kind {
         world::TimelineKind::Labeled(name) => {
             PullRequestTimelineItems::LabeledEvent(LabeledEvent {
                 created_at,
@@ -990,7 +1120,19 @@ fn timeline_item(item: world::TimelineItem) -> PullRequestTimelineItems {
         world::TimelineKind::ReadyForReview => {
             PullRequestTimelineItems::ReadyForReviewEvent(ReadyForReviewEvent { created_at })
         }
-    }
+        world::TimelineKind::ReviewRequested(rv) => {
+            PullRequestTimelineItems::ReviewRequestedEvent(ReviewRequestedEvent {
+                created_at,
+                requested_reviewer: requested_reviewer(face, &rv)?,
+            })
+        }
+        world::TimelineKind::ReviewRequestRemoved(rv) => {
+            PullRequestTimelineItems::ReviewRequestRemovedEvent(ReviewRequestRemovedEvent {
+                created_at,
+                requested_reviewer: requested_reviewer(face, &rv)?,
+            })
+        }
+    })
 }
 
 // ---- node / search roots --------------------------------------------------
@@ -1073,7 +1215,7 @@ impl QueryRoot {
             ))
         })?;
         let matches = search::eval(face(ctx), &parsed).map_err(internal)?;
-        let (matches, page_info) = take_first(matches, first.or(Some(30)));
+        let (matches, page_info) = take_first("search", matches, first)?;
         Ok(SearchResultItemConnection {
             page_info,
             nodes: matches
@@ -1094,7 +1236,10 @@ impl QueryRoot {
         let actor = face(ctx).world.actor_by_login(&login).map_err(internal)?;
         Ok(actor
             .filter(|a| a.kind == world::ActorKind::Org)
-            .map(|a| Organization { login: a.login }))
+            .map(|a| Organization {
+                id: a.id,
+                login: a.login,
+            }))
     }
 
     async fn repository(

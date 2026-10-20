@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::{Result, WorldError};
 
 /// Bumped on every schema change.
-pub(crate) const SCHEMA_VERSION: i64 = 2;
+pub(crate) const SCHEMA_VERSION: i64 = 3;
 
 // State vocabulary is neutral (rule 9: vendor-neutral state, vendor faces) —
 // faces render casing like "APPROVED" or "CHANGES_REQUESTED" at the wire,
@@ -118,16 +118,73 @@ const SCHEMA: &str = r#"
     ) STRICT;
 
     -- What happened to a pull that its current state no longer shows: GitHub's
-    -- timeline items. `label` is set exactly for the label kinds.
+    -- timeline items. `label` is set exactly for the label kinds, and one of
+    -- `reviewer_id` / `team_id` exactly for the review-request kinds. A
+    -- deleted team's requests stay on the timeline, so `team_id` is not a
+    -- foreign key; team ids are never reused, so it never names a later team.
+    -- `team_slug` keeps the slug the team had.
     CREATE TABLE pull_timeline (
-        id         INTEGER PRIMARY KEY,
-        pull_id    INTEGER NOT NULL REFERENCES pulls(id),
-        kind       TEXT NOT NULL CHECK (kind IN ('labeled', 'unlabeled', 'ready_for_review')),
-        label      TEXT,
-        actor_id   INTEGER NOT NULL REFERENCES actors(id),
-        clock_unix INTEGER NOT NULL,
-        CHECK ((kind IN ('labeled', 'unlabeled')) = (label IS NOT NULL))
+        id          INTEGER PRIMARY KEY,
+        pull_id     INTEGER NOT NULL REFERENCES pulls(id),
+        kind        TEXT NOT NULL CHECK (kind IN ('labeled', 'unlabeled', 'ready_for_review',
+                                                  'review_requested', 'review_request_removed')),
+        label       TEXT,
+        reviewer_id INTEGER REFERENCES actors(id),
+        team_id     INTEGER,
+        team_slug   TEXT,
+        actor_id    INTEGER NOT NULL REFERENCES actors(id),
+        clock_unix  INTEGER NOT NULL,
+        CHECK ((kind IN ('labeled', 'unlabeled')) = (label IS NOT NULL)),
+        CHECK ((team_id IS NULL) = (team_slug IS NULL)),
+        CHECK ((kind IN ('review_requested', 'review_request_removed'))
+               = ((reviewer_id IS NULL) <> (team_id IS NULL))),
+        CHECK (kind IN ('review_requested', 'review_request_removed')
+               OR (reviewer_id IS NULL AND team_id IS NULL))
     ) STRICT;
+
+    -- An organization's members. GitHub Enterprise Server adds a member
+    -- directly rather than inviting them, so every membership is active.
+    CREATE TABLE org_members (
+        org_id             INTEGER NOT NULL REFERENCES actors(id),
+        member_id          INTEGER NOT NULL REFERENCES actors(id),
+        role               TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+        created_clock_unix INTEGER NOT NULL,
+        PRIMARY KEY (org_id, member_id)
+    ) STRICT;
+
+    -- AUTOINCREMENT so a deleted team's id, and the node id derived from it,
+    -- never comes back as another team's.
+    CREATE TABLE teams (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        org_id             INTEGER NOT NULL REFERENCES actors(id),
+        slug               TEXT NOT NULL COLLATE NOCASE,
+        name               TEXT NOT NULL COLLATE NOCASE,
+        description        TEXT,
+        created_clock_unix INTEGER NOT NULL,
+        UNIQUE (org_id, slug),
+        UNIQUE (org_id, name)
+    ) STRICT;
+
+    CREATE TABLE team_members (
+        team_id            INTEGER NOT NULL REFERENCES teams(id),
+        member_id          INTEGER NOT NULL REFERENCES actors(id),
+        role               TEXT NOT NULL CHECK (role IN ('member', 'maintainer')),
+        created_clock_unix INTEGER NOT NULL,
+        PRIMARY KEY (team_id, member_id)
+    ) STRICT;
+
+    -- A pull's pending review requests, each naming one user or one team.
+    CREATE TABLE review_requests (
+        id          INTEGER PRIMARY KEY,
+        pull_id     INTEGER NOT NULL REFERENCES pulls(id),
+        reviewer_id INTEGER REFERENCES actors(id),
+        team_id     INTEGER REFERENCES teams(id),
+        CHECK ((reviewer_id IS NULL) <> (team_id IS NULL))
+    ) STRICT;
+    CREATE UNIQUE INDEX review_requests_user ON review_requests (pull_id, reviewer_id)
+        WHERE reviewer_id IS NOT NULL;
+    CREATE UNIQUE INDEX review_requests_team ON review_requests (pull_id, team_id)
+        WHERE team_id IS NOT NULL;
 
     CREATE TABLE reviews (
         id                   INTEGER PRIMARY KEY,

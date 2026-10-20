@@ -788,9 +788,10 @@ async fn tf_draft_mutations() {
     assert!(actions.contains(&"pull.convert_to_draft"));
 }
 
-/// TF's organization.teams query (teams.go): an org-kind actor answers with
-/// an empty team set (teams are unmodeled — truthfully none), a user login
-/// answers null, exactly the shapes TF degrades on without erroring.
+/// TF's organization.teams query (teams.go): an org that never made a team
+/// answers with an empty team set, and a user login answers null, exactly the
+/// shapes TF degrades on without erroring. `e2e_teams.rs` covers an org with
+/// teams.
 #[tokio::test(flavor = "multi_thread")]
 async fn tf_organization_teams_query() {
     let s = seed().await;

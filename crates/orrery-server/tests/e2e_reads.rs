@@ -326,8 +326,9 @@ async fn poll_path_reads() {
 }
 
 /// The poller's per-cycle team reconcile reads an org's teams, and the local
-/// PAT path reads the user's own. Teams are not modeled, so an org has none and
-/// a user is in none; a user login is not an org.
+/// PAT path reads the user's own. An org that never made a team has none, a
+/// user on no team is in none, and a user login is not an org. `e2e_teams.rs`
+/// covers teams that exist.
 #[tokio::test(flavor = "multi_thread")]
 async fn org_teams() {
     let inst = boot().await;

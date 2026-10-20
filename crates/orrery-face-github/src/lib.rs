@@ -1,8 +1,9 @@
 //! The GitHub REST face. Grows strictly on demand (spec/README.md rule 1):
 //! every endpoint here exists because a consumer in `spec/surface-github.md`
 //! or `spec/usage.md` needs it. Currently the authoring surface: repo
-//! creation, pull requests (open/edit/merge), reviews, issue comments, and
-//! check runs — the writes a scenario driver performs (spec/usage.md).
+//! creation, org membership and teams, pull requests (open/edit/merge),
+//! review requests, reviews, issue comments, labels, and check runs — the
+//! writes a scenario driver performs (spec/usage.md).
 //!
 //! Face endpoints mimic real GitHub, including its lax body decoding: unknown
 //! request fields are ignored, exactly as GitHub ignores them. The exception
@@ -25,6 +26,7 @@ mod checks;
 pub mod graphql;
 pub mod nodeid;
 pub mod oauth;
+mod orgs;
 mod pulls;
 mod reads;
 mod render;
@@ -43,7 +45,19 @@ pub struct GithubFace {
 pub fn router(face: GithubFace) -> Router {
     Router::new()
         .route("/orgs/{org}/repos", post(create_org_repo))
-        .route("/orgs/{org}/teams", get(reads::list_org_teams))
+        .route(
+            "/orgs/{org}/teams",
+            get(reads::list_org_teams).post(orgs::create_team),
+        )
+        .route("/orgs/{org}/teams/{team_slug}", delete(orgs::delete_team))
+        .route(
+            "/orgs/{org}/teams/{team_slug}/memberships/{username}",
+            put(orgs::set_team_membership).delete(orgs::remove_team_membership),
+        )
+        .route(
+            "/orgs/{org}/memberships/{username}",
+            put(orgs::set_org_membership),
+        )
         .route("/user", get(reads::get_user))
         .route("/user/emails", get(reads::get_user_emails))
         .route("/user/teams", get(reads::list_user_teams))
@@ -67,6 +81,10 @@ pub fn router(face: GithubFace) -> Router {
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/reviews",
             get(reads::list_reviews).post(pulls::create_review),
+        )
+        .route(
+            "/repos/{owner}/{repo}/pulls/{number}/requested_reviewers",
+            post(pulls::request_reviewers).delete(pulls::remove_review_requests),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/comments",
@@ -276,6 +294,11 @@ pub(crate) fn validation_custom(resource: &str, message: &str) -> Response<Body>
 /// like a GitHub 422 so strict clients parse it, but self-describing so a
 /// human reads exactly what to do (NOT-MOCKED at field granularity).
 pub(crate) fn orrery_unsupported_field(field: &str) -> Response<Body> {
+    orrery_unsupported_field_on("Repository", field)
+}
+
+/// [`orrery_unsupported_field`] for a request about another `resource`.
+pub(crate) fn orrery_unsupported_field_on(resource: &str, field: &str) -> Response<Body> {
     let body = serde_json::json!({
         "message": format!("orrery: request field {field:?} is not mocked"),
         "orrery": {
@@ -283,7 +306,7 @@ pub(crate) fn orrery_unsupported_field(field: &str) -> Response<Body> {
             "field": field,
             "hint": "If a consumer needs this behavior, add it to the surface inventory (spec/surface-github.md) and implement it.",
         },
-        "errors": [{ "resource": "Repository", "code": "custom", "field": field,
+        "errors": [{ "resource": resource, "code": "custom", "field": field,
                      "message": "not mocked by orrery" }],
     });
     json_response(StatusCode::UNPROCESSABLE_ENTITY, body)

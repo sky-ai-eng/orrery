@@ -299,6 +299,152 @@ impl World {
         })
     }
 
+    /// Request reviews, GitHub's `POST …/pulls/{n}/requested_reviewers`.
+    /// Every name is checked before anything is written: a user must be a
+    /// person other than the pull's author, and a team must belong to the
+    /// organization that owns the repository. A reviewer already pending is
+    /// skipped, so only a new request is logged and lands on the timeline.
+    ///
+    /// The returned pull is read back inside the write's transaction, as every
+    /// pull write's is: its labels and requests are aggregates over other
+    /// tables, which a RETURNING clause on `pulls` cannot project.
+    pub fn request_reviewers(
+        &self,
+        pull_id: i64,
+        actor_id: i64,
+        users: &[&str],
+        teams: &[&str],
+    ) -> Result<Pull> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let before = queries::require_pull(&tx, pull_id)?;
+            let user_ids = users
+                .iter()
+                .map(|login| {
+                    let id = reviewer_user_id(&tx, login)?;
+                    if login.eq_ignore_ascii_case(&before.author_login) {
+                        return Err(WorldError::ReviewerIsAuthor);
+                    }
+                    Ok(id)
+                })
+                .collect::<Result<Vec<i64>>>()?;
+            let team_ids = teams
+                .iter()
+                .map(|slug| reviewer_team_id(&tx, before.repo_id, slug))
+                .collect::<Result<Vec<i64>>>()?;
+            let mut added: Vec<RequestedReviewer> = Vec::new();
+            for id in &user_ids {
+                if insert_request(&tx, pull_id, Some(*id), None)? {
+                    added.push(RequestedReviewer::User(login_of(&tx, *id)?));
+                }
+            }
+            for id in &team_ids {
+                if insert_request(&tx, pull_id, None, Some(*id))? {
+                    added.push(RequestedReviewer::Team {
+                        id: *id,
+                        slug: slug_of(&tx, *id)?,
+                    });
+                }
+            }
+            if added.is_empty() {
+                return Ok(before);
+            }
+            for rv in &added {
+                record_timeline(
+                    &tx,
+                    pull_id,
+                    actor_id,
+                    &TimelineKind::ReviewRequested(rv.clone()),
+                )?;
+            }
+            touch_pull(&tx, pull_id)?;
+            let pull = queries::require_pull(&tx, pull_id)?;
+            log_locked(
+                &tx,
+                actor_id,
+                "pull.request_reviewers",
+                &serde_json::json!({
+                    "repo": repo_full_name(&tx, pull.repo_id)?,
+                    "number": pull.number,
+                    "requested": added,
+                }),
+            )?;
+            tx.commit()?;
+            Ok(pull)
+        })
+    }
+
+    /// Withdraw review requests, GitHub's `DELETE
+    /// …/pulls/{n}/requested_reviewers`. A name with no pending request is
+    /// skipped, as GitHub skips it; each request withdrawn is logged and lands
+    /// on the timeline. The returned pull is read back inside the
+    /// transaction, for the reason `request_reviewers` gives.
+    pub fn remove_review_requests(
+        &self,
+        pull_id: i64,
+        actor_id: i64,
+        users: &[&str],
+        teams: &[&str],
+    ) -> Result<Pull> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let before = queries::require_pull(&tx, pull_id)?;
+            let mut removed: Vec<RequestedReviewer> = Vec::new();
+            for login in users {
+                let gone: Option<String> = tx
+                    .query_row(
+                        "DELETE FROM review_requests
+                         WHERE pull_id = ?1
+                           AND reviewer_id = (SELECT id FROM actors WHERE login = ?2)
+                         RETURNING (SELECT login FROM actors WHERE id = reviewer_id)",
+                        params![pull_id, login],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                removed.extend(gone.map(RequestedReviewer::User));
+            }
+            for slug in teams {
+                let gone: Option<(i64, String)> = tx
+                    .query_row(
+                        "DELETE FROM review_requests
+                         WHERE pull_id = ?1
+                           AND team_id = (SELECT t.id FROM teams t JOIN repos r ON r.owner_id = t.org_id
+                                          WHERE r.id = ?2 AND t.slug = ?3)
+                         RETURNING team_id, (SELECT slug FROM teams WHERE id = team_id)",
+                        params![pull_id, before.repo_id, slug],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                removed.extend(gone.map(|(id, slug)| RequestedReviewer::Team { id, slug }));
+            }
+            if removed.is_empty() {
+                return Ok(before);
+            }
+            for rv in &removed {
+                record_timeline(
+                    &tx,
+                    pull_id,
+                    actor_id,
+                    &TimelineKind::ReviewRequestRemoved(rv.clone()),
+                )?;
+            }
+            touch_pull(&tx, pull_id)?;
+            let pull = queries::require_pull(&tx, pull_id)?;
+            log_locked(
+                &tx,
+                actor_id,
+                "pull.remove_review_requests",
+                &serde_json::json!({
+                    "repo": repo_full_name(&tx, pull.repo_id)?,
+                    "number": pull.number,
+                    "removed": removed,
+                }),
+            )?;
+            tx.commit()?;
+            Ok(pull)
+        })
+    }
+
     /// A pull's timeline, oldest first.
     pub fn list_pull_timeline(&self, pull_id: i64) -> Result<Vec<TimelineItem>> {
         self.with_conn(|conn| queries::list_timeline_for_pull(conn, pull_id))
@@ -422,6 +568,15 @@ impl World {
                 params![id],
                 queries::row_to_review,
             )?;
+            // GitHub: once a requested reviewer submits a review, they are no
+            // longer a requested reviewer. Their team's request stays. The
+            // removal leaves no log or timeline entry of its own: the
+            // `review.submit` entry below implies it, and GitHub's timeline
+            // shows only the review.
+            tx.execute(
+                "DELETE FROM review_requests WHERE pull_id = ?1 AND reviewer_id = ?2",
+                params![pull_id, author_id],
+            )?;
             touch_pull(&tx, pull_id)?;
             log_locked(
                 &tx,
@@ -539,17 +694,88 @@ fn record_timeline(
     actor_id: i64,
     kind: &TimelineKind,
 ) -> Result<()> {
-    let (kind, label) = match kind {
-        TimelineKind::Labeled(name) => ("labeled", Some(name.as_str())),
-        TimelineKind::Unlabeled(name) => ("unlabeled", Some(name.as_str())),
-        TimelineKind::ReadyForReview => ("ready_for_review", None),
+    let (kind, label, reviewer) = match kind {
+        TimelineKind::Labeled(name) => ("labeled", Some(name.as_str()), None),
+        TimelineKind::Unlabeled(name) => ("unlabeled", Some(name.as_str()), None),
+        TimelineKind::ReadyForReview => ("ready_for_review", None, None),
+        TimelineKind::ReviewRequested(rv) => ("review_requested", None, Some(rv)),
+        TimelineKind::ReviewRequestRemoved(rv) => ("review_request_removed", None, Some(rv)),
+    };
+    let (reviewer_login, team_id, team_slug) = match reviewer {
+        Some(RequestedReviewer::User(login)) => (Some(login.as_str()), None, None),
+        Some(RequestedReviewer::Team { id, slug }) => (None, Some(*id), Some(slug.as_str())),
+        None => (None, None, None),
     };
     conn.execute(
-        "INSERT INTO pull_timeline (pull_id, kind, label, actor_id, clock_unix)
-         VALUES (?1, ?2, ?3, ?4, (SELECT clock_unix FROM world WHERE id = 1))",
-        params![pull_id, kind, label, actor_id],
+        "INSERT INTO pull_timeline (pull_id, kind, label, reviewer_id, team_id, team_slug,
+                                    actor_id, clock_unix)
+         VALUES (?1, ?2, ?3, (SELECT id FROM actors WHERE login = ?4), ?5, ?6, ?7,
+                 (SELECT clock_unix FROM world WHERE id = 1))",
+        params![
+            pull_id,
+            kind,
+            label,
+            reviewer_login,
+            team_id,
+            team_slug,
+            actor_id
+        ],
     )?;
     Ok(())
+}
+
+/// A user who can be asked for a review: a person, not a bot or an
+/// organization.
+fn reviewer_user_id(conn: &Connection, login: &str) -> Result<i64> {
+    conn.query_row(
+        "SELECT id FROM actors WHERE login = ?1 AND kind = 'user'",
+        params![login],
+        |r| r.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| WorldError::InvalidReviewer(login.to_string()))
+}
+
+/// A team of the organization that owns the pull's repository; a repository
+/// a user owns has no teams to ask.
+fn reviewer_team_id(conn: &Connection, repo_id: i64, slug: &str) -> Result<i64> {
+    conn.query_row(
+        "SELECT t.id FROM teams t JOIN repos r ON r.owner_id = t.org_id
+         WHERE r.id = ?1 AND t.slug = ?2",
+        params![repo_id, slug],
+        |r| r.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| WorldError::InvalidReviewer(slug.to_string()))
+}
+
+fn insert_request(
+    conn: &Connection,
+    pull_id: i64,
+    reviewer_id: Option<i64>,
+    team_id: Option<i64>,
+) -> Result<bool> {
+    Ok(conn.execute(
+        "INSERT INTO review_requests (pull_id, reviewer_id, team_id) VALUES (?1, ?2, ?3)
+         ON CONFLICT DO NOTHING",
+        params![pull_id, reviewer_id, team_id],
+    )? == 1)
+}
+
+fn login_of(conn: &Connection, actor_id: i64) -> Result<String> {
+    Ok(conn.query_row(
+        "SELECT login FROM actors WHERE id = ?1",
+        params![actor_id],
+        |r| r.get(0),
+    )?)
+}
+
+fn slug_of(conn: &Connection, team_id: i64) -> Result<String> {
+    Ok(conn.query_row(
+        "SELECT slug FROM teams WHERE id = ?1",
+        params![team_id],
+        |r| r.get(0),
+    )?)
 }
 
 fn touch_pull(conn: &Connection, pull_id: i64) -> Result<()> {
