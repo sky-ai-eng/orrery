@@ -120,13 +120,15 @@ impl World {
     /// pair. Refused on a non-open pull, and refused when the pull is already
     /// in the target state: GitHub errors there rather than succeeding as a
     /// no-op, and a silent no-op would also leave a phantom log entry.
+    /// Ready-for-review also lands on the pull's timeline, where GitHub reports
+    /// when it happened.
     pub fn set_pull_draft(&self, pull_id: i64, actor_id: i64, draft: bool) -> Result<Pull> {
-        let action = if draft {
-            "pull.convert_to_draft"
+        let (action, timeline) = if draft {
+            ("pull.convert_to_draft", None)
         } else {
-            "pull.ready_for_review"
+            ("pull.ready_for_review", Some(TimelineKind::ReadyForReview))
         };
-        self.transition(pull_id, actor_id, action, |p| {
+        self.transition(pull_id, actor_id, action, timeline, |p| {
             if p.state != PullState::Open {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} is not open",
@@ -210,8 +212,100 @@ impl World {
         })
     }
 
+    /// Add labels to a pull, GitHub's `POST …/issues/{n}/labels`: names it
+    /// already carries (compared without case) are skipped, so only a label
+    /// that is new to the pull is logged and lands on its timeline. Every name
+    /// is validated before anything is written.
+    pub fn add_pull_labels(&self, pull_id: i64, actor_id: i64, names: &[&str]) -> Result<Pull> {
+        if let Some(bad) = names.iter().find(|n| !valid_label(n)) {
+            return Err(WorldError::InvalidLabel(bad.to_string()));
+        }
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let before = queries::require_pull(&tx, pull_id)?;
+            let mut added: Vec<&str> = Vec::new();
+            for name in names {
+                let inserted = tx.execute(
+                    "INSERT INTO pull_labels (pull_id, name) VALUES (?1, ?2)
+                     ON CONFLICT DO NOTHING",
+                    params![pull_id, name],
+                )?;
+                if inserted == 1 {
+                    record_timeline(
+                        &tx,
+                        pull_id,
+                        actor_id,
+                        &TimelineKind::Labeled(name.to_string()),
+                    )?;
+                    added.push(name);
+                }
+            }
+            if added.is_empty() {
+                return Ok(before);
+            }
+            touch_pull(&tx, pull_id)?;
+            let pull = queries::require_pull(&tx, pull_id)?;
+            log_locked(
+                &tx,
+                actor_id,
+                "pull.label",
+                &serde_json::json!({
+                    "repo": repo_full_name(&tx, pull.repo_id)?,
+                    "number": pull.number,
+                    "added": added,
+                }),
+            )?;
+            tx.commit()?;
+            Ok(pull)
+        })
+    }
+
+    /// Remove one label, GitHub's `DELETE …/issues/{n}/labels/{name}`; the
+    /// name matches without case. A label the pull does not carry is refused.
+    pub fn remove_pull_label(&self, pull_id: i64, actor_id: i64, name: &str) -> Result<Pull> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            queries::require_pull(&tx, pull_id)?;
+            let removed: Option<String> = tx
+                .query_row(
+                    "DELETE FROM pull_labels WHERE pull_id = ?1 AND name = ?2 RETURNING name",
+                    params![pull_id, name],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(removed) = removed else {
+                return Err(WorldError::NoSuchLabel(name.to_string()));
+            };
+            record_timeline(
+                &tx,
+                pull_id,
+                actor_id,
+                &TimelineKind::Unlabeled(removed.clone()),
+            )?;
+            touch_pull(&tx, pull_id)?;
+            let pull = queries::require_pull(&tx, pull_id)?;
+            log_locked(
+                &tx,
+                actor_id,
+                "pull.unlabel",
+                &serde_json::json!({
+                    "repo": repo_full_name(&tx, pull.repo_id)?,
+                    "number": pull.number,
+                    "removed": removed,
+                }),
+            )?;
+            tx.commit()?;
+            Ok(pull)
+        })
+    }
+
+    /// A pull's timeline, oldest first.
+    pub fn list_pull_timeline(&self, pull_id: i64) -> Result<Vec<TimelineItem>> {
+        self.with_conn(|conn| queries::list_timeline_for_pull(conn, pull_id))
+    }
+
     pub fn close_pull(&self, pull_id: i64, actor_id: i64) -> Result<Pull> {
-        self.transition(pull_id, actor_id, "pull.close", |p| {
+        self.transition(pull_id, actor_id, "pull.close", None, |p| {
             if p.state != PullState::Open {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} is not open",
@@ -225,7 +319,7 @@ impl World {
     }
 
     pub fn reopen_pull(&self, pull_id: i64, actor_id: i64) -> Result<Pull> {
-        self.transition(pull_id, actor_id, "pull.reopen", |p| {
+        self.transition(pull_id, actor_id, "pull.reopen", None, |p| {
             if p.merged {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} has been merged",
@@ -398,13 +492,15 @@ impl World {
         self.with_conn(|conn| queries::list_comments_for_pull(conn, pull_id))
     }
 
-    /// Shared shape of close/reopen: guard the current state, run one UPDATE,
-    /// bump `updated`, log, return the stored row.
+    /// Shared shape of close/reopen/draft: guard the current state, run one
+    /// UPDATE, record the timeline item if there is one, bump `updated`, log,
+    /// return the stored row.
     fn transition(
         &self,
         pull_id: i64,
         actor_id: i64,
         action: &str,
+        timeline: Option<TimelineKind>,
         guard: impl FnOnce(&Pull) -> Result<&'static str>,
     ) -> Result<Pull> {
         self.with_conn(|conn| {
@@ -412,6 +508,9 @@ impl World {
             let before = queries::require_pull(&tx, pull_id)?;
             let sql = guard(&before)?;
             tx.execute(sql, params![pull_id])?;
+            if let Some(kind) = &timeline {
+                record_timeline(&tx, pull_id, actor_id, kind)?;
+            }
             touch_pull(&tx, pull_id)?;
             let pull = queries::require_pull(&tx, pull_id)?;
             log_locked(
@@ -427,6 +526,30 @@ impl World {
             Ok(pull)
         })
     }
+}
+
+/// GitHub's limit on a label name.
+fn valid_label(name: &str) -> bool {
+    !name.trim().is_empty() && name.chars().count() <= 50
+}
+
+fn record_timeline(
+    conn: &Connection,
+    pull_id: i64,
+    actor_id: i64,
+    kind: &TimelineKind,
+) -> Result<()> {
+    let (kind, label) = match kind {
+        TimelineKind::Labeled(name) => ("labeled", Some(name.as_str())),
+        TimelineKind::Unlabeled(name) => ("unlabeled", Some(name.as_str())),
+        TimelineKind::ReadyForReview => ("ready_for_review", None),
+    };
+    conn.execute(
+        "INSERT INTO pull_timeline (pull_id, kind, label, actor_id, clock_unix)
+         VALUES (?1, ?2, ?3, ?4, (SELECT clock_unix FROM world WHERE id = 1))",
+        params![pull_id, kind, label, actor_id],
+    )?;
+    Ok(())
 }
 
 fn touch_pull(conn: &Connection, pull_id: i64) -> Result<()> {

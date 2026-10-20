@@ -143,6 +143,7 @@ pub fn face(
         "PUT" => ureq::put(url)
             .header("authorization", &auth)
             .send_json(body),
+        "DELETE" => ureq::delete(url).header("authorization", &auth).call(),
         other => panic!("unsupported method {other}"),
     };
     match result {

@@ -28,6 +28,10 @@ pub enum WorldError {
     NoSuchPull(i64),
     #[error("no check run with id {0}")]
     NoSuchCheckRun(i64),
+    #[error("invalid label name {0:?}: 1-50 characters, not all whitespace")]
+    InvalidLabel(String),
+    #[error("pull has no label {0:?}")]
+    NoSuchLabel(String),
     #[error("invalid state transition: {0}")]
     InvalidTransition(String),
     #[error("no actor {0:?}")]

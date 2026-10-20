@@ -1,6 +1,6 @@
-//! Pull request endpoints: open, edit/close/reopen, merge, reviews, and
-//! issue comments (a PR is an issue for commenting purposes, so the comment
-//! route lives under `/issues/`, exactly as on GitHub).
+//! Pull request endpoints: open, edit/close/reopen, merge, reviews, issue
+//! comments and labels (a PR is an issue for commenting and labelling, so
+//! those routes live under `/issues/`, exactly as on GitHub).
 
 use std::collections::BTreeMap;
 
@@ -10,7 +10,7 @@ use axum::http::{Response, StatusCode};
 use orrery_face_git::store;
 use orrery_world::{Actor, NewPull, Pull, PullState, Repo, ReviewState, WorldError};
 
-use crate::render::{comment_json, pull_json, review_json};
+use crate::render::{comment_json, label_json, pull_json, review_json};
 use crate::{
     GithubFace, github_error, internal, json_response, orrery_unsupported_field, resolve_repo,
     validation_custom, validation_invalid, validation_missing,
@@ -492,6 +492,89 @@ pub(crate) async fn create_comment(
             StatusCode::CREATED,
             comment_json(&face, &repo, &pull, &comment),
         ),
+        Err(e) => internal(e),
+    }
+}
+
+/// GitHub takes the labels to add as `{"labels": [...]}` or as a bare array.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum AddLabelsBody {
+    Wrapped {
+        labels: Vec<serde_json::Value>,
+        #[serde(flatten)]
+        rest: BTreeMap<String, serde_json::Value>,
+    },
+    Bare(Vec<serde_json::Value>),
+}
+
+/// `POST /repos/{o}/{r}/issues/{n}/labels`: answers 200 with every label the
+/// pull now carries.
+pub(crate) async fn add_labels(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
+    Extension(actor): Extension<Actor>,
+    body: Bytes,
+) -> Response<Body> {
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let pull = match pull_by_path_number(&face, &repo, &number) {
+        Ok(Some(p)) => p,
+        Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(resp) => return *resp,
+    };
+    let values = match serde_json::from_slice(&body) {
+        Ok(AddLabelsBody::Wrapped { labels, rest }) => {
+            let _ = rest;
+            labels
+        }
+        Ok(AddLabelsBody::Bare(labels)) => labels,
+        Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
+    };
+    // GitHub also takes `{"name": ...}` objects here; no consumer sends them.
+    let Some(names) = values
+        .iter()
+        .map(|v| v.as_str())
+        .collect::<Option<Vec<&str>>>()
+    else {
+        return orrery_unsupported_field("labels[] as objects");
+    };
+    match face.world.add_pull_labels(pull.id, actor.id, &names) {
+        Ok(pull) => json_response(
+            StatusCode::OK,
+            serde_json::Value::Array(pull.labels.iter().map(|n| label_json(n)).collect()),
+        ),
+        Err(WorldError::InvalidLabel(_)) => validation_invalid("Label", "name"),
+        Err(e) => internal(e),
+    }
+}
+
+/// `DELETE /repos/{o}/{r}/issues/{n}/labels/{name}`: answers 200 with the
+/// labels left, or GitHub's 404 when the pull does not carry the label.
+pub(crate) async fn remove_label(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, number, name)): UrlPath<(String, String, String, String)>,
+    Extension(actor): Extension<Actor>,
+) -> Response<Body> {
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let pull = match pull_by_path_number(&face, &repo, &number) {
+        Ok(Some(p)) => p,
+        Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(resp) => return *resp,
+    };
+    match face.world.remove_pull_label(pull.id, actor.id, &name) {
+        Ok(pull) => json_response(
+            StatusCode::OK,
+            serde_json::Value::Array(pull.labels.iter().map(|n| label_json(n)).collect()),
+        ),
+        Err(WorldError::NoSuchLabel(_)) => {
+            github_error(StatusCode::NOT_FOUND, "Label does not exist")
+        }
         Err(e) => internal(e),
     }
 }

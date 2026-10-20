@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{boot, control_post, face_ok, git, mint_actor};
+use common::{boot, control_post, face, face_ok, git, mint_actor};
 
 /// TF's `prBaseFields` (internal/github/graphql.go), verbatim.
 const PR_BASE_FIELDS: &str = r#"
@@ -954,4 +954,170 @@ async fn bot_actors_render_as_github_apps() {
         ),
         Err(403)
     );
+}
+
+/// Labels written through REST and ready-for-review through GraphQL read back
+/// through TF's full fragment: the pull's current labels, and the timeline
+/// items TF dates those transitions by.
+#[tokio::test(flavor = "multi_thread")]
+async fn tf_labels_and_timeline() {
+    let s = seed().await;
+    face_ok(
+        "POST",
+        &format!("{}/pulls", s.api),
+        &s.token,
+        serde_json::json!({ "title": "WIP", "head": "feature", "base": "main", "draft": true }),
+    );
+    let labels_url = format!("{}/issues/1/labels", s.api);
+
+    let added = face_ok(
+        "POST",
+        &labels_url,
+        &s.bob_token,
+        serde_json::json!({ "labels": ["bug", "needs-review"] }),
+    );
+    let names: Vec<&str> = added
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["bug", "needs-review"]);
+    let bare = face_ok(
+        "POST",
+        &labels_url,
+        &s.bob_token,
+        serde_json::json!(["triage"]),
+    );
+    assert_eq!(
+        bare.as_array().unwrap().len(),
+        3,
+        "a bare array is the same request"
+    );
+    assert_eq!(
+        face(
+            "POST",
+            &labels_url,
+            &s.bob_token,
+            serde_json::json!({ "labels": [""] })
+        ),
+        Err(422)
+    );
+    assert_eq!(
+        face(
+            "POST",
+            &labels_url,
+            &s.bob_token,
+            serde_json::json!({ "labels": [{ "name": "x" }] })
+        ),
+        Err(422),
+        "label objects are refused as not mocked"
+    );
+
+    let left = face_ok(
+        "DELETE",
+        &format!("{labels_url}/bug"),
+        &s.bob_token,
+        serde_json::json!({}),
+    );
+    assert_eq!(left.as_array().unwrap().len(), 2);
+    assert_eq!(
+        face(
+            "DELETE",
+            &format!("{labels_url}/bug"),
+            &s.bob_token,
+            serde_json::json!({})
+        ),
+        Err(404)
+    );
+    assert_eq!(
+        face(
+            "POST",
+            &format!("{}/issues/99/labels", s.api),
+            &s.bob_token,
+            serde_json::json!(["x"])
+        ),
+        Err(404)
+    );
+
+    let rest = face_ok(
+        "GET",
+        &format!("{}/pulls/1", s.api),
+        &s.token,
+        serde_json::json!({}),
+    );
+    let rest_names: Vec<&str> = rest["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(rest_names, ["needs-review", "triage"]);
+
+    let ready = "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } } }";
+    let resp = gql(
+        &s.inst.base,
+        &s.token,
+        ready,
+        serde_json::json!({ "id": "O_pull_1" }),
+    );
+    assert!(resp.get("errors").is_none(), "unexpected errors: {resp}");
+
+    let query = format!(
+        "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ...PRFullFields }} }} {}",
+        pr_full_fragment()
+    );
+    let resp = gql(
+        &s.inst.base,
+        &s.token,
+        &query,
+        serde_json::json!({ "ids": ["O_pull_1"] }),
+    );
+    assert!(resp.get("errors").is_none(), "unexpected errors: {resp}");
+    let pr = &resp["data"]["nodes"][0];
+    assert_eq!(
+        pr["labels"]["nodes"],
+        serde_json::json!([{ "name": "needs-review" }, { "name": "triage" }])
+    );
+    // Nothing here advances the clock, so every item is dated at its start.
+    let clock = "2020-01-01T00:00:00Z";
+    let timeline: Vec<(String, Option<String>)> = pr["timelineItems"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| {
+            assert_eq!(n["createdAt"], clock);
+            (
+                n["__typename"].as_str().unwrap().to_string(),
+                n["label"]["name"].as_str().map(str::to_string),
+            )
+        })
+        .collect();
+    assert_eq!(
+        timeline,
+        [
+            ("LabeledEvent".to_string(), Some("bug".to_string())),
+            ("LabeledEvent".to_string(), Some("needs-review".to_string())),
+            ("LabeledEvent".to_string(), Some("triage".to_string())),
+            ("UnlabeledEvent".to_string(), Some("bug".to_string())),
+            ("ReadyForReviewEvent".to_string(), None),
+        ]
+    );
+
+    let only_ready = gql(
+        &s.inst.base,
+        &s.token,
+        "query($id: ID!) { node(id: $id) { ... on PullRequest { timelineItems(last: 1, itemTypes: [READY_FOR_REVIEW_EVENT, UNLABELED_EVENT]) { pageInfo { hasPreviousPage } nodes { __typename } } } } }",
+        serde_json::json!({ "id": "O_pull_1" }),
+    );
+    assert!(
+        only_ready.get("errors").is_none(),
+        "unexpected errors: {only_ready}"
+    );
+    let items = &only_ready["data"]["node"]["timelineItems"];
+    assert_eq!(
+        items["nodes"],
+        serde_json::json!([{ "__typename": "ReadyForReviewEvent" }])
+    );
+    assert_eq!(items["pageInfo"]["hasPreviousPage"], true);
 }

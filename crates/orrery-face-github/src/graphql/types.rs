@@ -335,7 +335,7 @@ pub struct Ref {
     pub id: ID,
 }
 
-// ---- labels / comments / timeline (write surfaces not yet mocked) ---------
+// ---- labels / comments / timeline -----------------------------------------
 
 #[derive(SimpleObject)]
 pub struct Label {
@@ -886,11 +886,12 @@ impl PullRequest {
         }
     }
 
-    /// Labels have no write surface yet, so every pull truthfully has none.
-    async fn labels(&self, _first: Option<i32>) -> Option<LabelConnection> {
+    async fn labels(&self, first: Option<i32>) -> Option<LabelConnection> {
+        let names = self.pull.labels.clone();
+        let (names, page_info) = take_first(names, first);
         Some(LabelConnection {
-            page_info: PageInfo::default(),
-            nodes: Vec::new(),
+            page_info,
+            nodes: names.into_iter().map(|name| Label { name }).collect(),
         })
     }
 
@@ -937,17 +938,57 @@ impl PullRequest {
         self.pull.closed_clock_unix.map(rfc3339)
     }
 
-    /// No timeline events exist because none of the actions that would mint
-    /// them (labeling, review requests, ready-for-review before this commit's
-    /// log format) have write surfaces that record them yet.
+    /// Review requests are not modelled, so no `ReviewRequestedEvent` exists.
     async fn timeline_items(
         &self,
-        _last: Option<i32>,
-        _item_types: Option<Vec<PullRequestTimelineItemsItemType>>,
-    ) -> PullRequestTimelineItemsConnection {
-        PullRequestTimelineItemsConnection {
-            page_info: PageInfo::default(),
-            nodes: Vec::new(),
+        ctx: &Context<'_>,
+        first: Option<i32>,
+        last: Option<i32>,
+        before: Option<String>,
+        item_types: Option<Vec<PullRequestTimelineItemsItemType>>,
+    ) -> Result<PullRequestTimelineItemsConnection, Error> {
+        let mut items = face(ctx)
+            .world
+            .list_pull_timeline(self.pull.id)
+            .map_err(internal)?;
+        if let Some(types) = item_types {
+            items.retain(|i| types.contains(&timeline_item_type(&i.kind)));
+        }
+        let (items, page_info) = page("timelineItems", items, |i| i.id, first, last, before)?;
+        Ok(PullRequestTimelineItemsConnection {
+            page_info,
+            nodes: items.into_iter().map(timeline_item).collect(),
+        })
+    }
+}
+
+fn timeline_item_type(kind: &world::TimelineKind) -> PullRequestTimelineItemsItemType {
+    match kind {
+        world::TimelineKind::Labeled(_) => PullRequestTimelineItemsItemType::LabeledEvent,
+        world::TimelineKind::Unlabeled(_) => PullRequestTimelineItemsItemType::UnlabeledEvent,
+        world::TimelineKind::ReadyForReview => {
+            PullRequestTimelineItemsItemType::ReadyForReviewEvent
+        }
+    }
+}
+
+fn timeline_item(item: world::TimelineItem) -> PullRequestTimelineItems {
+    let created_at = rfc3339(item.clock_unix);
+    match item.kind {
+        world::TimelineKind::Labeled(name) => {
+            PullRequestTimelineItems::LabeledEvent(LabeledEvent {
+                created_at,
+                label: Label { name },
+            })
+        }
+        world::TimelineKind::Unlabeled(name) => {
+            PullRequestTimelineItems::UnlabeledEvent(UnlabeledEvent {
+                created_at,
+                label: Label { name },
+            })
+        }
+        world::TimelineKind::ReadyForReview => {
+            PullRequestTimelineItems::ReadyForReviewEvent(ReadyForReviewEvent { created_at })
         }
     }
 }

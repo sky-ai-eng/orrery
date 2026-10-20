@@ -16,7 +16,9 @@ pub(crate) const REPO_SELECT: &str = "SELECT r.id, a.login, r.name, r.descriptio
 pub(crate) const PULL_SELECT: &str = "SELECT p.id, p.repo_id, p.number, p.title, p.body,
     au.login, p.state, p.draft, p.head_ref, p.head_sha, p.base_ref, p.base_sha,
     p.merged, p.merge_commit_sha, mb.login, p.created_clock_unix, p.updated_clock_unix,
-    p.closed_clock_unix
+    p.closed_clock_unix,
+    (SELECT json_group_array(name) FROM (
+        SELECT name FROM pull_labels WHERE pull_id = p.id ORDER BY name COLLATE NOCASE))
     FROM pulls p
     JOIN actors au ON au.id = p.author_id
     LEFT JOIN actors mb ON mb.id = p.merged_by_id";
@@ -76,6 +78,9 @@ pub(crate) fn row_to_pull(r: &Row<'_>) -> rusqlite::Result<Pull> {
         created_clock_unix: r.get(15)?,
         updated_clock_unix: r.get(16)?,
         closed_clock_unix: r.get(17)?,
+        labels: serde_json::from_str(&r.get::<_, String>(18)?).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(18, rusqlite::types::Type::Text, Box::new(e))
+        })?,
     })
 }
 
@@ -210,6 +215,37 @@ pub(crate) fn list_comments_for_pull(conn: &Connection, pull_id: i64) -> Result<
         "{COMMENT_SELECT} WHERE c.pull_id = ?1 ORDER BY c.id"
     ))?;
     let rows = stmt.query_map(params![pull_id], row_to_comment)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn list_timeline_for_pull(conn: &Connection, pull_id: i64) -> Result<Vec<TimelineItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.pull_id, t.kind, t.label, a.login, t.clock_unix
+         FROM pull_timeline t JOIN actors a ON a.id = t.actor_id
+         WHERE t.pull_id = ?1 ORDER BY t.id",
+    )?;
+    let rows = stmt.query_map(params![pull_id], |r| {
+        let label: Option<String> = r.get(3)?;
+        let kind = match (r.get::<_, String>(2)?.as_str(), label) {
+            ("labeled", Some(name)) => TimelineKind::Labeled(name),
+            ("unlabeled", Some(name)) => TimelineKind::Unlabeled(name),
+            ("ready_for_review", None) => TimelineKind::ReadyForReview,
+            (other, _) => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    format!("timeline kind {other:?} with that label").into(),
+                ));
+            }
+        };
+        Ok(TimelineItem {
+            id: r.get(0)?,
+            pull_id: r.get(1)?,
+            kind,
+            actor_login: r.get(4)?,
+            clock_unix: r.get(5)?,
+        })
+    })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 

@@ -5,7 +5,7 @@
 
 use orrery_world::{
     ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX, NewCheckRun, NewPull,
-    Pull, PullState, ReviewState, World, WorldError,
+    Pull, PullState, ReviewState, TimelineKind, World, WorldError,
 };
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -301,4 +301,127 @@ fn check_run_create_and_patch_return_stored_rows() {
             .collect();
     assert!(actions.iter().any(|a| a == "check_run.create"));
     assert!(actions.iter().any(|a| a == "check_run.update"));
+}
+
+fn timeline_kinds(f: &Fixture, pull_id: i64) -> Vec<TimelineKind> {
+    f.w.list_pull_timeline(pull_id)
+        .unwrap()
+        .into_iter()
+        .map(|i| i.kind)
+        .collect()
+}
+
+#[test]
+fn labels_added_and_removed_land_on_the_pull_and_its_timeline() {
+    let f = fixture();
+    let pull = open_pull(&f, "feature", SHA_B);
+    f.w.advance_clock(60, f.alice).unwrap();
+
+    let labelled =
+        f.w.add_pull_labels(pull.id, f.bob, &["bug", "Bug", "needs-review"])
+            .unwrap();
+    assert_eq!(labelled, f.w.pull_by_id(pull.id).unwrap().unwrap());
+    assert_eq!(
+        labelled.labels,
+        vec!["bug", "needs-review"],
+        "a repeat in another case is the same label"
+    );
+    assert_eq!(labelled.updated_clock_unix, f.w.clock().unwrap());
+
+    let again = f.w.add_pull_labels(pull.id, f.bob, &["BUG"]).unwrap();
+    assert_eq!(
+        again, labelled,
+        "a label the pull carries is skipped without a write"
+    );
+
+    let removed = f.w.remove_pull_label(pull.id, f.bob, "BUG").unwrap();
+    assert_eq!(removed, f.w.pull_by_id(pull.id).unwrap().unwrap());
+    assert_eq!(removed.labels, vec!["needs-review"]);
+    assert!(matches!(
+        f.w.remove_pull_label(pull.id, f.bob, "bug"),
+        Err(WorldError::NoSuchLabel(_))
+    ));
+
+    assert_eq!(
+        timeline_kinds(&f, pull.id),
+        vec![
+            TimelineKind::Labeled("bug".into()),
+            TimelineKind::Labeled("needs-review".into()),
+            TimelineKind::Unlabeled("bug".into()),
+        ],
+        "the unlabel records the stored name, not the request's casing"
+    );
+    let items = f.w.list_pull_timeline(pull.id).unwrap();
+    assert!(
+        items
+            .iter()
+            .all(|i| i.actor_login == "bob" && i.clock_unix == f.w.clock().unwrap())
+    );
+
+    let actions: Vec<(String, serde_json::Value)> =
+        f.w.log_after(0, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.action.starts_with("pull.") && e.action.contains("label"))
+            .map(|e| (e.action, e.details))
+            .collect();
+    assert_eq!(
+        actions.len(),
+        2,
+        "one entry per write that changed something: {actions:?}"
+    );
+    assert_eq!(actions[0].0, "pull.label");
+    assert_eq!(
+        actions[0].1["added"],
+        serde_json::json!(["bug", "needs-review"])
+    );
+    assert_eq!(actions[1].0, "pull.unlabel");
+    assert_eq!(actions[1].1["removed"], "bug");
+}
+
+#[test]
+fn an_invalid_label_name_refuses_the_whole_request() {
+    let f = fixture();
+    let pull = open_pull(&f, "feature", SHA_B);
+    let long = "x".repeat(51);
+    for bad in ["", "   ", long.as_str()] {
+        assert!(
+            matches!(
+                f.w.add_pull_labels(pull.id, f.alice, &["ok", bad]),
+                Err(WorldError::InvalidLabel(_))
+            ),
+            "{bad:?} accepted"
+        );
+    }
+    assert!(f.w.pull_by_id(pull.id).unwrap().unwrap().labels.is_empty());
+    assert!(timeline_kinds(&f, pull.id).is_empty());
+    assert!(matches!(
+        f.w.add_pull_labels(9999, f.alice, &["ok"]),
+        Err(WorldError::NoSuchPull(_))
+    ));
+}
+
+#[test]
+fn ready_for_review_lands_on_the_timeline_and_convert_to_draft_does_not() {
+    let f = fixture();
+    let draft =
+        f.w.create_pull(NewPull {
+            repo_id: f.repo,
+            author_id: f.alice,
+            title: "wip",
+            body: None,
+            head_ref: "wip",
+            head_sha: SHA_B,
+            base_ref: "main",
+            base_sha: SHA_A,
+            draft: true,
+        })
+        .unwrap();
+    f.w.set_pull_draft(draft.id, f.alice, false).unwrap();
+    f.w.set_pull_draft(draft.id, f.alice, true).unwrap();
+    assert!(f.w.set_pull_draft(draft.id, f.alice, true).is_err());
+    assert_eq!(
+        timeline_kinds(&f, draft.id),
+        vec![TimelineKind::ReadyForReview]
+    );
 }

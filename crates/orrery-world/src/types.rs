@@ -113,6 +113,25 @@ pub struct Pull {
     pub created_clock_unix: i64,
     pub updated_clock_unix: i64,
     pub closed_clock_unix: Option<i64>,
+    /// The pull's labels, ordered by name without regard to case.
+    pub labels: Vec<String>,
+}
+
+/// One item on a pull's timeline (see `pull_timeline` in the schema).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TimelineItem {
+    pub id: i64,
+    pub pull_id: i64,
+    pub kind: TimelineKind,
+    pub actor_login: String,
+    pub clock_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum TimelineKind {
+    Labeled(String),
+    Unlabeled(String),
+    ReadyForReview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

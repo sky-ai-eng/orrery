@@ -17,7 +17,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{Response, StatusCode};
-use axum::routing::{get, patch, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use orrery_face_git::GitFace;
 use orrery_world::{Actor, ActorKind, Repo, World, WorldError};
 
@@ -75,6 +75,14 @@ pub fn router(face: GithubFace) -> Router {
         .route(
             "/repos/{owner}/{repo}/issues/{number}/comments",
             get(reads::list_issue_comments).post(pulls::create_comment),
+        )
+        .route(
+            "/repos/{owner}/{repo}/issues/{number}/labels",
+            post(pulls::add_labels),
+        )
+        .route(
+            "/repos/{owner}/{repo}/issues/{number}/labels/{name}",
+            delete(pulls::remove_label),
         )
         .route(
             "/repos/{owner}/{repo}/commits/{sha}/check-runs",

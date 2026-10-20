@@ -183,6 +183,8 @@ Updated at TF commit `a53a770e` (2026-10-20), where triage-factory's poll end-to
 
 `prFullFragment` (`graphql.go:107`) = base + commits with `statusCheckRollup{contexts(first:100){pageInfo.hasNextPage, nodes{__typename, ...on CheckRun{databaseId, name, status, conclusion, completedAt, detailsUrl, checkSuite.workflowRun.databaseId}}}}` + labels/comments/timestamps + `timelineItems(last:20, itemTypes:[LABELED_EVENT, UNLABELED_EVENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT]){nodes{__typename, createdAt, label.name, requestedReviewer{User.login | Team.slug + Team.organization.login}}}`. `StatusContext` union members are decoded then dropped — legacy commit statuses are silently ignored; only CheckRun survives.
 
+**What Orrery serves for `timelineItems`:** `LabeledEvent` and `UnlabeledEvent` from the label writes in §4.1, and `ReadyForReviewEvent` from `markPullRequestReadyForReview`, each dated at the world clock when it happened. `itemTypes` filters, and `first`/`last`/`before` page as on `reviews`. Review requests are not modelled, so no `ReviewRequestedEvent` exists. `labels(first:)` returns the pull's labels ordered by name.
+
 ### TF's two GraphQL mutations
 
 `markPullRequestReadyForReview` and `convertPullRequestToDraft` (`status.go:198-248`; approval + dashboard drag): each preceded by a REST PR read for `node_id`; response discarded.
@@ -207,6 +209,12 @@ Updated at TF commit `a53a770e` (2026-10-20), where triage-factory's poll end-to
 | `DELETE` comment (two-path probe) | `pulls.go:826` ← comment-delete (numeric id) | Same two paths; no body. |
 
 Affirmatively absent: TF posts no comments/labels/statuses/check-runs of its own accord; no RUN_URL is ever written to GitHub by Go code (`{{RUN_URL}}` is a prompt placeholder only); poller/tracker/reconcile/curator/grantmirror are read-only.
+
+**Authoring writes beyond TF's inventory**, which TF's poll end-to-end test uses to build its world:
+- `POST`/`PATCH .../check-runs` (`usage.md`).
+- `POST /repos/{o}/{r}/issues/{n}/labels`, taking `{"labels": [names]}` or a bare array of names, answering 200 with the issue's labels. Label objects (`{"name": ...}`) are refused as not mocked. A name already on the pull is skipped, matched without case, and an empty or longer-than-50-character name is a 422.
+- `DELETE /repos/{o}/{r}/issues/{n}/labels/{name}`, answering 200 with the labels left, or 404 "Label does not exist".
+- Orrery keeps labels per pull, not per repository: a label object carries `name`, `color` `ededed` (what GitHub gives a label it creates on first use), `default` false and `description` null, and no `id`.
 
 ### 4.2 `tfac exec gh` verbs (agent-initiated, host-executed)
 

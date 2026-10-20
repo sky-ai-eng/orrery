@@ -104,7 +104,7 @@ pub(crate) fn pull_json(
             "user": actor_json(owner),
             "repo": repo_json(face, repo, owner),
         },
-        "labels": [],
+        "labels": pull.labels.iter().map(|n| label_json(n)).collect::<Vec<_>>(),
         "requested_reviewers": [],
         "requested_teams": [],
         "assignees": [],
@@ -208,4 +208,16 @@ pub(crate) fn rfc3339(unix: i64) -> String {
     jiff::Timestamp::from_second(unix)
         .map(|t| t.to_string())
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+/// GitHub's label object, holding what a pull's label carries. Orrery keeps
+/// no repository labels, so there is no id, and the colour is the one GitHub
+/// gives a label it creates on first use.
+pub(crate) fn label_json(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "color": "ededed",
+        "default": false,
+        "description": serde_json::Value::Null,
+    })
 }

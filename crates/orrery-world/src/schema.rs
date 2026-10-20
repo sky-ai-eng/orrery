@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::{Result, WorldError};
 
 /// Bumped on every schema change.
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+pub(crate) const SCHEMA_VERSION: i64 = 2;
 
 // State vocabulary is neutral (rule 9: vendor-neutral state, vendor faces) —
 // faces render casing like "APPROVED" or "CHANGES_REQUESTED" at the wire,
@@ -106,6 +106,27 @@ const SCHEMA: &str = r#"
         updated_clock_unix INTEGER NOT NULL,
         closed_clock_unix  INTEGER,
         UNIQUE (repo_id, number)
+    ) STRICT;
+
+    -- A pull's current labels. GitHub keeps labels per repository and creates
+    -- one when it is first added to an issue; Orrery keeps only the names on
+    -- each pull until a consumer reads a repository's labels.
+    CREATE TABLE pull_labels (
+        pull_id INTEGER NOT NULL REFERENCES pulls(id),
+        name    TEXT NOT NULL COLLATE NOCASE,
+        PRIMARY KEY (pull_id, name)
+    ) STRICT;
+
+    -- What happened to a pull that its current state no longer shows: GitHub's
+    -- timeline items. `label` is set exactly for the label kinds.
+    CREATE TABLE pull_timeline (
+        id         INTEGER PRIMARY KEY,
+        pull_id    INTEGER NOT NULL REFERENCES pulls(id),
+        kind       TEXT NOT NULL CHECK (kind IN ('labeled', 'unlabeled', 'ready_for_review')),
+        label      TEXT,
+        actor_id   INTEGER NOT NULL REFERENCES actors(id),
+        clock_unix INTEGER NOT NULL,
+        CHECK ((kind IN ('labeled', 'unlabeled')) = (label IS NOT NULL))
     ) STRICT;
 
     CREATE TABLE reviews (
