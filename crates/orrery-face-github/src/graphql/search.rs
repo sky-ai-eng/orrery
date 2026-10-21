@@ -135,7 +135,7 @@ pub fn eval(
             continue;
         }
         if let Some(cut) = q.closed_after
-            && !pull.closed_clock_unix.is_some_and(|t| t >= cut)
+            && pull.closed_clock_unix.is_none_or(|t| t < cut)
         {
             continue;
         }
