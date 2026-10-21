@@ -50,6 +50,8 @@ pub enum WorldError {
     InvalidTransition(String),
     #[error("no actor {0:?}")]
     NoSuchActor(String),
+    #[error("the system actor holds no token")]
+    SystemActorToken,
     #[error("invalid emails: {0}")]
     InvalidEmails(String),
     #[error("invalid OAuth app {field}: {message}")]
@@ -57,6 +59,8 @@ pub enum WorldError {
         field: &'static str,
         message: String,
     },
+    #[error("no OAuth app with client id {0:?}")]
+    NoSuchOAuthApp(String),
     #[error("the client id and secret do not name an OAuth app")]
     OAuthClientCredentials,
     #[error("the authorization code is unknown, already used, or expired")]

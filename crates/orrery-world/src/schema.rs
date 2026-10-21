@@ -14,7 +14,7 @@ use crate::{Result, WorldError};
 
 /// The version a database is at once the baseline is applied, and the oldest
 /// one this binary migrates from.
-pub const BASELINE_VERSION: i64 = 4;
+pub const BASELINE_VERSION: i64 = 5;
 
 /// Forward migrations, oldest first, each one SQL batch. `MIGRATIONS[i]`
 /// takes a database from version `BASELINE_VERSION + i` to the next.
@@ -45,12 +45,15 @@ const BASELINE: &str = r#"
     ) STRICT;
 
     -- `origin` is what a token was derived from, which its value cannot say:
-    -- `actor` for the token minted with its actor, `oauth:{code_id}` for one
-    -- an authorization code was exchanged for. Re-keying re-derives from it.
+    -- `actor` for the token minted with its actor, `actor:{n}` for the nth
+    -- one issued for it since, `oauth:{code_id}` for one an authorization
+    -- code was exchanged for. Re-keying re-derives from it.
     CREATE TABLE tokens (
         token              TEXT PRIMARY KEY,
         actor_id           INTEGER NOT NULL REFERENCES actors(id),
-        origin             TEXT NOT NULL CHECK (origin = 'actor' OR origin GLOB 'oauth:[1-9]*'),
+        origin             TEXT NOT NULL CHECK (origin = 'actor'
+                                                OR origin GLOB 'actor:[1-9]*'
+                                                OR origin GLOB 'oauth:[1-9]*'),
         created_clock_unix INTEGER NOT NULL
     ) STRICT;
 
@@ -91,6 +94,17 @@ const BASELINE: &str = r#"
         client_secret      TEXT NOT NULL,
         callback_url       TEXT NOT NULL,
         created_clock_unix INTEGER NOT NULL
+    ) STRICT;
+
+    -- Client secrets issued for an app after it was registered, `n` counting
+    -- from 1. The secret issued at registration stays in `oauth_apps`, and
+    -- every one of them is accepted.
+    CREATE TABLE oauth_app_secrets (
+        app_id             INTEGER NOT NULL REFERENCES oauth_apps(id),
+        n                  INTEGER NOT NULL CHECK (n >= 1),
+        secret             TEXT NOT NULL,
+        created_clock_unix INTEGER NOT NULL,
+        PRIMARY KEY (app_id, n)
     ) STRICT;
 
     -- An authorization grant: issued when an actor authorizes an app, spent

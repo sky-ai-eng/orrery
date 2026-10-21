@@ -212,18 +212,25 @@ fn fork_is_isolated_from_the_source() {
 struct Seeded {
     alice: orrery_world::Actor,
     alice_token: String,
+    issued_token: String,
     client_id: String,
     client_secret: String,
+    issued_secret: String,
     oauth_token: String,
     pending_code: String,
 }
 
-/// Alice, an OAuth app, a code she authorized and exchanged, and a second
-/// code still waiting to be.
+/// Alice with a token issued beside her first, an OAuth app with a client
+/// secret issued beside its first, a code she authorized and exchanged, and a
+/// second code still waiting to be.
 fn seed(world: &World) -> Seeded {
     let (alice, alice_token) = world.create_actor("alice", ActorKind::User).unwrap();
+    let (_, issued_token) = world.issue_actor_token("alice", alice.id).unwrap();
     let app = world
         .create_oauth_app("Sign-in", "https://auth.test/callback", alice.id)
+        .unwrap();
+    let issued_secret = world
+        .issue_oauth_client_secret(&app.client_id, alice.id)
         .unwrap();
     let issue = || {
         world
@@ -239,8 +246,10 @@ fn seed(world: &World) -> Seeded {
     Seeded {
         alice,
         alice_token,
+        issued_token,
         client_id: app.client_id,
         client_secret: app.client_secret,
+        issued_secret,
         oauth_token,
         pending_code,
     }
@@ -270,10 +279,14 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
     let fork = World::open(&forked_root).unwrap();
 
     // Tokens: the source's are refused, the re-derived ones act as alice.
-    for token in [&source.alice_token, &source.oauth_token] {
+    for token in [
+        &source.alice_token,
+        &source.issued_token,
+        &source.oauth_token,
+    ] {
         assert!(fork.actor_by_token(token).unwrap().is_none(), "{token}");
     }
-    for token in [&twin.alice_token, &twin.oauth_token] {
+    for token in [&twin.alice_token, &twin.issued_token, &twin.oauth_token] {
         assert_eq!(
             fork.actor_by_token(token).unwrap().as_ref(),
             Some(&source.alice)
@@ -288,19 +301,16 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
         .unwrap();
     assert_eq!(app.client_secret, twin.client_secret);
     assert_ne!(app.client_secret, source.client_secret);
-    assert!(matches!(
-        fork.exchange_oauth_code(
-            &source.client_id,
-            &source.client_secret,
-            &twin.pending_code,
-            None
-        ),
-        Err(WorldError::OAuthClientCredentials)
-    ));
+    for secret in [&source.client_secret, &source.issued_secret] {
+        assert!(matches!(
+            fork.exchange_oauth_code(&source.client_id, secret, &twin.pending_code, None),
+            Err(WorldError::OAuthClientCredentials)
+        ));
+    }
 
     // The pending code: the source's value is dead in the fork, the
-    // re-derived one exchanges, and the token it buys means nothing to the
-    // source.
+    // re-derived one exchanges under the re-derived issued secret, and the
+    // token it buys means nothing to the source.
     assert!(matches!(
         fork.exchange_oauth_code(
             &app.client_id,
@@ -311,7 +321,12 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
         Err(WorldError::OAuthBadCode)
     ));
     let exchanged = fork
-        .exchange_oauth_code(&app.client_id, &app.client_secret, &twin.pending_code, None)
+        .exchange_oauth_code(
+            &app.client_id,
+            &twin.issued_secret,
+            &twin.pending_code,
+            None,
+        )
         .unwrap();
     assert_eq!(exchanged.actor, source.alice);
     assert!(
@@ -321,11 +336,34 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
             .is_none()
     );
 
-    // The source is untouched.
+    // Credentials issued in the fork are the twin's, and work only there.
+    let (_, fork_token) = fork.issue_actor_token("alice", source.alice.id).unwrap();
+    let (_, twin_token) = twin_world
+        .issue_actor_token("alice", twin.alice.id)
+        .unwrap();
+    assert_eq!(fork_token, twin_token);
     assert_eq!(
-        inst.world.actor_by_token(&source.alice_token).unwrap(),
+        fork.actor_by_token(&fork_token).unwrap(),
         Some(source.alice.clone())
     );
+    assert!(inst.world.actor_by_token(&fork_token).unwrap().is_none());
+    let fork_secret_issued = fork
+        .issue_oauth_client_secret(&app.client_id, source.alice.id)
+        .unwrap();
+    assert_eq!(
+        fork_secret_issued,
+        twin_world
+            .issue_oauth_client_secret(&twin.client_id, twin.alice.id)
+            .unwrap()
+    );
+
+    // The source is untouched.
+    for token in [&source.alice_token, &source.issued_token] {
+        assert_eq!(
+            inst.world.actor_by_token(token).unwrap(),
+            Some(source.alice.clone())
+        );
+    }
 
     // One logged action, attributed to the engine, naming no credential.
     let log = fork.log_after(0, 500).unwrap();
@@ -334,15 +372,24 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
     assert_eq!(rekeys[0].actor_login, "orrery");
     assert_eq!(
         rekeys[0].details,
-        serde_json::json!({ "tokens": 2, "oauth_apps": 1, "oauth_codes": 1 })
+        serde_json::json!({
+            "tokens": 3,
+            "oauth_apps": 1,
+            "oauth_app_secrets": 1,
+            "oauth_codes": 1,
+        })
     );
     let wire = serde_json::to_string(&log).unwrap();
     for secret in [
         &"c3".repeat(32),
         &twin.alice_token,
+        &twin.issued_token,
         &twin.oauth_token,
         &twin.client_secret,
+        &twin.issued_secret,
         &twin.pending_code,
+        &fork_token,
+        &fork_secret_issued,
     ] {
         assert!(!wire.contains(secret.as_str()), "the log leaks {secret}");
     }

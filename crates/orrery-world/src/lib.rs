@@ -179,12 +179,16 @@ impl World {
                 true => WorldError::ActorExists(login.to_string()),
                 false => WorldError::from(e),
             })?;
-        let token =
-            credentials::actor_token(&credentials::world_secret(&conn)?, &actor.login, actor.id);
+        let token = credentials::actor_token(
+            &credentials::world_secret(&conn)?,
+            &actor.login,
+            actor.id,
+            0,
+        );
         conn.execute(
             "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
              VALUES (?1, ?2, ?3, ?4)",
-            params![token, actor.id, credentials::TokenOrigin::Actor, clock],
+            params![token, actor.id, credentials::TokenOrigin::Actor(0), clock],
         )?;
         identity::insert_email(&conn, actor.id, &identity::default_email(&actor.login))?;
         log_locked(
@@ -193,6 +197,58 @@ impl World {
             "actor.create",
             &serde_json::json!({ "login": actor.login, "kind": kind.as_str() }),
         )?;
+        Ok((actor, token))
+    }
+
+    /// Issue another token for an existing actor. A stored token is never
+    /// read back, so this is how anyone gets one for an actor they did not
+    /// create, as in a world re-keyed at its creation. Every token issued
+    /// before stays valid. `by` is the actor the action log attributes the
+    /// issue to.
+    pub fn issue_actor_token(&self, login: &str, by: i64) -> Result<(Actor, String)> {
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction()?;
+        let actor = tx
+            .query_row(
+                &format!("{} WHERE login = ?1", queries::ACTOR_SELECT),
+                params![login],
+                queries::row_to_actor,
+            )
+            .optional()?
+            .ok_or_else(|| WorldError::NoSuchActor(login.to_string()))?;
+        if actor.kind == ActorKind::System {
+            return Err(WorldError::SystemActorToken);
+        }
+        let n: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(CAST(substr(origin, 7) AS INTEGER)), 0) + 1
+             FROM tokens WHERE actor_id = ?1 AND origin GLOB 'actor:*'",
+            params![actor.id],
+            |r| r.get(0),
+        )?;
+        let token: String = tx.query_row(
+            "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
+             VALUES (?1, ?2, ?3, ?4)
+             RETURNING token",
+            params![
+                credentials::actor_token(
+                    &credentials::world_secret(&tx)?,
+                    &actor.login,
+                    actor.id,
+                    n
+                ),
+                actor.id,
+                credentials::TokenOrigin::Actor(n),
+                queries::clock(&tx)?
+            ],
+            |r| r.get(0),
+        )?;
+        log_locked(
+            &tx,
+            by,
+            "actor.token.issue",
+            &serde_json::json!({ "login": actor.login, "n": n }),
+        )?;
+        tx.commit()?;
         Ok((actor, token))
     }
 

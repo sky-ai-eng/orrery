@@ -100,16 +100,23 @@ fn the_same_secret_and_calls_mint_the_same_credentials() {
     let run = || {
         let (_dir, w) = keyed(&secret);
         let (alice, token) = w.create_actor("alice", ActorKind::User).unwrap();
+        let (_, issued_token) = w.issue_actor_token("alice", alice.id).unwrap();
         let app = w
             .create_oauth_app("Sign-in", "https://auth.test/callback", alice.id)
+            .unwrap();
+        let issued_secret = w
+            .issue_oauth_client_secret(&app.client_id, alice.id)
             .unwrap();
         let code = w
             .issue_oauth_code(&app, &alice, "https://auth.test/callback", "user")
             .unwrap();
         let oauth = w
-            .exchange_oauth_code(&app.client_id, &app.client_secret, &code, None)
+            .exchange_oauth_code(&app.client_id, &issued_secret, &code, None)
             .unwrap();
-        (token, app.client_id, app.client_secret, code, oauth.token)
+        (
+            [token, issued_token, oauth.token],
+            [app.client_id, app.client_secret, issued_secret, code],
+        )
     };
     assert_eq!(run(), run());
 }
@@ -126,6 +133,56 @@ fn the_world_secret_never_reaches_the_log() {
     );
     assert!(!log.contains(&"ab".repeat(32)), "{log}");
     assert!(!log.contains(&token), "{log}");
+}
+
+#[test]
+fn an_issued_token_acts_as_its_actor_beside_every_earlier_one() {
+    let (_dir, w) = fresh();
+    let sys = w.actor_by_login("orrery").unwrap().unwrap();
+    let (alice, created) = w.create_actor("alice", ActorKind::User).unwrap();
+    let (actor, first) = w.issue_actor_token("alice", sys.id).unwrap();
+    assert_eq!(actor, alice);
+    // The login is matched as GitHub matches it, and the derivation uses the
+    // stored one.
+    let (_, second) = w.issue_actor_token("ALICE", sys.id).unwrap();
+    assert!(
+        first.starts_with("orr_"),
+        "tokens are visibly fake: {first}"
+    );
+    assert_ne!(first, second);
+    for token in [&created, &first, &second] {
+        assert_eq!(w.actor_by_token(token).unwrap().as_ref(), Some(&alice));
+    }
+
+    // Another actor's count is its own, and its tokens are its own.
+    let (bob, _) = w.create_actor("bob", ActorKind::User).unwrap();
+    let (_, bobs) = w.issue_actor_token("bob", sys.id).unwrap();
+    assert_eq!(w.actor_by_token(&bobs).unwrap(), Some(bob));
+
+    assert!(matches!(
+        w.issue_actor_token("ghost", sys.id),
+        Err(WorldError::NoSuchActor(_))
+    ));
+    assert!(matches!(
+        w.issue_actor_token("orrery", sys.id),
+        Err(WorldError::SystemActorToken)
+    ));
+
+    let log = w.log_after(0, 100).unwrap();
+    let issued: Vec<_> = log
+        .iter()
+        .filter(|e| e.action == "actor.token.issue")
+        .map(|e| (e.actor_login.as_str(), e.details.clone()))
+        .collect();
+    assert_eq!(
+        issued,
+        [("alice", 1), ("alice", 2), ("bob", 1)]
+            .map(|(login, n)| ("orrery", serde_json::json!({ "login": login, "n": n })))
+    );
+    let wire = serde_json::to_string(&log).unwrap();
+    for token in [&first, &second, &bobs] {
+        assert!(!wire.contains(token.as_str()), "the log leaks {token}");
+    }
 }
 
 #[test]

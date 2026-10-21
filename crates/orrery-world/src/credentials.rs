@@ -65,8 +65,9 @@ impl FromSql for WorldSecret {
 /// re-keying needs to know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenOrigin {
-    /// Minted with its actor.
-    Actor,
+    /// The actor's `n`th token: 0 for the one minted with it, then each one
+    /// issued for it since, counting from 1.
+    Actor(i64),
     /// Issued for the authorization code with this id.
     OAuthCode(i64),
 }
@@ -74,7 +75,8 @@ pub(crate) enum TokenOrigin {
 impl ToSql for TokenOrigin {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(match self {
-            TokenOrigin::Actor => "actor".to_string(),
+            TokenOrigin::Actor(0) => "actor".to_string(),
+            TokenOrigin::Actor(n) => format!("actor:{n}"),
             TokenOrigin::OAuthCode(id) => format!("oauth:{id}"),
         }))
     }
@@ -82,26 +84,27 @@ impl ToSql for TokenOrigin {
 
 impl FromSql for TokenOrigin {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        match value.as_str()? {
-            "actor" => Ok(TokenOrigin::Actor),
-            other => other
-                .strip_prefix("oauth:")
-                .and_then(|id| id.parse().ok())
-                .map(TokenOrigin::OAuthCode)
-                .ok_or_else(|| {
-                    FromSqlError::Other(format!("{other:?} is not a token origin").into())
-                }),
+        let origin = value.as_str()?;
+        let numbered = |prefix: &str| origin.strip_prefix(prefix).and_then(|n| n.parse().ok());
+        match origin {
+            "actor" => Some(TokenOrigin::Actor(0)),
+            _ => numbered("actor:")
+                .map(TokenOrigin::Actor)
+                .or_else(|| numbered("oauth:").map(TokenOrigin::OAuthCode)),
         }
+        .ok_or_else(|| FromSqlError::Other(format!("{origin:?} is not a token origin").into()))
     }
 }
 
-/// The `orr_` prefix keeps tokens visibly fake and outside every real GitHub
-/// token namespace (`ghp_`, `ghs_`, `gho_`, ...).
-pub(crate) fn actor_token(secret: &WorldSecret, login: &str, actor_id: i64) -> String {
-    format!(
-        "orr_{}",
-        hex::encode(&secret.derive(&format!("{login}:{actor_id}"))[..16])
-    )
+/// The actor's `n`th token (see [`TokenOrigin::Actor`]). The `orr_` prefix
+/// keeps tokens visibly fake and outside every real GitHub token namespace
+/// (`ghp_`, `ghs_`, `gho_`, ...).
+pub(crate) fn actor_token(secret: &WorldSecret, login: &str, actor_id: i64, n: i64) -> String {
+    let input = match n {
+        0 => format!("{login}:{actor_id}"),
+        n => format!("{login}:{actor_id}:{n}"),
+    };
+    format!("orr_{}", hex::encode(&secret.derive(&input)[..16]))
 }
 
 pub(crate) fn oauth_token(secret: &WorldSecret, code_id: i64) -> String {
@@ -115,11 +118,14 @@ pub(crate) fn oauth_code(secret: &WorldSecret, code_id: i64) -> String {
     hex::encode(&secret.derive(&format!("oauth-code:{code_id}"))[..10])
 }
 
-pub(crate) fn oauth_client_secret(secret: &WorldSecret, app_id: i64) -> String {
-    format!(
-        "orr_secret_{}",
-        hex::encode(&secret.derive(&format!("oauth-app-secret:{app_id}"))[..20])
-    )
+/// The app's `n`th client secret: 0 for the one issued at registration, then
+/// each one issued for it since, counting from 1.
+pub(crate) fn oauth_client_secret(secret: &WorldSecret, app_id: i64, n: i64) -> String {
+    let input = match n {
+        0 => format!("oauth-app-secret:{app_id}"),
+        n => format!("oauth-app-secret:{app_id}:{n}"),
+    };
+    format!("orr_secret_{}", hex::encode(&secret.derive(&input)[..20]))
 }
 
 /// Unkeyed: a client id is public by nature, sent in the clear on every
@@ -171,7 +177,7 @@ impl World {
         )?;
         for (old, origin, login, actor_id) in &tokens {
             let new = match origin {
-                TokenOrigin::Actor => actor_token(secret, login, *actor_id),
+                TokenOrigin::Actor(n) => actor_token(secret, login, *actor_id, *n),
                 TokenOrigin::OAuthCode(code_id) => oauth_token(secret, *code_id),
             };
             tx.execute(
@@ -185,7 +191,19 @@ impl World {
         for id in &apps {
             tx.execute(
                 "UPDATE oauth_apps SET client_secret = ?1 WHERE id = ?2",
-                params![oauth_client_secret(secret, *id), id],
+                params![oauth_client_secret(secret, *id, 0), id],
+            )?;
+        }
+
+        let app_secrets = queries::list(
+            &tx,
+            "SELECT app_id, n FROM oauth_app_secrets ORDER BY app_id, n",
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        for (app_id, n) in &app_secrets {
+            tx.execute(
+                "UPDATE oauth_app_secrets SET secret = ?1 WHERE app_id = ?2 AND n = ?3",
+                params![oauth_client_secret(secret, *app_id, *n), app_id, n],
             )?;
         }
 
@@ -213,6 +231,7 @@ impl World {
             &serde_json::json!({
                 "tokens": tokens.len(),
                 "oauth_apps": apps.len(),
+                "oauth_app_secrets": app_secrets.len(),
                 "oauth_codes": codes.len(),
             }),
         )?;

@@ -52,6 +52,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         .actor_by_login(SYSTEM_ACTOR_LOGIN)?
         .expect("every world has the system actor");
     let (alice, _) = w.create_actor("alice", ActorKind::User)?;
+    w.issue_actor_token("alice", system.id)?;
     let (bob, _) = w.create_actor("bob", ActorKind::User)?;
     let (carol, _) = w.create_actor("carol", ActorKind::User)?;
     let (ci, _) = w.create_actor("ci-bot", ActorKind::Bot)?;
@@ -159,8 +160,9 @@ fn populate(w: &World) -> orrery_world::Result<()> {
     w.close_pull(closed.id, bob.id)?;
 
     let app = w.create_oauth_app("GoTrue", CALLBACK, alice.id)?;
+    let issued = w.issue_oauth_client_secret(&app.client_id, system.id)?;
     let code = w.issue_oauth_code(&app, &alice, CALLBACK, "user:email")?;
-    w.exchange_oauth_code(&app.client_id, &app.client_secret, &code, Some(CALLBACK))?;
+    w.exchange_oauth_code(&app.client_id, &issued, &code, Some(CALLBACK))?;
     w.issue_oauth_code(&app, &bob, CALLBACK, "read:org")?;
     Ok(())
 }

@@ -103,7 +103,7 @@ impl World {
                 id,
                 name,
                 credentials::oauth_client_id(id),
-                credentials::oauth_client_secret(&secret, id),
+                credentials::oauth_client_secret(&secret, id, 0),
                 callback_url,
                 clock
             ],
@@ -121,6 +121,48 @@ impl World {
         )?;
         tx.commit()?;
         Ok(app)
+    }
+
+    /// Issue another client secret for a registered app. A stored secret is
+    /// never read back, so this is how anyone gets one for an app they did
+    /// not register, as in a world re-keyed at its creation. The secret
+    /// issued at registration, and every one issued since, stays valid.
+    pub fn issue_oauth_client_secret(&self, client_id: &str, by: i64) -> Result<String> {
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction()?;
+        let app_id: i64 = tx
+            .query_row(
+                "SELECT id FROM oauth_apps WHERE client_id = ?1",
+                params![client_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| WorldError::NoSuchOAuthApp(client_id.to_string()))?;
+        let n: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(n), 0) + 1 FROM oauth_app_secrets WHERE app_id = ?1",
+            params![app_id],
+            |r| r.get(0),
+        )?;
+        let secret: String = tx.query_row(
+            "INSERT INTO oauth_app_secrets (app_id, n, secret, created_clock_unix)
+             VALUES (?1, ?2, ?3, ?4)
+             RETURNING secret",
+            params![
+                app_id,
+                n,
+                credentials::oauth_client_secret(&credentials::world_secret(&tx)?, app_id, n),
+                queries::clock(&tx)?
+            ],
+            |r| r.get(0),
+        )?;
+        log_locked(
+            &tx,
+            by,
+            "oauth_app.secret.issue",
+            &serde_json::json!({ "client_id": client_id, "n": n }),
+        )?;
+        tx.commit()?;
+        Ok(secret)
     }
 
     pub fn oauth_app_by_client_id(&self, client_id: &str) -> Result<Option<OAuthApp>> {
@@ -191,14 +233,19 @@ impl World {
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
         let clock = queries::clock(&tx)?;
+        // The secret issued at registration, or any issued since.
         let app = tx
             .query_row(
-                &format!("{OAUTH_APP_SELECT} WHERE client_id = ?1"),
-                params![client_id],
+                &format!(
+                    "{OAUTH_APP_SELECT} WHERE client_id = ?1
+                     AND (client_secret = ?2 OR EXISTS (
+                         SELECT 1 FROM oauth_app_secrets s
+                         WHERE s.app_id = oauth_apps.id AND s.secret = ?2))"
+                ),
+                params![client_id, client_secret],
                 row_to_oauth_app,
             )
             .optional()?
-            .filter(|app| app.client_secret == client_secret)
             .ok_or(WorldError::OAuthClientCredentials)?;
         let (code_id, actor_id, issued_redirect, scope, created, exchanged) = tx
             .query_row(

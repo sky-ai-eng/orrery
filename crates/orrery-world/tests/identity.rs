@@ -193,3 +193,61 @@ fn an_oauth_code_is_spent_once_and_expires_on_the_virtual_clock() {
     assert!(actions.contains(&"oauth.authorize".to_string()));
     assert!(actions.contains(&"oauth.token".to_string()));
 }
+
+#[test]
+fn an_issued_client_secret_exchanges_beside_the_registration_secret() {
+    let (_dir, w) = fresh();
+    let sys = w.actor_by_login("orrery").unwrap().unwrap();
+    let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+    let redirect = "http://auth.test/callback";
+    let app = w.create_oauth_app("gotrue", redirect, sys.id).unwrap();
+    let other = w.create_oauth_app("other", redirect, sys.id).unwrap();
+
+    let first = w.issue_oauth_client_secret(&app.client_id, sys.id).unwrap();
+    let second = w.issue_oauth_client_secret(&app.client_id, sys.id).unwrap();
+    assert!(first.starts_with("orr_secret_"));
+    assert_ne!(first, second);
+    assert_ne!(first, app.client_secret);
+    assert_eq!(
+        w.oauth_app_by_client_id(&app.client_id).unwrap(),
+        Some(app.clone()),
+        "the app keeps the secret it was registered with"
+    );
+
+    for secret in [&first, &second, &app.client_secret] {
+        let code = w.issue_oauth_code(&app, &alice, redirect, "").unwrap();
+        let token = w
+            .exchange_oauth_code(&app.client_id, secret, &code, None)
+            .unwrap();
+        assert_eq!(token.actor, alice);
+    }
+    // A secret is the app's own: it names no other app.
+    let code = w.issue_oauth_code(&other, &alice, redirect, "").unwrap();
+    assert!(matches!(
+        w.exchange_oauth_code(&other.client_id, &first, &code, None),
+        Err(WorldError::OAuthClientCredentials)
+    ));
+
+    assert!(matches!(
+        w.issue_oauth_client_secret("orr_client_nope", sys.id),
+        Err(WorldError::NoSuchOAuthApp(_))
+    ));
+
+    let log = w.log_after(0, 100).unwrap();
+    let issued: Vec<_> = log
+        .iter()
+        .filter(|e| e.action == "oauth_app.secret.issue")
+        .map(|e| (e.actor_login.as_str(), e.details.clone()))
+        .collect();
+    assert_eq!(
+        issued,
+        [1, 2].map(|n| (
+            "orrery",
+            serde_json::json!({ "client_id": app.client_id, "n": n })
+        ))
+    );
+    let wire = serde_json::to_string(&log).unwrap();
+    for secret in [&first, &second] {
+        assert!(!wire.contains(secret.as_str()), "the log leaks {secret}");
+    }
+}

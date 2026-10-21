@@ -26,7 +26,12 @@ pub fn router(state: AppState) -> Router {
         .route("/clock/advance", post(advance_clock))
         .route("/actors", post(create_actor))
         .route("/actors/{login}/emails", put(set_actor_emails))
+        .route("/actors/{login}/tokens", post(issue_actor_token))
         .route("/oauth-apps", post(create_oauth_app))
+        .route(
+            "/oauth-apps/{client_id}/secrets",
+            post(issue_oauth_client_secret),
+        )
         .route("/log/list", post(log_list))
         .merge(crate::snapshots::router())
         .with_state(state)
@@ -91,13 +96,7 @@ async fn create_actor(State(state): State<AppState>, body: Bytes) -> Response<Bo
         Err(resp) => return *resp,
     };
     match state.world.create_actor(&parsed.login, parsed.kind) {
-        Ok((actor, token)) => json(
-            StatusCode::CREATED,
-            serde_json::json!({
-                "actor": { "id": actor.id, "login": actor.login, "kind": actor.kind },
-                "token": token,
-            }),
-        ),
+        Ok((actor, token)) => actor_token_created(&actor, &token),
         Err(e @ (WorldError::InvalidLogin(_) | WorldError::InvalidActorKind)) => errors(
             StatusCode::BAD_REQUEST,
             "INVALID_ARGUMENT",
@@ -112,6 +111,42 @@ async fn create_actor(State(state): State<AppState>, body: Bytes) -> Response<Bo
         ),
         Err(e) => internal(e),
     }
+}
+
+/// Issue another token for an existing actor. No read returns a stored
+/// token, so this is the way in to an actor someone else created, or one a
+/// re-keyed world inherited.
+async fn issue_actor_token(
+    State(state): State<AppState>,
+    UrlPath(login): UrlPath<String>,
+) -> Response<Body> {
+    let system = match system_actor(&state) {
+        Ok(a) => a,
+        Err(resp) => return *resp,
+    };
+    match state.world.issue_actor_token(&login, system.id) {
+        Ok((actor, token)) => actor_token_created(&actor, &token),
+        Err(e @ WorldError::SystemActorToken) => errors(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            &e.to_string(),
+            Some("login"),
+        ),
+        Err(e @ WorldError::NoSuchActor(_)) => {
+            errors(StatusCode::NOT_FOUND, "NOT_FOUND", &e.to_string(), None)
+        }
+        Err(e) => internal(e),
+    }
+}
+
+fn actor_token_created(actor: &Actor, token: &str) -> Response<Body> {
+    json(
+        StatusCode::CREATED,
+        serde_json::json!({
+            "actor": { "id": actor.id, "login": actor.login, "kind": actor.kind },
+            "token": token,
+        }),
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -182,6 +217,29 @@ async fn create_oauth_app(State(state): State<AppState>, body: Bytes) -> Respons
             &message,
             Some(field),
         ),
+        Err(e) => internal(e),
+    }
+}
+
+/// Issue another client secret for a registered app, as GitHub's settings
+/// page generates one. No read returns a stored secret, so this is the way
+/// in to an app a re-keyed world inherited.
+async fn issue_oauth_client_secret(
+    State(state): State<AppState>,
+    UrlPath(client_id): UrlPath<String>,
+) -> Response<Body> {
+    let system = match system_actor(&state) {
+        Ok(a) => a,
+        Err(resp) => return *resp,
+    };
+    match state.world.issue_oauth_client_secret(&client_id, system.id) {
+        Ok(secret) => json(
+            StatusCode::CREATED,
+            serde_json::json!({ "client_id": client_id, "client_secret": secret }),
+        ),
+        Err(e @ WorldError::NoSuchOAuthApp(_)) => {
+            errors(StatusCode::NOT_FOUND, "NOT_FOUND", &e.to_string(), None)
+        }
         Err(e) => internal(e),
     }
 }
