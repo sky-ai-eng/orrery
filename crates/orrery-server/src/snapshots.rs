@@ -13,7 +13,7 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::{Response, StatusCode};
 use axum::routing::{get, post};
 use orrery_snapshot::{DiffSide, SnapshotError};
-use orrery_world::{WorldError, WorldReader, WorldView};
+use orrery_world::{WorldError, WorldView};
 
 use crate::control::{decode_strict, errors, internal};
 use crate::{AppState, json};
@@ -172,28 +172,14 @@ async fn diff(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let dir = state.snapshots_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _hold = guard;
-        let from_dir = dir.join(&parsed.from);
-        let from_reader = open_side(&dir, &parsed.from)?;
-        let from_side = DiffSide {
-            name: &parsed.from,
-            view: &from_reader,
-            repos_dir: &from_dir.join("repos"),
-        };
+        let from = orrery_snapshot::open(&dir, &parsed.from)?;
         match &parsed.to {
             Some(to_name) => {
-                let to_dir = dir.join(to_name);
-                let to_reader = open_side(&dir, to_name)?;
-                orrery_snapshot::diff::diff(
-                    from_side,
-                    DiffSide {
-                        name: to_name,
-                        view: &to_reader,
-                        repos_dir: &to_dir.join("repos"),
-                    },
-                )
+                let to = orrery_snapshot::open(&dir, to_name)?;
+                orrery_snapshot::diff::diff(from.side(), to.side())
             }
             None => orrery_snapshot::diff::diff(
-                from_side,
+                from.side(),
                 DiffSide {
                     name: "live",
                     view: &*world,
@@ -209,13 +195,6 @@ async fn diff(State(state): State<AppState>, body: Bytes) -> Response<Body> {
             Err(e) => internal(e),
         },
         Err(e) => snapshot_error(e, None),
-    }
-}
-
-fn open_side(snapshots_dir: &std::path::Path, name: &str) -> Result<WorldReader, SnapshotError> {
-    match orrery_snapshot::info(snapshots_dir, name)? {
-        Some(_) => Ok(WorldReader::open(&snapshots_dir.join(name))?),
-        None => Err(SnapshotError::NotFound(name.to_string())),
     }
 }
 

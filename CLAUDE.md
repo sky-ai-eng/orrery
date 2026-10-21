@@ -27,7 +27,7 @@ cargo fmt --all
 ## Database rules
 
 - All persistence goes through `orrery-world`; no other crate opens the SQLite file. One process, one writer — do not grow a repository-pattern layer or a second dialect.
-- The schema is one definition (`orrery-world/src/schema.rs`) applied when a world is created. No world is deployed, so a schema change edits it in place and bumps `SCHEMA_VERSION`; a world written under another version is refused at open, not migrated. Tables are `STRICT`.
+- The schema is a baseline plus an ordered list of forward migrations (`orrery-world/src/schema.rs`). A world migrates when it opens; one newer than the binary, or older than the baseline, is refused. Until the first release freezes the baseline, a schema change still edits the baseline in place and bumps `BASELINE_VERSION`, replacing the baseline fixture in `orrery-world/tests/fixtures/` (see its README). Tables are `STRICT`.
 - **A single-row write returns the row it persisted**, sourced from `RETURNING` on the write statement itself — never a follow-up read — projecting the same columns the point read uses. A caller must never re-read to learn what the write already returned. Conformance tests assert returned-row == point-read for every such method.
 - The action log is append-only: no UPDATE or DELETE ever targets `action_log`. Its `seq` is the total order every replay and diff hangs off.
 

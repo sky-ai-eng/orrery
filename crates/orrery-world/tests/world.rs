@@ -1,4 +1,6 @@
-use orrery_world::{ActorKind, DEFAULT_T0_UNIX, World, WorldError, WorldSecret};
+use orrery_world::{
+    ActorKind, DEFAULT_T0_UNIX, World, WorldError, WorldReader, WorldSecret, WorldView,
+};
 use sha2::{Digest, Sha256};
 
 fn fresh() -> (tempfile::TempDir, World) {
@@ -238,5 +240,25 @@ fn log_is_ordered_and_keyset_paginated() {
     assert!(
         all.iter()
             .all(|e| !e.actor_login.is_empty() && e.clock_unix >= DEFAULT_T0_UNIX)
+    );
+}
+
+#[test]
+fn a_reader_opens_a_world_under_any_path() {
+    // The reader opens through an SQLite URI, where these characters mean
+    // something.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("100% sure? #1 ü");
+    {
+        let w = World::create(&root, DEFAULT_T0_UNIX, &WorldSecret::LOCAL).unwrap();
+        w.create_actor("alice", ActorKind::User).unwrap();
+    }
+    let reader = WorldReader::open(&root).unwrap();
+    assert!(
+        reader
+            .list_actors()
+            .unwrap()
+            .iter()
+            .any(|a| a.login == "alice")
     );
 }

@@ -9,11 +9,16 @@
 //! full world directory. Every credential in a world is derived and fake
 //! (rule 12), but a copy holds the world secret and the stored tokens, so
 //! nothing here returns a snapshot's raw contents.
+//!
+//! A snapshot is never rewritten, so it stays a record of its moment.
+//! Restore and fork copy it and the copy
+//! migrates when it opens as a world; reading one from an older schema
+//! version migrates a scratch copy of its database.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use orrery_world::{World, WorldReader, WorldSecret, WorldView};
+use orrery_world::{World, WorldError, WorldReader, WorldSecret, WorldView};
 
 pub mod diff;
 
@@ -131,6 +136,12 @@ pub fn restore(world: &World, snapshots_dir: &Path, name: &str) -> Result<()> {
     if !src.exists() {
         return Err(SnapshotError::NotFound(name.to_string()));
     }
+    // A snapshot this binary can't open would leave the world unusable once
+    // swapped in, so it is refused while the live state is still in place.
+    match WorldReader::open(&src) {
+        Ok(_) | Err(WorldError::NeedsMigration { .. }) => {}
+        Err(e) => return Err(e.into()),
+    }
     let root = world.root().to_path_buf();
     let trash = sibling(&root, ".world-trash")?;
     world.swap_state(|| {
@@ -199,8 +210,72 @@ pub fn fork(
     Ok(dest_world)
 }
 
+/// A snapshot opened for reading, by name, through whichever view its
+/// schema version needs.
+pub struct OpenSnapshot {
+    name: String,
+    repos_dir: PathBuf,
+    view: Box<dyn WorldView>,
+    // Declared after `view`, so the scratch database closes before its
+    // directory is removed.
+    _scratch: Option<tempfile::TempDir>,
+}
+
+impl OpenSnapshot {
+    pub fn view(&self) -> &dyn WorldView {
+        &*self.view
+    }
+
+    /// This snapshot as one side of a diff.
+    pub fn side(&self) -> DiffSide<'_> {
+        DiffSide {
+            name: &self.name,
+            view: self.view(),
+            repos_dir: &self.repos_dir,
+        }
+    }
+}
+
+/// Open the snapshot `name` for reading. Blocking: run off the async runtime.
+pub fn open(snapshots_dir: &Path, name: &str) -> Result<OpenSnapshot> {
+    validate_name(name)?;
+    let dir = snapshots_dir.join(name);
+    if !dir.exists() {
+        return Err(SnapshotError::NotFound(name.to_string()));
+    }
+    open_dir(name, &dir)
+}
+
+/// A snapshot at this binary's schema version is read in place. An older one
+/// is read through a copy of its database, migrated in a scratch directory
+/// beside it (so the copy can be a reflink) and removed when the returned
+/// value drops. Bare repos have no schema, so the diff reads them in place.
+fn open_dir(name: &str, dir: &Path) -> Result<OpenSnapshot> {
+    let (view, scratch): (Box<dyn WorldView>, _) = match WorldReader::open(dir) {
+        Ok(reader) => (Box::new(reader), None),
+        Err(WorldError::NeedsMigration { .. }) => {
+            let parent = dir.parent().ok_or_else(|| {
+                SnapshotError::Copy(format!("{} has no parent directory", dir.display()))
+            })?;
+            // A dot name keeps a scratch copy out of the listing, as `.tmp-*`.
+            let scratch = tempfile::Builder::new()
+                .prefix(".scratch-")
+                .tempdir_in(parent)?;
+            std::fs::copy(dir.join("world.db"), scratch.path().join("world.db"))?;
+            (Box::new(World::open(scratch.path())?), Some(scratch))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(OpenSnapshot {
+        name: name.to_string(),
+        repos_dir: dir.join("repos"),
+        view,
+        _scratch: scratch,
+    })
+}
+
 fn info_of(name: &str, dir: &Path) -> Result<SnapshotInfo> {
-    let meta = WorldReader::open(dir)?.view_meta()?;
+    let meta = open_dir(name, dir)?.view().view_meta()?;
     Ok(SnapshotInfo {
         name: name.to_string(),
         clock_unix: meta.clock_unix,

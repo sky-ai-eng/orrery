@@ -104,8 +104,9 @@ impl WorldView for World {
 }
 
 /// A read-only connection to a world directory that is not being served —
-/// a snapshot. Requires the current schema version: a snapshot made under
-/// another schema is refused loudly rather than half-read.
+/// a snapshot. Requires the current schema version: an older snapshot is
+/// `NeedsMigration` (migrate a copy, never the snapshot), and anything else
+/// is refused loudly rather than half-read.
 pub struct WorldReader {
     conn: Connection,
 }
@@ -116,19 +117,36 @@ impl WorldReader {
         if !db.exists() {
             return Err(WorldError::NotFound(root.to_path_buf()));
         }
+        // Even a read-only connection creates and writes a WAL database's
+        // -shm and -wal files. `immutable` takes no locks and opens neither,
+        // so reading a snapshot leaves every byte of it as it was. That is
+        // sound because a snapshot is quiesced: its WAL is empty and nothing
+        // writes it.
         let conn = Connection::open_with_flags(
-            db,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            immutable_uri(&db)?,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        let version = schema::schema_version(&conn)?;
-        if version != schema::SCHEMA_VERSION {
-            return Err(WorldError::SchemaVersion {
-                found: version,
-                expected: schema::SCHEMA_VERSION,
-            });
-        }
+        schema::check_current(&conn)?;
         Ok(WorldReader { conn })
     }
+}
+
+fn immutable_uri(path: &Path) -> Result<String> {
+    let Some(text) = path.to_str() else {
+        return Err(rusqlite::Error::InvalidPath(path.to_path_buf()).into());
+    };
+    let mut uri = String::from("file:");
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+            uri.push(char::from(b));
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri.push_str("?immutable=1");
+    Ok(uri)
 }
 
 impl WorldView for WorldReader {

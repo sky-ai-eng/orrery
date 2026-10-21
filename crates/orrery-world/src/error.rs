@@ -65,6 +65,10 @@ pub enum WorldError {
     OAuthRedirectMismatch,
     #[error("world schema version {found} does not match this binary's {expected}")]
     SchemaVersion { found: i64, expected: i64 },
+    #[error(
+        "world schema version {found} predates this binary's {expected}; it migrates when opened as a world"
+    )]
+    NeedsMigration { found: i64, expected: i64 },
     #[error("world.db: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("world root io: {0}")]

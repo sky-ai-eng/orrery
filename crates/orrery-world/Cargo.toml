@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "Orrery's world kernel: world-root layout, SQLite state, the virtual clock, actors, and the append-only action log"
 
+[features]
+# Exposes `test_support`, which lets another crate's tests append migrations.
+test-support = []
+
 [dependencies]
 hex.workspace = true
 hmac.workspace = true

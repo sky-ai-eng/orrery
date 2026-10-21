@@ -34,6 +34,9 @@ pub use error::WorldError;
 pub use identity::OAUTH_CODE_TTL_SECONDS;
 pub use pulls::NewPull;
 pub use reader::{ViewMeta, WorldReader, WorldView};
+#[cfg(feature = "test-support")]
+pub use schema::test_support;
+pub use schema::{BASELINE_VERSION, SCHEMA_VERSION};
 pub use types::*;
 
 pub type Result<T> = std::result::Result<T, WorldError>;
@@ -87,7 +90,8 @@ impl World {
         Ok(world)
     }
 
-    /// Open an existing world at `root`.
+    /// Open an existing world at `root`, migrating it to this binary's schema
+    /// version first.
     pub fn open(root: &Path) -> Result<World> {
         if !root.join(DB_FILE).exists() {
             return Err(WorldError::NotFound(root.to_path_buf()));
@@ -409,10 +413,10 @@ impl World {
 }
 
 fn open_conn(root: &Path) -> Result<Connection> {
-    let conn = Connection::open(root.join(DB_FILE))?;
+    let mut conn = Connection::open(root.join(DB_FILE))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    schema::apply(&conn)?;
+    schema::apply(&mut conn)?;
     Ok(conn)
 }
 

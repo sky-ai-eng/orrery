@@ -1,21 +1,34 @@
-//! The world schema, applied whole when a world is created. Orrery has no
-//! deployed worlds to carry forward, so the schema changes in place and its
-//! version is bumped with it; a world written under another version is refused
-//! at open rather than migrated.
+//! The world schema: a baseline, applied whole when a world is created, and
+//! the forward migrations that carry an existing world from the version it
+//! was written at to this binary's.
+//!
+//! `user_version` counts them: the baseline stamps `BASELINE_VERSION`, and
+//! each migration adds one. Until the first release freezes the
+//! baseline, a schema change still edits the baseline in place and bumps
+//! `BASELINE_VERSION`, so a world from before the bump is below the baseline
+//! and refused.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::{Result, WorldError};
 
-/// Bumped on every schema change.
-pub(crate) const SCHEMA_VERSION: i64 = 4;
+/// The version a database is at once the baseline is applied, and the oldest
+/// one this binary migrates from.
+pub const BASELINE_VERSION: i64 = 4;
+
+/// Forward migrations, oldest first, each one SQL batch. `MIGRATIONS[i]`
+/// takes a database from version `BASELINE_VERSION + i` to the next.
+const MIGRATIONS: &[&str] = &[];
+
+/// The version this binary reads and writes.
+pub const SCHEMA_VERSION: i64 = BASELINE_VERSION + MIGRATIONS.len() as i64;
 
 // State vocabulary is neutral (rule 9: vendor-neutral state, vendor faces) —
 // faces render casing like "APPROVED" or "CHANGES_REQUESTED" at the wire,
 // never the store. `pulls.base_sha` is pinned at PR creation (and on base
 // retarget), matching GitHub's static `base.sha`; `head_sha` tracks the branch
 // via push observation, matching GitHub's synchronize behavior.
-const SCHEMA: &str = r#"
+const BASELINE: &str = r#"
     -- `secret` keys every credential the world derives (credentials.rs): 32
     -- bytes as lowercase hex. It is never logged and no read returns it.
     CREATE TABLE world (
@@ -230,23 +243,265 @@ const SCHEMA: &str = r#"
     ) STRICT;
 "#;
 
-/// Create the schema on an empty database, or check an existing one's
-/// version.
-pub(crate) fn apply(conn: &Connection) -> Result<()> {
-    match schema_version(conn)? {
+/// Bring a database to this binary's version: create the baseline on an
+/// empty one, then run every pending migration. A database newer than the
+/// binary, or older than the baseline, is refused.
+pub(crate) fn apply(conn: &mut Connection) -> Result<()> {
+    let migrations = migrations();
+    let target = BASELINE_VERSION + migrations.len() as i64;
+    // IMMEDIATE takes the write lock before the version is read, so a second
+    // opener waits and then finds the work done, rather than migrating from a
+    // version that is already gone.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let found = schema_version(&tx)?;
+    let pending = match found {
         0 => {
-            conn.execute_batch(SCHEMA)?;
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            Ok(())
+            tx.execute_batch(BASELINE)?;
+            &migrations[..]
         }
-        SCHEMA_VERSION => Ok(()),
-        found => Err(WorldError::SchemaVersion {
-            found,
-            expected: SCHEMA_VERSION,
-        }),
+        v if v == target => return Ok(()),
+        v if (BASELINE_VERSION..target).contains(&v) => {
+            &migrations[(v - BASELINE_VERSION) as usize..]
+        }
+        _ => {
+            return Err(WorldError::SchemaVersion {
+                found,
+                expected: target,
+            });
+        }
+    };
+    for sql in pending {
+        tx.execute_batch(sql)?;
+    }
+    tx.pragma_update(None, "user_version", target)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Check that a database can be read as is. One that `apply` would migrate
+/// is `NeedsMigration`, so a reader can migrate a copy instead.
+pub(crate) fn check_current(conn: &Connection) -> Result<()> {
+    let found = schema_version(conn)?;
+    let expected = BASELINE_VERSION + migrations().len() as i64;
+    match found {
+        v if v == expected => Ok(()),
+        v if (BASELINE_VERSION..expected).contains(&v) => {
+            Err(WorldError::NeedsMigration { found, expected })
+        }
+        _ => Err(WorldError::SchemaVersion { found, expected }),
     }
 }
 
-pub(crate) fn schema_version(conn: &Connection) -> Result<i64> {
+fn schema_version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn migrations() -> Vec<&'static str> {
+    MIGRATIONS.to_vec()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn migrations() -> Vec<&'static str> {
+    let mut all = MIGRATIONS.to_vec();
+    all.extend(test_support::APPENDED.get());
+    all
+}
+
+/// Migrations appended for a test, so a world at this binary's version can
+/// be made older than the binary. Worlds opened on the calling thread while
+/// `with_appended_migrations` runs see a binary at `SCHEMA_VERSION` plus the
+/// number appended.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static APPENDED: Cell<&'static [&'static str]> = const { Cell::new(&[]) };
+    }
+
+    pub fn with_appended_migrations<T>(
+        migrations: &'static [&'static str],
+        f: impl FnOnce() -> T,
+    ) -> T {
+        struct Reset(&'static [&'static str]);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                APPENDED.set(self.0);
+            }
+        }
+        let _reset = Reset(APPENDED.replace(migrations));
+        f()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::test_support::with_appended_migrations;
+    use super::{BASELINE_VERSION, SCHEMA_VERSION, schema_version};
+    use crate::{
+        ActorKind, DEFAULT_T0_UNIX, LogEntry, World, WorldError, WorldReader, WorldSecret,
+        WorldView,
+    };
+
+    // The shapes a real migration takes: a column with a default, and a new
+    // table backfilled from an old one.
+    const TOPICS: &str = "
+        ALTER TABLE repos ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1));
+        CREATE TABLE repo_topics (
+            repo_id INTEGER NOT NULL REFERENCES repos(id),
+            topic   TEXT NOT NULL,
+            PRIMARY KEY (repo_id, topic)
+        ) STRICT;
+        INSERT INTO repo_topics (repo_id, topic) SELECT id, 'migrated' FROM repos;
+    ";
+    const BROKEN: &str = "INSERT INTO no_such_table VALUES (1);";
+
+    /// A world at this binary's version with a little of everything the
+    /// tests compare: actors, a repo, and log entries.
+    fn world(dir: &Path) -> PathBuf {
+        let root = dir.join("world");
+        let w = World::create(&root, DEFAULT_T0_UNIX, &WorldSecret::LOCAL).unwrap();
+        let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+        w.create_repo(alice.id, "webapp", None, false, "main", alice.id)
+            .unwrap();
+        w.advance_clock(60, alice.id).unwrap();
+        root
+    }
+
+    fn version(w: &World) -> i64 {
+        w.with_conn(schema_version).unwrap()
+    }
+
+    fn has_table(w: &World, name: &str) -> bool {
+        w.with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [name],
+                |r| r.get::<_, i64>(0),
+            )? == 1)
+        })
+        .unwrap()
+    }
+
+    fn whole_log(w: &World) -> Vec<LogEntry> {
+        w.log_after(0, 10_000).unwrap()
+    }
+
+    #[test]
+    fn a_world_opens_at_the_next_version_with_its_data_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = world(dir.path());
+        let (actors, repos, log) = {
+            let w = World::open(&root).unwrap();
+            assert_eq!(version(&w), SCHEMA_VERSION);
+            (
+                w.list_actors().unwrap(),
+                w.list_repos().unwrap(),
+                whole_log(&w),
+            )
+        };
+
+        with_appended_migrations(&[TOPICS], || {
+            let w = World::open(&root).unwrap();
+            assert_eq!(version(&w), SCHEMA_VERSION + 1);
+            let topics: i64 = w
+                .with_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT count(*) FROM repo_topics WHERE topic = 'migrated'",
+                        [],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(topics, 1, "the backfill ran");
+            assert_eq!(w.list_actors().unwrap(), actors);
+            assert_eq!(w.list_repos().unwrap(), repos);
+            assert_eq!(whole_log(&w), log, "the action log reads as before");
+
+            // The migrated world takes writes, and its log carries on.
+            w.create_actor("bob", ActorKind::User).unwrap();
+            let last = log.last().unwrap().seq;
+            let appended = w.log_after(last, 10).unwrap();
+            assert_eq!(appended.len(), 1);
+            assert_eq!(appended[0].seq, last + 1);
+            drop(w);
+
+            // Opening again finds nothing pending.
+            let w = World::open(&root).unwrap();
+            assert_eq!(version(&w), SCHEMA_VERSION + 1);
+        });
+    }
+
+    #[test]
+    fn pending_migrations_run_in_one_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = world(dir.path());
+
+        with_appended_migrations(&[TOPICS, BROKEN], || {
+            assert!(matches!(World::open(&root), Err(WorldError::Sqlite(_))));
+        });
+
+        let w = World::open(&root).unwrap();
+        assert_eq!(version(&w), SCHEMA_VERSION);
+        assert!(
+            !has_table(&w, "repo_topics"),
+            "the migration before the failing one rolled back with it"
+        );
+    }
+
+    #[test]
+    fn a_world_newer_than_the_binary_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = world(dir.path());
+        with_appended_migrations(&[TOPICS], || World::open(&root).map(drop)).unwrap();
+
+        assert!(matches!(
+            World::open(&root),
+            Err(WorldError::SchemaVersion { found, expected })
+                if found == SCHEMA_VERSION + 1 && expected == SCHEMA_VERSION
+        ));
+        assert!(matches!(
+            WorldReader::open(&root),
+            Err(WorldError::SchemaVersion { found, .. }) if found == SCHEMA_VERSION + 1
+        ));
+    }
+
+    #[test]
+    fn a_world_below_the_baseline_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = world(dir.path());
+        World::open(&root)
+            .unwrap()
+            .with_conn(|conn| Ok(conn.pragma_update(None, "user_version", BASELINE_VERSION - 1)?))
+            .unwrap();
+
+        assert!(matches!(
+            World::open(&root),
+            Err(WorldError::SchemaVersion { found, .. }) if found == BASELINE_VERSION - 1
+        ));
+        assert!(matches!(
+            WorldReader::open(&root),
+            Err(WorldError::SchemaVersion { found, .. }) if found == BASELINE_VERSION - 1
+        ));
+    }
+
+    #[test]
+    fn a_reader_never_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = world(dir.path());
+
+        with_appended_migrations(&[TOPICS], || {
+            assert!(matches!(
+                WorldReader::open(&root),
+                Err(WorldError::NeedsMigration { found, expected })
+                    if found == SCHEMA_VERSION && expected == SCHEMA_VERSION + 1
+            ));
+        });
+        let w = World::open(&root).unwrap();
+        assert_eq!(version(&w), SCHEMA_VERSION);
+        assert!(!has_table(&w, "repo_topics"));
+    }
 }
