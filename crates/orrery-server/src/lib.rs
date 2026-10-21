@@ -1,7 +1,9 @@
 //! The HTTP host. Mounts the faces (git smart-HTTP at the root, the GitHub
 //! REST face under `/api/v3` — the GHES mount shape — and GitHub's OAuth web
 //! flow under `/login/oauth`), the `/_orrery/` control plane, face auth, and the
-//! NOT-MOCKED fallback.
+//! NOT-MOCKED fallback. The faces and the control plane are separate routers so
+//! a world can serve the control plane on a listener that no public
+//! request reaches.
 //!
 //! Route classes and their failure behavior (spec/README.md rule 1):
 //! - matched face route, missing data → vendor-faithful 404
@@ -37,10 +39,59 @@ pub struct AppState {
     pub snapshots_dir: PathBuf,
     /// The GitHub GraphQL executor, built once per instance.
     pub schema: orrery_face_github::graphql::GithubSchema,
+    /// See [`Options::anonymous_git_reads`].
+    pub anonymous_git_reads: bool,
 }
 
-/// Build the full application router for one world instance.
-pub fn app(world: Arc<World>, base_url: String, snapshots_dir: PathBuf) -> Router {
+/// How a world process exposes its faces. The default is local `orrery serve`.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Let fetch-side git traffic through without a token, as GitHub does for
+    /// public repos. A world whose faces are on the public internet turns this
+    /// off, since its host and repository names can be guessed.
+    pub anonymous_git_reads: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            anonymous_git_reads: true,
+        }
+    }
+}
+
+/// One world's faces and control plane, built over shared state (the git
+/// face's write gate in particular) and mounted on one listener or two.
+pub struct Routers {
+    faces: Router,
+    control: Router,
+}
+
+impl Routers {
+    /// Both on one listener, the control plane at `/_orrery`.
+    pub fn combined(self) -> Router {
+        self.control.merge(self.faces).fallback(not_mocked)
+    }
+
+    /// `(faces, control)` for two listeners. The faces router has no
+    /// `/_orrery`, so a control path sent to it is unknown surface like any
+    /// other. The control router keeps the `/_orrery` prefix, so a forwarder
+    /// passes paths through unchanged.
+    pub fn split(self) -> (Router, Router) {
+        (
+            self.faces.fallback(not_mocked),
+            self.control.fallback(not_mocked),
+        )
+    }
+}
+
+/// Build the routers for one world instance.
+pub fn routers(
+    world: Arc<World>,
+    base_url: String,
+    snapshots_dir: PathBuf,
+    options: Options,
+) -> Routers {
     let git = GitFace::new(world.clone());
     let github = GithubFace {
         world: world.clone(),
@@ -53,6 +104,7 @@ pub fn app(world: Arc<World>, base_url: String, snapshots_dir: PathBuf) -> Route
         git: git.clone(),
         snapshots_dir,
         schema: orrery_face_github::graphql::schema(github.clone()),
+        anonymous_git_reads: options.anonymous_git_reads,
     };
 
     // GraphQL mounts at the GHES address — `/api/graphql`, a sibling of
@@ -74,16 +126,20 @@ pub fn app(world: Arc<World>, base_url: String, snapshots_dir: PathBuf) -> Route
         .merge(graphql)
         .layer(middleware::from_fn_with_state(state.clone(), face_auth));
 
-    Router::new()
-        .nest("/_orrery", control::router(state))
-        .merge(oauth)
-        .merge(faces)
-        .fallback(not_mocked)
+    Routers {
+        faces: Router::new().merge(oauth).merge(faces),
+        control: Router::new().nest("/_orrery", control::router(state)),
+    }
 }
 
-/// Serve until the listener is closed. The caller owns binding, so tests can
-/// use an ephemeral port and read it back before starting.
-pub async fn run(listener: tokio::net::TcpListener, app: Router) -> std::io::Result<()> {
+/// Serve until the listener is closed. The caller owns binding — a TCP port
+/// (tests bind an ephemeral one and read it back before starting) or a Unix
+/// socket.
+pub async fn run<L>(listener: L, app: Router) -> std::io::Result<()>
+where
+    L: axum::serve::Listener,
+    L::Addr: std::fmt::Debug,
+{
     axum::serve(listener, app).await
 }
 
@@ -108,10 +164,11 @@ async fn graphql_handler(
 /// clones without credentials, and consumers rely on it (TF deliberately
 /// clones public repos with no token). The request proceeds with no actor
 /// attached; the git face itself refuses anonymous access to private repos.
-/// Pushes and the REST face always require a token.
+/// Pushes and the REST face always require a token, and so do git reads when
+/// [`Options::anonymous_git_reads`] is off.
 async fn face_auth(State(state): State<AppState>, mut req: Request, next: Next) -> Response<Body> {
     let Some(token) = extract_token(req.headers()) else {
-        if is_anonymous_git_read(&req) {
+        if state.anonymous_git_reads && is_anonymous_git_read(&req) {
             return next.run(req).await;
         }
         return bad_credentials();

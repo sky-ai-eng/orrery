@@ -63,10 +63,108 @@ struct InstanceConfig {
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct ServerConfig {
-    listen: Option<String>,
+    listen: Option<Listen>,
     /// External base URL rendered into clone/html URLs; defaults to
-    /// `http://<bound address>`.
+    /// `http://<bound address>`. Required when `listen` is a socket, since no
+    /// URL can be derived from one.
     base_url: Option<String>,
+    /// Serve the control plane only here. Absent, it stays at `/_orrery` on
+    /// `listen`.
+    control_listen: Option<Listen>,
+    /// Defaults to true; see `orrery_server::Options::anonymous_git_reads`.
+    anonymous_git_reads: Option<bool>,
+}
+
+/// A listener address: `host:port`, or `unix:/absolute/path` for a Unix
+/// socket, which needs no port.
+#[derive(serde::Deserialize)]
+#[serde(try_from = "String")]
+enum Listen {
+    Tcp(String),
+    Unix(PathBuf),
+}
+
+impl TryFrom<String> for Listen {
+    type Error = String;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        let Some(path) = raw.strip_prefix("unix:") else {
+            return Ok(Listen::Tcp(raw));
+        };
+        let path = PathBuf::from(path);
+        if !path.is_absolute() {
+            return Err(format!(
+                "{raw:?}: a socket path must be absolute, as in unix:/run/orrery.sock"
+            ));
+        }
+        Ok(Listen::Unix(path))
+    }
+}
+
+enum Listener {
+    Tcp(tokio::net::TcpListener, std::net::SocketAddr),
+    Unix(tokio::net::UnixListener, PathBuf),
+}
+
+impl std::fmt::Display for Listener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Listener::Tcp(_, addr) => write!(f, "{addr}"),
+            Listener::Unix(_, path) => write!(f, "unix:{}", path.display()),
+        }
+    }
+}
+
+impl Listen {
+    async fn bind(&self) -> anyhow::Result<Listener> {
+        match self {
+            Listen::Tcp(addr) => {
+                let listener = tokio::net::TcpListener::bind(addr)
+                    .await
+                    .with_context(|| format!("binding {addr}"))?;
+                let bound = listener.local_addr()?;
+                Ok(Listener::Tcp(listener, bound))
+            }
+            Listen::Unix(path) => {
+                remove_stale_socket(path)?;
+                let listener = tokio::net::UnixListener::bind(path)
+                    .with_context(|| format!("binding unix:{}", path.display()))?;
+                Ok(Listener::Unix(listener, path.clone()))
+            }
+        }
+    }
+}
+
+/// A killed process leaves its socket file behind, and binding over it fails,
+/// so a restarted world would find its address taken. Only a socket nobody
+/// answers on is stale: a live one is another process's, and a file that is
+/// not a socket was never ours to delete.
+fn remove_stale_socket(path: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("inspecting {}", path.display())),
+    };
+    anyhow::ensure!(
+        meta.file_type().is_socket(),
+        "{} exists and is not a socket",
+        path.display()
+    );
+    anyhow::ensure!(
+        std::os::unix::net::UnixStream::connect(path).is_err(),
+        "{} is in use by another process",
+        path.display()
+    );
+    std::fs::remove_file(path).with_context(|| format!("removing stale socket {}", path.display()))
+}
+
+async fn run(listener: Listener, app: axum::Router) -> std::io::Result<()> {
+    match listener {
+        Listener::Tcp(listener, _) => orrery_server::run(listener, app).await,
+        Listener::Unix(listener, _) => orrery_server::run(listener, app).await,
+    }
 }
 
 #[tokio::main]
@@ -115,25 +213,45 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
     let world_root = config.instance.dir.join("world");
     let world = Arc::new(World::open_or_create(&world_root, t0_unix)?);
 
-    let listen = config.server.listen.as_deref().unwrap_or("127.0.0.1:4180");
-    let listener = tokio::net::TcpListener::bind(listen)
-        .await
-        .with_context(|| format!("binding {listen}"))?;
-    let bound = listener.local_addr()?;
-    let base_url = config
+    let listen = config
         .server
-        .base_url
-        .clone()
-        .unwrap_or_else(|| format!("http://{bound}"));
+        .listen
+        .unwrap_or_else(|| Listen::Tcp("127.0.0.1:4180".to_string()));
+    let listener = listen.bind().await?;
+    let base_url = match (config.server.base_url, &listener) {
+        (Some(base_url), _) => base_url,
+        (None, Listener::Tcp(_, bound)) => format!("http://{bound}"),
+        (None, Listener::Unix(..)) => anyhow::bail!(
+            "server.base_url must be set when server.listen is a Unix socket: no URL can be derived from one"
+        ),
+    };
+    let control = match &config.server.control_listen {
+        Some(control_listen) => Some(control_listen.bind().await?),
+        None => None,
+    };
 
     tracing::info!(
         world = %world_root.display(),
-        %bound,
+        listen = %listener,
+        control = %control.as_ref().map_or_else(|| format!("{listener}/_orrery"), ToString::to_string),
         %base_url,
         clock_unix = world.clock()?,
         "orrery serving"
     );
-    let app = orrery_server::app(world, base_url, config.instance.dir.join("snapshots"));
-    orrery_server::run(listener, app).await?;
+    let routers = orrery_server::routers(
+        world,
+        base_url,
+        config.instance.dir.join("snapshots"),
+        orrery_server::Options {
+            anonymous_git_reads: config.server.anonymous_git_reads.unwrap_or(true),
+        },
+    );
+    match control {
+        None => run(listener, routers.combined()).await?,
+        Some(control) => {
+            let (faces, control_plane) = routers.split();
+            tokio::try_join!(run(listener, faces), run(control, control_plane))?;
+        }
+    }
     Ok(())
 }

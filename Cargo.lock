@@ -1174,12 +1174,15 @@ name = "orrery"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "jiff",
  "orrery-server",
  "orrery-snapshot",
  "orrery-world",
  "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{boot, control_post, git, mint_actor};
+use common::{boot, boot_with, control_post, git, git_output, mint_actor};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn author_push_clone_observe() {
@@ -260,4 +260,68 @@ async fn anonymous_git_reads_follow_github_rules() {
         ureq::Error::StatusCode(code) => assert_eq!(code, 401),
         other => panic!("expected status error, got {other:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worlds_can_refuse_anonymous_git_reads() {
+    let inst = boot_with(orrery_server::Options {
+        anonymous_git_reads: false,
+    })
+    .await;
+    let base = &inst.base;
+    let token = mint_actor(base, "frank", "user");
+    ureq::post(format!("{base}/api/v3/user/repos"))
+        .header("authorization", &format!("token {token}"))
+        .send_json(serde_json::json!({ "name": "open", "private": false }))
+        .unwrap();
+    let authed_url = format!("{base}/frank/open.git")
+        .replace("http://", &format!("http://x-access-token:{token}@"));
+    let clock = inst.world.clock().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    git(&src, clock, &["init", "-b", "main", "."]);
+    std::fs::write(src.join("f"), "open").unwrap();
+    git(&src, clock, &["add", "."]);
+    git(&src, clock, &["commit", "-m", "init"]);
+    git(&src, clock, &["push", &authed_url, "main"]);
+
+    // Even a public repo needs a token: both legs of a fetch get the same
+    // 401 as any other unauthenticated face request.
+    let anon = work.path().join("anon-clone");
+    let out = git_output(
+        work.path(),
+        clock,
+        &[
+            "clone",
+            &format!("{base}/frank/open.git"),
+            anon.to_str().unwrap(),
+        ],
+    );
+    assert!(!out.status.success(), "anonymous clone must fail");
+    let refused = ureq::get(format!(
+        "{base}/frank/open.git/info/refs?service=git-upload-pack"
+    ))
+    .call()
+    .expect_err("anonymous ref advertisement refuses");
+    match refused {
+        ureq::Error::StatusCode(code) => assert_eq!(code, 401),
+        other => panic!("expected status error, got {other:?}"),
+    }
+    let refused = ureq::post(format!("{base}/frank/open.git/git-upload-pack"))
+        .header("content-type", "application/x-git-upload-pack-request")
+        .send("")
+        .expect_err("anonymous upload-pack refuses");
+    match refused {
+        ureq::Error::StatusCode(code) => assert_eq!(code, 401),
+        other => panic!("expected status error, got {other:?}"),
+    }
+
+    let dst = work.path().join("clone");
+    git(
+        work.path(),
+        clock,
+        &["clone", &authed_url, dst.to_str().unwrap()],
+    );
+    assert_eq!(std::fs::read_to_string(dst.join("f")).unwrap(), "open");
 }

@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::Arc;
 
 use orrery_world::{DEFAULT_T0_UNIX, World};
@@ -27,34 +27,39 @@ impl Drop for Instance {
 }
 
 pub async fn boot() -> Instance {
+    boot_with(orrery_server::Options::default()).await
+}
+
+pub async fn boot_with(options: orrery_server::Options) -> Instance {
     let dir = tempfile::tempdir().expect("tempdir");
     let world =
         Arc::new(World::create(&dir.path().join("world"), DEFAULT_T0_UNIX).expect("create world"));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let app = orrery_server::app(world.clone(), base.clone(), dir.path().join("snapshots"));
-    let task = tokio::spawn(async move {
-        orrery_server::run(listener, app).await.expect("server run");
-    });
-    Instance {
-        dir,
-        world,
-        base,
-        task,
-    }
+    serve(dir, world, options).await
 }
 
 /// Boot a server over an existing world directory — how a forked instance
 /// comes up.
 pub async fn boot_at(dir: tempfile::TempDir, world_root: &Path) -> Instance {
     let world = Arc::new(World::open(world_root).expect("open world"));
+    serve(dir, world, orrery_server::Options::default()).await
+}
+
+async fn serve(
+    dir: tempfile::TempDir,
+    world: Arc<World>,
+    options: orrery_server::Options,
+) -> Instance {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let app = orrery_server::app(world.clone(), base.clone(), dir.path().join("snapshots"));
+    let app = orrery_server::routers(
+        world.clone(),
+        base.clone(),
+        dir.path().join("snapshots"),
+        options,
+    )
+    .combined();
     let task = tokio::spawn(async move {
         orrery_server::run(listener, app).await.expect("server run");
     });
@@ -69,8 +74,20 @@ pub async fn boot_at(dir: tempfile::TempDir, world_root: &Path) -> Instance {
 /// Run git hermetically, the way an authoring script would: identity pinned,
 /// commit dates from the world clock, no operator config.
 pub fn git(cwd: &Path, clock_unix: i64, args: &[&str]) -> String {
+    let out = git_output(cwd, clock_unix, args);
+    assert!(
+        out.status.success(),
+        "git {args:?} failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// [`git`] for a run whose failure is the point.
+pub fn git_output(cwd: &Path, clock_unix: i64, args: &[&str]) -> Output {
     let date = format!("{clock_unix} +0000");
-    let out = Command::new("git")
+    Command::new("git")
         .current_dir(cwd)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -83,14 +100,7 @@ pub fn git(cwd: &Path, clock_unix: i64, args: &[&str]) -> String {
         .env("GIT_COMMITTER_DATE", &date)
         .args(args)
         .output()
-        .expect("spawn git");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed:\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+        .expect("spawn git")
 }
 
 pub fn control_post(base: &str, path: &str, body: serde_json::Value) -> serde_json::Value {

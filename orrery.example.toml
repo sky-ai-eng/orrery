@@ -10,6 +10,15 @@ dir = "./instance"
 t0 = "2026-01-01T00:00:00Z"
 
 [server]
+# host:port, or unix:/absolute/path for a Unix socket. A stale socket file left
+# at the path is removed before binding.
 listen = "127.0.0.1:4180"
 # External base URL rendered into clone/html URLs; defaults to http://<listen>.
+# Required when listen is a socket.
 # base_url = "http://127.0.0.1:4180"
+# Serve the control plane (/_orrery/*) only here, in listen's syntax; listen
+# then answers /_orrery/* as unmocked surface. Omit to keep it on listen.
+# control_listen = "unix:/run/orrery/control.sock"
+# Clone and fetch without a token, as GitHub allows for public repos. A world
+# whose faces are on the public internet sets this to false.
+# anonymous_git_reads = true
