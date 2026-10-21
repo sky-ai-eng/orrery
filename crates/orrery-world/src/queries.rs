@@ -476,7 +476,7 @@ pub(crate) fn check_run_by_id(conn: &Connection, id: i64) -> Result<Option<Check
         .optional()?)
 }
 
-fn list<T>(
+pub(crate) fn list<T>(
     conn: &Connection,
     sql: &str,
     map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,

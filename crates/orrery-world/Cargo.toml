@@ -8,6 +8,7 @@ description = "Orrery's world kernel: world-root layout, SQLite state, the virtu
 
 [dependencies]
 hex.workspace = true
+hmac.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

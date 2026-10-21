@@ -1,8 +1,14 @@
-use orrery_world::{ActorKind, DEFAULT_T0_UNIX, World, WorldError};
+use orrery_world::{ActorKind, DEFAULT_T0_UNIX, World, WorldError, WorldSecret};
+use sha2::{Digest, Sha256};
 
 fn fresh() -> (tempfile::TempDir, World) {
+    keyed(&WorldSecret::LOCAL)
+}
+
+fn keyed(secret: &WorldSecret) -> (tempfile::TempDir, World) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let world = World::create(&dir.path().join("world"), DEFAULT_T0_UNIX).expect("create world");
+    let world =
+        World::create(&dir.path().join("world"), DEFAULT_T0_UNIX, secret).expect("create world");
     (dir, world)
 }
 
@@ -11,7 +17,7 @@ fn create_then_reopen_preserves_state() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("world");
     {
-        let w = World::create(&root, 1000).unwrap();
+        let w = World::create(&root, 1000, &WorldSecret::LOCAL).unwrap();
         w.create_actor("alice", ActorKind::User).unwrap();
         assert_eq!(w.clock().unwrap(), 1000);
     }
@@ -23,7 +29,7 @@ fn create_then_reopen_preserves_state() {
         .expect("alice survives reopen");
     assert_eq!(alice.kind, ActorKind::User);
     assert!(matches!(
-        World::create(&root, 1000),
+        World::create(&root, 1000, &WorldSecret::LOCAL),
         Err(WorldError::AlreadyExists(_))
     ));
 }
@@ -64,13 +70,60 @@ fn create_actor_returns_the_stored_row() {
         token.starts_with("orr_"),
         "tokens are visibly fake: {token}"
     );
+}
 
-    // Determinism: the token is derived, so an identical world mints an
-    // identical token.
-    let dir2 = tempfile::tempdir().unwrap();
-    let w2 = World::create(&dir2.path().join("world"), DEFAULT_T0_UNIX).unwrap();
-    let (_, token2) = w2.create_actor("alice", ActorKind::User).unwrap();
-    assert_eq!(token, token2);
+#[test]
+fn tokens_are_unguessable_without_the_world_secret() {
+    let (_d1, w1) = keyed(&WorldSecret::from_bytes([1; 32]));
+    let (_d2, w2) = keyed(&WorldSecret::from_bytes([2; 32]));
+    let (alice1, token1) = w1.create_actor("alice", ActorKind::User).unwrap();
+    let (alice2, token2) = w2.create_actor("alice", ActorKind::User).unwrap();
+    assert_eq!((alice1.id, alice2.id), (2, 2));
+    assert_ne!(token1, token2);
+
+    // The derivation's inputs are public; without the key they compute nothing.
+    let bare = format!(
+        "orr_{}",
+        hex::encode(&Sha256::digest(format!("alice:{}", alice1.id))[..16])
+    );
+    assert_ne!(token1, bare);
+    assert_ne!(token2, bare);
+    assert!(w1.actor_by_token(&bare).unwrap().is_none());
+    assert!(w1.actor_by_token(&token2).unwrap().is_none());
+}
+
+#[test]
+fn the_same_secret_and_calls_mint_the_same_credentials() {
+    let secret = WorldSecret::from_bytes([7; 32]);
+    let run = || {
+        let (_dir, w) = keyed(&secret);
+        let (alice, token) = w.create_actor("alice", ActorKind::User).unwrap();
+        let app = w
+            .create_oauth_app("Sign-in", "https://auth.test/callback", alice.id)
+            .unwrap();
+        let code = w
+            .issue_oauth_code(&app, &alice, "https://auth.test/callback", "user")
+            .unwrap();
+        let oauth = w
+            .exchange_oauth_code(&app.client_id, &app.client_secret, &code, None)
+            .unwrap();
+        (token, app.client_id, app.client_secret, code, oauth.token)
+    };
+    assert_eq!(run(), run());
+}
+
+#[test]
+fn the_world_secret_never_reaches_the_log() {
+    let secret = WorldSecret::from_bytes([0xab; 32]);
+    let (_dir, w) = keyed(&secret);
+    let (_, token) = w.create_actor("alice", ActorKind::User).unwrap();
+    let log = serde_json::to_string(&w.log_after(0, 100).unwrap()).unwrap();
+    assert_eq!(
+        w.log_after(0, 1).unwrap()[0].details,
+        serde_json::json!({ "t0_unix": DEFAULT_T0_UNIX })
+    );
+    assert!(!log.contains(&"ab".repeat(32)), "{log}");
+    assert!(!log.contains(&token), "{log}");
 }
 
 #[test]

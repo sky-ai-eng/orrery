@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::{Result, WorldError};
 
 /// Bumped on every schema change.
-pub(crate) const SCHEMA_VERSION: i64 = 3;
+pub(crate) const SCHEMA_VERSION: i64 = 4;
 
 // State vocabulary is neutral (rule 9: vendor-neutral state, vendor faces) —
 // faces render casing like "APPROVED" or "CHANGES_REQUESTED" at the wire,
@@ -16,9 +16,12 @@ pub(crate) const SCHEMA_VERSION: i64 = 3;
 // retarget), matching GitHub's static `base.sha`; `head_sha` tracks the branch
 // via push observation, matching GitHub's synchronize behavior.
 const SCHEMA: &str = r#"
+    -- `secret` keys every credential the world derives (credentials.rs): 32
+    -- bytes as lowercase hex. It is never logged and no read returns it.
     CREATE TABLE world (
         id         INTEGER PRIMARY KEY CHECK (id = 1),
-        clock_unix INTEGER NOT NULL
+        clock_unix INTEGER NOT NULL,
+        secret     TEXT NOT NULL CHECK (length(secret) = 64 AND secret NOT GLOB '*[^0-9a-f]*')
     ) STRICT;
 
     CREATE TABLE actors (
@@ -28,9 +31,13 @@ const SCHEMA: &str = r#"
         created_clock_unix INTEGER NOT NULL
     ) STRICT;
 
+    -- `origin` is what a token was derived from, which its value cannot say:
+    -- `actor` for the token minted with its actor, `oauth:{code_id}` for one
+    -- an authorization code was exchanged for. Re-keying re-derives from it.
     CREATE TABLE tokens (
         token              TEXT PRIMARY KEY,
         actor_id           INTEGER NOT NULL REFERENCES actors(id),
+        origin             TEXT NOT NULL CHECK (origin = 'actor' OR origin GLOB 'oauth:[1-9]*'),
         created_clock_unix INTEGER NOT NULL
     ) STRICT;
 

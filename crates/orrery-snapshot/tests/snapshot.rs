@@ -6,11 +6,15 @@
 use orrery_snapshot::{DiffSide, SnapshotError, diff};
 use orrery_world::{
     ActorEmail, ActorKind, DEFAULT_T0_UNIX, NewPull, OrgRole, Pull, ReviewState, TeamRole, World,
-    WorldView,
+    WorldError, WorldSecret, WorldView,
 };
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/// The secret every test instance is created with, and its stored form.
+const SECRET: WorldSecret = WorldSecret::from_bytes([0x5a; 32]);
+const SECRET_HEX: &str = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
 
 struct Instance {
     dir: tempfile::TempDir,
@@ -20,8 +24,8 @@ struct Instance {
 impl Instance {
     fn new() -> Instance {
         let dir = tempfile::tempdir().expect("tempdir");
-        let world =
-            World::create(&dir.path().join("world"), DEFAULT_T0_UNIX).expect("create world");
+        let world = World::create(&dir.path().join("world"), DEFAULT_T0_UNIX, &SECRET)
+            .expect("create world");
         Instance { dir, world }
     }
 
@@ -146,7 +150,7 @@ fn create_list_info_delete() {
 #[test]
 fn restore_rewinds_and_the_world_keeps_working() {
     let inst = Instance::new();
-    let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
+    let (alice, alice_token) = inst.world.create_actor("alice", ActorKind::User).unwrap();
     orrery_snapshot::create(&inst.world, &inst.snapshots(), "before").unwrap();
 
     inst.world.advance_clock(3600, alice.id).unwrap();
@@ -161,6 +165,12 @@ fn restore_rewinds_and_the_world_keeps_working() {
     assert!(inst.world.actor_by_login("bob").unwrap().is_none());
     assert!(inst.world.actor_by_token(&bob_token).unwrap().is_none());
     assert!(inst.world.actor_by_login("alice").unwrap().is_some());
+    // Restore returns the world to its own state, secret included, so the
+    // credentials it had then still work: nothing is re-keyed.
+    assert_eq!(
+        inst.world.actor_by_token(&alice_token).unwrap(),
+        Some(alice)
+    );
 
     // The restored world is fully live: writes, and further snapshots, work.
     inst.world.create_actor("carol", ActorKind::User).unwrap();
@@ -179,7 +189,8 @@ fn fork_is_isolated_from_the_source() {
     orrery_snapshot::create(&inst.world, &inst.snapshots(), "seed").unwrap();
 
     let dest = tempfile::tempdir().unwrap();
-    let forked_root = orrery_snapshot::fork(&inst.snapshots(), "seed", dest.path()).unwrap();
+    let forked_root =
+        orrery_snapshot::fork(&inst.snapshots(), "seed", dest.path(), &SECRET).unwrap();
     let fork = World::open(&forked_root).unwrap();
     assert_eq!(fork.clock().unwrap(), DEFAULT_T0_UNIX);
     assert!(fork.actor_by_login("alice").unwrap().is_some());
@@ -194,7 +205,147 @@ fn fork_is_isolated_from_the_source() {
 
     // A second fork into the same instance dir refuses: it already has a
     // world.
-    assert!(orrery_snapshot::fork(&inst.snapshots(), "seed", dest.path()).is_err());
+    assert!(orrery_snapshot::fork(&inst.snapshots(), "seed", dest.path(), &SECRET).is_err());
+}
+
+/// The credentials one scripted history leaves in a world.
+struct Seeded {
+    alice: orrery_world::Actor,
+    alice_token: String,
+    client_id: String,
+    client_secret: String,
+    oauth_token: String,
+    pending_code: String,
+}
+
+/// Alice, an OAuth app, a code she authorized and exchanged, and a second
+/// code still waiting to be.
+fn seed(world: &World) -> Seeded {
+    let (alice, alice_token) = world.create_actor("alice", ActorKind::User).unwrap();
+    let app = world
+        .create_oauth_app("Sign-in", "https://auth.test/callback", alice.id)
+        .unwrap();
+    let issue = || {
+        world
+            .issue_oauth_code(&app, &alice, "https://auth.test/callback", "user")
+            .unwrap()
+    };
+    let spent = issue();
+    let oauth_token = world
+        .exchange_oauth_code(&app.client_id, &app.client_secret, &spent, None)
+        .unwrap()
+        .token;
+    let pending_code = issue();
+    Seeded {
+        alice,
+        alice_token,
+        client_id: app.client_id,
+        client_secret: app.client_secret,
+        oauth_token,
+        pending_code,
+    }
+}
+
+#[test]
+fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
+    let inst = Instance::new();
+    let source = seed(&inst.world);
+    inst.snapshot("seed");
+
+    // A twin: the same history played into a world created with the fork's
+    // secret holds exactly the credentials re-keying must derive.
+    let fork_secret = WorldSecret::from_bytes([0xc3; 32]);
+    let twin_dir = tempfile::tempdir().unwrap();
+    let twin_world = World::create(
+        &twin_dir.path().join("world"),
+        DEFAULT_T0_UNIX,
+        &fork_secret,
+    )
+    .unwrap();
+    let twin = seed(&twin_world);
+
+    let dest = tempfile::tempdir().unwrap();
+    let forked_root =
+        orrery_snapshot::fork(&inst.snapshots(), "seed", dest.path(), &fork_secret).unwrap();
+    let fork = World::open(&forked_root).unwrap();
+
+    // Tokens: the source's are refused, the re-derived ones act as alice.
+    for token in [&source.alice_token, &source.oauth_token] {
+        assert!(fork.actor_by_token(token).unwrap().is_none(), "{token}");
+    }
+    for token in [&twin.alice_token, &twin.oauth_token] {
+        assert_eq!(
+            fork.actor_by_token(token).unwrap().as_ref(),
+            Some(&source.alice)
+        );
+    }
+
+    // The app keeps its public client id and gets the re-derived secret.
+    assert_eq!(twin.client_id, source.client_id);
+    let app = fork
+        .oauth_app_by_client_id(&source.client_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(app.client_secret, twin.client_secret);
+    assert_ne!(app.client_secret, source.client_secret);
+    assert!(matches!(
+        fork.exchange_oauth_code(
+            &source.client_id,
+            &source.client_secret,
+            &twin.pending_code,
+            None
+        ),
+        Err(WorldError::OAuthClientCredentials)
+    ));
+
+    // The pending code: the source's value is dead in the fork, the
+    // re-derived one exchanges, and the token it buys means nothing to the
+    // source.
+    assert!(matches!(
+        fork.exchange_oauth_code(
+            &app.client_id,
+            &app.client_secret,
+            &source.pending_code,
+            None
+        ),
+        Err(WorldError::OAuthBadCode)
+    ));
+    let exchanged = fork
+        .exchange_oauth_code(&app.client_id, &app.client_secret, &twin.pending_code, None)
+        .unwrap();
+    assert_eq!(exchanged.actor, source.alice);
+    assert!(
+        inst.world
+            .actor_by_token(&exchanged.token)
+            .unwrap()
+            .is_none()
+    );
+
+    // The source is untouched.
+    assert_eq!(
+        inst.world.actor_by_token(&source.alice_token).unwrap(),
+        Some(source.alice.clone())
+    );
+
+    // One logged action, attributed to the engine, naming no credential.
+    let log = fork.log_after(0, 500).unwrap();
+    let rekeys: Vec<_> = log.iter().filter(|e| e.action == "world.rekey").collect();
+    assert_eq!(rekeys.len(), 1);
+    assert_eq!(rekeys[0].actor_login, "orrery");
+    assert_eq!(
+        rekeys[0].details,
+        serde_json::json!({ "tokens": 2, "oauth_apps": 1, "oauth_codes": 1 })
+    );
+    let wire = serde_json::to_string(&log).unwrap();
+    for secret in [
+        &"c3".repeat(32),
+        &twin.alice_token,
+        &twin.oauth_token,
+        &twin.client_secret,
+        &twin.pending_code,
+    ] {
+        assert!(!wire.contains(secret.as_str()), "the log leaks {secret}");
+    }
 }
 
 #[test]
@@ -391,6 +542,7 @@ fn diff_reports_oauth_apps_and_authorizations_without_their_secrets() {
     let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
     inst.snapshot("before");
 
+    let (_, bob_token) = inst.world.create_actor("bob", ActorKind::User).unwrap();
     let app = inst
         .world
         .create_oauth_app("GoTrue", "https://auth.test/callback", alice.id)
@@ -429,8 +581,14 @@ fn diff_reports_oauth_apps_and_authorizations_without_their_secrets() {
     assert_eq!(whole.authorizations_exchanged.len(), 1);
 
     let wire = serde_json::to_string(&whole).unwrap();
-    for secret in [&app.client_secret, &code, &token.token] {
-        assert!(!wire.contains(secret.as_str()), "diff leaks {secret}");
+    for secret in [
+        SECRET_HEX,
+        &bob_token,
+        &app.client_secret,
+        &code,
+        &token.token,
+    ] {
+        assert!(!wire.contains(secret), "diff leaks {secret}");
     }
 }
 

@@ -8,6 +8,7 @@ disallowed-methods = [
     { path = "std::time::Instant::now", reason = "the world's time source is the virtual clock; use it, or justify an #[allow] at an operator-facing edge" },
     { path = "jiff::Timestamp::now", reason = "the world's time source is the virtual clock" },
     { path = "jiff::Zoned::now", reason = "the world's time source is the virtual clock" },
+    { path = "getrandom::fill", reason = "randomness is a hidden input that breaks replay; derive values from world state, or justify an #[allow] where the world stores the result" },
 ]
 
 # BTreeMap/BTreeSet are house style for anything that is iterated, serialized,

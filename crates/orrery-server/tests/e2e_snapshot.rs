@@ -6,6 +6,7 @@
 mod common;
 
 use common::{boot, boot_at, control_post, face, face_ok, git, mint_actor};
+use orrery_world::WorldSecret;
 
 fn control(
     method: &str,
@@ -311,12 +312,18 @@ async fn fork_serves_an_independent_world() {
 
     // Fork the snapshot into a second instance and serve it.
     let dest = tempfile::tempdir().unwrap();
-    let forked_root =
-        orrery_snapshot::fork(&inst.dir.path().join("snapshots"), "seed", dest.path()).unwrap();
+    let forked_root = orrery_snapshot::fork(
+        &inst.dir.path().join("snapshots"),
+        "seed",
+        dest.path(),
+        &WorldSecret::LOCAL,
+    )
+    .unwrap();
     let fork = boot_at(dest, &forked_root).await;
 
-    // Alice's derived token works in the fork (same world lineage), and the
-    // repo clones from the fork's own URL.
+    // Both are local worlds under the well-known secret, so re-keying the
+    // fork derives the token alice already holds, and the repo clones from
+    // the fork's own URL.
     let fork_url = format!(
         "{}/alice/webapp.git",
         fork.base

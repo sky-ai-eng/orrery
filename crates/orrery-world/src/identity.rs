@@ -3,8 +3,8 @@
 //! those codes are traded for.
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use sha2::{Digest, Sha256};
 
+use crate::credentials::{self, TokenOrigin};
 use crate::{
     Actor, ActorEmail, ActorKind, OAuthApp, OAuthToken, Result, World, WorldError,
     constraint_violation, log_locked, queries,
@@ -72,7 +72,8 @@ impl World {
     }
 
     /// Register an OAuth app. Its client id and secret are derived from its
-    /// id (rule 5), so a replayed world issues the same ones.
+    /// id (rule 5), so a replayed world issues the same ones; the secret is
+    /// keyed by the world secret, the public client id is not.
     pub fn create_oauth_app(&self, name: &str, callback_url: &str, by: i64) -> Result<OAuthApp> {
         if name.trim().is_empty() || name.len() > 100 {
             return Err(WorldError::InvalidOAuthApp {
@@ -89,6 +90,7 @@ impl World {
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
         let clock = queries::clock(&tx)?;
+        let secret = credentials::world_secret(&tx)?;
         let id: i64 = tx.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM oauth_apps", [], |r| {
             r.get(0)
         })?;
@@ -100,14 +102,8 @@ impl World {
             params![
                 id,
                 name,
-                format!(
-                    "orr_client_{}",
-                    derive_hex(&format!("oauth-app-client:{id}"), 10)
-                ),
-                format!(
-                    "orr_secret_{}",
-                    derive_hex(&format!("oauth-app-secret:{id}"), 20)
-                ),
+                credentials::oauth_client_id(id),
+                credentials::oauth_client_secret(&secret, id),
                 callback_url,
                 clock
             ],
@@ -151,6 +147,7 @@ impl World {
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
         let clock = queries::clock(&tx)?;
+        let secret = credentials::world_secret(&tx)?;
         let id: i64 = tx.query_row(
             "SELECT COALESCE(MAX(id), 0) + 1 FROM oauth_codes",
             [],
@@ -163,7 +160,7 @@ impl World {
              RETURNING code",
             params![
                 id,
-                derive_hex(&format!("oauth-code:{id}"), 10),
+                credentials::oauth_code(&secret, id),
                 app.id,
                 actor.id,
                 redirect_uri,
@@ -231,10 +228,11 @@ impl World {
             "UPDATE oauth_codes SET exchanged_clock_unix = ?1 WHERE id = ?2",
             params![clock, code_id],
         )?;
-        let token = format!("orr_{}", derive_hex(&format!("oauth-token:{code_id}"), 16));
+        let token = credentials::oauth_token(&credentials::world_secret(&tx)?, code_id);
         tx.execute(
-            "INSERT INTO tokens (token, actor_id, created_clock_unix) VALUES (?1, ?2, ?3)",
-            params![token, actor_id, clock],
+            "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![token, actor_id, TokenOrigin::OAuthCode(code_id), clock],
         )?;
         let actor = tx.query_row(
             &format!("{} WHERE id = ?1", queries::ACTOR_SELECT),
@@ -340,10 +338,4 @@ fn is_absolute_http_url(s: &str) -> bool {
             let host = rest.split(['/', '?', '#']).next().unwrap_or("");
             !host.is_empty() && !host.chars().any(char::is_whitespace)
         })
-}
-
-/// Hex of the first `bytes` bytes of `input`'s SHA-256: the derived-not-random
-/// identifiers rule 5 requires.
-fn derive_hex(input: &str, bytes: usize) -> String {
-    hex::encode(&Sha256::digest(input)[..bytes])
 }

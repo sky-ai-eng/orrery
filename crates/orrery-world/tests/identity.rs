@@ -3,12 +3,17 @@
 //! virtual clock.
 
 use orrery_world::{
-    ActorEmail, ActorKind, DEFAULT_T0_UNIX, OAUTH_CODE_TTL_SECONDS, World, WorldError,
+    ActorEmail, ActorKind, DEFAULT_T0_UNIX, OAUTH_CODE_TTL_SECONDS, World, WorldError, WorldSecret,
 };
 
 fn fresh() -> (tempfile::TempDir, World) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let world = World::create(&dir.path().join("world"), DEFAULT_T0_UNIX).expect("create world");
+    let world = World::create(
+        &dir.path().join("world"),
+        DEFAULT_T0_UNIX,
+        &WorldSecret::LOCAL,
+    )
+    .expect("create world");
     (dir, world)
 }
 

@@ -6,13 +6,14 @@
 //! copy.
 //!
 //! Layout: `<instance>/world/` live, `<instance>/snapshots/<name>/` each a
-//! full world directory. Snapshots are safe to share by rule 12 — every
-//! credential in a world is derived and fake.
+//! full world directory. Every credential in a world is derived and fake
+//! (rule 12), but a copy holds the world secret and the stored tokens, so
+//! nothing here returns a snapshot's raw contents.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use orrery_world::{World, WorldReader, WorldView};
+use orrery_world::{World, WorldReader, WorldSecret, WorldView};
 
 pub mod diff;
 
@@ -118,6 +119,9 @@ pub fn delete(snapshots_dir: &Path, name: &str) -> Result<()> {
 /// the database around the directory swap. Blocking: run off the async
 /// runtime.
 ///
+/// No re-keying: the world returns to its own earlier state, and the secret
+/// in that state is its own.
+///
 /// The old live state moves aside before the copy and is removed only after
 /// it succeeds; a failed copy renames it back, so the world is never left
 /// half-restored.
@@ -157,9 +161,15 @@ pub fn restore(world: &World, snapshots_dir: &Path, name: &str) -> Result<()> {
 }
 
 /// Copy a snapshot into a fresh instance directory as its live world —
-/// a fork. Snapshots are static, so this is safe while the source instance
-/// serves traffic.
-pub fn fork(snapshots_dir: &Path, name: &str, dest_instance_dir: &Path) -> Result<PathBuf> {
+/// a fork — and re-key it under `secret`. A fork is a new world, so it must
+/// accept none of its source's credentials. Snapshots are static, so this is
+/// safe while the source instance serves traffic.
+pub fn fork(
+    snapshots_dir: &Path,
+    name: &str,
+    dest_instance_dir: &Path,
+    secret: &WorldSecret,
+) -> Result<PathBuf> {
     validate_name(name)?;
     let src = snapshots_dir.join(name);
     if !src.exists() {
@@ -174,6 +184,18 @@ pub fn fork(snapshots_dir: &Path, name: &str, dest_instance_dir: &Path) -> Resul
     }
     std::fs::create_dir_all(dest_instance_dir)?;
     copy_dir(&src, &dest_world)?;
+    if let Err(e) = World::open_rekeyed(&dest_world, secret) {
+        // A copy left un-re-keyed would accept its source's credentials.
+        if let Err(cleanup) = std::fs::remove_dir_all(&dest_world) {
+            tracing::error!(
+                error = %cleanup,
+                "removing a fork that failed to re-key also failed; {} still holds \
+                 its source's credentials",
+                dest_world.display(),
+            );
+        }
+        return Err(e.into());
+    }
     Ok(dest_world)
 }
 

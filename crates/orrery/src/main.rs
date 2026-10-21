@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use orrery_world::World;
+use orrery_world::{World, WorldSecret};
 
 #[derive(Parser)]
 #[command(
@@ -24,9 +24,9 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
-    /// Copy a snapshot into a fresh instance directory as its live world.
-    /// Snapshots are static, so this is safe while the source instance is
-    /// being served.
+    /// Copy a snapshot into a fresh instance directory as its live world,
+    /// re-keyed under the well-known local secret. Snapshots are static, so
+    /// this is safe while the source instance is being served.
     Fork {
         /// The source instance directory (the one holding `snapshots/`).
         #[arg(long)]
@@ -58,6 +58,39 @@ struct InstanceConfig {
     /// RFC3339 T0 for a newly created world. Ignored when the world already
     /// exists — the clock lives in the world, not the config.
     t0: Option<String>,
+    /// The secret a newly created world derives its credentials from. Ignored
+    /// when the world already exists, like `t0`: the secret lives in the world.
+    #[serde(default)]
+    secret: SecretChoice,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum SecretChoice {
+    /// The well-known `WorldSecret::LOCAL`: a local world needs no
+    /// unguessable credentials, and its runs stay identical from run to run.
+    #[default]
+    Local,
+    /// Unguessable, as a world on the public internet needs.
+    Random,
+}
+
+impl SecretChoice {
+    fn secret(&self) -> anyhow::Result<WorldSecret> {
+        match self {
+            SecretChoice::Local => Ok(WorldSecret::LOCAL),
+            SecretChoice::Random => {
+                let mut bytes = [0; 32];
+                // The one random input in the tree. It is safe for replay
+                // because the world stores the secret at creation and every
+                // later derivation reads it from there.
+                #[allow(clippy::disallowed_methods)]
+                getrandom::fill(&mut bytes)
+                    .map_err(|e| anyhow::anyhow!("generating the world secret: {e}"))?;
+                Ok(WorldSecret::from_bytes(bytes))
+            }
+        }
+    }
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -188,8 +221,16 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn fork(instance: &std::path::Path, snapshot: &str, dest: &std::path::Path) -> anyhow::Result<()> {
-    let world = orrery_snapshot::fork(&instance.join("snapshots"), snapshot, dest)
-        .with_context(|| format!("forking snapshot {snapshot:?} from {}", instance.display()))?;
+    // Local worlds share the well-known secret, so a fork of a local world
+    // keeps the tokens its source minted and a local run is identical every
+    // time.
+    let world = orrery_snapshot::fork(
+        &instance.join("snapshots"),
+        snapshot,
+        dest,
+        &WorldSecret::LOCAL,
+    )
+    .with_context(|| format!("forking snapshot {snapshot:?} from {}", instance.display()))?;
     println!(
         "forked {snapshot:?} into {} — serve it with a config whose instance.dir is {}",
         world.display(),
@@ -211,7 +252,11 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         None => orrery_world::DEFAULT_T0_UNIX,
     };
     let world_root = config.instance.dir.join("world");
-    let world = Arc::new(World::open_or_create(&world_root, t0_unix)?);
+    let world = Arc::new(World::open_or_create(
+        &world_root,
+        t0_unix,
+        &config.instance.secret.secret()?,
+    )?);
 
     let listen = config
         .server

@@ -4,7 +4,7 @@
 
 use orrery_world::{
     ActorKind, DEFAULT_T0_UNIX, NewPull, OrgRole, Pull, RequestedReviewer, ReviewState, TeamRole,
-    TimelineKind, World, WorldError,
+    TimelineKind, World, WorldError, WorldSecret,
 };
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -24,7 +24,12 @@ struct Fixture {
 /// carol is not in the org.
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
-    let w = World::create(&dir.path().join("world"), DEFAULT_T0_UNIX).expect("create world");
+    let w = World::create(
+        &dir.path().join("world"),
+        DEFAULT_T0_UNIX,
+        &WorldSecret::LOCAL,
+    )
+    .expect("create world");
     let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
     let (bob, _) = w.create_actor("bob", ActorKind::User).unwrap();
     let (carol, _) = w.create_actor("carol", ActorKind::User).unwrap();

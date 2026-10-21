@@ -8,6 +8,11 @@ dir = "./instance"
 # the clock lives in the world, not the config. Omit for the fixed default
 # (2020-01-01T00:00:00Z).
 t0 = "2026-01-01T00:00:00Z"
+# The secret a newly created world derives its fake credentials from. "local"
+# is a fixed, well-known one, so local runs mint the same tokens every time;
+# "random" makes them unguessable, as a world on the public internet needs.
+# Ignored when the world already exists — the secret lives in the world.
+# secret = "local"
 
 [server]
 # host:port, or unix:/absolute/path for a Unix socket. A stale socket file left

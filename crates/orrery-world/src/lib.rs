@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::{Connection, OptionalExtension, params};
-use sha2::{Digest, Sha256};
 
 mod checks;
+mod credentials;
 mod error;
 mod identity;
 mod orgs;
@@ -29,6 +29,7 @@ mod schema;
 mod types;
 
 pub use checks::{CheckRunPatch, NewCheckRun};
+pub use credentials::WorldSecret;
 pub use error::WorldError;
 pub use identity::OAUTH_CODE_TTL_SECONDS;
 pub use pulls::NewPull;
@@ -56,8 +57,9 @@ pub struct World {
 
 impl World {
     /// Create a new world at `root` (which must not already contain one) with
-    /// the clock at `t0_unix`, and seed the system actor.
-    pub fn create(root: &Path, t0_unix: i64) -> Result<World> {
+    /// the clock at `t0_unix` and every credential keyed by `secret`, and seed
+    /// the system actor.
+    pub fn create(root: &Path, t0_unix: i64, secret: &WorldSecret) -> Result<World> {
         if root.join(DB_FILE).exists() {
             return Err(WorldError::AlreadyExists(root.to_path_buf()));
         }
@@ -66,8 +68,8 @@ impl World {
         {
             let conn = world.lock();
             conn.execute(
-                "INSERT INTO world (id, clock_unix) VALUES (1, ?1)",
-                params![t0_unix],
+                "INSERT INTO world (id, clock_unix, secret) VALUES (1, ?1, ?2)",
+                params![t0_unix, secret],
             )?;
             conn.execute(
                 "INSERT INTO actors (login, kind, created_clock_unix) VALUES (?1, 'system', ?2)",
@@ -93,12 +95,13 @@ impl World {
         World::connect(root)
     }
 
-    /// Open the world at `root`, creating it with `t0_unix` if absent.
-    pub fn open_or_create(root: &Path, t0_unix: i64) -> Result<World> {
+    /// Open the world at `root`, creating it with `t0_unix` and `secret` if
+    /// absent. An existing world keeps the secret it was created with.
+    pub fn open_or_create(root: &Path, t0_unix: i64, secret: &WorldSecret) -> Result<World> {
         if root.join(DB_FILE).exists() {
             World::open(root)
         } else {
-            World::create(root, t0_unix)
+            World::create(root, t0_unix, secret)
         }
     }
 
@@ -152,7 +155,8 @@ impl World {
     // ---- actors & tokens ----
 
     /// Create an actor and mint its token. The token is derived, not random
-    /// (rule 5: replay must reproduce it; rule 12: it is fake by construction).
+    /// (rule 5: replay must reproduce it; rule 12: it is fake by construction),
+    /// and keyed by the world secret, so it cannot be guessed.
     pub fn create_actor(&self, login: &str, kind: ActorKind) -> Result<(Actor, String)> {
         validate_login(login)?;
         if kind == ActorKind::System {
@@ -171,10 +175,12 @@ impl World {
                 true => WorldError::ActorExists(login.to_string()),
                 false => WorldError::from(e),
             })?;
-        let token = derive_token(&actor.login, actor.id);
+        let token =
+            credentials::actor_token(&credentials::world_secret(&conn)?, &actor.login, actor.id);
         conn.execute(
-            "INSERT INTO tokens (token, actor_id, created_clock_unix) VALUES (?1, ?2, ?3)",
-            params![token, actor.id, clock],
+            "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![token, actor.id, credentials::TokenOrigin::Actor, clock],
         )?;
         identity::insert_email(&conn, actor.id, &identity::default_email(&actor.login))?;
         log_locked(
@@ -458,14 +464,6 @@ pub(crate) fn constraint_violation(e: &rusqlite::Error) -> bool {
         rusqlite::Error::SqliteFailure(f, _)
             if f.code == rusqlite::ErrorCode::ConstraintViolation
     )
-}
-
-/// Tokens are derived from stable inputs so replay reproduces them exactly.
-/// The `orr_` prefix keeps them visibly fake and outside every real GitHub
-/// token namespace (`ghp_`, `ghs_`, `gho_`, ...).
-fn derive_token(login: &str, actor_id: i64) -> String {
-    let digest = Sha256::digest(format!("{login}:{actor_id}"));
-    format!("orr_{}", hex::encode(&digest[..16]))
 }
 
 /// GitHub login rules: alphanumeric and hyphens, no leading/trailing hyphen,

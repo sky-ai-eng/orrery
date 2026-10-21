@@ -5,7 +5,7 @@
 
 use orrery_world::{
     ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX, NewCheckRun, NewPull,
-    Pull, PullState, ReviewState, TimelineKind, World, WorldError,
+    Pull, PullState, ReviewState, TimelineKind, World, WorldError, WorldSecret,
 };
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -22,7 +22,12 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
-    let w = World::create(&dir.path().join("world"), DEFAULT_T0_UNIX).expect("create world");
+    let w = World::create(
+        &dir.path().join("world"),
+        DEFAULT_T0_UNIX,
+        &WorldSecret::LOCAL,
+    )
+    .expect("create world");
     let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
     let (bob, _) = w.create_actor("bob", ActorKind::User).unwrap();
     let repo = w

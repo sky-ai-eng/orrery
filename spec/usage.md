@@ -86,7 +86,7 @@ Authoring history is replaying it under the crank: set clock to T0, make the cal
 **There is no clock rollback in a live world.** Rewinding time over existing state is meaningless. What feels like rollback is a world operation:
 
 - **Coarse:** restore or fork from a named snapshot (the clock value travels inside it).
-- **Fine:** replay — rule 5 guarantees seed + action log rebuilds the world at any prefix. The log is the fine-grained history; snapshots are memoized prefixes for speed. "State as of event N" = fork from the nearest earlier snapshot, re-execute the log to N.
+- **Fine:** replay — rule 5 guarantees seed + action log rebuilds the world at any prefix. The log is the fine-grained history; snapshots are memoized prefixes for speed. "State as of event N" = fork from the nearest earlier snapshot, re-execute the log to N. Credentials replay too: each is derived under the world's secret, which is never in the log, and a world is re-keyed only at its creation (one `world.rekey` entry, when it is made from another world's state). So every entry after that was made under the secret the world holds now, and a replay reads it from the live world and re-executes under it rather than re-keying.
 
 Snapshots are therefore taken at explicit moments only — named test points (`before`/`after`), seed caches, the ring's reset point — never per event.
 

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::Arc;
 
-use orrery_world::{DEFAULT_T0_UNIX, World};
+use orrery_world::{DEFAULT_T0_UNIX, World, WorldSecret};
 
 pub struct Instance {
     /// The instance directory: `world/` live, `snapshots/` beside it.
@@ -26,15 +26,27 @@ impl Drop for Instance {
     }
 }
 
+/// Boot a local world: the well-known secret, as `orrery serve` uses.
 pub async fn boot() -> Instance {
     boot_with(orrery_server::Options::default()).await
 }
 
 pub async fn boot_with(options: orrery_server::Options) -> Instance {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let world =
-        Arc::new(World::create(&dir.path().join("world"), DEFAULT_T0_UNIX).expect("create world"));
+    let (dir, world) = create(&WorldSecret::LOCAL);
     serve(dir, world, options).await
+}
+
+pub async fn boot_keyed(secret: &WorldSecret) -> Instance {
+    let (dir, world) = create(secret);
+    serve(dir, world, orrery_server::Options::default()).await
+}
+
+fn create(secret: &WorldSecret) -> (tempfile::TempDir, Arc<World>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let world = Arc::new(
+        World::create(&dir.path().join("world"), DEFAULT_T0_UNIX, secret).expect("create world"),
+    );
+    (dir, world)
 }
 
 /// Boot a server over an existing world directory — how a forked instance
