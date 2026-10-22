@@ -14,12 +14,13 @@ use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use base64::Engine as _;
 use orrery_face_git::store;
-use orrery_world::{Actor, PullState};
+use orrery_world::{Actor, ActorKind, PullState};
 use sha2::{Digest, Sha256};
 
 use crate::pulls::pull_by_path_number;
 use crate::render::{
-    check_run_json, comment_json, pull_json, repo_json, review_json, team_full_json, team_json,
+    check_run_json, comment_json, org_full_json, pull_json, repo_json, review_json, team_full_json,
+    team_json, user_full_json,
 };
 use crate::{GithubFace, github_error, internal, json_response, resolve_repo, validation_invalid};
 
@@ -329,22 +330,48 @@ pub(crate) async fn list_branches(
     )
 }
 
-pub(crate) async fn get_user(Extension(actor): Extension<Actor>) -> Response<Body> {
+pub(crate) async fn get_user(
+    State(face): State<GithubFace>,
+    Extension(actor): Extension<Actor>,
+) -> Response<Body> {
     if let Some(refused) = refuse_integration(&actor) {
         return refused;
     }
-    json_response(
-        StatusCode::OK,
-        serde_json::json!({
-            "login": crate::render::rest_login(&actor),
-            "id": actor.id,
-            "node_id": format!("O_actor_{}", actor.id),
-            "name": actor.login,
-            "avatar_url": format!("https://orrery.invalid/avatars/{}", actor.id),
-            "type": crate::render::owner_type(actor.kind),
-            "site_admin": false,
-        }),
-    )
+    json_response(StatusCode::OK, user_full_json(&face, &actor))
+}
+
+/// An account by the login REST spells it with: a user's, an organization's,
+/// or an App's bot as `<slug>[bot]`. Any other login is GitHub's 404.
+pub(crate) async fn get_user_by_login(
+    State(face): State<GithubFace>,
+    UrlPath(username): UrlPath<String>,
+) -> Response<Body> {
+    let (login, bot) = match username.strip_suffix("[bot]") {
+        Some(slug) => (slug, true),
+        None => (username.as_str(), false),
+    };
+    match face.world.actor_by_login(login) {
+        Ok(Some(a)) if (a.kind == ActorKind::Bot) == bot && a.kind != ActorKind::System => {
+            json_response(StatusCode::OK, user_full_json(&face, &a))
+        }
+        Ok(_) => github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => internal(e),
+    }
+}
+
+/// An organization by login. A user's login, or one nobody holds, is
+/// GitHub's 404.
+pub(crate) async fn get_org(
+    State(face): State<GithubFace>,
+    UrlPath(org): UrlPath<String>,
+) -> Response<Body> {
+    match face.world.actor_by_login(&org) {
+        Ok(Some(a)) if a.kind == ActorKind::Org => {
+            json_response(StatusCode::OK, org_full_json(&face, &a))
+        }
+        Ok(_) => github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => internal(e),
+    }
 }
 
 /// A bot actor stands for a GitHub App installation, and GitHub refuses an

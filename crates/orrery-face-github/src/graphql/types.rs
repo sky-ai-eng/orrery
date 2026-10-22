@@ -236,9 +236,12 @@ fn take_first<T>(
 
 // ---- actors ---------------------------------------------------------------
 
+/// `databaseId` here and on `Bot`, `Team` and `Organization` is GitHub's
+/// `Int`: the same id REST answers as `id`.
 #[derive(SimpleObject)]
 pub struct User {
     pub login: String,
+    pub database_id: Option<i64>,
 }
 
 /// A GitHub App's bot. GraphQL spells its login as the bare slug, without
@@ -246,6 +249,7 @@ pub struct User {
 #[derive(SimpleObject)]
 pub struct Bot {
     pub login: String,
+    pub database_id: Option<i64>,
 }
 
 #[derive(Interface)]
@@ -256,13 +260,32 @@ pub enum GqlActor {
 }
 
 /// The author a stored login names, typed by its actor's kind. Actors are
-/// never deleted, so a lookup miss is an anomaly; it degrades to a User
-/// rather than failing the whole query.
+/// never deleted, so a lookup miss is an anomaly; it degrades to a User with
+/// no id rather than failing the whole query.
 fn author(face: &GithubFace, login: &str) -> GqlActor {
-    let login = login.to_string();
-    match face.world.actor_by_login(&login) {
-        Ok(Some(a)) if a.kind == world::ActorKind::Bot => GqlActor::Bot(Bot { login }),
-        _ => GqlActor::User(User { login }),
+    match face.world.actor_by_login(login).ok().flatten() {
+        Some(a) if a.kind == world::ActorKind::Bot => GqlActor::Bot(Bot {
+            login: a.login,
+            database_id: Some(a.id),
+        }),
+        found => GqlActor::User(User {
+            login: login.to_string(),
+            database_id: found.map(|a| a.id),
+        }),
+    }
+}
+
+/// The user a stored login names, degrading to no id on a lookup miss as
+/// [`author`] does.
+fn user(face: &GithubFace, login: &str) -> User {
+    User {
+        login: login.to_string(),
+        database_id: face
+            .world
+            .actor_by_login(login)
+            .ok()
+            .flatten()
+            .map(|a| a.id),
     }
 }
 
@@ -280,6 +303,10 @@ pub struct Organization {
 
 #[Object]
 impl Organization {
+    async fn database_id(&self) -> Option<i64> {
+        Some(self.id)
+    }
+
     async fn login(&self) -> &str {
         &self.login
     }
@@ -319,6 +346,10 @@ pub struct Team {
 
 #[Object]
 impl Team {
+    async fn database_id(&self) -> Option<i64> {
+        Some(self.team.id)
+    }
+
     async fn slug(&self) -> &str {
         &self.team.slug
     }
@@ -364,9 +395,7 @@ fn requested_reviewer(
     reviewer: &world::RequestedReviewer,
 ) -> Result<Option<RequestedReviewer>, Error> {
     Ok(match reviewer {
-        world::RequestedReviewer::User(login) => Some(RequestedReviewer::User(User {
-            login: login.clone(),
-        })),
+        world::RequestedReviewer::User(login) => Some(RequestedReviewer::User(user(face, login))),
         world::RequestedReviewer::Team { id, .. } => face
             .world
             .team_by_id(*id)
@@ -925,9 +954,7 @@ impl PullRequest {
             .requested_reviewers
             .iter()
             .map(|login| ReviewRequest {
-                requested_reviewer: Some(RequestedReviewer::User(User {
-                    login: login.clone(),
-                })),
+                requested_reviewer: Some(RequestedReviewer::User(user(face, login))),
             })
             .collect();
         for slug in &self.pull.requested_teams {

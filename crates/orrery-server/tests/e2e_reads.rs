@@ -366,3 +366,70 @@ async fn org_teams() {
         );
     }
 }
+
+/// The reads that name an account by login. The poller's team reconcile
+/// reads an organization's id from `GET /orgs/{org}`, which is 404 for
+/// anything but an organization; `GET /users/{username}` answers for a user,
+/// an organization, or an App's bot under its `[bot]` login. Each id is the
+/// one every other read carries for that account.
+#[tokio::test(flavor = "multi_thread")]
+async fn accounts_by_login() {
+    let inst = boot().await;
+    let base = inst.base.clone();
+    mint_actor(&base, "acme", "org");
+    let alice = mint_actor(&base, "alice", "user");
+    mint_actor(&base, "ci", "bot");
+    let get = |path: &str| {
+        face(
+            "GET",
+            &format!("{base}/api/v3{path}"),
+            &alice,
+            serde_json::json!(null),
+        )
+    };
+
+    let org = get("/orgs/acme").unwrap();
+    assert_eq!(org["login"], "acme");
+    assert_eq!(org["type"], "Organization");
+    assert!(org["id"].as_i64().unwrap() > 0);
+    assert_eq!(org["html_url"], format!("{base}/acme"));
+    let membership = face_ok(
+        "PUT",
+        &format!("{base}/api/v3/orgs/acme/memberships/alice"),
+        &alice,
+        serde_json::json!({}),
+    );
+    assert_eq!(membership["organization"]["id"], org["id"]);
+    for login in ["alice", "ci", "ghost"] {
+        assert_eq!(
+            get(&format!("/orgs/{login}")).map(|_| ()),
+            Err(404),
+            "{login}"
+        );
+    }
+
+    let me = face_ok(
+        "GET",
+        &format!("{base}/api/v3/user"),
+        &alice,
+        serde_json::json!(null),
+    );
+    let user = get("/users/alice").unwrap();
+    assert_eq!(user, me, "the same object GET /user answers");
+    assert_eq!(user["type"], "User");
+    let as_user = get("/users/acme").unwrap();
+    assert_eq!(as_user["type"], "Organization");
+    assert_eq!(as_user["id"], org["id"]);
+    let bot = get("/users/ci%5Bbot%5D").unwrap();
+    assert_eq!(bot["login"], "ci[bot]");
+    assert_eq!(bot["type"], "Bot");
+    assert_eq!(bot["html_url"], format!("{base}/apps/ci"));
+    assert!(bot["id"].as_i64().unwrap() > 0);
+    for login in ["ci", "alice%5Bbot%5D", "ghost"] {
+        assert_eq!(
+            get(&format!("/users/{login}")).map(|_| ()),
+            Err(404),
+            "{login}"
+        );
+    }
+}

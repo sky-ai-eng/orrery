@@ -82,9 +82,11 @@ fn gql_raw(
 const USER_TEAMS_IN_ORG: &str = r#"
 		query UserTeamsInOrg($org: String!, $login: String!, $cursor: String) {
 			organization(login: $org) {
+				databaseId
 				teams(first: 100, userLogins: [$login], after: $cursor) {
 					pageInfo { hasNextPage endCursor }
 					nodes {
+						databaseId
 						slug
 						name
 						members { totalCount }
@@ -99,9 +101,11 @@ const USER_TEAMS_IN_ORG: &str = r#"
 const ORG_TEAMS: &str = r#"
 		query OrgTeams($org: String!, $cursor: String) {
 			organization(login: $org) {
+				databaseId
 				teams(first: 100, after: $cursor) {
 					pageInfo { hasNextPage endCursor }
 					nodes {
+						databaseId
 						slug
 						name
 						members { totalCount }
@@ -120,8 +124,8 @@ const PR_REQUESTS: &str = r#"
 		pageInfo { hasNextPage }
 		nodes {
 			requestedReviewer {
-				... on User { login }
-				... on Team { slug organization { login } }
+				... on User { login databaseId }
+				... on Team { databaseId slug organization { login } }
 			}
 		}
 	}
@@ -335,11 +339,16 @@ async fn org_and_team_membership() {
         USER_TEAMS_IN_ORG,
         serde_json::json!({ "org": "acme", "login": "bob", "cursor": null }),
     );
+    // GraphQL's databaseIds are the ids REST answers with.
+    assert_eq!(
+        resp["data"]["organization"]["databaseId"],
+        m["organization"]["id"]
+    );
     let teams = &resp["data"]["organization"]["teams"];
     assert_eq!(
         teams["nodes"],
-        serde_json::json!([{ "slug": "platform-team", "name": "Platform Team",
-                             "members": { "totalCount": 2 } }])
+        serde_json::json!([{ "databaseId": team["id"], "slug": "platform-team",
+                             "name": "Platform Team", "members": { "totalCount": 2 } }])
     );
     let resp = gql(
         &s.inst.base,
@@ -631,12 +640,19 @@ async fn review_requests_round_trip() {
         serde_json::json!({ "id": "O_pull_1" }),
     );
     let node = &resp["data"]["node"];
+    // Each reviewer's databaseId is the id the REST pull answered with.
+    let (bob_id, carol_id) = (
+        &pull["requested_reviewers"][0]["id"],
+        &pull["requested_reviewers"][1]["id"],
+    );
+    let platform_id = &pull["requested_teams"][0]["id"];
     assert_eq!(
         node["reviewRequests"]["nodes"],
         serde_json::json!([
-            { "requestedReviewer": { "login": "bob" } },
-            { "requestedReviewer": { "login": "carol" } },
-            { "requestedReviewer": { "slug": "platform", "organization": { "login": "acme" } } },
+            { "requestedReviewer": { "login": "bob", "databaseId": bob_id } },
+            { "requestedReviewer": { "login": "carol", "databaseId": carol_id } },
+            { "requestedReviewer": { "databaseId": platform_id, "slug": "platform",
+                                     "organization": { "login": "acme" } } },
         ])
     );
     let requested: Vec<&serde_json::Value> = node["timelineItems"]["nodes"]

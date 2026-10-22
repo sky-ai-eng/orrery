@@ -244,6 +244,41 @@ pub(crate) fn org_json(face: &GithubFace, org_login: &str) -> serde_json::Value 
     json
 }
 
+/// GitHub's organization object as `GET /orgs/{org}` answers it: the object
+/// a team carries, plus the profile fields.
+pub(crate) fn org_full_json(face: &GithubFace, org: &Actor) -> serde_json::Value {
+    let base = face.base_url.trim_end_matches('/');
+    let mut json = org_json(face, &org.login);
+    json["avatar_url"] = serde_json::json!(avatar_url(org));
+    json["html_url"] = serde_json::json!(format!("{base}/{}", org.login));
+    json["created_at"] = serde_json::json!(rfc3339(org.created_clock_unix));
+    json["updated_at"] = serde_json::json!(rfc3339(org.created_clock_unix));
+    json
+}
+
+/// GitHub's user object as `GET /user` and `GET /users/{username}` answer
+/// it. Orrery keeps no display name, so `name` is the login.
+pub(crate) fn user_full_json(face: &GithubFace, actor: &Actor) -> serde_json::Value {
+    let base = face.base_url.trim_end_matches('/');
+    let login = rest_login(actor);
+    let html_url = match actor.kind {
+        ActorKind::Bot => format!("{base}/apps/{}", actor.login),
+        _ => format!("{base}/{login}"),
+    };
+    let mut json = actor_json(actor);
+    json["name"] = serde_json::json!(actor.login);
+    json["avatar_url"] = serde_json::json!(avatar_url(actor));
+    json["url"] = serde_json::json!(format!("{base}/api/v3/users/{login}"));
+    json["html_url"] = serde_json::json!(html_url);
+    json["created_at"] = serde_json::json!(rfc3339(actor.created_clock_unix));
+    json["updated_at"] = serde_json::json!(rfc3339(actor.created_clock_unix));
+    json
+}
+
+fn avatar_url(actor: &Actor) -> String {
+    format!("https://orrery.invalid/avatars/{}", actor.id)
+}
+
 /// GitHub's team object as an organization's team listing and a pull's
 /// `requested_teams` carry it. Orrery keeps no secret teams and no nesting,
 /// so every team is `closed` with no parent.

@@ -44,6 +44,7 @@ pub struct GithubFace {
 
 pub fn router(face: GithubFace) -> Router {
     Router::new()
+        .route("/orgs/{org}", get(reads::get_org))
         .route("/orgs/{org}/repos", post(create_org_repo))
         .route(
             "/orgs/{org}/teams",
@@ -58,6 +59,7 @@ pub fn router(face: GithubFace) -> Router {
             "/orgs/{org}/memberships/{username}",
             put(orgs::set_org_membership),
         )
+        .route("/users/{username}", get(reads::get_user_by_login))
         .route("/user", get(reads::get_user))
         .route("/user/emails", get(reads::get_user_emails))
         .route("/user/teams", get(reads::list_user_teams))

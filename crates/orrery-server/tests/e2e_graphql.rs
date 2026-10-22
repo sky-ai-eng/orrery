@@ -15,7 +15,7 @@ const PR_BASE_FIELDS: &str = r#"
 	number
 	title
 	body
-	author { __typename login }
+	author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
 	state
 	isDraft
 	merged
@@ -32,8 +32,8 @@ const PR_BASE_FIELDS: &str = r#"
 		pageInfo { hasNextPage }
 		nodes {
 			requestedReviewer {
-				... on User { login }
-				... on Team { slug organization { login } }
+				... on User { login databaseId }
+				... on Team { databaseId slug organization { login } }
 			}
 		}
 	}
@@ -41,7 +41,7 @@ const PR_BASE_FIELDS: &str = r#"
 		nodes {
 			id
 			fullDatabaseId
-			author { __typename login }
+			author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
 			state
 			submittedAt
 			comments { totalCount }
@@ -231,7 +231,7 @@ fn open_pr(s: &Seeded) -> serde_json::Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn tf_refresh_full_fragment_round_trip() {
     let s = seed().await;
-    open_pr(&s);
+    let pull = open_pr(&s);
 
     // Two reviews by bob so latestReviews collapses to his latest while
     // reviews.totalCount sees both.
@@ -242,7 +242,7 @@ async fn tf_refresh_full_fragment_round_trip() {
         &s.bob_token,
         serde_json::json!({ "event": "REQUEST_CHANGES", "body": "needs work" }),
     );
-    face_ok(
+    let approval = face_ok(
         "POST",
         &reviews_url,
         &s.bob_token,
@@ -296,6 +296,10 @@ async fn tf_refresh_full_fragment_round_trip() {
     assert_eq!(pr["title"], "Add feature");
     assert_eq!(pr["body"], "does the thing");
     assert_eq!(pr["author"]["login"], "alice");
+    assert_eq!(
+        pr["author"]["databaseId"], pull["user"]["id"],
+        "an Int, the id REST answers"
+    );
     assert_eq!(pr["state"], "OPEN");
     assert_eq!(pr["isDraft"], false);
     assert_eq!(pr["merged"], false);
@@ -321,6 +325,7 @@ async fn tf_refresh_full_fragment_round_trip() {
     assert_eq!(latest[0]["author"]["__typename"], "User");
     assert_eq!(latest[0]["comments"]["totalCount"], 0);
     assert_eq!(latest[0]["author"]["login"], "bob");
+    assert_eq!(latest[0]["author"]["databaseId"], approval["user"]["id"]);
     assert_eq!(latest[0]["state"], "APPROVED");
     assert_eq!(latest[0]["submittedAt"], "2020-01-01T00:00:00Z");
     assert_eq!(pr["reviews"]["totalCount"], 2);
@@ -378,7 +383,7 @@ const PR_COMMENTS_QUERY: &str = r#"
 					nodes {
 						fullDatabaseId
 						createdAt
-						author { __typename login }
+						author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
 						body
 					}
 				}
@@ -400,7 +405,7 @@ const PR_REVIEWS_QUERY: &str = r#"
 						fullDatabaseId
 						state
 						submittedAt
-						author { __typename login }
+						author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
 						body
 						comments(first: 100) {
 							totalCount
@@ -800,9 +805,11 @@ async fn tf_organization_teams_query() {
     let query = r#"
 		query($org: String!, $login: String!, $cursor: String) {
 			organization(login: $org) {
+				databaseId
 				teams(first: 100, userLogins: [$login], after: $cursor) {
 					pageInfo { hasNextPage endCursor }
 					nodes {
+						databaseId
 						slug
 						name
 						members { totalCount }
@@ -818,6 +825,13 @@ async fn tf_organization_teams_query() {
         serde_json::json!({ "org": "acme", "login": "alice", "cursor": null }),
     );
     assert!(resp.get("errors").is_none(), "unexpected errors: {resp}");
+    let org = face_ok(
+        "GET",
+        &format!("{}/api/v3/orgs/acme", s.inst.base),
+        &s.token,
+        serde_json::json!(null),
+    );
+    assert_eq!(resp["data"]["organization"]["databaseId"], org["id"]);
     let teams = &resp["data"]["organization"]["teams"];
     assert_eq!(teams["pageInfo"]["hasNextPage"], false);
     assert_eq!(teams["nodes"].as_array().unwrap().len(), 0);
@@ -883,7 +897,7 @@ async fn unknown_field_marked_not_mocked() {
 #[tokio::test(flavor = "multi_thread")]
 async fn bot_actors_render_as_github_apps() {
     let s = seed().await;
-    open_pr(&s);
+    let pull = open_pr(&s);
     let rest = face_ok(
         "POST",
         &format!("{}/issues/1/comments", s.api),
@@ -909,6 +923,7 @@ async fn bot_actors_render_as_github_apps() {
     let author = &comments["data"]["node"]["comments"]["nodes"][0]["author"];
     assert_eq!(author["__typename"], "Bot");
     assert_eq!(author["login"], "ci");
+    assert_eq!(author["databaseId"], rest["user"]["id"]);
     let reviews = gql(
         &s.inst.base,
         &s.token,
@@ -918,16 +933,21 @@ async fn bot_actors_render_as_github_apps() {
     let author = &reviews["data"]["node"]["reviews"]["nodes"][0]["author"];
     assert_eq!(author["__typename"], "Bot");
     assert_eq!(author["login"], "ci");
+    assert_eq!(author["databaseId"], review["user"]["id"]);
 
     // A person stays a User in both.
     let pr = gql(
         &s.inst.base,
         &s.token,
-        "query($id: ID!) { node(id: $id) { ... on PullRequest { author { __typename login } } } }",
+        "query($id: ID!) { node(id: $id) { ... on PullRequest { author { __typename login ... on User { databaseId } ... on Bot { databaseId } } } } }",
         serde_json::json!({ "id": "O_pull_1" }),
     );
     assert_eq!(pr["data"]["node"]["author"]["__typename"], "User");
     assert_eq!(pr["data"]["node"]["author"]["login"], "alice");
+    assert_eq!(
+        pr["data"]["node"]["author"]["databaseId"],
+        pull["user"]["id"]
+    );
 
     for path in [
         "/api/v3/user",
