@@ -19,6 +19,7 @@ const PR_BASE_FIELDS: &str = r#"
 	state
 	isDraft
 	merged
+	mergedBy { __typename login ... on User { databaseId } ... on Bot { databaseId } }
 	mergeable
 	headRefName
 	baseRefName
@@ -50,6 +51,11 @@ const PR_BASE_FIELDS: &str = r#"
 	reviews(last: 1, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
 		totalCount
 		nodes { fullDatabaseId submittedAt }
+	}
+	closedEvents: timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) {
+		nodes {
+			... on ClosedEvent { actor { __typename login ... on User { databaseId } ... on Bot { databaseId } } }
+		}
 	}
 "#;
 
@@ -303,6 +309,8 @@ async fn tf_refresh_full_fragment_round_trip() {
     assert_eq!(pr["state"], "OPEN");
     assert_eq!(pr["isDraft"], false);
     assert_eq!(pr["merged"], false);
+    assert!(pr["mergedBy"].is_null());
+    assert_eq!(pr["closedEvents"]["nodes"], serde_json::json!([]));
     assert_eq!(pr["mergeable"], "MERGEABLE");
     assert_eq!(pr["headRefName"], "feature");
     assert_eq!(pr["baseRefName"], "main");
@@ -608,6 +616,16 @@ async fn tf_discovery_search_and_refusals() {
     assert_eq!(merged[0]["state"], "MERGED");
     assert_eq!(merged[0]["merged"], true);
     assert_eq!(merged[0]["mergedAt"], "2020-01-01T00:00:00Z");
+    assert_eq!(merged[0]["mergedBy"]["__typename"], "User");
+    assert_eq!(merged[0]["mergedBy"]["login"], "alice");
+    assert_eq!(
+        merged[0]["mergedBy"]["databaseId"],
+        merged[0]["author"]["databaseId"]
+    );
+    assert_eq!(
+        merged[0]["closedEvents"]["nodes"][0]["actor"]["login"], "alice",
+        "a merge closes the pull too, as GitHub logs `closed` beside `merged`"
+    );
 
     let reviewed = run("is:pr is:merged reviewed-by:bob merged:>=2020-01-01");
     assert_eq!(reviewed.len(), 1);
@@ -617,6 +635,13 @@ async fn tf_discovery_search_and_refusals() {
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0]["number"], 2);
     assert_eq!(closed[0]["state"], "CLOSED");
+    assert!(closed[0]["mergedBy"].is_null());
+    assert_eq!(
+        closed[0]["closedEvents"]["nodes"],
+        serde_json::json!([{ "actor": {
+            "__typename": "User", "login": "alice", "databaseId": closed[0]["author"]["databaseId"]
+        } }])
+    );
 
     assert_eq!(
         run("is:pr is:closed is:unmerged reviewed-by:bob closed:>=2020-01-01").len(),
@@ -1141,4 +1166,111 @@ async fn tf_labels_and_timeline() {
         serde_json::json!([{ "__typename": "ReadyForReviewEvent" }])
     );
     assert_eq!(items["pageInfo"]["hasPreviousPage"], true);
+}
+
+/// Who merged and who closed a pull, read through TF's base fields: the
+/// merger is `mergedBy`, and the closer is the actor of the newest
+/// `ClosedEvent`, typed by its kind like an author. A merge closes the pull
+/// too, so it lands as a `ClosedEvent` by the merger.
+#[tokio::test(flavor = "multi_thread")]
+async fn tf_merger_and_closer() {
+    let s = seed().await;
+    open_pr(&s);
+    let users = format!("{}/api/v3/users", s.inst.base);
+    let bob_id = face_ok(
+        "GET",
+        &format!("{users}/bob"),
+        &s.token,
+        serde_json::json!(null),
+    )["id"]
+        .clone();
+    let ci_id = face_ok(
+        "GET",
+        &format!("{users}/ci[bot]"),
+        &s.token,
+        serde_json::json!(null),
+    )["id"]
+        .clone();
+    let pull_url = format!("{}/pulls/1", s.api);
+    let set_state = |token: &str, state: &str| {
+        face_ok(
+            "PATCH",
+            &pull_url,
+            token,
+            serde_json::json!({ "state": state }),
+        );
+    };
+    let query = format!(
+        "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ...PRFullFields }} }} {}",
+        pr_full_fragment()
+    );
+    let read = || {
+        let resp = gql(
+            &s.inst.base,
+            &s.token,
+            &query,
+            serde_json::json!({ "ids": ["O_pull_1"] }),
+        );
+        assert!(resp.get("errors").is_none(), "unexpected errors: {resp}");
+        resp["data"]["nodes"][0].clone()
+    };
+    let closer = |pr: &serde_json::Value| pr["closedEvents"]["nodes"][0]["actor"].clone();
+
+    set_state(&s.ci_token, "closed");
+    let pr = read();
+    assert_eq!(pr["state"], "CLOSED");
+    assert_eq!(
+        closer(&pr),
+        serde_json::json!({ "__typename": "Bot", "login": "ci", "databaseId": ci_id }),
+        "a bot closer is a Bot with its bare slug"
+    );
+    assert_eq!(
+        pr["timelineItems"]["nodes"],
+        serde_json::json!([]),
+        "the full fragment's own timeline does not ask for closes"
+    );
+
+    set_state(&s.token, "open");
+    set_state(&s.bob_token, "closed");
+    assert_eq!(
+        closer(&read()),
+        serde_json::json!({ "__typename": "User", "login": "bob", "databaseId": bob_id }),
+        "last: 1 is the newest close"
+    );
+
+    set_state(&s.token, "open");
+    face_ok(
+        "PUT",
+        &format!("{pull_url}/merge"),
+        &s.bob_token,
+        serde_json::json!({}),
+    );
+    let pr = read();
+    assert_eq!(pr["state"], "MERGED");
+    assert_eq!(
+        pr["mergedBy"],
+        serde_json::json!({ "__typename": "User", "login": "bob", "databaseId": bob_id })
+    );
+    assert_eq!(closer(&pr)["login"], "bob", "the merge is the newest close");
+
+    let closes = gql(
+        &s.inst.base,
+        &s.token,
+        "query($id: ID!) { node(id: $id) { ... on PullRequest { timelineItems(first: 10, itemTypes: [CLOSED_EVENT]) { nodes { __typename ... on ClosedEvent { actor { login } } } } } } }",
+        serde_json::json!({ "id": "O_pull_1" }),
+    );
+    assert!(
+        closes.get("errors").is_none(),
+        "unexpected errors: {closes}"
+    );
+    let logins: Vec<&str> = closes["data"]["node"]["timelineItems"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| {
+            assert_eq!(n["__typename"], "ClosedEvent");
+            n["actor"]["login"].as_str().unwrap()
+        })
+        .collect();
+    assert_eq!(logins, ["ci", "bob", "bob"], "every close, oldest first");
 }

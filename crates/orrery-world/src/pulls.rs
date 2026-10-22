@@ -451,7 +451,8 @@ impl World {
     }
 
     pub fn close_pull(&self, pull_id: i64, actor_id: i64) -> Result<Pull> {
-        self.transition(pull_id, actor_id, "pull.close", None, |p| {
+        let timeline = Some(TimelineKind::Closed);
+        self.transition(pull_id, actor_id, "pull.close", timeline, |p| {
             if p.state != PullState::Open {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} is not open",
@@ -484,7 +485,8 @@ impl World {
 
     /// Record a merge the git side already performed: state bookkeeping only —
     /// the ref move and its `ref.update` entry are the caller's, since the
-    /// kernel never touches git.
+    /// kernel never touches git. The merge closes the pull, so it lands on the
+    /// timeline as a close by the merger.
     pub fn record_merge(
         &self,
         pull_id: i64,
@@ -507,6 +509,7 @@ impl World {
                  WHERE id = ?3",
                 params![merge_commit_sha, actor_id, pull_id],
             )?;
+            record_timeline(&tx, pull_id, actor_id, &TimelineKind::Closed)?;
             touch_pull(&tx, pull_id)?;
             let pull = queries::require_pull(&tx, pull_id)?;
             log_locked(
@@ -700,6 +703,7 @@ fn record_timeline(
         TimelineKind::ReadyForReview => ("ready_for_review", None, None),
         TimelineKind::ReviewRequested(rv) => ("review_requested", None, Some(rv)),
         TimelineKind::ReviewRequestRemoved(rv) => ("review_request_removed", None, Some(rv)),
+        TimelineKind::Closed => ("closed", None, None),
     };
     let (reviewer_login, team_id, team_slug) = match reviewer {
         Some(RequestedReviewer::User(login)) => (Some(login.as_str()), None, None),

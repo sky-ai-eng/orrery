@@ -135,6 +135,15 @@ fn close_reopen_merge_state_machine() {
         Err(WorldError::InvalidTransition(_))
     ));
 
+    // The close and the merge each land on the timeline as a close, and the
+    // refused transitions add nothing.
+    let items = f.w.list_pull_timeline(pull.id).unwrap();
+    assert_eq!(
+        items.iter().map(|i| &i.kind).collect::<Vec<_>>(),
+        [&TimelineKind::Closed, &TimelineKind::Closed]
+    );
+    assert!(items.iter().all(|i| i.actor_login == "bob"));
+
     let actions: Vec<String> =
         f.w.log_after(0, 100)
             .unwrap()

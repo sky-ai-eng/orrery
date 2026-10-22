@@ -300,6 +300,7 @@ fn row_to_timeline(r: &Row<'_>) -> rusqlite::Result<TimelineItem> {
         ("ready_for_review", None, None) => TimelineKind::ReadyForReview,
         ("review_requested", None, Some(rv)) => TimelineKind::ReviewRequested(rv),
         ("review_request_removed", None, Some(rv)) => TimelineKind::ReviewRequestRemoved(rv),
+        ("closed", None, None) => TimelineKind::Closed,
         (other, _, _) => {
             return Err(rusqlite::Error::FromSqlConversionFailure(
                 2,

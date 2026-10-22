@@ -14,7 +14,7 @@ use crate::{Result, WorldError};
 
 /// The version a database is at once the baseline is applied, and the oldest
 /// one this binary migrates from.
-pub const BASELINE_VERSION: i64 = 5;
+pub const BASELINE_VERSION: i64 = 6;
 
 /// Forward migrations, oldest first, each one SQL batch. `MIGRATIONS[i]`
 /// takes a database from version `BASELINE_VERSION + i` to the next.
@@ -161,7 +161,8 @@ const BASELINE: &str = r#"
         id          INTEGER PRIMARY KEY,
         pull_id     INTEGER NOT NULL REFERENCES pulls(id),
         kind        TEXT NOT NULL CHECK (kind IN ('labeled', 'unlabeled', 'ready_for_review',
-                                                  'review_requested', 'review_request_removed')),
+                                                  'review_requested', 'review_request_removed',
+                                                  'closed')),
         label       TEXT,
         reviewer_id INTEGER REFERENCES actors(id),
         team_id     INTEGER,

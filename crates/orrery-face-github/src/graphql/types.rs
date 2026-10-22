@@ -82,6 +82,7 @@ pub enum PullRequestTimelineItemsItemType {
     ReviewRequestedEvent,
     ReviewRequestRemovedEvent,
     ReadyForReviewEvent,
+    ClosedEvent,
 }
 
 // ---- shared plumbing ------------------------------------------------------
@@ -259,9 +260,9 @@ pub enum GqlActor {
     Bot(Bot),
 }
 
-/// The author a stored login names, typed by its actor's kind. Actors are
-/// never deleted, so a lookup miss is an anomaly; it degrades to a User with
-/// no id rather than failing the whole query.
+/// The actor a stored login names (an author, a merger, a closer), typed by
+/// its kind. Actors are never deleted, so a lookup miss is an anomaly; it
+/// degrades to a User with no id rather than failing the whole query.
 fn author(face: &GithubFace, login: &str) -> GqlActor {
     match face.world.actor_by_login(login).ok().flatten() {
         Some(a) if a.kind == world::ActorKind::Bot => GqlActor::Bot(Bot {
@@ -531,6 +532,13 @@ pub struct ReadyForReviewEvent {
     pub created_at: String,
 }
 
+/// `PullRequest` has no closer field: who closed a pull is the actor of its
+/// newest close.
+#[derive(SimpleObject)]
+pub struct ClosedEvent {
+    pub actor: Option<GqlActor>,
+}
+
 // Variant names mirror GitHub's type names; the postfix is theirs.
 #[allow(clippy::enum_variant_names)]
 #[derive(Union)]
@@ -540,6 +548,7 @@ pub enum PullRequestTimelineItems {
     ReviewRequestedEvent(ReviewRequestedEvent),
     ReviewRequestRemovedEvent(ReviewRequestRemovedEvent),
     ReadyForReviewEvent(ReadyForReviewEvent),
+    ClosedEvent(ClosedEvent),
 }
 
 #[derive(SimpleObject)]
@@ -881,6 +890,11 @@ impl PullRequest {
         self.pull.merged
     }
 
+    async fn merged_by(&self, ctx: &Context<'_>) -> Option<GqlActor> {
+        let login = self.pull.merged_by_login.as_deref()?;
+        Some(author(face(ctx), login))
+    }
+
     async fn mergeable(&self, ctx: &Context<'_>) -> Result<MergeableState, Error> {
         if self.pull.state != world::PullState::Open {
             return Ok(MergeableState::Unknown);
@@ -1123,6 +1137,7 @@ fn timeline_item_type(kind: &world::TimelineKind) -> PullRequestTimelineItemsIte
         world::TimelineKind::ReviewRequestRemoved(_) => {
             PullRequestTimelineItemsItemType::ReviewRequestRemovedEvent
         }
+        world::TimelineKind::Closed => PullRequestTimelineItemsItemType::ClosedEvent,
     }
 }
 
@@ -1159,6 +1174,9 @@ fn timeline_item(
                 requested_reviewer: requested_reviewer(face, &rv)?,
             })
         }
+        world::TimelineKind::Closed => PullRequestTimelineItems::ClosedEvent(ClosedEvent {
+            actor: Some(author(face, &item.actor_login)),
+        }),
     })
 }
 

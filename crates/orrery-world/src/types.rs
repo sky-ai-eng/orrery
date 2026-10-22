@@ -139,6 +139,9 @@ pub enum TimelineKind {
     ReadyForReview,
     ReviewRequested(RequestedReviewer),
     ReviewRequestRemoved(RequestedReviewer),
+    /// Recorded by a merge as well as a plain close: GitHub logs a `closed`
+    /// event beside `merged`, by the same actor at the same time.
+    Closed,
 }
 
 /// Whose review a request asks for: a user by login, or a team by its id,
