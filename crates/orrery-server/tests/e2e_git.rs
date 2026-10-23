@@ -14,7 +14,7 @@ async fn author_push_clone_observe() {
 
     // Control plane: mint the authoring actor.
     let token = mint_actor(base, "alice", "user");
-    assert!(token.starts_with("orr_"));
+    assert!(token.starts_with("orrfake_"));
 
     // Face: create the repo through GitHub's API shape (spec/usage.md — the
     // face's first REST endpoint; no push-to-create).

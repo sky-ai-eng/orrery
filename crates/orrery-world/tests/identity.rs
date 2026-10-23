@@ -113,8 +113,8 @@ fn create_oauth_app_returns_the_stored_row_with_derived_credentials() {
         Some(app.clone()),
         w.oauth_app_by_client_id(&app.client_id).unwrap()
     );
-    assert!(app.client_id.starts_with("orr_client_"));
-    assert!(app.client_secret.starts_with("orr_secret_"));
+    assert!(app.client_id.starts_with("orrfake_client_"));
+    assert!(app.client_secret.starts_with("orrfake_secret_"));
 
     let (_dir2, w2) = fresh();
     let sys2 = w2.actor_by_login("orrery").unwrap().unwrap();
@@ -205,7 +205,7 @@ fn an_issued_client_secret_exchanges_beside_the_registration_secret() {
 
     let first = w.issue_oauth_client_secret(&app.client_id, sys.id).unwrap();
     let second = w.issue_oauth_client_secret(&app.client_id, sys.id).unwrap();
-    assert!(first.starts_with("orr_secret_"));
+    assert!(first.starts_with("orrfake_secret_"));
     assert_ne!(first, second);
     assert_ne!(first, app.client_secret);
     assert_eq!(
@@ -229,7 +229,7 @@ fn an_issued_client_secret_exchanges_beside_the_registration_secret() {
     ));
 
     assert!(matches!(
-        w.issue_oauth_client_secret("orr_client_nope", sys.id),
+        w.issue_oauth_client_secret("orrfake_client_nope", sys.id),
         Err(WorldError::NoSuchOAuthApp(_))
     ));
 

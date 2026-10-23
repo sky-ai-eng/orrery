@@ -96,20 +96,20 @@ impl FromSql for TokenOrigin {
     }
 }
 
-/// The actor's `n`th token (see [`TokenOrigin::Actor`]). The `orr_` prefix
-/// keeps tokens visibly fake and outside every real GitHub token namespace
-/// (`ghp_`, `ghs_`, `gho_`, ...).
+/// The actor's `n`th token (see [`TokenOrigin::Actor`]). The `orrfake_` prefix
+/// marks a world's credentials as fake wherever they turn up, and keeps them
+/// outside every real GitHub token namespace (`ghp_`, `ghs_`, `gho_`, ...).
 pub(crate) fn actor_token(secret: &WorldSecret, login: &str, actor_id: i64, n: i64) -> String {
     let input = match n {
         0 => format!("{login}:{actor_id}"),
         n => format!("{login}:{actor_id}:{n}"),
     };
-    format!("orr_{}", hex::encode(&secret.derive(&input)[..16]))
+    format!("orrfake_{}", hex::encode(&secret.derive(&input)[..16]))
 }
 
 pub(crate) fn oauth_token(secret: &WorldSecret, code_id: i64) -> String {
     format!(
-        "orr_{}",
+        "orrfake_{}",
         hex::encode(&secret.derive(&format!("oauth-token:{code_id}"))[..16])
     )
 }
@@ -125,14 +125,17 @@ pub(crate) fn oauth_client_secret(secret: &WorldSecret, app_id: i64, n: i64) -> 
         0 => format!("oauth-app-secret:{app_id}"),
         n => format!("oauth-app-secret:{app_id}:{n}"),
     };
-    format!("orr_secret_{}", hex::encode(&secret.derive(&input)[..20]))
+    format!(
+        "orrfake_secret_{}",
+        hex::encode(&secret.derive(&input)[..20])
+    )
 }
 
 /// Unkeyed: a client id is public by nature, sent in the clear on every
 /// authorize link.
 pub(crate) fn oauth_client_id(app_id: i64) -> String {
     format!(
-        "orr_client_{}",
+        "orrfake_client_{}",
         hex::encode(&Sha256::digest(format!("oauth-app-client:{app_id}"))[..10])
     )
 }

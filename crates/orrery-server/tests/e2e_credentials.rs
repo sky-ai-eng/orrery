@@ -269,7 +269,7 @@ async fn issued_credentials_work_beside_the_first() {
         let token = exchange(&http, &base, client_id, secret, &code).unwrap();
         assert_eq!(login_of(&http, &base, &token).as_deref(), Ok("alice"));
     }
-    let (status, body) = control_issue(&http, &base, "/oauth-apps/orr_client_nope/secrets");
+    let (status, body) = control_issue(&http, &base, "/oauth-apps/orrfake_client_nope/secrets");
     assert_eq!(status, 404);
     assert_eq!(body["errors"][0]["reason"], "NOT_FOUND");
 }

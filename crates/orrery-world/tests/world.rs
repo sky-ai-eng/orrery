@@ -69,7 +69,7 @@ fn create_actor_returns_the_stored_row() {
     let read = w.actor_by_login("alice").unwrap().unwrap();
     assert_eq!(created, read);
     assert!(
-        token.starts_with("orr_"),
+        token.starts_with("orrfake_"),
         "tokens are visibly fake: {token}"
     );
 }
@@ -85,7 +85,7 @@ fn tokens_are_unguessable_without_the_world_secret() {
 
     // The derivation's inputs are public; without the key they compute nothing.
     let bare = format!(
-        "orr_{}",
+        "orrfake_{}",
         hex::encode(&Sha256::digest(format!("alice:{}", alice1.id))[..16])
     );
     assert_ne!(token1, bare);
@@ -146,7 +146,7 @@ fn an_issued_token_acts_as_its_actor_beside_every_earlier_one() {
     // stored one.
     let (_, second) = w.issue_actor_token("ALICE", sys.id).unwrap();
     assert!(
-        first.starts_with("orr_"),
+        first.starts_with("orrfake_"),
         "tokens are visibly fake: {first}"
     );
     assert_ne!(first, second);
@@ -191,7 +191,7 @@ fn token_resolves_to_its_actor() {
     let (actor, token) = w.create_actor("ci-bot", ActorKind::Bot).unwrap();
     let resolved = w.actor_by_token(&token).unwrap().expect("token resolves");
     assert_eq!(resolved, actor);
-    assert!(w.actor_by_token("orr_bogus").unwrap().is_none());
+    assert!(w.actor_by_token("orrfake_bogus").unwrap().is_none());
 }
 
 #[test]
