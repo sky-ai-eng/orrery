@@ -108,10 +108,11 @@ pub fn rev_list_count(bare: &Path, from: &str, to: &str) -> Result<u64, GitFaceE
         .map_err(|_| GitFaceError::Cgi(format!("rev-list --count returned {out:?}")))
 }
 
-/// Totals of `git diff --numstat base...head` — GitHub's additions /
+/// Totals of `git diff --numstat -M base...head` — GitHub's additions /
 /// deletions / changed-files triple, three-dot so the comparison base is the
-/// merge base. Binary files report `-` counts, which contribute 0 lines but
-/// still count as a changed file, matching GitHub.
+/// merge base, and a rename counted once, as `changed_files` lists it. Binary
+/// files report `-` counts, which contribute 0 lines but still count as a
+/// changed file, matching GitHub.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DiffStats {
     pub additions: i64,
@@ -120,7 +121,8 @@ pub struct DiffStats {
 }
 
 pub fn diff_stats(bare: &Path, base: &str, head: &str) -> Result<DiffStats, GitFaceError> {
-    let out = run(hermetic_git(bare).args(["diff", "--numstat", &format!("{base}...{head}")]))?;
+    let out =
+        run(hermetic_git(bare).args(["diff", "--numstat", "-M", &format!("{base}...{head}")]))?;
     let mut stats = DiffStats::default();
     for line in out.lines() {
         let mut parts = line.split('\t');
@@ -132,6 +134,123 @@ pub fn diff_stats(bare: &Path, base: &str, head: &str) -> Result<DiffStats, GitF
         stats.deletions += del.parse::<i64>().unwrap_or(0);
     }
     Ok(stats)
+}
+
+/// How a file differs across a comparison, as GitHub's REST `status` spells
+/// it. A type change, and any status git adds later, reads as `Changed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileStatus {
+    Added,
+    Removed,
+    Modified,
+    Renamed,
+    Copied,
+    Changed,
+}
+
+impl FileStatus {
+    pub fn rest(self) -> &'static str {
+        match self {
+            FileStatus::Added => "added",
+            FileStatus::Removed => "removed",
+            FileStatus::Modified => "modified",
+            FileStatus::Renamed => "renamed",
+            FileStatus::Copied => "copied",
+            FileStatus::Changed => "changed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    pub path: String,
+    pub status: FileStatus,
+    /// The path a renamed or copied file came from.
+    pub previous: Option<String>,
+}
+
+/// The files `git diff base...head` changes, in path order, with renames
+/// detected — three-dot so the comparison base is the merge base, as in
+/// GitHub's compare and pull request files.
+pub fn changed_files(
+    bare: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Vec<ChangedFile>, GitFaceError> {
+    let out = run(hermetic_git(bare).args([
+        "diff",
+        "--name-status",
+        "-z",
+        "-M",
+        &format!("{base}...{head}"),
+    ]))?;
+    let mut fields = out.split('\0');
+    let mut files = Vec::new();
+    while let Some(code) = fields.next() {
+        let status = match code.chars().next() {
+            None => continue,
+            Some('A') => FileStatus::Added,
+            Some('D') => FileStatus::Removed,
+            Some('M') => FileStatus::Modified,
+            Some('R') => FileStatus::Renamed,
+            Some('C') => FileStatus::Copied,
+            Some(_) => FileStatus::Changed,
+        };
+        let (previous, path) = match status {
+            FileStatus::Renamed | FileStatus::Copied => {
+                let (Some(from), Some(to)) = (fields.next(), fields.next()) else {
+                    break;
+                };
+                (Some(from.to_string()), to)
+            }
+            _ => {
+                let Some(path) = fields.next() else {
+                    break;
+                };
+                (None, path)
+            }
+        };
+        files.push(ChangedFile {
+            path: path.to_string(),
+            status,
+            previous,
+        });
+    }
+    Ok(files)
+}
+
+/// A commit and its parents' ids, first parent first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitParents {
+    pub sha: String,
+    pub parents: Vec<String>,
+}
+
+/// The commits reachable from `head` and not from `base`, oldest first and
+/// parents before children — a compare's commit list.
+pub fn commits_between(
+    bare: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Vec<CommitParents>, GitFaceError> {
+    let out = run(hermetic_git(bare).args([
+        "rev-list",
+        "--parents",
+        "--topo-order",
+        "--reverse",
+        &format!("{base}..{head}"),
+    ]))?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let mut ids = line.split(' ');
+            let sha = ids.next().filter(|s| !s.is_empty())?;
+            Some(CommitParents {
+                sha: sha.to_string(),
+                parents: ids.map(str::to_string).collect(),
+            })
+        })
+        .collect())
 }
 
 /// A commit's committer date as unix seconds; `None` when `sha` doesn't

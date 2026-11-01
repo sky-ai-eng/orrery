@@ -79,9 +79,11 @@ Path built with `url.PathEscape` on base/head; `...` literal.
 - Files form (`GetCompareFiles`, `pulls.go:324`): `files[]` only.
 Consumers: review freshness annotation (every review-artifact GET, best-effort), finalize frame, `pr add-review-comment` anchoring, `pr diff` staleness probe (`ahead_by` only; errors → 0).
 
+TF's base-branch watch (sky-ai-eng/triage-factory#1417) is a fourth consumer: it reads `old...tip` as JSON when a base branch's tip moves, and takes `status` (`identical`, `ahead`, `behind`, `diverged`), `total_commits`, `files[].{filename,status,previous_filename}` and `commits[].{sha,parents[].sha}`. A 404 (an old tip that no longer exists) means the base was rewritten. Its compare limits are GitHub's: at most 300 files and 250 commits listed. **What Orrery serves:** the JSON shape only, for revisions that resolve to commits in the repository (a sha, a branch name, or a `{ref}` either side), with renames detected and the files in path order. `ahead_by`, `behind_by` and `total_commits` count commits, `commits` lists the range oldest first, and an unresolvable end is the vendor-faithful 404. The diff and patch media shapes answer the NOT-MOCKED 422 on `Accept`.
+
 ### 1.11 `GET /repos/{o}/{r}/pulls/{n}/files` — `?per_page=100&page=N`
 
-`GetPRFiles` (`pulls.go:239`): `filename, status, previous_filename, additions, deletions, patch`. Paged to `MaxPRFiles = 1000` with WARN. Consumers: `gh pr files`, 406 fallbacks.
+`GetPRFiles` (`pulls.go:239`): `filename, status, previous_filename, additions, deletions, patch`. Paged to `MaxPRFiles = 1000` with WARN. Consumers: `gh pr files`, 406 fallbacks. TF's base-branch watch reads `filename` and `previous_filename` of a pull with a renamed or copied file, up to 3000 files, because GraphQL gives no previous path. **What Orrery serves:** `filename`, `status` and `previous_filename` for each file the pull changes against its base branch's tip while open (the pinned base once terminal), paged by `per_page`/`page`; `additions`, `deletions` and `patch` are absent.
 
 ### 1.12 PR diff media — `GET /repos/{o}/{r}/pulls/{n}` with `Accept: application/vnd.github.v3.diff`
 
@@ -117,6 +119,10 @@ Consumers: review freshness annotation (every review-artifact GET, best-effort),
 ### 1.18 `GET /repos/{o}/{r}/branches?per_page={n}&page={n}` — branch picker
 
 `ListBranchesPage` (`events.go:317`; `repos_handler.go:969`): `name` only. Pass-through proxied list; no server-side search (client filters).
+
+### 1.20 `GET /repos/{o}/{r}/git/ref/heads/{branch}` — a base branch's tip
+
+TF's base-branch watch (sky-ai-eng/triage-factory#1417; `BranchTip`, `internal/github/branch_moves.go`): one read per base branch an open pull targets, per poll cycle, conditional on the `ETag` of the last 200 (`If-None-Match`). It reads `object.sha`; a 304 costs nothing against the rate limit and means the tip has not moved. The branch name's `/` stays a path separator, each segment escaped. A missing branch is a 404. **What Orrery serves:** `{ref, url, object: {sha, type: "commit", url}}`; the `ETag` is derived from the body, so it changes iff the tip does, and a replayed tag answers 304 with no body.
 
 ### 1.19 Identity & validation
 
@@ -172,6 +178,7 @@ Updated at TF commit `a53a770e` (2026-10-20), where triage-factory's poll end-to
 - **`nodes(ids:[ID!]!){...on PullRequest{id, mergeable, headRefOid}}` — the mergeability probe** (`graphql.go`, query `PRMergeability`). Up to 100 ids per document, one document per repository; a `null` entry, or a node that is not a pull, is skipped. `headRefOid` is the head the answer was read at.
 - **`node(id:){...on PullRequest}{comments(last:50, before:$before)}`** — the tracker's new-comment read (`pr_comments.go`, query `PRComments`): `totalCount, pageInfo{hasPreviousPage, startCursor}, nodes{fullDatabaseId, createdAt, author{__typename, login, ...on User{databaseId}, ...on Bot{databaseId}}, body}`. Walks backwards from the newest comment through `startCursor` until it reaches what it saw last cycle.
 - **`node(id:){...on PullRequest}{reviews(last:50, before:$before, states:[APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED])}`** — the tracker's new-review read (`pr_reviews.go`, query `PRReviews`): `totalCount, pageInfo{hasPreviousPage, startCursor}, nodes{fullDatabaseId, state, submittedAt, author{__typename, login, ...on User{databaseId}, ...on Bot{databaseId}}, body, comments(first:100){totalCount, nodes{fullDatabaseId, path, body}}}`. `totalCount` counts the `states`-filtered set.
+- **`nodes(ids:[ID!]!){...on PullRequest{id, headRefOid, changedFiles, files(first:100){pageInfo{hasNextPage, endCursor}, nodes{path, changeType}}}}` — the base-branch watch's changed paths** (query `PRChangedPaths`, sky-ai-eng/triage-factory#1417). Up to 100 ids per document. TF pages a pull with more files through `node(id:){...on PullRequest{headRefOid, files(first:100, after:$cursor){...}}}` (query `PRChangedPathsPage`), and checks that each page was read at the head the first was. **What Orrery serves for `files`:** the pull's files in path order, paged by `first`/`after` (a cursor names how many files precede it); `changeType` is `ADDED`, `DELETED`, `RENAMED`, `COPIED`, `MODIFIED` or `CHANGED`, and there is no previous path, which is why TF reads that over REST (§1.11). `changedFiles` counts a rename once, as `files` does.
 - **`rateLimit { cost }`** is selected by every query document, and its cost is recorded per operation (`client.go` `recordQueryCost`). A null `rateLimit` is allowed — a GHES with rate limiting off sends it — and records nothing; Orrery, which presents as that GHES, answers null.
 - **`node(id:){...on PullRequestReview}`** (`pending_reviews.go:58`): `state, body, comments(first:100){pageInfo.hasNextPage, nodes{id, path, line, startLine, body}}` — `line`/`startLine` are nullable and null is meaningful (outdated comment), must not collapse to 0. `null` node = absence, not error.
 - **Aliased branch existence** (`branches.go:65`): batches of 50 aliases, `r{i}: repository(owner:$o{i}, name:$n{i}){ref(qualifiedName:$q{i}){id}}` with `q = refs/heads/<branch>`. Presence only; a null repository alias or an alias named in `errors[].path[0]` = unknown, never "deleted".

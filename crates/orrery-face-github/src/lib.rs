@@ -81,6 +81,10 @@ pub fn router(face: GithubFace) -> Router {
             put(pulls::merge_pull),
         )
         .route(
+            "/repos/{owner}/{repo}/pulls/{number}/files",
+            get(reads::list_pull_files),
+        )
+        .route(
             "/repos/{owner}/{repo}/pulls/{number}/reviews",
             get(reads::list_reviews).post(pulls::create_review),
         )
@@ -113,6 +117,14 @@ pub fn router(face: GithubFace) -> Router {
             get(reads::get_contents),
         )
         .route("/repos/{owner}/{repo}/branches", get(reads::list_branches))
+        .route(
+            "/repos/{owner}/{repo}/git/ref/heads/{*branch}",
+            get(reads::get_branch_ref),
+        )
+        .route(
+            "/repos/{owner}/{repo}/compare/{basehead}",
+            get(reads::compare),
+        )
         .route(
             "/repos/{owner}/{repo}/check-runs",
             post(checks::create_check_run),

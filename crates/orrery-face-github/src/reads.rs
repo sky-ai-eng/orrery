@@ -22,7 +22,10 @@ use crate::render::{
     check_run_json, comment_json, org_full_json, pull_json, repo_json, review_json, team_full_json,
     team_json, user_full_json,
 };
-use crate::{GithubFace, github_error, internal, json_response, resolve_repo, validation_invalid};
+use crate::{
+    GithubFace, github_error, internal, json_response, orrery_unsupported_field_on, resolve_repo,
+    validation_invalid,
+};
 
 /// GitHub's listing defaults: 30 per page, cap 100, silently clamped —
 /// the face is lax where GitHub is lax.
@@ -328,6 +331,196 @@ pub(crate) async fn list_branches(
         StatusCode::OK,
         serde_json::Value::Array(paginate(branches, per_page, page)),
     )
+}
+
+/// GitHub's own limits on a compare: it lists at most this many files and,
+/// unpaginated, this many commits, however large the range.
+const COMPARE_FILE_CAP: usize = 300;
+const COMPARE_COMMIT_CAP: usize = 250;
+
+fn changed_file_json(file: &store::ChangedFile) -> serde_json::Value {
+    let mut json = serde_json::json!({ "filename": file.path, "status": file.status.rest() });
+    if let Some(previous) = &file.previous {
+        json["previous_filename"] = serde_json::Value::String(previous.clone());
+    }
+    json
+}
+
+/// The tip of a branch, with the tag a conditional read keys on. The tag is
+/// derived from the exact body, so it changes iff the tip does; a replayed tag
+/// answers 304 with no body, which costs nothing against GitHub's rate limit.
+pub(crate) async fn get_branch_ref(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, branch)): UrlPath<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    let sha = match store::rev_parse(&bare, &format!("refs/heads/{branch}")) {
+        Ok(Some(sha)) => sha,
+        Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => return internal(e),
+    };
+    let api = format!(
+        "{}/api/v3/repos/{}",
+        face.base_url.trim_end_matches('/'),
+        repo.full_name()
+    );
+    let body = serde_json::json!({
+        "ref": format!("refs/heads/{branch}"),
+        "url": format!("{api}/git/refs/heads/{branch}"),
+        "object": { "sha": sha, "type": "commit", "url": format!("{api}/git/commits/{sha}") },
+    })
+    .to_string();
+    let etag = format!("W/\"{}\"", hex::encode(&Sha256::digest(&body)[..16]));
+    let matched = headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|inm| inm.trim() == etag);
+    Response::builder()
+        .status(if matched {
+            StatusCode::NOT_MODIFIED
+        } else {
+            StatusCode::OK
+        })
+        .header("etag", etag)
+        .header("content-type", "application/json; charset=utf-8")
+        .body(if matched {
+            Body::empty()
+        } else {
+            Body::from(body)
+        })
+        .expect("static response parts are valid")
+}
+
+/// A commit-ish as a commit id, or `None` when it names nothing. A leading
+/// `-` is never a revision, so it cannot reach git as an option.
+fn resolve_commit(
+    bare: &std::path::Path,
+    rev: &str,
+) -> Result<Option<String>, orrery_face_git::GitFaceError> {
+    if rev.is_empty() || rev.starts_with('-') {
+        return Ok(None);
+    }
+    store::rev_parse(bare, &format!("{rev}^{{commit}}"))
+}
+
+fn compare_json(
+    bare: &std::path::Path,
+    base: &str,
+    head: &str,
+) -> Result<serde_json::Value, orrery_face_git::GitFaceError> {
+    let ahead_by = store::rev_list_count(bare, base, head)?;
+    let behind_by = store::rev_list_count(bare, head, base)?;
+    let status = match (ahead_by, behind_by) {
+        (0, 0) => "identical",
+        (_, 0) => "ahead",
+        (0, _) => "behind",
+        _ => "diverged",
+    };
+    let files: Vec<serde_json::Value> = store::changed_files(bare, base, head)?
+        .iter()
+        .take(COMPARE_FILE_CAP)
+        .map(changed_file_json)
+        .collect();
+    let commits: Vec<serde_json::Value> = store::commits_between(bare, base, head)?
+        .iter()
+        .take(COMPARE_COMMIT_CAP)
+        .map(|c| {
+            let parents: Vec<serde_json::Value> = c
+                .parents
+                .iter()
+                .map(|p| serde_json::json!({ "sha": p }))
+                .collect();
+            serde_json::json!({ "sha": c.sha, "parents": parents })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "status": status,
+        "ahead_by": ahead_by,
+        "behind_by": behind_by,
+        "total_commits": ahead_by,
+        "commits": commits,
+        "files": files,
+    }))
+}
+
+/// `base...head` as JSON. The diff and patch media shapes are refused loudly:
+/// answering them with JSON would be a plausible wrong answer.
+pub(crate) async fn compare(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, basehead)): UrlPath<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    if headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("diff") || a.contains("patch"))
+    {
+        return orrery_unsupported_field_on("Comparison", "Accept");
+    }
+    let Some((base_rev, head_rev)) = basehead.split_once("...") else {
+        return github_error(StatusCode::NOT_FOUND, "Not Found");
+    };
+    let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    let mut ends = [String::new(), String::new()];
+    for (end, rev) in ends.iter_mut().zip([base_rev, head_rev]) {
+        match resolve_commit(&bare, rev) {
+            Ok(Some(sha)) => *end = sha,
+            Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+            Err(e) => return internal(e),
+        }
+    }
+    match compare_json(&bare, &ends[0], &ends[1]) {
+        Ok(json) => json_response(StatusCode::OK, json),
+        Err(e) => internal(e),
+    }
+}
+
+/// The files a pull request changes, paged. The base is the base branch's
+/// tip while the pull is open and the pinned base sha once it is terminal,
+/// as for the pull's diff totals.
+pub(crate) async fn list_pull_files(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
+    RawQuery(query): RawQuery,
+) -> Response<Body> {
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let pull = match pull_by_path_number(&face, &repo, &number) {
+        Ok(Some(p)) => p,
+        Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(resp) => return *resp,
+    };
+    let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    let base = if pull.state == PullState::Open {
+        match store::rev_parse(&bare, &format!("refs/heads/{}", pull.base_ref)) {
+            Ok(Some(tip)) => tip,
+            Ok(None) => pull.base_sha.clone(),
+            Err(e) => return internal(e),
+        }
+    } else {
+        pull.base_sha.clone()
+    };
+    let files = match store::changed_files(&bare, &base, &pull.head_sha) {
+        Ok(f) => f,
+        Err(e) => return internal(e),
+    };
+    let (per_page, page) = page_params(&query.unwrap_or_default());
+    let items: Vec<serde_json::Value> = paginate(files, per_page, page)
+        .iter()
+        .map(changed_file_json)
+        .collect();
+    json_response(StatusCode::OK, serde_json::Value::Array(items))
 }
 
 pub(crate) async fn get_user(

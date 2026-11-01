@@ -45,6 +45,17 @@ pub enum MergeableState {
     Unknown,
 }
 
+/// How a pull request changes a file.
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+pub enum PatchStatus {
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    Modified,
+    Changed,
+}
+
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
 pub enum PullRequestReviewState {
     Pending,
@@ -775,6 +786,18 @@ impl Commit {
 }
 
 #[derive(SimpleObject)]
+pub struct PullRequestChangedFile {
+    pub path: String,
+    pub change_type: PatchStatus,
+}
+
+#[derive(SimpleObject)]
+pub struct PullRequestChangedFileConnection {
+    pub page_info: PageInfo,
+    pub nodes: Vec<PullRequestChangedFile>,
+}
+
+#[derive(SimpleObject)]
 pub struct PullRequestCommit {
     pub commit: Commit,
 }
@@ -958,6 +981,46 @@ impl PullRequest {
 
     async fn changed_files(&self, ctx: &Context<'_>) -> Result<i64, Error> {
         Ok(self.diff_stats(face(ctx))?.changed_files)
+    }
+
+    /// The files the pull changes, in path order, paged by `first`/`after`.
+    /// A cursor names the count of files before it, so it is stable while
+    /// the pull's head and base do not move.
+    async fn files(
+        &self,
+        ctx: &Context<'_>,
+        first: Option<i32>,
+        after: Option<String>,
+    ) -> Result<PullRequestChangedFileConnection, Error> {
+        let face = face(ctx);
+        let mut skip = 0;
+        if let Some(a) = after {
+            let consumed = cursor_id(&a).ok_or_else(|| {
+                Error::new(format!("`{a}` does not appear to be a valid cursor."))
+            })?;
+            skip = consumed.max(0) as usize;
+        }
+        let base = self.diff_base(face)?;
+        let files =
+            store::changed_files(&self.bare(face), &base, &self.pull.head_sha).map_err(internal)?;
+        let rest: Vec<PullRequestChangedFile> = files
+            .into_iter()
+            .skip(skip)
+            .map(|f| PullRequestChangedFile {
+                path: f.path,
+                change_type: match f.status {
+                    store::FileStatus::Added => PatchStatus::Added,
+                    store::FileStatus::Removed => PatchStatus::Deleted,
+                    store::FileStatus::Renamed => PatchStatus::Renamed,
+                    store::FileStatus::Copied => PatchStatus::Copied,
+                    store::FileStatus::Modified => PatchStatus::Modified,
+                    store::FileStatus::Changed => PatchStatus::Changed,
+                },
+            })
+            .collect();
+        let (nodes, mut page_info) = take_first("files", rest, first)?;
+        page_info.end_cursor = (!nodes.is_empty()).then(|| cursor((skip + nodes.len()) as i64));
+        Ok(PullRequestChangedFileConnection { page_info, nodes })
     }
 
     /// The pull's pending requests: users, then teams, each in request order.
