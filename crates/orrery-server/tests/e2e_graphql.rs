@@ -1,4 +1,4 @@
-//! End-to-end GraphQL: TF's six query families (spec/surface-github.md §3)
+//! End-to-end GraphQL: TF's seven query families (spec/surface-github.md §3)
 //! against a served world, using the *verbatim* query and fragment texts from
 //! triage-factory's `internal/github` — rule 2 applied to the wire's exact
 //! spelling, comments and all. Plus the GraphQL translation of the
@@ -20,7 +20,6 @@ const PR_BASE_FIELDS: &str = r#"
 	isDraft
 	merged
 	mergedBy { __typename login ... on User { databaseId } ... on Bot { databaseId } }
-	mergeable
 	headRefName
 	baseRefName
 	url
@@ -311,7 +310,6 @@ async fn tf_refresh_full_fragment_round_trip() {
     assert_eq!(pr["merged"], false);
     assert!(pr["mergedBy"].is_null());
     assert_eq!(pr["closedEvents"]["nodes"], serde_json::json!([]));
-    assert_eq!(pr["mergeable"], "MERGEABLE");
     assert_eq!(pr["headRefName"], "feature");
     assert_eq!(pr["baseRefName"], "main");
     assert_eq!(
@@ -381,6 +379,36 @@ async fn tf_refresh_full_fragment_round_trip() {
 }
 
 /// TF's `prCommentsQuery` (internal/github/pr_comments.go), verbatim.
+/// TF's mergeability probe (`prMergeabilityQuery`), verbatim.
+const PR_MERGEABILITY_QUERY: &str = r#"
+	query PRMergeability($ids: [ID!]!) {
+		nodes(ids: $ids) { ... on PullRequest { id mergeable headRefOid } }
+		rateLimit { cost }
+	}
+"#;
+
+/// TF's probe worker reads a batch of pulls' mergeability and the head each
+/// answer was read at, and skips an id with no node.
+#[tokio::test(flavor = "multi_thread")]
+async fn tf_mergeability_probe() {
+    let s = seed().await;
+    open_pr(&s);
+
+    let resp = gql(
+        &s.inst.base,
+        &s.token,
+        PR_MERGEABILITY_QUERY,
+        serde_json::json!({ "ids": ["O_pull_1", "O_pull_999"] }),
+    );
+    assert!(resp.get("errors").is_none(), "unexpected errors: {resp}");
+    let nodes = resp["data"]["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["id"], "O_pull_1");
+    assert_eq!(nodes[0]["mergeable"], "MERGEABLE");
+    assert_eq!(nodes[0]["headRefOid"], s.feature_sha.as_str());
+    assert!(nodes[1].is_null(), "missing pull resolves to null");
+}
+
 const PR_COMMENTS_QUERY: &str = r#"
 	query PRComments($id: ID!, $before: String) {
 		node(id: $id) {

@@ -917,6 +917,10 @@ impl PullRequest {
         &self.pull.head_ref
     }
 
+    async fn head_ref_oid(&self) -> &str {
+        &self.pull.head_sha
+    }
+
     async fn base_ref_name(&self) -> &str {
         &self.pull.base_ref
     }
