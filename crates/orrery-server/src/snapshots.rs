@@ -71,6 +71,9 @@ struct ListBody {
     page_size: Option<usize>,
 }
 
+// TODO(ORR-37): a last page that is exactly full answers a non-null
+// `next_after_name`, and the page-size bounds are a second copy of
+// control.rs's.
 async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let parsed: ListBody = match decode_strict(&body) {
         Ok(p) => p,

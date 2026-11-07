@@ -28,6 +28,8 @@ pub fn router(state: AppState) -> Router {
         .route("/clock", get(get_clock))
         .route("/clock/advance", post(advance_clock))
         .route("/actors", post(create_actor))
+        // TODO(ORR-36): GET /actors/{login} and GET /oauth-apps/{client_id},
+        // the point reads these two lists have no partner for.
         .route("/actors/list", post(list_actors))
         .route("/actors/{login}/emails", put(set_actor_emails))
         .route("/actors/{login}/tokens", post(issue_actor_token))
@@ -414,6 +416,8 @@ fn clock_body(clock: i64) -> serde_json::Value {
 /// An empty body is a valid spelling of "all defaults" for bodies whose fields
 /// are all optional; callers with required fields still fail on the missing
 /// field, named by serde.
+// TODO(ORR-35): a body that fails to decode answers one fault with no
+// `field`, and hides every other fault in it.
 pub(crate) fn decode_strict<T: serde::de::DeserializeOwned>(
     body: &[u8],
 ) -> Result<T, Box<Response<Body>>> {
