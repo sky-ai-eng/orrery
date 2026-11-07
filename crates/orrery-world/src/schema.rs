@@ -3,10 +3,9 @@
 //! was written at to this binary's.
 //!
 //! `user_version` counts them: the baseline stamps `BASELINE_VERSION`, and
-//! each migration adds one. Until the first release freezes the
-//! baseline, a schema change still edits the baseline in place and bumps
-//! `BASELINE_VERSION`, so a world from before the bump is below the baseline
-//! and refused.
+//! each migration adds one. World databases outlive the binary that wrote
+//! them, so every schema change is a new forward migration with a fixture
+//! (`tests/fixtures/README.md`), and the baseline never changes.
 
 use rusqlite::{Connection, TransactionBehavior};
 
@@ -355,7 +354,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::test_support::with_appended_migrations;
-    use super::{BASELINE_VERSION, SCHEMA_VERSION, schema_version};
+    use super::{BASELINE, BASELINE_VERSION, SCHEMA_VERSION, schema_version};
     use crate::{
         ActorKind, DEFAULT_T0_UNIX, LogEntry, World, WorldError, WorldReader, WorldSecret,
         WorldView,
@@ -403,6 +402,27 @@ mod tests {
 
     fn whole_log(w: &World) -> Vec<LogEntry> {
         w.log_after(0, 10_000).unwrap()
+    }
+
+    // The whole text is hashed, comments and whitespace included, so the test
+    // never has to decide which edits would change a world the baseline
+    // creates.
+    #[test]
+    fn the_baseline_never_changes() {
+        use sha2::{Digest, Sha256};
+
+        let found = (BASELINE_VERSION, hex::encode(Sha256::digest(BASELINE)));
+        let frozen = (
+            6,
+            "e0b8db1239647acec5bee52f89035aca4fb0a1d730d3c82b8b16b161110ffeba".to_owned(),
+        );
+        assert_eq!(
+            found, frozen,
+            "the baseline schema changed. World databases outlive the binary that \
+             wrote them, so the baseline and BASELINE_VERSION never change: revert \
+             the edit and add a forward migration to MIGRATIONS instead, with a \
+             fixture (tests/fixtures/README.md)"
+        );
     }
 
     #[test]

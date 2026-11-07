@@ -41,7 +41,7 @@ A core principle of engineering in the era of AI is that the entire product must
 ## Database rules
 
 - All persistence goes through `orrery-world`; no other crate opens the SQLite file. One process, one writer — do not grow a repository-pattern layer or a second dialect.
-- The schema is a baseline plus an ordered list of forward migrations (`orrery-world/src/schema.rs`). A world migrates when it opens; one newer than the binary, or older than the baseline, is refused. Until the first release freezes the baseline, a schema change still edits the baseline in place and bumps `BASELINE_VERSION`, replacing the baseline fixture in `orrery-world/tests/fixtures/` (see its README). Tables are `STRICT`.
+- The schema is a baseline plus an ordered list of forward migrations (`orrery-world/src/schema.rs`). A world migrates when it opens; one newer than the binary, or older than the baseline, is refused. World databases outlive the binary that wrote them, so every schema change is a new forward migration with a fixture in `orrery-world/tests/fixtures/` (see its README), and the baseline never changes. Tables are `STRICT`.
 - **A single-row write returns the row it persisted**, sourced from `RETURNING` on the write statement itself — never a follow-up read — projecting the same columns the point read uses. A caller must never re-read to learn what the write already returned. Conformance tests assert returned-row == point-read for every such method.
 - The action log is append-only: no UPDATE or DELETE ever targets `action_log`. Its `seq` is the total order every replay and diff hangs off.
 
