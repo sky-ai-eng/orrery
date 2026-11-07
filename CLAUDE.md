@@ -36,7 +36,7 @@ A core principle of engineering in the era of AI is that the entire product must
 - **A statistic is its own read.** Numbers *about* rows (counts, a distribution, coverage) get their own read-only `GET` with a fixed schema of named cuts — never a `view=`/`group_by=` parameter that changes a response's shape. A different derivation is a different path.
 - **One error shape.** `{"errors": [{"reason": "SCREAMING_SNAKE_CODE", "message": "prose", "field": "optional"}]}` — always a list; validation reports *every* failing field, not the first. `reason` is a stable machine code; `field` appears only for payload-field faults. No plain-text bodies, and no 200 with an error.
 - **Updates are PATCH on the resource,** field by field: absent = keep, explicit `null` = clear. No full-replace PUT that is really a partial write, and no verb route for what is a field write. A PUT replaces the whole value it names (`PUT …/actors/{login}/emails` sets the full list).
-- **The API is the whole product; the CLI is one client.** Every route is also driven by scripts, agents, tests, and other services, so no rule may exist only in a client. A CLI command is a literal alias for one documented call (`spec/usage.md`), and the route itself enforces anything the command checks before calling it.
+- **The API is the whole product; the CLI is one client.** Every route is also driven by scripts, agents, tests, and other services, so no rule may exist only in a client. A CLI command is a literal alias for one documented call (`spec/usage.md`), and the route itself enforces anything the command checks before calling it. The exceptions are `create` and `fork`, which act on world directories no process is serving, so there is no route to call.
 
 ## Database rules
 
