@@ -6,8 +6,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::credentials::{self, TokenOrigin};
 use crate::{
-    Actor, ActorEmail, ActorKind, OAuthApp, OAuthToken, Result, World, WorldError,
-    constraint_violation, log_locked, queries,
+    Actor, ActorEmail, ActorKind, ListedActor, ListedOAuthApp, OAuthApp, OAuthToken, Result, World,
+    WorldError, constraint_violation, log_locked, queries,
 };
 
 /// How long an authorization code stays exchangeable: GitHub's ten minutes,
@@ -28,6 +28,45 @@ impl World {
             conn.prepare(&format!("{EMAIL_SELECT} WHERE actor_id = ?1 {EMAIL_ORDER}"))?;
         let rows = stmt.query_map(params![actor_id], row_to_email)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Actors whose login sorts after `after_login`, in login order, at most
+    /// `limit`, each with its addresses in [`World::actor_emails`] order.
+    /// Logins compare under the column's `NOCASE` collation, under which
+    /// they are unique, so the order is total and `"BOB"` is the same
+    /// position as `"bob"`. The system actor is left out, since no token can
+    /// be issued for it.
+    pub fn actors_after(
+        &self,
+        after_login: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ListedActor>> {
+        let conn = self.lock();
+        let mut actors = conn.prepare(&format!(
+            "{} WHERE a.kind != 'system' AND a.login > ?1 COLLATE NOCASE
+             ORDER BY a.login COLLATE NOCASE LIMIT ?2",
+            queries::ACTOR_SELECT
+        ))?;
+        let mut emails =
+            conn.prepare(&format!("{EMAIL_SELECT} WHERE actor_id = ?1 {EMAIL_ORDER}"))?;
+        // Every login is non-empty, so "" sorts before all of them.
+        let rows = actors.query_map(
+            params![after_login.unwrap_or(""), limit as i64],
+            queries::row_to_actor,
+        )?;
+        let mut listed = Vec::new();
+        for row in rows {
+            let actor = row?;
+            let emails = emails
+                .query_map(params![actor.id], row_to_email)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            listed.push(ListedActor {
+                login: actor.login,
+                kind: actor.kind,
+                emails,
+            });
+        }
+        Ok(listed)
     }
 
     /// Replace an actor's addresses. This is what reality does when a person
@@ -174,6 +213,29 @@ impl World {
                 row_to_oauth_app,
             )
             .optional()?)
+    }
+
+    /// OAuth apps whose client id sorts after `after_client_id`, in client id
+    /// order, at most `limit`. The query never reads a secret.
+    pub fn oauth_apps_after(
+        &self,
+        after_client_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ListedOAuthApp>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT name, client_id, callback_url FROM oauth_apps
+             WHERE client_id > ?1 ORDER BY client_id LIMIT ?2",
+        )?;
+        // Every client id is non-empty, so "" sorts before all of them.
+        let rows = stmt.query_map(params![after_client_id.unwrap_or(""), limit as i64], |r| {
+            Ok(ListedOAuthApp {
+                name: r.get(0)?,
+                client_id: r.get(1)?,
+                callback_url: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// Record `actor` authorizing `app` and return the authorization code.

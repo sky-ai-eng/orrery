@@ -12,12 +12,15 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{Response, StatusCode};
 use axum::routing::{get, post, put};
-use orrery_world::{Actor, ActorEmail, ActorKind, SYSTEM_ACTOR_LOGIN, WorldError};
+use orrery_world::{
+    Actor, ActorEmail, ActorKind, OAUTH_CLIENT_ID_PREFIX, SYSTEM_ACTOR_LOGIN, WorldError,
+    validate_login,
+};
 
 use crate::{AppState, json};
 
-const LOG_PAGE_MAX: usize = 500;
-const LOG_PAGE_DEFAULT: usize = 100;
+const LIST_PAGE_MAX: usize = 500;
+const LIST_PAGE_DEFAULT: usize = 100;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -25,9 +28,13 @@ pub fn router(state: AppState) -> Router {
         .route("/clock", get(get_clock))
         .route("/clock/advance", post(advance_clock))
         .route("/actors", post(create_actor))
+        // TODO(ORR-36): GET /actors/{login} and GET /oauth-apps/{client_id},
+        // the point reads these two lists have no partner for.
+        .route("/actors/list", post(list_actors))
         .route("/actors/{login}/emails", put(set_actor_emails))
         .route("/actors/{login}/tokens", post(issue_actor_token))
         .route("/oauth-apps", post(create_oauth_app))
+        .route("/oauth-apps/list", post(list_oauth_apps))
         .route(
             "/oauth-apps/{client_id}/secrets",
             post(issue_oauth_client_secret),
@@ -269,29 +276,134 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let page_size = parsed.page_size.unwrap_or(LOG_PAGE_DEFAULT);
-    if page_size == 0 || page_size > LOG_PAGE_MAX {
-        return errors(
-            StatusCode::BAD_REQUEST,
-            "OUT_OF_RANGE",
-            &format!("page_size must be 1..={LOG_PAGE_MAX}"),
-            Some("page_size"),
-        );
-    }
-    match state.world.log_after(parsed.after_seq, page_size) {
+    let page_size = match page_size(parsed.page_size) {
+        Ok(n) => n,
+        Err(fault) => return faults(StatusCode::BAD_REQUEST, vec![fault]),
+    };
+    match state.world.log_after(parsed.after_seq, page_size + 1) {
         Ok(items) => {
-            // Keyset pagination over seq, which is a total order by
-            // construction; a full page signals a possible next page.
-            let next_after_seq = (items.len() == page_size)
-                .then(|| items.last().map(|e| e.seq))
-                .flatten();
+            let (items, next) = keyset_page(items, page_size, |e| e.seq);
             json(
                 StatusCode::OK,
-                serde_json::json!({ "items": items, "next_after_seq": next_after_seq }),
+                serde_json::json!({ "items": items, "next_after_seq": next }),
             )
         }
         Err(e) => internal(e),
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActorListBody {
+    page_size: Option<usize>,
+    after_login: Option<String>,
+}
+
+/// Which actors a world holds, so a caller handed a world it did not build
+/// knows whom it may issue tokens for. Never a token.
+async fn list_actors(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    let parsed: ActorListBody = match decode_strict(&body) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
+    };
+    let mut found = Vec::new();
+    let page_size = page_size(parsed.page_size).unwrap_or_else(|fault| {
+        found.push(fault);
+        0
+    });
+    if let Some(after) = &parsed.after_login
+        && let Err(e) = validate_login(after)
+    {
+        found.push(Fault::invalid(e.to_string(), "after_login"));
+    }
+    if !found.is_empty() {
+        return faults(StatusCode::BAD_REQUEST, found);
+    }
+    match state
+        .world
+        .actors_after(parsed.after_login.as_deref(), page_size + 1)
+    {
+        Ok(items) => {
+            let (items, next) = keyset_page(items, page_size, |a| a.login.clone());
+            json(
+                StatusCode::OK,
+                serde_json::json!({ "items": items, "next_after_login": next }),
+            )
+        }
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OAuthAppListBody {
+    page_size: Option<usize>,
+    after_client_id: Option<String>,
+}
+
+/// Which OAuth apps a world holds, so a caller handed a world it did not
+/// build knows which it may issue secrets for. Never a secret.
+async fn list_oauth_apps(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    let parsed: OAuthAppListBody = match decode_strict(&body) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
+    };
+    let mut found = Vec::new();
+    let page_size = page_size(parsed.page_size).unwrap_or_else(|fault| {
+        found.push(fault);
+        0
+    });
+    if let Some(after) = &parsed.after_client_id
+        && !after.starts_with(OAUTH_CLIENT_ID_PREFIX)
+    {
+        found.push(Fault::invalid(
+            format!("{after:?} is not a client id: every one starts with {OAUTH_CLIENT_ID_PREFIX}"),
+            "after_client_id",
+        ));
+    }
+    if !found.is_empty() {
+        return faults(StatusCode::BAD_REQUEST, found);
+    }
+    match state
+        .world
+        .oauth_apps_after(parsed.after_client_id.as_deref(), page_size + 1)
+    {
+        Ok(items) => {
+            let (items, next) = keyset_page(items, page_size, |a| a.client_id.clone());
+            json(
+                StatusCode::OK,
+                serde_json::json!({ "items": items, "next_after_client_id": next }),
+            )
+        }
+        Err(e) => internal(e),
+    }
+}
+
+fn page_size(requested: Option<usize>) -> Result<usize, Fault> {
+    let page_size = requested.unwrap_or(LIST_PAGE_DEFAULT);
+    if (1..=LIST_PAGE_MAX).contains(&page_size) {
+        Ok(page_size)
+    } else {
+        Err(Fault {
+            reason: "OUT_OF_RANGE",
+            message: format!("page_size must be 1..={LIST_PAGE_MAX}"),
+            field: Some("page_size"),
+        })
+    }
+}
+
+/// Cut `rows`, read with one row past the page, to the page and the cursor
+/// that follows it. The extra row is how the last page is known to be last,
+/// so a page that ends on the final row has a null cursor.
+fn keyset_page<T, K>(
+    mut rows: Vec<T>,
+    page_size: usize,
+    key: impl Fn(&T) -> K,
+) -> (Vec<T>, Option<K>) {
+    let more = rows.len() > page_size;
+    rows.truncate(page_size);
+    let next = more.then(|| rows.last().map(key)).flatten();
+    (rows, next)
 }
 
 fn clock_body(clock: i64) -> serde_json::Value {
@@ -304,6 +416,8 @@ fn clock_body(clock: i64) -> serde_json::Value {
 /// An empty body is a valid spelling of "all defaults" for bodies whose fields
 /// are all optional; callers with required fields still fail on the missing
 /// field, named by serde.
+// TODO(ORR-35): a body that fails to decode answers one fault with no
+// `field`, and hides every other fault in it.
 pub(crate) fn decode_strict<T: serde::de::DeserializeOwned>(
     body: &[u8],
 ) -> Result<T, Box<Response<Body>>> {
@@ -318,17 +432,51 @@ pub(crate) fn decode_strict<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// One entry of the error shape's `errors` list.
+pub(crate) struct Fault {
+    reason: &'static str,
+    message: String,
+    field: Option<&'static str>,
+}
+
+impl Fault {
+    fn invalid(message: String, field: &'static str) -> Fault {
+        Fault {
+            reason: "INVALID_ARGUMENT",
+            message,
+            field: Some(field),
+        }
+    }
+}
+
+/// The error shape with every fault found, so a caller fixes them all in one
+/// round trip.
+pub(crate) fn faults(status: StatusCode, faults: Vec<Fault>) -> Response<Body> {
+    let errors: Vec<_> = faults
+        .iter()
+        .map(|f| error_entry(f.reason, &f.message, f.field))
+        .collect();
+    json(status, serde_json::json!({ "errors": errors }))
+}
+
 pub(crate) fn errors(
     status: StatusCode,
     reason: &str,
     message: &str,
     field: Option<&str>,
 ) -> Response<Body> {
+    json(
+        status,
+        serde_json::json!({ "errors": [error_entry(reason, message, field)] }),
+    )
+}
+
+fn error_entry(reason: &str, message: &str, field: Option<&str>) -> serde_json::Value {
     let mut err = serde_json::json!({ "reason": reason, "message": message });
     if let Some(f) = field {
         err["field"] = serde_json::Value::String(f.to_string());
     }
-    json(status, serde_json::json!({ "errors": [err] }))
+    err
 }
 
 pub(crate) fn internal(e: impl std::fmt::Display) -> Response<Body> {

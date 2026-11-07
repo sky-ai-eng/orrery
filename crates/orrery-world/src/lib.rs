@@ -29,7 +29,7 @@ mod schema;
 mod types;
 
 pub use checks::{CheckRunPatch, NewCheckRun};
-pub use credentials::WorldSecret;
+pub use credentials::{OAUTH_CLIENT_ID_PREFIX, WorldSecret};
 pub use error::WorldError;
 pub use identity::OAUTH_CODE_TTL_SECONDS;
 pub use pulls::NewPull;
@@ -528,7 +528,7 @@ pub(crate) fn constraint_violation(e: &rusqlite::Error) -> bool {
 
 /// GitHub login rules: alphanumeric and hyphens, no leading/trailing hyphen,
 /// at most 39 chars. The system actor's login is reserved.
-fn validate_login(login: &str) -> Result<()> {
+pub fn validate_login(login: &str) -> Result<()> {
     let valid = !login.is_empty()
         && login.len() <= 39
         && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
