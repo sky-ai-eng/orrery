@@ -6,7 +6,15 @@ name: release-please
 #
 # Orrery stays on 0.y.z: .github/release-please-config.json bumps the minor
 # for a breaking change (a `!` title) and the patch for everything else.
-# Nothing reaches 1.0.0 until that file says `"release-as": "1.0.0"`.
+# Nothing reaches 1.0.0 until that file says `"release-as": "1.0.0"`. Its
+# `initial-version` is what the first release is cut at, since without it
+# release-please starts a repository with no releases at 1.0.0.
+#
+# The release type is `simple`, not `rust`: the `rust` type rewrites the root
+# Cargo.toml as a package manifest and refuses a virtual workspace like this
+# one. So the config's extra-files bump the one version every crate inherits
+# (`workspace.package.version`) and the workspace's own entries in
+# Cargo.lock, the ones with no `source`, so `cargo build --locked` holds.
 #
 # Uses RELEASES_TOKEN (a PAT) instead of the default GITHUB_TOKEN because
 # GitHub deliberately suppresses workflow triggers from GITHUB_TOKEN
