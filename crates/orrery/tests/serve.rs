@@ -1,92 +1,12 @@
 //! `orrery serve` the way a supervisor runs it: the real binary, a generated
 //! config, and Unix sockets for its listeners.
-//! Requests are hand-written HTTP/1.1, since no client in the tree speaks it
-//! over a Unix socket.
 
-use std::io::{Read as _, Write as _};
-use std::os::unix::net::{UnixListener, UnixStream};
+mod common;
+
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
 
-struct Served(Child);
-
-impl Drop for Served {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// `instance` and `server` are extra lines for those tables.
-fn write_config(dir: &Path, instance: &str, server: &str) -> PathBuf {
-    let config = dir.join("orrery.toml");
-    let instance_dir = dir.join("instance");
-    std::fs::write(
-        &config,
-        format!("[instance]\ndir = {instance_dir:?}\n{instance}\n[server]\n{server}"),
-    )
-    .unwrap();
-    config
-}
-
-fn orrery_serve(config: &Path, envs: &[(&str, &str)]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_orrery"));
-    cmd.args(["serve", "--config"])
-        .arg(config)
-        .envs(envs.iter().copied())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    cmd
-}
-
-/// Start `orrery serve` and wait until every socket accepts connections.
-fn serve(config: &Path, envs: &[(&str, &str)], sockets: &[&Path]) -> Served {
-    let mut served = Served(orrery_serve(config, envs).spawn().unwrap());
-    for _ in 0..200 {
-        if sockets.iter().all(|s| UnixStream::connect(s).is_ok()) {
-            return served;
-        }
-        if let Some(status) = served.0.try_wait().unwrap() {
-            let mut stderr = String::new();
-            served
-                .0
-                .stderr
-                .take()
-                .unwrap()
-                .read_to_string(&mut stderr)
-                .unwrap();
-            panic!("orrery serve exited with {status}: {stderr}");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("orrery serve never listened on {sockets:?}");
-}
-
-/// One request over a Unix socket; returns the status and body.
-fn request(
-    socket: &Path,
-    method: &str,
-    path: &str,
-    token: Option<&str>,
-    body: &str,
-) -> (u16, String) {
-    let mut stream = UnixStream::connect(socket).unwrap();
-    let auth = token
-        .map(|t| format!("authorization: token {t}\r\n"))
-        .unwrap_or_default();
-    write!(
-        stream,
-        "{method} {path} HTTP/1.1\r\nhost: world.test\r\n{auth}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    )
-    .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    let status = response[9..12].parse().unwrap();
-    let (_, body) = response.split_once("\r\n\r\n").unwrap();
-    (status, body.to_string())
-}
+use common::{Served, orrery_serve, request, serve, write_config};
 
 #[test]
 fn split_listeners_serve_over_unix_sockets() {
@@ -194,26 +114,8 @@ fn tokio_worker_threads_sizes_the_runtime() {
 /// Serve a fresh instance whose `[instance]` table adds `instance`, and
 /// return the token it mints for alice, its socket and the running server.
 fn alice_token(dir: &Path, instance: &str) -> (String, PathBuf, Served) {
-    let socket = dir.join("faces.sock");
-    let config = write_config(
-        dir,
-        instance,
-        &format!(
-            "listen = \"unix:{}\"\nbase_url = \"http://world.test\"\n",
-            socket.display()
-        ),
-    );
-    let served = serve(&config, &[], &[&socket]);
-    let (status, body) = request(
-        &socket,
-        "POST",
-        "/_orrery/actors",
-        None,
-        r#"{"login":"alice","kind":"user"}"#,
-    );
-    assert_eq!(status, 201, "{body}");
-    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let token = created["token"].as_str().unwrap().to_string();
+    let (socket, served) = common::serve_instance(dir, instance);
+    let token = common::mint(&socket, "alice");
     (token, socket, served)
 }
 

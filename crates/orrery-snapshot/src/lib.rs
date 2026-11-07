@@ -32,6 +32,8 @@ pub enum SnapshotError {
     NotFound(String),
     #[error("a snapshot named {0:?} already exists")]
     AlreadyExists(String),
+    #[error("{} already holds a world", .0.display())]
+    DestinationExists(PathBuf),
     #[error("copy failed: {0}")]
     Copy(String),
     #[error(transparent)]
@@ -171,10 +173,9 @@ pub fn restore(world: &World, snapshots_dir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Copy a snapshot into a fresh instance directory as its live world —
-/// a fork — and re-key it under `secret`. A fork is a new world, so it must
-/// accept none of its source's credentials. Snapshots are static, so this is
-/// safe while the source instance serves traffic.
+/// Copy the snapshot `name` into a fresh instance directory as its live
+/// world, as [`fork_world`] does. Snapshots are static, so this is safe while
+/// the source instance serves traffic.
 pub fn fork(
     snapshots_dir: &Path,
     name: &str,
@@ -186,15 +187,32 @@ pub fn fork(
     if !src.exists() {
         return Err(SnapshotError::NotFound(name.to_string()));
     }
+    fork_world(&src, dest_instance_dir, secret)
+}
+
+/// Copy the world directory `src_world` into a fresh instance directory as
+/// its live world (a fork) and re-key it under `secret`. A fork is a new
+/// world, so it must accept none of its source's credentials.
+///
+/// The source is only read, so any number of forks may copy it at once. It
+/// must not change during the copy: a snapshot, or the world of an instance
+/// no process is serving.
+pub fn fork_world(
+    src_world: &Path,
+    dest_instance_dir: &Path,
+    secret: &WorldSecret,
+) -> Result<PathBuf> {
+    if !src_world.join("world.db").exists() {
+        return Err(WorldError::NotFound(src_world.to_path_buf()).into());
+    }
     let dest_world = dest_instance_dir.join("world");
     if dest_world.exists() {
-        return Err(SnapshotError::Copy(format!(
-            "{} already contains a world",
-            dest_instance_dir.display()
-        )));
+        return Err(SnapshotError::DestinationExists(
+            dest_instance_dir.to_path_buf(),
+        ));
     }
     std::fs::create_dir_all(dest_instance_dir)?;
-    copy_dir(&src, &dest_world)?;
+    copy_dir(src_world, &dest_world)?;
     if let Err(e) = World::open_rekeyed(&dest_world, secret) {
         // A copy left un-re-keyed would accept its source's credentials.
         if let Err(cleanup) = std::fs::remove_dir_all(&dest_world) {

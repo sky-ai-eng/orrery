@@ -28,6 +28,10 @@ use orrery_world::World;
 mod control;
 mod snapshots;
 
+/// The full SHA of the commit this binary was built from, or `unknown` when
+/// the build named none and was not run in a git checkout. See `build.rs`.
+pub const BUILD_COMMIT: &str = env!("ORRERY_BUILD_COMMIT");
+
 #[derive(Clone)]
 pub struct AppState {
     pub world: Arc<World>,
