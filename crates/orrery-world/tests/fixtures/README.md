@@ -15,5 +15,5 @@ This writes `v<SCHEMA_VERSION>.db` for the checked-out code. The world it builds
 ## When
 
 - **Adding a migration:** if the current version has no fixture yet, build it first, then add the migration. Once the migration is in, the code at the old version is gone, and so is the only thing that can write a faithful fixture for it.
-- **Changing the baseline** (allowed until the first release freezes it): bump `BASELINE_VERSION`, delete the old baseline fixture, and build the new one.
+- **Never change the baseline.** World databases outlive the binary that wrote them, so every schema change is a new forward migration with a fixture, and the baseline never changes. `BASELINE_VERSION` stays where it is, and `v<BASELINE_VERSION>.db` stays the oldest fixture.
 - **Never rebuild a committed fixture.** It records what a world at that version really looked like. If you rebuild it with today's builder, it stops being that record. The example refuses to overwrite one.
