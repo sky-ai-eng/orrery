@@ -144,6 +144,18 @@ async fn no_control_plane_read_returns_a_credential() {
     ));
     let carol = mint_actor(&base, "carol", "user");
 
+    let actors = control("POST", "/actors/list", None);
+    let apps = control("POST", "/oauth-apps/list", None);
+    // The lists answered with the rows, so the checks below test them.
+    for login in ["alice", "bob", "carol"] {
+        assert!(
+            actors.contains(&format!("\"login\":\"{login}\"")),
+            "{login} not in {actors}"
+        );
+    }
+    assert!(apps.contains(&client_id), "{client_id} not in {apps}");
+    reads.push(actors);
+    reads.push(apps);
     reads.push(control("GET", "/healthz", None));
     reads.push(control("GET", "/clock", None));
     reads.push(control(
@@ -165,6 +177,8 @@ async fn no_control_plane_read_returns_a_credential() {
         Some(serde_json::json!({ "from": "empty", "to": "seeded" })),
     ));
     reads.push(control("POST", "/snapshots/seeded/restore", None));
+    reads.push(control("POST", "/actors/list", None));
+    reads.push(control("POST", "/oauth-apps/list", None));
     reads.push(control(
         "POST",
         "/log/list",
@@ -313,8 +327,21 @@ async fn a_rekeyed_world_is_entered_through_issued_credentials() {
     .unwrap();
     let fork = boot_at(dest, &forked_root).await;
 
+    // Enter the fork the way a caller handed it would: learn what it holds
+    // from its lists, not from what built the source.
+    let (status, actors) = control_issue(&http, &fork.base, "/actors/list");
+    assert_eq!(status, 200);
+    let login = actors["items"][0]["login"].as_str().unwrap().to_string();
+    assert_eq!(actors["items"].as_array().unwrap().len(), 1);
+    assert_eq!(login, "alice");
+    let (status, apps) = control_issue(&http, &fork.base, "/oauth-apps/list");
+    assert_eq!(status, 200);
+    let fork_client_id = apps["items"][0]["client_id"].as_str().unwrap().to_string();
+    assert_eq!(apps["items"].as_array().unwrap().len(), 1);
+    assert_eq!(fork_client_id, client_id);
+
     assert_eq!(login_of(&http, &fork.base, &source_token), Err(401));
-    let token = control_issue(&http, &fork.base, "/actors/alice/tokens").1["token"]
+    let token = control_issue(&http, &fork.base, &format!("/actors/{login}/tokens")).1["token"]
         .as_str()
         .unwrap()
         .to_string();
@@ -322,23 +349,23 @@ async fn a_rekeyed_world_is_entered_through_issued_credentials() {
     assert_eq!(login_of(&http, &source.base, &token), Err(401));
 
     for secret in [source_secret, &source_issued] {
-        let code = authorize(&http, &fork.base, client_id, "alice");
+        let code = authorize(&http, &fork.base, &fork_client_id, &login);
         assert_eq!(
-            exchange(&http, &fork.base, client_id, secret, &code).unwrap_err(),
+            exchange(&http, &fork.base, &fork_client_id, secret, &code).unwrap_err(),
             "incorrect_client_credentials"
         );
     }
     let issued = control_issue(
         &http,
         &fork.base,
-        &format!("/oauth-apps/{client_id}/secrets"),
+        &format!("/oauth-apps/{fork_client_id}/secrets"),
     )
     .1["client_secret"]
         .as_str()
         .unwrap()
         .to_string();
-    let code = authorize(&http, &fork.base, client_id, "alice");
-    let oauth_token = exchange(&http, &fork.base, client_id, &issued, &code).unwrap();
+    let code = authorize(&http, &fork.base, &fork_client_id, &login);
+    let oauth_token = exchange(&http, &fork.base, &fork_client_id, &issued, &code).unwrap();
     assert_eq!(
         login_of(&http, &fork.base, &oauth_token).as_deref(),
         Ok("alice")

@@ -382,6 +382,24 @@ pub struct OAuthApp {
     pub created_clock_unix: i64,
 }
 
+/// An actor as a list of actors names it. There is no token field, so a list
+/// cannot return one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ListedActor {
+    pub login: String,
+    pub kind: ActorKind,
+    pub emails: Vec<ActorEmail>,
+}
+
+/// An OAuth app as a list of apps names it. There is no secret field, so a
+/// list cannot return one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ListedOAuthApp {
+    pub name: String,
+    pub client_id: String,
+    pub callback_url: String,
+}
+
 /// The result of trading an authorization code: a token acting as `actor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthToken {

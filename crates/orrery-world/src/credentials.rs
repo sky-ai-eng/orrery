@@ -131,11 +131,14 @@ pub(crate) fn oauth_client_secret(secret: &WorldSecret, app_id: i64, n: i64) -> 
     )
 }
 
+/// Every client id starts with this, so a value without it names no app.
+pub const OAUTH_CLIENT_ID_PREFIX: &str = "orrfake_client_";
+
 /// Unkeyed: a client id is public by nature, sent in the clear on every
 /// authorize link.
 pub(crate) fn oauth_client_id(app_id: i64) -> String {
     format!(
-        "orrfake_client_{}",
+        "{OAUTH_CLIENT_ID_PREFIX}{}",
         hex::encode(&Sha256::digest(format!("oauth-app-client:{app_id}"))[..10])
     )
 }
