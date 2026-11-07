@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -193,6 +194,16 @@ fn remove_stale_socket(path: &std::path::Path) -> anyhow::Result<()> {
     std::fs::remove_file(path).with_context(|| format!("removing stale socket {}", path.display()))
 }
 
+/// The one line `serve` writes to stdout, so a caller that started a world
+/// learns where it listens without reading logs, and a world told to bind
+/// port 0 can report the port it got.
+#[derive(serde::Serialize)]
+struct Ready<'a> {
+    base_url: &'a str,
+    listen: String,
+    control: String,
+}
+
 async fn run(listener: Listener, app: axum::Router) -> std::io::Result<()> {
     match listener {
         Listener::Tcp(listener, _) => orrery_server::run(listener, app).await,
@@ -207,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -283,6 +295,11 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         clock_unix = world.clock()?,
         "orrery serving"
     );
+    let ready = serde_json::to_string(&Ready {
+        base_url: &base_url,
+        listen: listener.to_string(),
+        control: control.as_ref().unwrap_or(&listener).to_string(),
+    })?;
     let routers = orrery_server::routers(
         world,
         base_url,
@@ -291,6 +308,10 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
             anonymous_git_reads: config.server.anonymous_git_reads.unwrap_or(true),
         },
     );
+    let mut stdout = std::io::stdout();
+    writeln!(stdout, "{ready}")
+        .and_then(|()| stdout.flush())
+        .context("writing the ready line to stdout")?;
     match control {
         None => run(listener, routers.combined()).await?,
         Some(control) => {
