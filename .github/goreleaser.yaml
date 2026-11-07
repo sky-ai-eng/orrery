@@ -9,9 +9,10 @@ builds:
     # `cargo auditable zigbuild`: cargo-auditable embeds the binary's
     # dependency list in the binary itself, which is what syft reads to write
     # the SBOM below. Without it, a Rust binary's SBOM lists nothing.
-    # goreleaser runs `cargo <command> --target <triple> <flags>`, and cargo
-    # takes no `--target` between `auditable` and `zigbuild`, so the command is
-    # a cargo alias for the pair, defined in `env` below. Its name must not
+    # goreleaser runs `cargo <command> --target <triple> <flags>`, and
+    # cargo-auditable hands everything after `auditable` to cargo, which
+    # refuses a `--target` ahead of the `zigbuild` subcommand. So the command
+    # is a cargo alias for the pair, defined in `env` below. Its name must not
     # start with either word: cargo reads a `CARGO_ALIAS_AUDITABLE_…` variable
     # as a table under `alias.auditable`, and then refuses the build.
     command: auditzig
@@ -20,8 +21,7 @@ builds:
       - --release
       - --locked
       - -p=orrery
-    # musl for Linux, so the binary is static and runs on any distribution,
-    # the way a CGO_ENABLED=0 Go binary does.
+    # musl for Linux, so the binary is static and runs on any distribution.
     targets:
       - x86_64-unknown-linux-musl
       - aarch64-unknown-linux-musl
