@@ -28,7 +28,7 @@ cargo fmt --all
 
 ## The control plane's API
 
-Every `/_orrery/` route follows these rules. Faces don't: a face copies GitHub, including its lax decoding and its error bodies. A route that doesn't meet a rule yet is converged when it is next touched; never add a new deviation.
+A core principle of engineering in the era of AI is that the entire product must be drivable purely from the API. To that end, every `/_orrery/` route must follow these rules. Faces don't: a face copies its source (like GitHub), including its lax decoding and its error bodies. A route that doesn't meet a rule yet is converged when it is next touched; never add a new deviation.
 
 - **One intent per route.** A route does one nameable thing with a fixed body schema. No discriminator field that changes which other fields are meaningful, and no field whose *emptiness* selects a second behavior (blank-means-delete, blank-means-keep). If two operations need different required fields, validation, or response shapes, they are two routes. Verb routes (`POST …/snapshots/{name}/restore`) are only for effects a field write can't express.
 - **Bad calls fail.** Strict body decoding — unknown fields are rejected. Invalid values are rejected with the field named — never clamped, defaulted, case-folded, or silently dropped. A malformed filter is rejected and must never *widen* a result set by falling back. Never report success for work that didn't happen.
