@@ -1,6 +1,7 @@
 //! The commit a binary was built from, as `--version` and the control plane
-//! report it. CI also runs this target with `ORRERY_BUILD_COMMIT` set, to
-//! prove a build that names its commit reports that one.
+//! report it. The expected value is read the way the build reads it, so the
+//! same test holds for a build that names its commit with
+//! `ORRERY_BUILD_COMMIT` and for one that falls back to the checkout.
 
 mod common;
 

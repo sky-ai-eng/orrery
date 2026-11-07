@@ -169,14 +169,18 @@ fn fork_world_copies_a_stopped_instance_and_never_writes_it() {
     assert_eq!(user["login"], "alice");
 
     // Re-keyed under a random secret, the copy accepts none of the source's
-    // tokens, and a token issued there works.
+    // tokens, and a token issued there works. The source is named through a
+    // symlink, as a template's current version might be: the fork is a copy
+    // of what it points at, and re-keying it leaves the source alone.
+    let template = source.path().join("template");
+    std::os::unix::fs::symlink(&world, &template).unwrap();
     let random = tempfile::tempdir().unwrap();
     let (code, made) = orrery_json(
         random.path(),
         &[
             "fork",
             "--world",
-            world.to_str().unwrap(),
+            template.to_str().unwrap(),
             "--dest",
             "instance",
             "--secret",
@@ -184,6 +188,7 @@ fn fork_world_copies_a_stopped_instance_and_never_writes_it() {
         ],
     );
     assert_eq!(code, 0, "{made}");
+    assert!(!random.path().join("instance/world").is_symlink());
     let (socket, _served) = serve_instance(random.path(), "");
     let (status, body) = request(&socket, "GET", "/api/v3/user", Some(&token), "");
     assert_eq!(status, 401, "{body}");
@@ -311,4 +316,18 @@ fn each_json_failure_names_its_reason() {
         "INTERNAL",
         None,
     );
+
+    // A copy that cannot be opened as a world fails to re-key, and leaves
+    // nothing in its destination, so a retry from a sound source succeeds.
+    std::fs::create_dir_all(cwd.join("broken/world")).unwrap();
+    std::fs::write(cwd.join("broken/world/world.db"), "not a database").unwrap();
+    assert_failed(
+        orrery_json(cwd, &["fork", "--world", "broken/world", "--dest", "retry"]),
+        "INTERNAL",
+        None,
+    );
+    let left: Vec<_> = std::fs::read_dir(cwd.join("retry")).unwrap().collect();
+    assert!(left.is_empty(), "a failed fork left {left:?}");
+    let (code, made) = orrery_json(cwd, &["fork", "--world", "made/world", "--dest", "retry"]);
+    assert_eq!(code, 0, "{made}");
 }

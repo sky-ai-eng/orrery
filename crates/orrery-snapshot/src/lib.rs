@@ -205,6 +205,9 @@ pub fn fork_world(
     if !src_world.join("world.db").exists() {
         return Err(WorldError::NotFound(src_world.to_path_buf()).into());
     }
+    // `cp -a` copies a symlink it is handed as the link itself, and
+    // re-keying that link would re-key the source.
+    let src_world = std::fs::canonicalize(src_world)?;
     let dest_world = dest_instance_dir.join("world");
     if dest_world.exists() {
         return Err(SnapshotError::DestinationExists(
@@ -212,20 +215,30 @@ pub fn fork_world(
         ));
     }
     std::fs::create_dir_all(dest_instance_dir)?;
-    copy_dir(src_world, &dest_world)?;
-    if let Err(e) = World::open_rekeyed(&dest_world, secret) {
-        // A copy left un-re-keyed would accept its source's credentials.
-        if let Err(cleanup) = std::fs::remove_dir_all(&dest_world) {
-            tracing::error!(
-                error = %cleanup,
-                "removing a fork that failed to re-key also failed; {} still holds \
-                 its source's credentials",
-                dest_world.display(),
-            );
+    // The copy is made and re-keyed beside its destination and renamed into
+    // place, so a fork that fails, or races another into the same
+    // destination, never leaves a partial or un-re-keyed world there. The
+    // staging directory is removed when it drops, whatever happened.
+    let staging = tempfile::Builder::new()
+        .prefix(".fork-")
+        .tempdir_in(dest_instance_dir)?;
+    let copy = staging.path().join("world");
+    copy_dir(&src_world, &copy)?;
+    World::open_rekeyed(&copy, secret)?;
+    match std::fs::rename(&copy, &dest_world) {
+        Ok(()) => Ok(dest_world),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Err(SnapshotError::DestinationExists(
+                dest_instance_dir.to_path_buf(),
+            ))
         }
-        return Err(e.into());
+        Err(e) => Err(e.into()),
     }
-    Ok(dest_world)
 }
 
 /// A snapshot opened for reading, by name, through whichever view its
