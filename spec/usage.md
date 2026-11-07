@@ -52,6 +52,8 @@ orrery snapshot after
 orrery diff before after                   # → branch pushed by agent, check re-run, PR updated
 ```
 
+Commands that talk to a running world address it by its control listener's origin, without `/_orrery`: `--control-url <url>`, else `$ORRERY_CONTROL_URL`, else `http://127.0.0.1:4180`, `serve`'s default listen. Only `http` and `https` are accepted, because seed scripts reach a world over TCP: `git` cannot push to a Unix socket. A world that can't be reached, or that answers with an error, fails the command with a non-zero exit that names the URL. A command's output is its stdout alone; logs go to stderr.
+
 ## What the diff reports
 
 `orrery diff` (`POST /_orrery/diff`) answers what happened between two world states, read from the states themselves (rule 11). Every section is present in every diff, empty when nothing happened. Entries name things by stable identity — a login, `owner/repo` with a pull number, `org/slug` — never by row id.
@@ -108,6 +110,15 @@ Snapshots are therefore taken at explicit moments only — named test points (`b
 ## Determinism addenda (discovered via this model)
 
 - **Git dates come from the virtual clock.** Real `git commit` stamps author/committer dates from the *client's* wall clock — a seed script run on a laptop embeds real time into commit objects, and replaying it later produces different SHAs. Anything that creates commits must export `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` from the world clock: the scenario driver does this automatically; bash authors use `orrery env`. This is the "hidden input" class rule 5 exists to catch.
+
+  `orrery env` reads `GET /_orrery/clock` and prints its `clock_unix` in git's internal date format, which every git version reads as that exact instant:
+
+  ```
+  export GIT_AUTHOR_DATE='@<clock_unix> +0000'
+  export GIT_COMMITTER_DATE='@<clock_unix> +0000'
+  ```
+
+  A script runs `eval "$(orrery env)"` before each commit, and again after advancing the clock.
 
 ## The V1 cut, revised
 

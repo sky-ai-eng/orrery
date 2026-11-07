@@ -43,6 +43,7 @@ curl -X POST localhost:4180/_orrery/clock/advance -d '{"seconds":3600}'
 # face: real GitHub shapes, real git
 curl -X POST localhost:4180/api/v3/user/repos -H "authorization: token $TOKEN" -d '{"name":"webapp"}'
 git clone http://x-access-token:$TOKEN@localhost:4180/alice/webapp.git
+eval "$(target/debug/orrery env)"   # date the next commits at the world clock, not the laptop's
 
 # engine ops: pause the world, act, ask what happened
 curl -X POST localhost:4180/_orrery/snapshots -d '{"name":"before"}'
