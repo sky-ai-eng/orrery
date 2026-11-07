@@ -6,6 +6,8 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use orrery_world::{World, WorldSecret};
 
+mod control;
+
 #[derive(Parser)]
 #[command(
     name = "orrery",
@@ -37,6 +39,13 @@ enum Command {
         /// The new instance directory; must not already hold a world.
         #[arg(long)]
         dest: PathBuf,
+    },
+    /// Print `export` lines that date git commits at the world clock, read
+    /// with `GET /_orrery/clock`. Run `eval "$(orrery env)"` before each
+    /// commit, and again after advancing the clock.
+    Env {
+        #[command(flatten)]
+        world: control::Address,
     },
 }
 
@@ -202,7 +211,10 @@ async fn run(listener: Listener, app: axum::Router) -> std::io::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // stdout carries a command's output, which a shell may evaluate
+    // (`eval "$(orrery env)"`), so no log line may reach it.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -217,7 +229,17 @@ async fn main() -> anyhow::Result<()> {
             snapshot,
             dest,
         } => fork(&instance, &snapshot, &dest),
+        Command::Env { world } => env(&world),
     }
+}
+
+/// `@<seconds> <offset>` is git's internal date format, which every git
+/// version reads as exactly that instant.
+fn env(world: &control::Address) -> anyhow::Result<()> {
+    let clock = world.clock()?;
+    println!("export GIT_AUTHOR_DATE='@{clock} +0000'");
+    println!("export GIT_COMMITTER_DATE='@{clock} +0000'");
+    Ok(())
 }
 
 fn fork(instance: &std::path::Path, snapshot: &str, dest: &std::path::Path) -> anyhow::Result<()> {
