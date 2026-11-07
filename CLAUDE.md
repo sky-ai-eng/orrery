@@ -11,6 +11,7 @@ cargo build --workspace
 cargo clippy --workspace --all-targets   # deny-level determinism tripwires live in clippy.toml
 cargo test --workspace                   # E2E tests exec the real `git` binary; git must be on PATH
 cargo fmt --all
+./scripts/license-check.sh               # the dependency license gate CI and every release run
 ```
 
 ## Architecture in one paragraph
@@ -68,6 +69,7 @@ Every list takes the serial comma: "faces, the control plane, and the CLI".
 ## Commits and pull requests
 
 - **Titles,** for commits and PRs alike, are conventional commits: `type(scope): imperative summary (ORR-NN)`, with the ticket suffix only when there is a ticket. Types: `feat`, `fix`, `perf`, `refactor`, `ci`, `docs`, `chore`, `test`. Scopes name the area: `world`, `face`, `github`, `snapshot`, `serve`, `spec`.
+- **Titles are the changelog, and they choose the next version.** release-please reads every title that lands on main into `CHANGELOG.md` and the next release's number (README.md, "Releases"). While Orrery is 0.y.z, a change that breaks an existing caller of a command or flag, `--json` output or the ready line, a control-plane route, the config file, or a world an earlier release wrote takes `!` after the scope (`feat(serve)!: …`) and moves the minor; every other title moves the patch.
 - **Bodies** say what was wrong, what changed, and how it was checked, then stop. The diff already says how; don't restate it, and don't narrate the path that led here or the alternatives passed over. Call out anything that could be missing or problematic.
 
 ## Coding conventions

@@ -1,0 +1,32 @@
+# cargo-deny configuration for scripts/license-check.sh, the dependency
+# license gate. Only `cargo deny check licenses` reads it.
+
+# The crate graph of the shipped binary: the `orrery` package (the script
+# passes its manifest), on the release targets in .github/goreleaser.yaml,
+# without dev-dependencies, which are never linked into it.
+[graph]
+targets = [
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+]
+exclude-dev = true
+
+# Permissive licenses only, and only the ones the graph needs today, so a
+# dependency under any other license, or with none cargo-deny can read, fails
+# the gate until someone reads its license and adds it here. A crate offering
+# several licenses (`MIT OR Apache-2.0`) passes when one of them is listed.
+[licenses]
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  # webpki-roots: the Mozilla root certificates' data license.
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  # unicode-ident: the Unicode data files' license.
+  "Unicode-3.0",
+  "Zlib",
+]

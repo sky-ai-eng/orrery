@@ -1,0 +1,102 @@
+version: 2
+
+project_name: orrery
+
+builds:
+  - id: orrery
+    builder: rust
+    binary: orrery
+    # `cargo auditable zigbuild`: cargo-auditable embeds the binary's
+    # dependency list in the binary itself, which is what syft reads to write
+    # the SBOM below. Without it, a Rust binary's SBOM lists nothing.
+    # goreleaser runs `cargo <command> --target <triple> <flags>`, and
+    # cargo-auditable hands everything after `auditable` to cargo, which
+    # refuses a `--target` ahead of the `zigbuild` subcommand. So the command
+    # is a cargo alias for the pair, defined in `env` below. Its name must not
+    # start with either word: cargo reads a `CARGO_ALIAS_AUDITABLE_…` variable
+    # as a table under `alias.auditable`, and then refuses the build.
+    command: auditzig
+    # `-p` because the repository root is a workspace with no package of its own.
+    flags:
+      - --release
+      - --locked
+      - -p=orrery
+    # musl for Linux, so the binary is static and runs on any distribution.
+    targets:
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+    env:
+      - CARGO_ALIAS_AUDITZIG=auditable zigbuild
+      # The commit `orrery --version` and `GET /_orrery/healthz` report. The
+      # build script would read it from the checkout anyway; naming it keeps
+      # the release from depending on how the runner checked out.
+      - ORRERY_BUILD_COMMIT={{ .FullCommit }}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+# SPDX SBOM per archive, attached to the GitHub release as "*.sbom.json".
+# Requires `syft` on PATH in the goreleaser job — see release.yml.
+sboms:
+  - artifacts: archive
+
+# Keyless signing (Sigstore/cosign) of checksums.txt via GitHub OIDC — no
+# signing keys to provision or rotate. Verifying the checksum signature
+# transitively verifies every archive (each line is a sha256 of one
+# archive). Requires `cosign` on PATH and `id-token: write` permission on
+# the goreleaser job — see release.yml. README.md's "Releases" section has
+# the consumer-facing verify commands.
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+# The changelog is release-please's: it writes one into CHANGELOG.md and the
+# same text into the GitHub Release body, before goreleaser runs. A second copy
+# generated here would land on that same body via `mode: append` below.
+# goreleaser contributes only `release.header`.
+changelog:
+  disable: true
+
+release:
+  github:
+    owner: sky-ai-eng
+    name: orrery
+  # release-please creates the GitHub Release with the changelog body
+  # before goreleaser runs. `mode: append` tells goreleaser to upload
+  # artifacts to that existing release rather than erroring on "release
+  # already exists".
+  mode: append
+  # Ship full releases, not prereleases. Must match .github/release-please-config.json's
+  # "prerelease": false — release-please creates the release, goreleaser appends
+  # to it, and a mismatch here would re-stamp it prerelease on artifact upload.
+  prerelease: false
+  make_latest: "true"
+  draft: false
+  header: |
+    ## orrery {{ .Tag }}
+
+    A deterministic mock of the software-development world.
+
+    ### Install
+    Download the tarball for your platform below and put `orrery` on your
+    `PATH`. It needs `git` on `PATH` too.
