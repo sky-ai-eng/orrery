@@ -65,9 +65,8 @@ Every list takes the serial comma: "faces, the control plane, and the CLI".
 
   Either form is fine, and one is enough: the Linear team (ORR) is contributor-only, so an outside contributor's tracker is a GitHub issue here. Two conditions, both required: the tracker must **already exist and already describe this specific gap**, and the marker goes at the site of the gap, not in a PR description. The alternative to a marker is doing the work now. If nothing covers it, file it first or say so — a `TODO` pointing somewhere that does not describe the gap is worse than no `TODO` at all, because it looks tracked.
 
-## Commits, branches, and pull requests
+## Commits and pull requests
 
-- **Branches:** a branch for ticketed work ends in the uppercase ticket id with no trailing slug (`…/ORR-<NN>`). Linear holds the descriptive title; the branch name only points back to the ticket.
 - **Titles,** for commits and PRs alike, are conventional commits: `type(scope): imperative summary (ORR-NN)`, with the ticket suffix only when there is a ticket. Types: `feat`, `fix`, `perf`, `refactor`, `ci`, `docs`, `chore`, `test`. Scopes name the area: `world`, `face`, `github`, `snapshot`, `serve`, `spec`.
 - **Bodies** say what was wrong, what changed, and how it was checked, then stop. The diff already says how; don't restate it, and don't narrate the path that led here or the alternatives passed over. Call out anything that could be missing or problematic.
 
