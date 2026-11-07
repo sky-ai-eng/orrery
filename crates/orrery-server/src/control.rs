@@ -41,7 +41,11 @@ async fn healthz(State(state): State<AppState>) -> Response<Body> {
     match state.world.clock() {
         Ok(clock) => json(
             StatusCode::OK,
-            serde_json::json!({ "status": "ok", "clock_unix": clock }),
+            serde_json::json!({
+                "status": "ok",
+                "clock_unix": clock,
+                "build": crate::BUILD_COMMIT,
+            }),
         ),
         Err(e) => internal(e),
     }

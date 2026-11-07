@@ -1,17 +1,28 @@
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
-use orrery_world::{World, WorldSecret};
+use clap::{ArgGroup, Parser, Subcommand};
+use orrery_snapshot::SnapshotError;
+use orrery_world::{World, WorldError, WorldSecret};
+
+static VERSION: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        orrery_server::BUILD_COMMIT
+    )
+});
 
 mod control;
 
 #[derive(Parser)]
 #[command(
     name = "orrery",
+    version = VERSION.as_str(),
     about = "A deterministic mock of the software-development world"
 )]
 struct Cli {
@@ -27,19 +38,55 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
-    /// Copy a snapshot into a fresh instance directory as its live world,
-    /// re-keyed under the well-known local secret. Snapshots are static, so
-    /// this is safe while the source instance is being served.
-    Fork {
-        /// The source instance directory (the one holding `snapshots/`).
+    /// Create a world at `<instance>/world`, exactly as `serve` does on first
+    /// run, and exit without serving it. Writes no config file.
+    Create {
+        /// The new instance directory; must not already hold a world.
         #[arg(long)]
         instance: PathBuf,
-        /// The snapshot name to fork from.
+        /// RFC3339 T0, the new world's clock. Defaults to
+        /// 2020-01-01T00:00:00Z.
         #[arg(long)]
-        snapshot: String,
+        t0: Option<String>,
+        /// The secret the new world derives its credentials from.
+        #[arg(long, value_enum, default_value_t)]
+        secret: SecretChoice,
+        /// Print one JSON object on stdout: the instance on success, the
+        /// control plane's error shape on failure.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Copy a world into a fresh instance directory as its live world,
+    /// re-keyed under the chosen secret.
+    ///
+    /// The source is a snapshot (`--instance` with `--snapshot`) or any world
+    /// directory (`--world`). It is only read, so any number of forks may copy
+    /// it at once. A snapshot never changes, so forking one is safe while its
+    /// instance is served. A world that `orrery serve` is running can be
+    /// copied mid-write, so `--world` is for stopped instances and built
+    /// templates: to copy a live world, snapshot it and fork the snapshot.
+    #[command(group(ArgGroup::new("source").required(true).args(["instance", "world"])))]
+    Fork {
+        /// The source instance directory (the one holding `snapshots/`).
+        #[arg(long, requires = "snapshot")]
+        instance: Option<PathBuf>,
+        /// The snapshot name to fork from.
+        #[arg(long, requires = "instance")]
+        snapshot: Option<String>,
+        /// A world directory to fork from, such as a stopped instance's
+        /// `world/`. Never one a running `orrery serve` is using.
+        #[arg(long, conflicts_with_all = ["instance", "snapshot"])]
+        world: Option<PathBuf>,
         /// The new instance directory; must not already hold a world.
         #[arg(long)]
         dest: PathBuf,
+        /// The secret the fork is re-keyed under.
+        #[arg(long, value_enum, default_value_t)]
+        secret: SecretChoice,
+        /// Print one JSON object on stdout: the instance on success, the
+        /// control plane's error shape on failure.
+        #[arg(long)]
+        json: bool,
     },
     /// Print `export` lines that date git commits at the world clock, read
     /// with `GET /_orrery/clock`. Run `eval "$(orrery env)"` before each
@@ -74,11 +121,11 @@ struct InstanceConfig {
     secret: SecretChoice,
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, clap::ValueEnum, Default, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 enum SecretChoice {
-    /// The well-known `WorldSecret::LOCAL`: a local world needs no
-    /// unguessable credentials, and its runs stay identical from run to run.
+    /// A fixed, well-known secret: a local world needs no unguessable
+    /// credentials, and its runs mint the same tokens every time.
     #[default]
     Local,
     /// Unguessable, as a world on the public internet needs.
@@ -221,27 +268,63 @@ async fn run(listener: Listener, app: axum::Router) -> std::io::Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<ExitCode> {
     // stdout carries a command's output, which a shell may evaluate
-    // (`eval "$(orrery env)"`), so no log line may reach it.
+    // (`eval "$(orrery env)"`) or a caller may parse (`--json`, the ready
+    // line), so no log line may reach it.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Serve { config } => serve(&config).await,
+        Command::Serve { config } => {
+            serve(&config).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Create {
+            instance,
+            t0,
+            secret,
+            json,
+        } => report(json, create(&instance, t0.as_deref(), secret), |made| {
+            format!(
+                "created a world at {} with its clock at {} — serve it with a config whose instance.dir is {}",
+                made.world.display(),
+                rfc3339(made.clock_unix),
+                made.instance.display(),
+            )
+        }),
         Command::Fork {
             instance,
             snapshot,
+            world,
             dest,
-        } => fork(&instance, &snapshot, &dest),
-        Command::Env { world } => env(&world),
+            secret,
+            json,
+        } => {
+            let source = match (instance, snapshot, world) {
+                (_, _, Some(world)) => Source::World(world),
+                (Some(instance), Some(snapshot), None) => Source::Snapshot { instance, snapshot },
+                _ => unreachable!("clap requires --world, or --instance with --snapshot"),
+            };
+            let outcome = fork(&source, &dest, secret);
+            report(json, outcome, |made| {
+                format!(
+                    "forked {source} into {} — serve it with a config whose instance.dir is {}",
+                    made.world.display(),
+                    made.instance.display(),
+                )
+            })
+        }
+        Command::Env { world } => {
+            env(&world)?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -254,23 +337,145 @@ fn env(world: &control::Address) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn fork(instance: &std::path::Path, snapshot: &str, dest: &std::path::Path) -> anyhow::Result<()> {
-    // Local worlds share the well-known secret, so a fork of a local world
-    // keeps the tokens its source minted and a local run is identical every
-    // time.
-    let world = orrery_snapshot::fork(
-        &instance.join("snapshots"),
-        snapshot,
-        dest,
-        &WorldSecret::LOCAL,
-    )
-    .with_context(|| format!("forking snapshot {snapshot:?} from {}", instance.display()))?;
-    println!(
-        "forked {snapshot:?} into {} — serve it with a config whose instance.dir is {}",
-        world.display(),
-        dest.display()
-    );
-    Ok(())
+/// A new instance holding a world, as `create` and `fork` report it.
+struct Made {
+    instance: PathBuf,
+    world: PathBuf,
+    clock_unix: i64,
+}
+
+/// A `create` or `fork` failure, in the control plane's error terms. `field`
+/// names the flag whose value it is about.
+struct Failure {
+    reason: &'static str,
+    message: String,
+    field: Option<&'static str>,
+}
+
+impl Failure {
+    fn new(reason: &'static str, e: impl std::fmt::Display, field: &'static str) -> Failure {
+        Failure {
+            reason,
+            message: format!("{e:#}"),
+            field: Some(field),
+        }
+    }
+
+    fn internal(e: impl std::fmt::Display) -> Failure {
+        Failure {
+            reason: "INTERNAL",
+            message: format!("{e:#}"),
+            field: None,
+        }
+    }
+}
+
+/// With `--json`, stdout holds exactly one object and a failure exits 1;
+/// without it, a person reads the result.
+fn report(
+    json: bool,
+    outcome: Result<Made, Failure>,
+    describe: impl FnOnce(&Made) -> String,
+) -> anyhow::Result<ExitCode> {
+    match outcome {
+        Ok(made) if json => println!(
+            "{}",
+            serde_json::json!({
+                "instance": made.instance.to_string_lossy(),
+                "world": made.world.to_string_lossy(),
+                "clock_unix": made.clock_unix,
+            })
+        ),
+        Ok(made) => println!("{}", describe(&made)),
+        Err(failure) if json => {
+            let mut error =
+                serde_json::json!({ "reason": failure.reason, "message": failure.message });
+            if let Some(field) = failure.field {
+                error["field"] = field.into();
+            }
+            println!("{}", serde_json::json!({ "errors": [error] }));
+            return Ok(ExitCode::FAILURE);
+        }
+        Err(failure) => anyhow::bail!(failure.message),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn create(instance: &Path, t0: Option<&str>, secret: SecretChoice) -> Result<Made, Failure> {
+    let t0_unix = t0_unix(t0, "--t0").map_err(|e| Failure::new("INVALID_ARGUMENT", e, "t0"))?;
+    let instance = std::path::absolute(instance).map_err(Failure::internal)?;
+    let world_root = instance.join("world");
+    let secret = secret.secret().map_err(Failure::internal)?;
+    let world = World::create(&world_root, t0_unix, &secret).map_err(|e| match e {
+        WorldError::AlreadyExists(_) => Failure::new("ALREADY_EXISTS", e, "instance"),
+        e => Failure::internal(e),
+    })?;
+    Ok(Made {
+        instance,
+        world: world_root,
+        clock_unix: world.clock().map_err(Failure::internal)?,
+    })
+}
+
+enum Source {
+    Snapshot { instance: PathBuf, snapshot: String },
+    World(PathBuf),
+}
+
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Source::Snapshot { instance, snapshot } => {
+                write!(f, "snapshot {snapshot:?} of {}", instance.display())
+            }
+            Source::World(world) => write!(f, "{}", world.display()),
+        }
+    }
+}
+
+fn fork(source: &Source, dest: &Path, secret: SecretChoice) -> Result<Made, Failure> {
+    let dest = std::path::absolute(dest).map_err(Failure::internal)?;
+    let secret = secret.secret().map_err(Failure::internal)?;
+    let (forked, source_field) = match source {
+        Source::Snapshot { instance, snapshot } => (
+            orrery_snapshot::fork(&instance.join("snapshots"), snapshot, &dest, &secret),
+            "snapshot",
+        ),
+        Source::World(world) => (orrery_snapshot::fork_world(world, &dest, &secret), "world"),
+    };
+    let world_root = forked.map_err(|e| match e {
+        SnapshotError::InvalidName(_) => Failure::new("INVALID_ARGUMENT", e, "snapshot"),
+        SnapshotError::NotFound(_) | SnapshotError::World(WorldError::NotFound(_)) => {
+            Failure::new("NOT_FOUND", e, source_field)
+        }
+        SnapshotError::DestinationExists(_) => Failure::new("ALREADY_EXISTS", e, "dest"),
+        e => Failure::internal(e),
+    })?;
+    let clock_unix = World::open(&world_root)
+        .and_then(|world| world.clock())
+        .map_err(Failure::internal)?;
+    Ok(Made {
+        instance: dest,
+        world: world_root,
+        clock_unix,
+    })
+}
+
+/// A new world's T0: the RFC3339 instant `t0`, which the caller calls `name`,
+/// or the fixed default.
+fn t0_unix(t0: Option<&str>, name: &str) -> anyhow::Result<i64> {
+    match t0 {
+        Some(t0) => Ok(jiff::Timestamp::from_str(t0)
+            .with_context(|| format!("{name} {t0:?} is not RFC3339"))?
+            .as_second()),
+        None => Ok(orrery_world::DEFAULT_T0_UNIX),
+    }
+}
+
+fn rfc3339(clock_unix: i64) -> String {
+    jiff::Timestamp::from_second(clock_unix)
+        .map(|t| t.to_string())
+        .unwrap_or_else(|_| format!("{clock_unix} (unix)"))
 }
 
 async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
@@ -279,12 +484,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
     let config: Config = toml::from_str(&raw)
         .with_context(|| format!("parsing config {}", config_path.display()))?;
 
-    let t0_unix = match &config.instance.t0 {
-        Some(t0) => jiff::Timestamp::from_str(t0)
-            .with_context(|| format!("instance.t0 {t0:?} is not RFC3339"))?
-            .as_second(),
-        None => orrery_world::DEFAULT_T0_UNIX,
-    };
+    let t0_unix = t0_unix(config.instance.t0.as_deref(), "instance.t0")?;
     let world_root = config.instance.dir.join("world");
     let world = Arc::new(World::open_or_create(
         &world_root,

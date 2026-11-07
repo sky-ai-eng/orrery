@@ -50,8 +50,10 @@ curl -X POST localhost:4180/_orrery/snapshots -d '{"name":"before"}'
 curl -X POST localhost:4180/_orrery/diff -d '{"from":"before"}'
 ```
 
-A snapshot can also seed a whole new instance:
+A snapshot, or a stopped instance's world, can seed a whole new instance, and a world can be made without serving it ([`spec/usage.md`](spec/usage.md) has both commands and their `--json` output):
 
 ```bash
 target/debug/orrery fork --instance ./instance --snapshot before --dest ./instance2
+target/debug/orrery fork --world ./instance2/world --dest ./instance3 --secret random
+target/debug/orrery create --instance ./instance4 --t0 2026-01-01T00:00:00Z
 ```

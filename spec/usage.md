@@ -115,6 +115,26 @@ Snapshots are therefore taken at explicit moments only — named test points (`b
 - Export for sharing = `tar` of a snapshot dir — safe by rule 12 (no real credentials exist to leak).
 - Residence: CI → the job's temp dir, discarded with it. Seeds → cached keyed by the hash of the seed definition. Ring → short rotation on the ring host's disk.
 
+## Making worlds without serving them
+
+Two commands make an instance's world and exit, for anything that supervises many worlds or builds them ahead of time. Neither is a control-plane alias: no world is running for them to call.
+
+- `orrery create --instance <dir> [--t0 <rfc3339>] [--secret local|random]` creates the world at `<dir>/world`, exactly as `serve` does on first run with the same `t0` and `secret`, and writes no config file. `t0` defaults to 2020-01-01T00:00:00Z, and `secret` to `local`. An instance that already holds a world is refused.
+- `orrery fork (--instance <dir> --snapshot <name> | --world <dir>) --dest <dir> [--secret local|random]` copies a world into a new instance and re-keys it under `secret` (default `local`), so the fork accepts none of its source's credentials, except that two local worlds derive the same ones. The source is `<instance>/snapshots/<name>`, or any world directory, such as a stopped instance's `world/` or a built template. It is only read, so any number of forks may copy it at once. A world that `serve` is running can change mid-copy, so it is never a `--world` source: snapshot it and fork the snapshot.
+
+With `--json`, each prints exactly one object on stdout. Success is `{"instance": "<dest>", "world": "<dest>/world", "clock_unix": <n>}`, with absolute paths. Failure is the control plane's error shape, `{"errors": [{"reason", "message", "field"}]}`, and exit status 1. `field` names the flag the failure is about (`t0`, `snapshot`, `world`, `instance`, or `dest`), and is absent for `INTERNAL`.
+
+| `reason` | When |
+| --- | --- |
+| `INVALID_ARGUMENT` | a malformed snapshot name or `t0` |
+| `NOT_FOUND` | no such snapshot or world directory |
+| `ALREADY_EXISTS` | the destination already holds a world |
+| `INTERNAL` | anything else |
+
+A malformed command line (an unknown flag, a missing source, or a `--secret` that is neither choice) is the argument parser's usage error, with or without `--json`: a message on stderr and exit status 2.
+
+**The build commit.** `orrery --version` prints `orrery <version> (<commit>)`, and `GET /_orrery/healthz` reports the same commit as `build`. It is the full SHA of the commit the binary was built from: `ORRERY_BUILD_COMMIT` at build time if set, else `git rev-parse HEAD`, else `unknown`. There is no dirty-tree marker.
+
 ## Determinism addenda (discovered via this model)
 
 - **Git dates come from the virtual clock.** Real `git commit` stamps author/committer dates from the *client's* wall clock — a seed script run on a laptop embeds real time into commit objects, and replaying it later produces different SHAs. Anything that creates commits must export `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` from the world clock: the scenario driver does this automatically; bash authors use `orrery env`. This is the "hidden input" class rule 5 exists to catch.

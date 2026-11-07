@@ -32,6 +32,8 @@ pub enum SnapshotError {
     NotFound(String),
     #[error("a snapshot named {0:?} already exists")]
     AlreadyExists(String),
+    #[error("{} already holds a world", .0.display())]
+    DestinationExists(PathBuf),
     #[error("copy failed: {0}")]
     Copy(String),
     #[error(transparent)]
@@ -171,10 +173,9 @@ pub fn restore(world: &World, snapshots_dir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Copy a snapshot into a fresh instance directory as its live world —
-/// a fork — and re-key it under `secret`. A fork is a new world, so it must
-/// accept none of its source's credentials. Snapshots are static, so this is
-/// safe while the source instance serves traffic.
+/// Copy the snapshot `name` into a fresh instance directory as its live
+/// world, as [`fork_world`] does. Snapshots are static, so this is safe while
+/// the source instance serves traffic.
 pub fn fork(
     snapshots_dir: &Path,
     name: &str,
@@ -186,28 +187,58 @@ pub fn fork(
     if !src.exists() {
         return Err(SnapshotError::NotFound(name.to_string()));
     }
+    fork_world(&src, dest_instance_dir, secret)
+}
+
+/// Copy the world directory `src_world` into a fresh instance directory as
+/// its live world (a fork) and re-key it under `secret`. A fork is a new
+/// world, so it must accept none of its source's credentials.
+///
+/// The source is only read, so any number of forks may copy it at once. It
+/// must not change during the copy: a snapshot, or the world of an instance
+/// no process is serving.
+pub fn fork_world(
+    src_world: &Path,
+    dest_instance_dir: &Path,
+    secret: &WorldSecret,
+) -> Result<PathBuf> {
+    if !src_world.join("world.db").exists() {
+        return Err(WorldError::NotFound(src_world.to_path_buf()).into());
+    }
+    // `cp -a` copies a symlink it is handed as the link itself, and
+    // re-keying that link would re-key the source.
+    let src_world = std::fs::canonicalize(src_world)?;
     let dest_world = dest_instance_dir.join("world");
     if dest_world.exists() {
-        return Err(SnapshotError::Copy(format!(
-            "{} already contains a world",
-            dest_instance_dir.display()
-        )));
+        return Err(SnapshotError::DestinationExists(
+            dest_instance_dir.to_path_buf(),
+        ));
     }
     std::fs::create_dir_all(dest_instance_dir)?;
-    copy_dir(&src, &dest_world)?;
-    if let Err(e) = World::open_rekeyed(&dest_world, secret) {
-        // A copy left un-re-keyed would accept its source's credentials.
-        if let Err(cleanup) = std::fs::remove_dir_all(&dest_world) {
-            tracing::error!(
-                error = %cleanup,
-                "removing a fork that failed to re-key also failed; {} still holds \
-                 its source's credentials",
-                dest_world.display(),
-            );
+    // The copy is made and re-keyed beside its destination and renamed into
+    // place, so a fork that fails, or races another into the same
+    // destination, never leaves a partial or un-re-keyed world there. The
+    // staging directory is removed when it drops, whatever happened.
+    let staging = tempfile::Builder::new()
+        .prefix(".fork-")
+        .tempdir_in(dest_instance_dir)?;
+    let copy = staging.path().join("world");
+    copy_dir(&src_world, &copy)?;
+    World::open_rekeyed(&copy, secret)?;
+    match std::fs::rename(&copy, &dest_world) {
+        Ok(()) => Ok(dest_world),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Err(SnapshotError::DestinationExists(
+                dest_instance_dir.to_path_buf(),
+            ))
         }
-        return Err(e.into());
+        Err(e) => Err(e.into()),
     }
-    Ok(dest_world)
 }
 
 /// A snapshot opened for reading, by name, through whichever view its

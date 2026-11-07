@@ -37,3 +37,9 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # A build that names its commit reports that one, not the checkout's.
+      - name: Test a build that names its commit
+        run: cargo test -p orrery --test build_commit
+        env:
+          ORRERY_BUILD_COMMIT: abc
