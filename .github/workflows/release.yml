@@ -1,0 +1,75 @@
+name: release
+
+# Builds the binaries, signs their checksums, and attaches both to the GitHub
+# Release on every v* tag push. Tags come from two sources:
+#   1. release-please.yml when a Release PR is merged on main (the
+#      automated path).
+#   2. A human running `git tag vX.Y.Z && git push origin vX.Y.Z` (the
+#      manual escape hatch — use only if release-please is wedged).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # Hard pre-release gate on third-party dependency licenses. A v* tag must not
+  # publish binaries unless the check passes — `goreleaser` `needs` this job
+  # below, so a copyleft/forbidden dep blocks the release rather than merely
+  # warning on it. Same scripts/license-check.sh the dependency-licenses.yml
+  # workflow runs on PRs + main.
+  dependency-licenses:
+    runs-on: ubuntu-latest
+    # Installing cargo-deny compiles it; cap the gate so a hung install/check
+    # can't block the release for GitHub's 6h default.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check third-party dependency licenses
+        run: ./scripts/license-check.sh
+
+  goreleaser:
+    needs: [dependency-licenses]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless cosign signing authenticates via GitHub's OIDC token — no
+      # signing keys to provision or rotate. See goreleaser.yaml's `signs:`.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # goreleaser runs `rustup target add` for each target itself.
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # Zig is the cross linker cargo-zigbuild drives, for the musl and macOS
+      # targets alike.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install cargo-zigbuild and cargo-auditable
+        run: cargo install --locked cargo-zigbuild@0.24.0 cargo-auditable@0.7.7
+
+      - name: Install syft (SBOM generation)
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Install cosign (artifact signing)
+        uses: sigstore/cosign-installer@v3
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean --config .github/goreleaser.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

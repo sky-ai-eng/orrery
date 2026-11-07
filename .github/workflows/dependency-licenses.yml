@@ -1,0 +1,42 @@
+name: dependency-licenses
+
+# Compliance gate for the licenses of our THIRD-PARTY dependencies (not our own
+# product license). Fails if any crate statically linked into the distributed
+# binary carries a license outside deny.toml's allow list, or none cargo-deny
+# can read. See scripts/license-check.sh — it's the single source of truth,
+# also run as a hard pre-release gate in release.yml.
+#
+# A new dependency can only enter via a Cargo.toml or Cargo.lock, so PR runs
+# are filtered to those (plus the script, its config, and this workflow); main
+# runs unconditionally so every merge is checked.
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/*/Cargo.toml'
+      - 'deny.toml'
+      - 'scripts/license-check.sh'
+      - '.github/workflows/dependency-licenses.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-licenses-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Installing cargo-deny compiles it; cap the job so a hung install/check
+    # can't sit on GitHub's 6h default.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check third-party dependency licenses
+        run: ./scripts/license-check.sh
