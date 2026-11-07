@@ -24,6 +24,9 @@ struct Served {
     child: Child,
     /// Reads stdout after the ready line until the process exits.
     rest_of_stdout: Option<JoinHandle<String>>,
+    /// Reads stderr as it is written: a pipe nobody drains fills with logs
+    /// and blocks the world's next write.
+    stderr: Option<JoinHandle<String>>,
 }
 
 impl Served {
@@ -33,13 +36,7 @@ impl Served {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let stdout = self.rest_of_stdout.take().unwrap().join().unwrap();
-        let mut stderr = String::new();
-        self.child
-            .stderr
-            .take()
-            .unwrap()
-            .read_to_string(&mut stderr)
-            .unwrap();
+        let stderr = self.stderr.take().unwrap().join().unwrap();
         (stdout, stderr)
     }
 }
@@ -78,6 +75,12 @@ fn orrery_serve(config: &Path, envs: &[(&str, &str)]) -> Command {
 fn serve(config: &Path, envs: &[(&str, &str)]) -> (Served, Ready) {
     let mut child = orrery_serve(config, envs).spawn().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut stderr = child.stderr.take().unwrap();
+    let stderr = std::thread::spawn(move || {
+        let mut all = String::new();
+        stderr.read_to_string(&mut all).unwrap();
+        all
+    });
     let (first_line, first_line_rx) = std::sync::mpsc::channel();
     let rest_of_stdout = std::thread::spawn(move || {
         let mut line = String::new();
@@ -90,6 +93,7 @@ fn serve(config: &Path, envs: &[(&str, &str)]) -> (Served, Ready) {
     let mut served = Served {
         child,
         rest_of_stdout: Some(rest_of_stdout),
+        stderr: Some(stderr),
     };
     let line = first_line_rx
         .recv_timeout(Duration::from_secs(10))
