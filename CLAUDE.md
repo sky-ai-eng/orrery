@@ -67,7 +67,7 @@ Every list takes the serial comma: "faces, the control plane, and the CLI".
 
 ## Commits, branches, and pull requests
 
-- **Branches:** `aa/ORR-<NN>` for ticketed work (uppercase id, no trailing slug), `aa/<short-kebab-slug>` otherwise. Linear holds the descriptive title; the branch name only points back to the ticket.
+- **Branches:** a branch for ticketed work ends in the uppercase ticket id with no trailing slug (`…/ORR-<NN>`). Linear holds the descriptive title; the branch name only points back to the ticket.
 - **Titles,** for commits and PRs alike, are conventional commits: `type(scope): imperative summary (ORR-NN)`, with the ticket suffix only when there is a ticket. Types: `feat`, `fix`, `perf`, `refactor`, `ci`, `docs`, `chore`, `test`. Scopes name the area: `world`, `face`, `github`, `snapshot`, `serve`, `spec`.
 - **Bodies** say what was wrong, what changed, and how it was checked, then stop. The diff already says how; don't restate it, and don't narrate the path that led here or the alternatives passed over. Call out anything that could be missing or problematic.
 
