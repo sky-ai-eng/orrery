@@ -382,8 +382,7 @@ pub struct OAuthApp {
     pub created_clock_unix: i64,
 }
 
-/// An actor as a list of actors names it. There is no token field, so a list
-/// cannot return one.
+/// An actor as a list of actors names it, with its addresses.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ListedActor {
     pub login: String,

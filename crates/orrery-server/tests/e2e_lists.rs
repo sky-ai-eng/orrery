@@ -270,3 +270,28 @@ async fn listing_writes_nothing() {
     list(base, "/oauth-apps/list", json!({}));
     assert_eq!(log(), before);
 }
+
+/// The log pages like the lists above: a page that ends on the last entry
+/// has a null cursor.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_logs_last_page_has_a_null_cursor() {
+    let inst = boot().await;
+    let base = &inst.base;
+    mint_actor(base, "alice", "user");
+    mint_actor(base, "bob", "user");
+    let all = list(base, "/log/list", json!({ "page_size": 500 }));
+    let entries = all["items"].as_array().unwrap().len();
+    assert!(entries >= 2);
+    assert_eq!(all["next_after_seq"], Value::Null);
+
+    let exact = list(base, "/log/list", json!({ "page_size": entries }));
+    assert_eq!(exact["items"].as_array().unwrap().len(), entries);
+    assert_eq!(exact["next_after_seq"], Value::Null);
+
+    let short = list(base, "/log/list", json!({ "page_size": entries - 1 }));
+    let last = short["items"][entries - 2]["seq"].clone();
+    assert_eq!(short["next_after_seq"], last);
+    let rest = list(base, "/log/list", json!({ "after_seq": last }));
+    assert_eq!(rest["items"].as_array().unwrap().len(), 1);
+    assert_eq!(rest["next_after_seq"], Value::Null);
+}

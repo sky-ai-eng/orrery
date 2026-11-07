@@ -278,16 +278,12 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
         Ok(n) => n,
         Err(fault) => return faults(StatusCode::BAD_REQUEST, vec![fault]),
     };
-    match state.world.log_after(parsed.after_seq, page_size) {
+    match state.world.log_after(parsed.after_seq, page_size + 1) {
         Ok(items) => {
-            // Keyset pagination over seq, which is a total order by
-            // construction; a full page signals a possible next page.
-            let next_after_seq = (items.len() == page_size)
-                .then(|| items.last().map(|e| e.seq))
-                .flatten();
+            let (items, next) = keyset_page(items, page_size, |e| e.seq);
             json(
                 StatusCode::OK,
-                serde_json::json!({ "items": items, "next_after_seq": next_after_seq }),
+                serde_json::json!({ "items": items, "next_after_seq": next }),
             )
         }
         Err(e) => internal(e),
@@ -397,11 +393,11 @@ fn page_size(requested: Option<usize>) -> Result<usize, Fault> {
 /// Cut `rows`, read with one row past the page, to the page and the cursor
 /// that follows it. The extra row is how the last page is known to be last,
 /// so a page that ends on the final row has a null cursor.
-fn keyset_page<T>(
+fn keyset_page<T, K>(
     mut rows: Vec<T>,
     page_size: usize,
-    key: impl Fn(&T) -> String,
-) -> (Vec<T>, Option<String>) {
+    key: impl Fn(&T) -> K,
+) -> (Vec<T>, Option<K>) {
     let more = rows.len() > page_size;
     rows.truncate(page_size);
     let next = more.then(|| rows.last().map(key)).flatten();
@@ -453,14 +449,8 @@ impl Fault {
 /// round trip.
 pub(crate) fn faults(status: StatusCode, faults: Vec<Fault>) -> Response<Body> {
     let errors: Vec<_> = faults
-        .into_iter()
-        .map(|f| {
-            let mut err = serde_json::json!({ "reason": f.reason, "message": f.message });
-            if let Some(field) = f.field {
-                err["field"] = serde_json::Value::String(field.to_string());
-            }
-            err
-        })
+        .iter()
+        .map(|f| error_entry(f.reason, &f.message, f.field))
         .collect();
     json(status, serde_json::json!({ "errors": errors }))
 }
@@ -471,11 +461,18 @@ pub(crate) fn errors(
     message: &str,
     field: Option<&str>,
 ) -> Response<Body> {
+    json(
+        status,
+        serde_json::json!({ "errors": [error_entry(reason, message, field)] }),
+    )
+}
+
+fn error_entry(reason: &str, message: &str, field: Option<&str>) -> serde_json::Value {
     let mut err = serde_json::json!({ "reason": reason, "message": message });
     if let Some(f) = field {
         err["field"] = serde_json::Value::String(f.to_string());
     }
-    json(status, serde_json::json!({ "errors": [err] }))
+    err
 }
 
 pub(crate) fn internal(e: impl std::fmt::Display) -> Response<Body> {

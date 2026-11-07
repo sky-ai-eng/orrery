@@ -34,38 +34,35 @@ impl World {
     /// `limit`, each with its addresses in [`World::actor_emails`] order.
     /// Logins compare under the column's `NOCASE` collation, under which
     /// they are unique, so the order is total and `"BOB"` is the same
-    /// position as `"bob"`. The system actor is never listed: nothing
-    /// creates it or issues a token for it.
+    /// position as `"bob"`. The system actor is left out, since no token can
+    /// be issued for it.
     pub fn actors_after(
         &self,
         after_login: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ListedActor>> {
         let conn = self.lock();
-        let mut actors = conn.prepare(
-            "SELECT id, login, kind FROM actors
-             WHERE kind != 'system' AND login > ?1 COLLATE NOCASE
-             ORDER BY login COLLATE NOCASE LIMIT ?2",
-        )?;
+        let mut actors = conn.prepare(&format!(
+            "{} WHERE a.kind != 'system' AND a.login > ?1 COLLATE NOCASE
+             ORDER BY a.login COLLATE NOCASE LIMIT ?2",
+            queries::ACTOR_SELECT
+        ))?;
         let mut emails =
             conn.prepare(&format!("{EMAIL_SELECT} WHERE actor_id = ?1 {EMAIL_ORDER}"))?;
         // Every login is non-empty, so "" sorts before all of them.
-        let rows = actors.query_map(params![after_login.unwrap_or(""), limit as i64], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                ActorKind::from_db(&r.get::<_, String>(2)?),
-            ))
-        })?;
+        let rows = actors.query_map(
+            params![after_login.unwrap_or(""), limit as i64],
+            queries::row_to_actor,
+        )?;
         let mut listed = Vec::new();
         for row in rows {
-            let (id, login, kind) = row?;
+            let actor = row?;
             let emails = emails
-                .query_map(params![id], row_to_email)?
+                .query_map(params![actor.id], row_to_email)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             listed.push(ListedActor {
-                login,
-                kind,
+                login: actor.login,
+                kind: actor.kind,
                 emails,
             });
         }
