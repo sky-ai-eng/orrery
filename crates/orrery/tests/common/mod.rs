@@ -1,5 +1,6 @@
 //! Drives the real `orrery` binary the way a supervisor does: generated
-//! configs, Unix sockets for its listeners, and `--json` output.
+//! configs, the ready line `serve` prints on stdout to say where it listens,
+//! and the `--json` output of the commands that make worlds.
 //! Requests are hand-written HTTP/1.1, since no client in the tree speaks it
 //! over a Unix socket.
 
@@ -7,18 +8,48 @@
 // suite skips is "unused" in that target.
 #![allow(dead_code)]
 
-use std::io::{Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-pub struct Served(pub Child);
+/// The line `orrery serve` prints on stdout once it is ready.
+#[derive(serde::Deserialize, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Ready {
+    pub base_url: String,
+    pub listen: String,
+    pub control: String,
+}
+
+pub struct Served {
+    pub child: Child,
+    /// Reads stdout after the ready line until the process exits.
+    rest_of_stdout: Option<JoinHandle<String>>,
+    /// Reads stderr as it is written: a pipe nobody drains fills with logs
+    /// and blocks the world's next write.
+    stderr: Option<JoinHandle<String>>,
+}
+
+impl Served {
+    /// Kill the process; return what it wrote to stdout after the ready
+    /// line, and all it wrote to stderr.
+    pub fn stop(&mut self) -> (String, String) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let stdout = self.rest_of_stdout.take().unwrap().join().unwrap();
+        let stderr = self.stderr.take().unwrap().join().unwrap();
+        (stdout, stderr)
+    }
+}
 
 impl Drop for Served {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -40,59 +71,92 @@ pub fn orrery_serve(config: &Path, envs: &[(&str, &str)]) -> Command {
     cmd.args(["serve", "--config"])
         .arg(config)
         .envs(envs.iter().copied())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     cmd
 }
 
-/// Start `orrery serve` and wait until every socket accepts connections.
-pub fn serve(config: &Path, envs: &[(&str, &str)], sockets: &[&Path]) -> Served {
-    let mut served = Served(orrery_serve(config, envs).spawn().unwrap());
-    for _ in 0..200 {
-        if sockets.iter().all(|s| UnixStream::connect(s).is_ok()) {
-            return served;
-        }
-        if let Some(status) = served.0.try_wait().unwrap() {
-            let mut stderr = String::new();
-            served
-                .0
-                .stderr
-                .take()
-                .unwrap()
-                .read_to_string(&mut stderr)
-                .unwrap();
-            panic!("orrery serve exited with {status}: {stderr}");
-        }
-        std::thread::sleep(Duration::from_millis(50));
+/// Start `orrery serve` and read its ready line. Every listener is bound by
+/// then, so nothing needs to poll for it.
+pub fn serve(config: &Path, envs: &[(&str, &str)]) -> (Served, Ready) {
+    let mut child = orrery_serve(config, envs).spawn().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut stderr = child.stderr.take().unwrap();
+    let stderr = std::thread::spawn(move || {
+        let mut all = String::new();
+        stderr.read_to_string(&mut all).unwrap();
+        all
+    });
+    let (first_line, first_line_rx) = std::sync::mpsc::channel();
+    let rest_of_stdout = std::thread::spawn(move || {
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        let _ = first_line.send(line);
+        let mut rest = String::new();
+        stdout.read_to_string(&mut rest).unwrap();
+        rest
+    });
+    let mut served = Served {
+        child,
+        rest_of_stdout: Some(rest_of_stdout),
+        stderr: Some(stderr),
+    };
+    let line = first_line_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("orrery serve printed no ready line");
+    if line.is_empty() {
+        let (_, stderr) = served.stop();
+        panic!("orrery serve exited before its ready line: {stderr}");
     }
-    panic!("orrery serve never listened on {sockets:?}");
+    let ready = serde_json::from_str(&line)
+        .unwrap_or_else(|e| panic!("{line:?} is not the ready line: {e}"));
+    (served, ready)
 }
 
-/// Serve the instance `dir/instance` on one socket, `dir/faces.sock`, whose
-/// `[instance]` table adds `instance`.
-pub fn serve_instance(dir: &Path, instance: &str) -> (PathBuf, Served) {
-    let socket = dir.join("faces.sock");
+/// Serve the instance `dir/instance`, whose `[instance]` table adds
+/// `instance`, with its faces and control plane on one Unix socket; returns
+/// that socket's address in the ready line's syntax.
+pub fn serve_instance(dir: &Path, instance: &str) -> (String, Served) {
     let config = write_config(
         dir,
         instance,
         &format!(
             "listen = \"unix:{}\"\nbase_url = \"http://world.test\"\n",
-            socket.display()
+            dir.join("faces.sock").display()
         ),
     );
-    let served = serve(&config, &[], &[&socket]);
-    (socket, served)
+    let (served, ready) = serve(&config, &[]);
+    (ready.listen, served)
 }
 
-/// One request over a Unix socket; returns the status and body.
+/// One request to an address in the ready line's syntax, `host:port` or
+/// `unix:/path`; returns the status and body.
 pub fn request(
-    socket: &Path,
+    addr: &str,
     method: &str,
     path: &str,
     token: Option<&str>,
     body: &str,
 ) -> (u16, String) {
-    let mut stream = UnixStream::connect(socket).unwrap();
+    match addr.strip_prefix("unix:") {
+        Some(socket) => exchange(
+            UnixStream::connect(socket).unwrap(),
+            method,
+            path,
+            token,
+            body,
+        ),
+        None => exchange(TcpStream::connect(addr).unwrap(), method, path, token, body),
+    }
+}
+
+fn exchange(
+    mut stream: impl Read + Write,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: &str,
+) -> (u16, String) {
     let auth = token
         .map(|t| format!("authorization: token {t}\r\n"))
         .unwrap_or_default();
@@ -111,22 +175,23 @@ pub fn request(
 
 /// A request whose answer must have `status`; returns its JSON body.
 pub fn call(
-    socket: &Path,
+    addr: &str,
     method: &str,
     path: &str,
     token: Option<&str>,
     body: &str,
     status: u16,
 ) -> serde_json::Value {
-    let (got, text) = request(socket, method, path, token, body);
+    let (got, text) = request(addr, method, path, token, body);
     assert_eq!(got, status, "{method} {path}: {text}");
     serde_json::from_str(&text).unwrap()
 }
 
-/// Mint `login` as a user and return its token.
-pub fn mint(socket: &Path, login: &str) -> String {
+/// Mint `login` as a user through the control plane at `addr`; returns its
+/// token.
+pub fn mint(addr: &str, login: &str) -> String {
     let created = call(
-        socket,
+        addr,
         "POST",
         "/_orrery/actors",
         None,

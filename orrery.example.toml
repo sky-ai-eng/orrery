@@ -16,7 +16,11 @@ t0 = "2026-01-01T00:00:00Z"
 
 [server]
 # host:port, or unix:/absolute/path for a Unix socket. A stale socket file left
-# at the path is removed before binding.
+# at the path is removed before binding. Port 0, as in "127.0.0.1:0", picks a
+# free port. Once it is ready to serve, `orrery serve` prints one line of JSON
+# to stdout naming its bound addresses, the real port included:
+#   {"base_url":"http://127.0.0.1:43211","listen":"127.0.0.1:43211","control":"127.0.0.1:43211"}
+# Nothing else goes to stdout; logs go to stderr.
 listen = "127.0.0.1:4180"
 # External base URL rendered into clone/html URLs; defaults to http://<listen>.
 # Required when listen is a socket.
