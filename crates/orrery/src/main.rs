@@ -16,6 +16,8 @@ static VERSION: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+mod control;
+
 #[derive(Parser)]
 #[command(
     name = "orrery",
@@ -84,6 +86,13 @@ enum Command {
         /// control plane's error shape on failure.
         #[arg(long)]
         json: bool,
+    },
+    /// Print `export` lines that date git commits at the world clock, read
+    /// with `GET /_orrery/clock`. Run `eval "$(orrery env)"` before each
+    /// commit, and again after advancing the clock.
+    Env {
+        #[command(flatten)]
+        world: control::Address,
     },
 }
 
@@ -249,34 +258,36 @@ async fn run(listener: Listener, app: axum::Router) -> std::io::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<ExitCode> {
+    // stdout carries a command's output, which a shell may evaluate
+    // (`eval "$(orrery env)"`) or a caller may parse (`--json`), so no log
+    // line may reach it.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let cli = Cli::parse();
-    let logs = tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-    );
     match cli.command {
         Command::Serve { config } => {
-            logs.init();
             serve(&config).await?;
             Ok(ExitCode::SUCCESS)
         }
-        // stdout carries the command's one result, so its logs go elsewhere.
         Command::Create {
             instance,
             t0,
             secret,
             json,
-        } => {
-            logs.with_writer(std::io::stderr).init();
-            report(json, create(&instance, t0.as_deref(), secret), |made| {
-                format!(
-                    "created a world at {} with its clock at {} — serve it with a config whose instance.dir is {}",
-                    made.world.display(),
-                    rfc3339(made.clock_unix),
-                    made.instance.display(),
-                )
-            })
-        }
+        } => report(json, create(&instance, t0.as_deref(), secret), |made| {
+            format!(
+                "created a world at {} with its clock at {} — serve it with a config whose instance.dir is {}",
+                made.world.display(),
+                rfc3339(made.clock_unix),
+                made.instance.display(),
+            )
+        }),
         Command::Fork {
             instance,
             snapshot,
@@ -285,7 +296,6 @@ async fn main() -> anyhow::Result<ExitCode> {
             secret,
             json,
         } => {
-            logs.with_writer(std::io::stderr).init();
             let source = match (instance, snapshot, world) {
                 (_, _, Some(world)) => Source::World(world),
                 (Some(instance), Some(snapshot), None) => Source::Snapshot { instance, snapshot },
@@ -300,7 +310,20 @@ async fn main() -> anyhow::Result<ExitCode> {
                 )
             })
         }
+        Command::Env { world } => {
+            env(&world)?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
+}
+
+/// `@<seconds> <offset>` is git's internal date format, which every git
+/// version reads as exactly that instant.
+fn env(world: &control::Address) -> anyhow::Result<()> {
+    let clock = world.clock()?;
+    println!("export GIT_AUTHOR_DATE='@{clock} +0000'");
+    println!("export GIT_COMMITTER_DATE='@{clock} +0000'");
+    Ok(())
 }
 
 /// A new instance holding a world, as `create` and `fork` report it.
