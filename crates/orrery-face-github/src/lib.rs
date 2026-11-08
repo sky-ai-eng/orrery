@@ -17,7 +17,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Extension, Path as UrlPath, State};
-use axum::http::{Response, StatusCode};
+use axum::http::{HeaderMap, Response, StatusCode, header};
 use axum::routing::{delete, get, patch, post, put};
 use orrery_face_git::GitFace;
 use orrery_world::{Actor, ActorKind, Repo, World, WorldError};
@@ -331,6 +331,16 @@ pub(crate) fn github_error(status: StatusCode, message: &str) -> Response<Body> 
 pub(crate) fn internal(e: impl std::fmt::Display) -> Response<Body> {
     tracing::error!(error = %e, "github face internal error");
     github_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+}
+
+/// A header's value, lowercased because the values matched against it (media
+/// types, mostly) compare ignoring case; empty when absent or not ASCII.
+pub(crate) fn header_str(headers: &HeaderMap, name: header::HeaderName) -> String {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 pub(crate) fn json_response(status: StatusCode, body: serde_json::Value) -> Response<Body> {

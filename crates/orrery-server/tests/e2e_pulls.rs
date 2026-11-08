@@ -442,7 +442,8 @@ fn not_mocked_field(answer: &(u16, serde_json::Value)) -> (u16, &str, &str) {
 }
 
 /// A pull request's diff and patch media are refused by name, as compare's
-/// are, rather than answered with the JSON object.
+/// are, rather than answered with the JSON object. A pull that doesn't exist
+/// is still GitHub's 404.
 #[tokio::test(flavor = "multi_thread")]
 async fn pull_diff_and_patch_media_are_not_mocked() {
     let s = seed().await;
@@ -456,12 +457,27 @@ async fn pull_diff_and_patch_media_are_not_mocked() {
     for accept in [
         "application/vnd.github.v3.diff",
         "application/vnd.github.v3.patch",
+        "Application/VND.GitHub.DIFF",
     ] {
         let answer = face_answer("GET", &url, &s.token, &[("accept", accept)], None);
         assert_eq!(
             not_mocked_field(&answer),
             (422, "Accept", "PullRequest"),
             "{accept}"
+        );
+    }
+    for missing in ["2", "abc"] {
+        let (status, body) = face_answer(
+            "GET",
+            &format!("{}/pulls/{missing}", s.api),
+            &s.token,
+            &[("accept", "application/vnd.github.v3.diff")],
+            None,
+        );
+        assert_eq!(
+            (status, &body["message"]),
+            (404, &"Not Found".into()),
+            "{missing}"
         );
     }
     let (status, pull) = face_answer(

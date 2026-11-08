@@ -17,7 +17,7 @@ use axum::routing::{get, post};
 use base64::Engine as _;
 use orrery_world::{ActorKind, OAuthApp, WorldError};
 
-use crate::{GithubFace, internal};
+use crate::{GithubFace, header_str, internal};
 
 const ERROR_DOC: &str = "https://docs.github.com/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors";
 
@@ -353,14 +353,6 @@ fn with_query(url: &str, pairs: &[(&str, &str)]) -> String {
         out.push_str(f);
     }
     out
-}
-
-fn header_str(headers: &HeaderMap, name: header::HeaderName) -> String {
-    headers
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_ascii_lowercase()
 }
 
 fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {

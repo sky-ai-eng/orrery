@@ -11,7 +11,7 @@
 
 use axum::body::Body;
 use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
-use axum::http::{HeaderMap, Response, StatusCode};
+use axum::http::{HeaderMap, Response, StatusCode, header};
 use base64::Engine as _;
 use orrery_face_git::store;
 use orrery_world::{Actor, ActorKind, PullState};
@@ -23,8 +23,8 @@ use crate::render::{
     team_json, user_full_json,
 };
 use crate::{
-    GithubFace, github_error, internal, json_response, orrery_unsupported_field, resolve_repo,
-    validation_invalid,
+    GithubFace, github_error, header_str, internal, json_response, orrery_unsupported_field,
+    resolve_repo, validation_invalid,
 };
 
 /// GitHub's listing defaults: 30 per page, cap 100, silently clamped —
@@ -126,10 +126,8 @@ pub(crate) async fn list_pulls(
 /// The diff and patch media types, refused on `resource`: answering them
 /// with JSON would be a plausible wrong answer.
 fn refuse_diff_media(headers: &HeaderMap, resource: &str) -> Option<Response<Body>> {
-    headers
-        .get("accept")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|a| a.contains("diff") || a.contains("patch"))
+    let accept = header_str(headers, header::ACCEPT);
+    (accept.contains("diff") || accept.contains("patch"))
         .then(|| orrery_unsupported_field(resource, "Accept"))
 }
 
@@ -142,16 +140,15 @@ pub(crate) async fn get_pull(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
+    let pull = match pull_by_path_number(&face, &repo, &number) {
+        Ok(Some(pull)) => pull,
+        Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(resp) => return *resp,
+    };
     if let Some(refused) = refuse_diff_media(&headers, "PullRequest") {
         return refused;
     }
-    match pull_by_path_number(&face, &repo, &number) {
-        Ok(Some(pull)) => {
-            json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull))
-        }
-        Ok(None) => github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(resp) => *resp,
-    }
+    json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull))
 }
 
 pub(crate) async fn list_reviews(
