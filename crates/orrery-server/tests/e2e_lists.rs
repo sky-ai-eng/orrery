@@ -211,7 +211,7 @@ async fn bad_list_bodies_name_every_fault() {
         faults(&answer)
     };
 
-    for path in ["/actors/list", "/oauth-apps/list"] {
+    for path in ["/actors/list", "/oauth-apps/list", "/snapshots/list"] {
         for size in [0, 501] {
             assert_eq!(
                 refused(path, json!({ "page_size": size })),
