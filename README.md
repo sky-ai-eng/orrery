@@ -1,6 +1,11 @@
-# Orrery
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/imgs/lockup-display-on-dark.svg">
+    <img src="docs/imgs/lockup-display-on-light.svg" alt="Orrery" width="360">
+  </picture>
+</h1>
 
-A local GitHub for testing software that acts on GitHub.
+<p align="center">A local GitHub for testing software that acts on GitHub.</p>
 
 Orrery serves GitHub's REST and GraphQL APIs and real git from one directory, on a clock you control. Point a bot, a poller, a CI integration, or a coding agent at it and it behaves like GitHub, except that you can snapshot the world, fork it, advance time by an hour in one call, and ask exactly what changed.
 
