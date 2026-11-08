@@ -15,7 +15,7 @@ Orrery serves GitHub's REST and GraphQL APIs and real git from one directory, on
 - **Same inputs, same world.** Every timestamp comes from the world's clock and every id is derived rather than random, so replaying the same calls reproduces the same commit SHAs.
 - **The diff is the result.** Snapshot, run the thing under test, then diff: pull requests opened and merged, reviews posted, labels added, refs moved, each attributed to an actor. Whether something happened is answered from the world's state, so the same scenario works as an integration test or as an agent benchmark.
 
-Orrery implements the parts of GitHub its users have needed so far, and grows as they need more. An endpoint it doesn't implement returns `501` naming the path instead of a `404`, and contributions are welcome. A world never makes a network call of its own.
+Orrery implements the parts of GitHub its users have needed so far, and grows as they need more. An endpoint it doesn't implement returns `501` naming the path instead of a `404`, and [contributions are welcome](CONTRIBUTING.md). A world never makes a network call of its own.
 
 ## Quick start
 
@@ -65,3 +65,11 @@ A world is a directory: a SQLite database and bare git repositories. A snapshot 
 - [Usage model](spec/usage.md): the two doors, the clock, snapshots, forks, and what a diff reports
 - [GitHub surface](spec/surface-github.md): every endpoint and GraphQL field Orrery serves, and how it behaves
 - [Design rules](spec/README.md): the rules every change to Orrery follows
+
+## License
+
+Source-available under the [Orrery License 1.0](LICENSE): free to use, copy, and modify for your own internal business purposes, including running it to develop and test software you ship, but not to redistribute, to offer as a hosted or managed service, or to build any part of it into a product you provide to others. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms.
+
+## Disclaimer
+
+Orrery is provided "as is", without warranty of any kind; see the [LICENSE](LICENSE) for the full terms.

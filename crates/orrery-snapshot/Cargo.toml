@@ -2,7 +2,8 @@
 name = "orrery-snapshot"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
+publish.workspace = true
 repository.workspace = true
 description = "Snapshot, restore, fork, and semantic diff over world directories"
 
