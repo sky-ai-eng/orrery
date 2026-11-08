@@ -64,7 +64,7 @@ A bot's token is refused on `GET /user`, `/user/emails`, `/user/teams`, and `/us
 | --- | --- |
 | `GET /repos/{o}/{r}/pulls` | `state` is `open` (the default), `closed` (merged included), or `all`, else `422`. Newest first, paged, with an `ETag` on every page (`grammar.md`). `head`, `base`, `sort`, and `direction` are ignored. |
 | `POST /repos/{o}/{r}/pulls` | `{title, head, base, body?, draft?}`. `head` is a branch, or `owner:branch` naming the repository's own owner. Missing fields are `422 missing_field`; a branch that doesn't exist is `422 invalid`. No commits between base and head, or an open pull request with the same head and base, is GitHub's `422` with its message. A cross-repository `head`, `issue`, and `head_repo` are not mocked. The head and base commits are pinned at creation. Answers `201`. |
-| `GET /repos/{o}/{r}/pulls/{n}` | The pull request. |
+| `GET /repos/{o}/{r}/pulls/{n}` | The pull request. The diff and patch media types are not mocked. |
 | `PATCH /repos/{o}/{r}/pulls/{n}` | `title`, `body` (null clears), `state` (`open` or `closed`), and `base` (an existing branch; the base commit is re-pinned). Reopening a merged pull request is GitHub's `422`. |
 | `PUT /repos/{o}/{r}/pulls/{n}/merge` | A real merge: `git merge-tree` and `commit-tree`, a two-parent commit authored and committed by `<login> <login@orrery.invalid>` at the world clock, with GitHub's default message unless `commit_title` or `commit_message` is given. A pull request that is not open, is a draft, or conflicts with its base is `405` "Pull Request is not mergeable" (a draft: "Pull Request is still a work in progress"); a `sha` that is not the head is `409`. A `merge_method` other than `merge` is not mocked. The base branch moves by compare-and-swap, the move is logged as a `ref.update`, and open pull requests whose head is the base branch take its new tip. Answers `{sha, merged: true, message}`. |
 | `GET /repos/{o}/{r}/pulls/{n}/files` | `[{filename, status, previous_filename?}]` in path order, paged, from `git diff -M` between the base and the head: against the base branch's tip while the pull request is open (or the pinned base if the branch is gone), and against the pinned base once it is closed. `status` is `added`, `removed`, `modified`, `renamed`, `copied`, or `changed`. `additions`, `deletions`, `changes`, `patch`, `sha`, and the URLs are absent. |
@@ -203,14 +203,13 @@ Every route here answers `501` until a consumer needs it:
 - reading a single comment or review, dismissing a review, review comment replies, reactions, and editing or deleting a comment;
 - inline review comments (a review with `comments`, or `POST …/pulls/{n}/comments`);
 - repository labels, branch protection, `GET …/branches/{branch}`, tags, and refs other than branches;
-- commits, trees, statuses, and the diff and patch media types of a pull request;
+- commits, trees, and statuses;
 - Actions: workflow runs, jobs, and logs;
 - GitHub Apps and installations (`/app`, `/app/installations`, installation tokens), and webhook delivery;
 - REST search, organization member listings, and `/rate_limit`.
 
 **Known gaps against the rules above:**
 
-- `GET …/pulls/{n}` with `Accept: application/vnd.github.v3.diff` or `.patch` answers the JSON object with `200`, a plausible wrong answer, where compare refuses the same media types (rule 1).
 - A matched path called with a method Orrery doesn't serve answers a bare `405` rather than the `501` (`grammar.md`).
 - `PATCH …/pulls/{n}` accepts an empty `title`.
 - `git_url` and `ssh_url` include the listener's port.

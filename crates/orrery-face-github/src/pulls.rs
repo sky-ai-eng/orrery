@@ -47,7 +47,7 @@ pub(crate) async fn create_pull(
     // spelling. Both are behavior we refuse to fake silently.
     for field in ["issue", "head_repo"] {
         if parsed.rest.contains_key(field) {
-            return orrery_unsupported_field(field);
+            return orrery_unsupported_field("PullRequest", field);
         }
     }
     let Some(title) = parsed.title.as_deref().filter(|t| !t.trim().is_empty()) else {
@@ -65,7 +65,10 @@ pub(crate) async fn create_pull(
         None => head_raw,
         Some((prefix, branch)) if prefix.eq_ignore_ascii_case(&repo.owner_login) => branch,
         Some(_) => {
-            return orrery_unsupported_field("head (cross-repository pull requests / forks)");
+            return orrery_unsupported_field(
+                "PullRequest",
+                "head (cross-repository pull requests / forks)",
+            );
         }
     };
 
@@ -259,7 +262,9 @@ pub(crate) async fn merge_pull(
         None | Some("merge") => {}
         // Squash and rebase are real GitHub methods Orrery has not built —
         // a loud refusal, never a silently different history.
-        Some(other) => return orrery_unsupported_field(&format!("merge_method={other}")),
+        Some(other) => {
+            return orrery_unsupported_field("PullRequest", &format!("merge_method={other}"));
+        }
     }
 
     // Serialize against pushes and other merges, then re-read the pull so
@@ -414,12 +419,13 @@ pub(crate) async fn create_review(
     // Inline review comments are their own subsystem; refuse loudly rather
     // than dropping them.
     if parsed.rest.contains_key("comments") {
-        return orrery_unsupported_field("comments");
+        return orrery_unsupported_field("PullRequestReview", "comments");
     }
     // GitHub's default for a missing event is a PENDING (draft) review —
     // stateful UI machinery Orrery does not fake. Divergence, loudly.
     let Some(event) = parsed.event.as_deref() else {
         return orrery_unsupported_field(
+            "PullRequestReview",
             "event (absent — pending reviews are not mocked; pass APPROVE, REQUEST_CHANGES, or COMMENT)",
         );
     };
@@ -543,7 +549,7 @@ pub(crate) async fn add_labels(
         .map(|v| v.as_str())
         .collect::<Option<Vec<&str>>>()
     else {
-        return orrery_unsupported_field("labels[] as objects");
+        return orrery_unsupported_field("Label", "labels[] as objects");
     };
     match face.world.add_pull_labels(pull.id, actor.id, &names) {
         Ok(pull) => json_response(

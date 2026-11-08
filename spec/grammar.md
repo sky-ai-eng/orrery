@@ -36,6 +36,8 @@ Every token is fake, prefixed `orrfake_`, and derived from the world's secret, s
    "errors": [{"resource": "…", "code": "custom", "field": "F", "message": "not mocked by orrery"}]}
   ```
 
+  `resource` names what the route is about: `Repository`, `PullRequest`, `PullRequestReview`, `Label`, `CheckRun`, `Team`, `Comparison`, or `OauthAccess` for the OAuth token exchange. The diff and patch media types, where a route lists them as not mocked, are refused the same way, with `field` `Accept`.
+
 - A body that isn't valid JSON is `400` `{"message": "Problems parsing JSON"}`, and on most routes so is a known field of the wrong type. A body over 2 MiB is `413`.
 - Logins, organization names, and repository names match ignoring case; responses carry each one's stored spelling. A `{number}` that isn't an integer is `404`.
 
@@ -47,11 +49,11 @@ Every token is fake, prefixed `orrfake_`, and derived from the world's secret, s
 
 ## Surface Orrery doesn't serve
 
-A REST path or method with no route answers `501`, deliberately unlike any GitHub response, so it can't be read as "no such thing":
+A REST path or method with no route answers `501`, deliberately unlike any GitHub response, so it can't be read as "no such thing". It names the method and the path as the request sent it:
 
 ```json
-{"message": "orrery: GET /rate_limit is not mocked",
- "orrery": {"not_mocked": true, "method": "GET", "path": "/rate_limit",
+{"message": "orrery: GET /api/v3/rate_limit is not mocked",
+ "orrery": {"not_mocked": true, "method": "GET", "path": "/api/v3/rate_limit",
             "hint": "If a consumer needs this endpoint, add it to the surface inventory (spec/surface-github.md) and implement it."}}
 ```
 
@@ -72,6 +74,4 @@ Orrery doesn't rate limit. It sends no `X-RateLimit-*` headers, GraphQL `rateLim
 ## Known gaps
 
 - A path Orrery routes, called with a method it doesn't serve (`GET /api/graphql`, `PATCH /repos/{o}/{r}`), answers a bare `405` rather than the `501` above.
-- The `path` a REST `501` reports omits the `/api/v3` prefix.
 - Query values are not percent-decoded, so `?ref=a%2Fb` looks for the ref `a%2Fb`.
-- A not-mocked field's `errors[].resource` is `Repository` on most routes, whatever the route's resource.

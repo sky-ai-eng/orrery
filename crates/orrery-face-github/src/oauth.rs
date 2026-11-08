@@ -104,7 +104,7 @@ async fn access_token(
 ) -> Response<Body> {
     let accept = header_str(&headers, header::ACCEPT);
     if accept.contains("xml") {
-        return crate::orrery_unsupported_field("Accept: application/xml");
+        return crate::orrery_unsupported_field("OauthAccess", "Accept: application/xml");
     }
     let as_json = accept.contains("application/json");
     let mut params = parse_form(query.as_deref().unwrap_or("").as_bytes());
