@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{boot, control_post, mint_actor};
+use common::{boot, control_post, fault, faults, mint_actor};
 use serde_json::{Value, json};
 
 fn agent() -> ureq::Agent {
@@ -27,25 +27,6 @@ fn list(base: &str, path: &str, body: Value) -> Value {
     let (status, answer) = post(base, path, body);
     assert_eq!(status, 200, "{path}: {answer}");
     answer
-}
-
-/// Each error's `(reason, field)`, in the order the answer lists them.
-fn faults(answer: &Value) -> Vec<(String, Option<String>)> {
-    answer["errors"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| {
-            (
-                e["reason"].as_str().unwrap().to_string(),
-                e["field"].as_str().map(str::to_string),
-            )
-        })
-        .collect()
-}
-
-fn fault(reason: &str, field: Option<&str>) -> (String, Option<String>) {
-    (reason.to_string(), field.map(str::to_string))
 }
 
 fn register_app(base: &str, name: &str) -> String {
@@ -220,7 +201,7 @@ async fn bad_list_bodies_name_every_fault() {
         }
         assert_eq!(
             refused(path, json!({ "page_sise": 10 })),
-            [fault("INVALID_ARGUMENT", None)]
+            [fault("INVALID_ARGUMENT", Some("page_sise"))]
         );
     }
     // The bounds are inclusive.
@@ -267,6 +248,29 @@ async fn bad_list_bodies_name_every_fault() {
         [
             fault("OUT_OF_RANGE", Some("page_size")),
             fault("INVALID_ARGUMENT", Some("after_name")),
+        ]
+    );
+
+    // A field that fails to decode hides none of the others.
+    assert_eq!(
+        refused("/actors/list", json!({ "page_size": "10" })),
+        [fault("INVALID_ARGUMENT", Some("page_size"))]
+    );
+    assert_eq!(
+        refused(
+            "/actors/list",
+            json!({ "page_size": -1, "after_login": "-x" })
+        ),
+        [
+            fault("INVALID_ARGUMENT", Some("page_size")),
+            fault("INVALID_ARGUMENT", Some("after_login")),
+        ]
+    );
+    assert_eq!(
+        refused("/actors/list", json!({ "page_size": 0, "bogus": 1 })),
+        [
+            fault("OUT_OF_RANGE", Some("page_size")),
+            fault("INVALID_ARGUMENT", Some("bogus")),
         ]
     );
 }

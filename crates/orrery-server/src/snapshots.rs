@@ -15,7 +15,7 @@ use axum::routing::{get, post};
 use orrery_snapshot::{DiffSide, SnapshotError};
 use orrery_world::{WorldError, WorldView};
 
-use crate::control::{Fault, decode_strict, errors, faults, internal, keyset_page, page_size};
+use crate::control::{Fault, Fields, errors, internal, keyset_page, page_size};
 use crate::{AppState, json};
 
 pub(crate) fn router() -> Router<AppState> {
@@ -27,15 +27,13 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/diff", post(diff))
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateBody {
-    name: String,
-}
-
+// TODO(ORR-38): the name is checked only at write time, after the write gate
+// is taken, so any other fault in the body hides it.
 async fn create(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: CreateBody = match decode_strict(&body) {
-        Ok(p) => p,
+    let mut fields = Fields::parse(&body);
+    let name: Option<String> = fields.required("name");
+    let name = match fields.finish(name) {
+        Ok(n) => n,
         Err(resp) => return *resp,
     };
     let gate = state.git.gate();
@@ -44,7 +42,7 @@ async fn create(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let dir = state.snapshots_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _hold = guard;
-        orrery_snapshot::create(&world, &dir, &parsed.name)
+        orrery_snapshot::create(&world, &dir, &name)
     })
     .await;
     match flatten(result) {
@@ -61,31 +59,19 @@ async fn get_one(State(state): State<AppState>, UrlPath(name): UrlPath<String>) 
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ListBody {
-    after_name: Option<String>,
-    page_size: Option<usize>,
-}
-
 async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: ListBody = match decode_strict(&body) {
-        Ok(p) => p,
-        Err(resp) => return *resp,
-    };
-    let mut found = Vec::new();
-    let page_size = page_size(parsed.page_size).unwrap_or_else(|fault| {
-        found.push(fault);
-        0
-    });
-    if let Some(after) = &parsed.after_name
+    let mut fields = Fields::parse(&body);
+    let page_size = page_size(&mut fields);
+    let after_name: Option<String> = fields.optional("after_name");
+    if let Some(after) = &after_name
         && let Err(e) = orrery_snapshot::validate_name(after)
     {
-        found.push(Fault::invalid(e.to_string(), "after_name"));
+        fields.fault(Fault::invalid(e.to_string(), "after_name"));
     }
-    if !found.is_empty() {
-        return faults(StatusCode::BAD_REQUEST, found);
-    }
+    let page_size = match fields.finish(page_size) {
+        Ok(n) => n,
+        Err(resp) => return *resp,
+    };
     let all = match orrery_snapshot::list(&state.snapshots_dir) {
         Ok(a) => a,
         Err(e) => return snapshot_error(e, None),
@@ -94,7 +80,7 @@ async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     // operator created, but the read contract is uniform anyway.
     let rows: Vec<_> = all
         .into_iter()
-        .filter(|s| match &parsed.after_name {
+        .filter(|s| match &after_name {
             Some(after) => s.name.as_str() > after.as_str(),
             None => true,
         })
@@ -152,29 +138,27 @@ async fn restore(State(state): State<AppState>, UrlPath(name): UrlPath<String>) 
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DiffBody {
-    from: String,
-    /// Another snapshot, or absent for the live world.
-    to: Option<String>,
-}
-
 async fn diff(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: DiffBody = match decode_strict(&body) {
-        Ok(p) => p,
+    let mut fields = Fields::parse(&body);
+    let from: Option<String> = fields.required("from");
+    // Another snapshot, or absent for the live world.
+    let to: Option<String> = fields.optional("to");
+    let from = match fields.finish(from) {
+        Ok(f) => f,
         Err(resp) => return *resp,
     };
     let gate = state.git.gate();
     let guard = gate.write_owned().await;
     let world = state.world.clone();
     let dir = state.snapshots_dir.clone();
+    // A failure to open a snapshot is about the field that named it; one in
+    // the comparison itself is about neither.
     let result = tokio::task::spawn_blocking(move || {
         let _hold = guard;
-        let from = orrery_snapshot::open(&dir, &parsed.from)?;
-        match &parsed.to {
+        let from = orrery_snapshot::open(&dir, &from).map_err(|e| (e, Some("from")))?;
+        let diffed = match &to {
             Some(to_name) => {
-                let to = orrery_snapshot::open(&dir, to_name)?;
+                let to = orrery_snapshot::open(&dir, to_name).map_err(|e| (e, Some("to")))?;
                 orrery_snapshot::diff::diff(from.side(), to.side())
             }
             None => orrery_snapshot::diff::diff(
@@ -185,15 +169,17 @@ async fn diff(State(state): State<AppState>, body: Bytes) -> Response<Body> {
                     repos_dir: &world.repos_dir(),
                 },
             ),
-        }
+        };
+        diffed.map_err(|e| (e, None))
     })
     .await;
-    match flatten(result) {
-        Ok(d) => match serde_json::to_value(&d) {
+    match result {
+        Ok(Ok(d)) => match serde_json::to_value(&d) {
             Ok(v) => json(StatusCode::OK, v),
             Err(e) => internal(e),
         },
-        Err(e) => snapshot_error(e, None),
+        Ok(Err((e, field))) => snapshot_error(e, field),
+        Err(e) => internal(format!("blocking task failed: {e}")),
     }
 }
 
