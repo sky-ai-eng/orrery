@@ -404,6 +404,13 @@ async fn patch_edits_close_and_reopen() {
     assert_eq!(status, 422);
     assert_eq!(create_refusal["errors"][0]["code"], "missing_field");
     assert_eq!(create_refusal["errors"][0]["field"], "title");
+    let absent = answer(
+        "POST",
+        &format!("{}/pulls", s.api),
+        &s.token,
+        serde_json::json!({ "head": "feature", "base": "main" }),
+    );
+    assert_eq!(absent, (422, create_refusal.clone()));
     for blank in ["", "   "] {
         let (status, edit_refusal) = answer(
             "PATCH",

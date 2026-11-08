@@ -50,10 +50,7 @@ pub(crate) async fn create_pull(
             return orrery_unsupported_field(field);
         }
     }
-    let Some(title) = parsed.title.as_deref() else {
-        return validation_missing("PullRequest", "title");
-    };
-    let title = match pull_title(title) {
+    let title = match pull_title(parsed.title.as_deref().unwrap_or("")) {
         Ok(t) => t,
         Err(resp) => return *resp,
     };
