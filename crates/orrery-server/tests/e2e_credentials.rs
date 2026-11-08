@@ -156,6 +156,19 @@ async fn no_control_plane_read_returns_a_credential() {
     assert!(apps.contains(&client_id), "{client_id} not in {apps}");
     reads.push(actors);
     reads.push(apps);
+    let alice_read = control("GET", "/actors/alice", None);
+    let app_read = control("GET", &format!("/oauth-apps/{client_id}"), None);
+    // The point reads answered with the rows, so the checks below test them.
+    assert!(
+        alice_read.contains("\"login\":\"alice\""),
+        "alice not in {alice_read}"
+    );
+    assert!(
+        app_read.contains(&client_id),
+        "{client_id} not in {app_read}"
+    );
+    reads.push(alice_read);
+    reads.push(app_read);
     reads.push(control("GET", "/healthz", None));
     reads.push(control("GET", "/clock", None));
     reads.push(control(
@@ -179,6 +192,8 @@ async fn no_control_plane_read_returns_a_credential() {
     reads.push(control("POST", "/snapshots/seeded/restore", None));
     reads.push(control("POST", "/actors/list", None));
     reads.push(control("POST", "/oauth-apps/list", None));
+    reads.push(control("GET", "/actors/alice", None));
+    reads.push(control("GET", &format!("/oauth-apps/{client_id}"), None));
     reads.push(control(
         "POST",
         "/log/list",

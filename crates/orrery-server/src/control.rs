@@ -32,13 +32,16 @@ pub fn router(state: AppState) -> Router {
         .route("/clock", get(get_clock))
         .route("/clock/advance", post(advance_clock))
         .route("/actors", post(create_actor))
-        // TODO(ORR-36): GET /actors/{login} and GET /oauth-apps/{client_id},
-        // the point reads these two lists have no partner for.
-        .route("/actors/list", post(list_actors))
+        .route("/actors/list", post(list_actors).get(get_actor_named_list))
+        .route("/actors/{login}", get(get_actor))
         .route("/actors/{login}/emails", put(set_actor_emails))
         .route("/actors/{login}/tokens", post(issue_actor_token))
         .route("/oauth-apps", post(create_oauth_app))
-        .route("/oauth-apps/list", post(list_oauth_apps))
+        .route(
+            "/oauth-apps/list",
+            post(list_oauth_apps).get(get_oauth_app_named_list),
+        )
+        .route("/oauth-apps/{client_id}", get(get_oauth_app))
         .route(
             "/oauth-apps/{client_id}/secrets",
             post(issue_oauth_client_secret),
@@ -307,6 +310,35 @@ async fn list_actors(State(state): State<AppState>, body: Bytes) -> Response<Bod
     }
 }
 
+async fn get_actor(
+    State(state): State<AppState>,
+    UrlPath(login): UrlPath<String>,
+) -> Response<Body> {
+    read_actor(&state, login)
+}
+
+/// `list` is a valid login, but the list's static path takes
+/// `GET /actors/list` before `/actors/{login}` can, so the point read is
+/// routed here too.
+async fn get_actor_named_list(State(state): State<AppState>) -> Response<Body> {
+    read_actor(&state, "list".to_string())
+}
+
+/// One actor, read by a login the caller already holds, answered as the list
+/// of actors answers it. Never a token.
+fn read_actor(state: &AppState, login: String) -> Response<Body> {
+    match state.world.listed_actor_by_login(&login) {
+        Ok(Some(actor)) => json(StatusCode::OK, serde_json::json!(actor)),
+        Ok(None) => errors(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            &WorldError::NoSuchActor(login).to_string(),
+            None,
+        ),
+        Err(e) => internal(e),
+    }
+}
+
 /// Which OAuth apps a world holds, so a caller handed a world it did not
 /// build knows which it may issue secrets for. Never a secret.
 async fn list_oauth_apps(State(state): State<AppState>, body: Bytes) -> Response<Body> {
@@ -336,6 +368,34 @@ async fn list_oauth_apps(State(state): State<AppState>, body: Bytes) -> Response
                 serde_json::json!({ "items": items, "next_after_client_id": next }),
             )
         }
+        Err(e) => internal(e),
+    }
+}
+
+async fn get_oauth_app(
+    State(state): State<AppState>,
+    UrlPath(client_id): UrlPath<String>,
+) -> Response<Body> {
+    read_oauth_app(&state, client_id)
+}
+
+/// No client id is `list`, but `GET /oauth-apps/list` is still a point read
+/// of one, so it answers 404 in the error shape like any other.
+async fn get_oauth_app_named_list(State(state): State<AppState>) -> Response<Body> {
+    read_oauth_app(&state, "list".to_string())
+}
+
+/// One OAuth app, read by a client id the caller already holds, answered as
+/// the list of apps answers it. Never a secret.
+fn read_oauth_app(state: &AppState, client_id: String) -> Response<Body> {
+    match state.world.listed_oauth_app_by_client_id(&client_id) {
+        Ok(Some(app)) => json(StatusCode::OK, serde_json::json!(app)),
+        Ok(None) => errors(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            &WorldError::NoSuchOAuthApp(client_id).to_string(),
+            None,
+        ),
         Err(e) => internal(e),
     }
 }
