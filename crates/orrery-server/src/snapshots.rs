@@ -27,6 +27,8 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/diff", post(diff))
 }
 
+// TODO(ORR-38): the name is checked only at write time, after the write gate
+// is taken, so any other fault in the body hides it.
 async fn create(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let name: Option<String> = fields.required("name");

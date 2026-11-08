@@ -92,6 +92,8 @@ async fn advance_clock(State(state): State<AppState>, body: Bytes) -> Response<B
     }
 }
 
+// TODO(ORR-38): login and kind are checked only at write time, so any other
+// fault in the body hides them, and an invalid login hides an invalid kind.
 async fn create_actor(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let login: Option<String> = fields.required("login");
@@ -194,6 +196,9 @@ async fn set_actor_emails(
 
 /// Register an OAuth app. GitHub offers this only in its web settings, so it
 /// is reality's to do, and the control plane's.
+// TODO(ORR-38): name and callback_url are checked only at write time, so any
+// other fault in the body hides them, and an invalid name hides an invalid
+// callback_url.
 async fn create_oauth_app(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let name: Option<String> = fields.required("name");
