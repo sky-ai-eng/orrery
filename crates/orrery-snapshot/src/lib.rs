@@ -26,7 +26,7 @@ pub use diff::{DiffSide, WorldDiff};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
-    #[error("invalid snapshot name {0:?}: 1-64 chars of [A-Za-z0-9._-], not '.' or '..'")]
+    #[error("invalid snapshot name {0:?}: 1-64 chars of [A-Za-z0-9._-], not starting with '.'")]
     InvalidName(String),
     #[error("no snapshot named {0:?}")]
     NotFound(String),
