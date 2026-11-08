@@ -349,7 +349,7 @@ fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
     )))
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub fn validate_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 64
         && name != "."

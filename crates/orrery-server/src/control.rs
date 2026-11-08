@@ -440,7 +440,7 @@ pub(crate) struct Fault {
 }
 
 impl Fault {
-    fn invalid(message: String, field: &'static str) -> Fault {
+    pub(crate) fn invalid(message: String, field: &'static str) -> Fault {
         Fault {
             reason: "INVALID_ARGUMENT",
             message,

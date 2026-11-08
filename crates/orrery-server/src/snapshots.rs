@@ -15,7 +15,7 @@ use axum::routing::{get, post};
 use orrery_snapshot::{DiffSide, SnapshotError};
 use orrery_world::{WorldError, WorldView};
 
-use crate::control::{decode_strict, errors, faults, internal, keyset_page, page_size};
+use crate::control::{Fault, decode_strict, errors, faults, internal, keyset_page, page_size};
 use crate::{AppState, json};
 
 pub(crate) fn router() -> Router<AppState> {
@@ -73,10 +73,19 @@ async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let page_size = match page_size(parsed.page_size) {
-        Ok(n) => n,
-        Err(fault) => return faults(StatusCode::BAD_REQUEST, vec![fault]),
-    };
+    let mut found = Vec::new();
+    let page_size = page_size(parsed.page_size).unwrap_or_else(|fault| {
+        found.push(fault);
+        0
+    });
+    if let Some(after) = &parsed.after_name
+        && let Err(e) = orrery_snapshot::validate_name(after)
+    {
+        found.push(Fault::invalid(e.to_string(), "after_name"));
+    }
+    if !found.is_empty() {
+        return faults(StatusCode::BAD_REQUEST, found);
+    }
     let all = match orrery_snapshot::list(&state.snapshots_dir) {
         Ok(a) => a,
         Err(e) => return snapshot_error(e, None),
