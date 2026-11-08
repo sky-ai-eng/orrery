@@ -26,7 +26,7 @@ pub use diff::{DiffSide, WorldDiff};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
-    #[error("invalid snapshot name {0:?}: 1-64 chars of [A-Za-z0-9._-], not '.' or '..'")]
+    #[error("invalid snapshot name {0:?}: 1-64 chars of [A-Za-z0-9._-], not starting with '.'")]
     InvalidName(String),
     #[error("no snapshot named {0:?}")]
     NotFound(String),
@@ -98,8 +98,10 @@ pub fn list(snapshots_dir: &Path) -> Result<Vec<SnapshotInfo>> {
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        // `.tmp-*` is an in-flight or crashed copy, not a snapshot.
-        if !entry.file_type()?.is_dir() || name.starts_with('.') {
+        // Only a directory a snapshot could be named is one: `.tmp-*` is an
+        // in-flight or crashed copy, and no other operation accepts any
+        // other name, so a listed name is always a usable cursor.
+        if !entry.file_type()?.is_dir() || validate_name(&name).is_err() {
             continue;
         }
         names.push(name);
@@ -349,7 +351,7 @@ fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
     )))
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub fn validate_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 64
         && name != "."

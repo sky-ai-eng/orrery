@@ -338,7 +338,7 @@ async fn list_oauth_apps(State(state): State<AppState>, body: Bytes) -> Response
 /// The page size a list body asks for, or `None` when it is out of range,
 /// which is recorded. One that fails to decode reads as the default here:
 /// its fault is already recorded, and a second one would report it twice.
-fn page_size(fields: &mut Fields) -> Option<usize> {
+pub(crate) fn page_size(fields: &mut Fields) -> Option<usize> {
     let page_size = fields.optional("page_size").unwrap_or(LIST_PAGE_DEFAULT);
     if (1..=LIST_PAGE_MAX).contains(&page_size) {
         Some(page_size)
@@ -354,7 +354,7 @@ fn page_size(fields: &mut Fields) -> Option<usize> {
 /// Cut `rows`, read with one row past the page, to the page and the cursor
 /// that follows it. The extra row is how the last page is known to be last,
 /// so a page that ends on the final row has a null cursor.
-fn keyset_page<T, K>(
+pub(crate) fn keyset_page<T, K>(
     mut rows: Vec<T>,
     page_size: usize,
     key: impl Fn(&T) -> K,
@@ -558,7 +558,7 @@ pub(crate) struct Fault {
 }
 
 impl Fault {
-    fn invalid(message: String, field: impl Into<String>) -> Fault {
+    pub(crate) fn invalid(message: String, field: impl Into<String>) -> Fault {
         Fault {
             reason: "INVALID_ARGUMENT",
             message,
@@ -566,7 +566,7 @@ impl Fault {
         }
     }
 
-    pub(crate) fn out_of_range(message: String, field: &'static str) -> Fault {
+    fn out_of_range(message: String, field: &'static str) -> Fault {
         Fault {
             reason: "OUT_OF_RANGE",
             message,

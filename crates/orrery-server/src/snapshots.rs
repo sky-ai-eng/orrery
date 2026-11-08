@@ -15,11 +15,8 @@ use axum::routing::{get, post};
 use orrery_snapshot::{DiffSide, SnapshotError};
 use orrery_world::{WorldError, WorldView};
 
-use crate::control::{Fault, Fields, errors, internal};
+use crate::control::{Fault, Fields, errors, internal, keyset_page, page_size};
 use crate::{AppState, json};
-
-const LIST_PAGE_MAX: usize = 500;
-const LIST_PAGE_DEFAULT: usize = 100;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -60,21 +57,17 @@ async fn get_one(State(state): State<AppState>, UrlPath(name): UrlPath<String>) 
     }
 }
 
-// TODO(ORR-37): a last page that is exactly full answers a non-null
-// `next_after_name`, and the page-size bounds are a second copy of
-// control.rs's.
 async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
-    let page_size = fields.optional("page_size").unwrap_or(LIST_PAGE_DEFAULT);
-    if page_size == 0 || page_size > LIST_PAGE_MAX {
-        fields.fault(Fault::out_of_range(
-            format!("page_size must be 1..={LIST_PAGE_MAX}"),
-            "page_size",
-        ));
-    }
+    let page_size = page_size(&mut fields);
     let after_name: Option<String> = fields.optional("after_name");
-    let (page_size, after_name) = match fields.finish(Some((page_size, after_name))) {
-        Ok(p) => p,
+    if let Some(after) = &after_name
+        && let Err(e) = orrery_snapshot::validate_name(after)
+    {
+        fields.fault(Fault::invalid(e.to_string(), "after_name"));
+    }
+    let page_size = match fields.finish(page_size) {
+        Ok(n) => n,
         Err(resp) => return *resp,
     };
     let all = match orrery_snapshot::list(&state.snapshots_dir) {
@@ -83,17 +76,15 @@ async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     };
     // Keyset over the listing's name order; the set is bounded by what an
     // operator created, but the read contract is uniform anyway.
-    let items: Vec<_> = all
+    let rows: Vec<_> = all
         .into_iter()
         .filter(|s| match &after_name {
             Some(after) => s.name.as_str() > after.as_str(),
             None => true,
         })
-        .take(page_size)
+        .take(page_size + 1)
         .collect();
-    let next_after_name = (items.len() == page_size)
-        .then(|| items.last().map(|s| s.name.clone()))
-        .flatten();
+    let (items, next_after_name) = keyset_page(rows, page_size, |s| s.name.clone());
     json(
         StatusCode::OK,
         serde_json::json!({

@@ -115,7 +115,19 @@ fn create_list_info_delete() {
     let after = orrery_snapshot::create(&inst.world, &inst.snapshots(), "after").unwrap();
     assert_eq!(after.clock_unix, DEFAULT_T0_UNIX + 3600);
 
-    // The listing reads each copy's own database — names sorted, tmp junk
+    // Whole copies of a snapshot under names no snapshot could have: a
+    // crashed `.tmp-*` copy and directories placed by hand.
+    for junk in [".tmp-before", "My Snap", &"x".repeat(65)] {
+        let copied = std::process::Command::new("cp")
+            .arg("-a")
+            .arg(inst.snapshots().join("before"))
+            .arg(inst.snapshots().join(junk))
+            .status()
+            .unwrap();
+        assert!(copied.success());
+    }
+
+    // The listing reads each copy's own database — names sorted, junk
     // excluded, and the info read equals what create returned.
     let listed = orrery_snapshot::list(&inst.snapshots()).unwrap();
     assert_eq!(
