@@ -144,6 +144,23 @@ async fn snapshot_diff_restore_over_http() {
         ),
         Err(400)
     );
+    let names = |page: &serde_json::Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, exact) = control(
+        "POST",
+        &base,
+        "/_orrery/snapshots/list",
+        Some(serde_json::json!({ "page_size": 2 })),
+    )
+    .unwrap();
+    assert_eq!(names(&exact), ["after", "before"]);
+    assert_eq!(exact["next_after_name"], serde_json::Value::Null);
     let (_, page) = control(
         "POST",
         &base,
@@ -151,7 +168,7 @@ async fn snapshot_diff_restore_over_http() {
         Some(serde_json::json!({ "page_size": 1 })),
     )
     .unwrap();
-    assert_eq!(page["items"][0]["name"], "after");
+    assert_eq!(names(&page), ["after"]);
     assert_eq!(page["next_after_name"], "after");
     let (_, page2) = control(
         "POST",
@@ -160,7 +177,8 @@ async fn snapshot_diff_restore_over_http() {
         Some(serde_json::json!({ "page_size": 1, "after_name": "after" })),
     )
     .unwrap();
-    assert_eq!(page2["items"][0]["name"], "before");
+    assert_eq!(names(&page2), ["before"]);
+    assert_eq!(page2["next_after_name"], serde_json::Value::Null);
 
     // The diff between the two moments is the engine's verdict on the hour.
     let (_, d) = control(

@@ -379,7 +379,7 @@ async fn list_oauth_apps(State(state): State<AppState>, body: Bytes) -> Response
     }
 }
 
-fn page_size(requested: Option<usize>) -> Result<usize, Fault> {
+pub(crate) fn page_size(requested: Option<usize>) -> Result<usize, Fault> {
     let page_size = requested.unwrap_or(LIST_PAGE_DEFAULT);
     if (1..=LIST_PAGE_MAX).contains(&page_size) {
         Ok(page_size)
@@ -395,7 +395,7 @@ fn page_size(requested: Option<usize>) -> Result<usize, Fault> {
 /// Cut `rows`, read with one row past the page, to the page and the cursor
 /// that follows it. The extra row is how the last page is known to be last,
 /// so a page that ends on the final row has a null cursor.
-fn keyset_page<T, K>(
+pub(crate) fn keyset_page<T, K>(
     mut rows: Vec<T>,
     page_size: usize,
     key: impl Fn(&T) -> K,
@@ -440,7 +440,7 @@ pub(crate) struct Fault {
 }
 
 impl Fault {
-    fn invalid(message: String, field: &'static str) -> Fault {
+    pub(crate) fn invalid(message: String, field: &'static str) -> Fault {
         Fault {
             reason: "INVALID_ARGUMENT",
             message,

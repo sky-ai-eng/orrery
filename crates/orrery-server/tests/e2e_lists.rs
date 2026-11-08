@@ -211,7 +211,7 @@ async fn bad_list_bodies_name_every_fault() {
         faults(&answer)
     };
 
-    for path in ["/actors/list", "/oauth-apps/list"] {
+    for path in ["/actors/list", "/oauth-apps/list", "/snapshots/list"] {
         for size in [0, 501] {
             assert_eq!(
                 refused(path, json!({ "page_size": size })),
@@ -236,6 +236,10 @@ async fn bad_list_bodies_name_every_fault() {
         [fault("INVALID_ARGUMENT", Some("after_client_id"))]
     );
     assert_eq!(
+        refused("/snapshots/list", json!({ "after_name": "no/slashes" })),
+        [fault("INVALID_ARGUMENT", Some("after_name"))]
+    );
+    assert_eq!(
         refused(
             "/actors/list",
             json!({ "page_size": 0, "after_login": "-x" })
@@ -253,6 +257,16 @@ async fn bad_list_bodies_name_every_fault() {
         [
             fault("OUT_OF_RANGE", Some("page_size")),
             fault("INVALID_ARGUMENT", Some("after_client_id")),
+        ]
+    );
+    assert_eq!(
+        refused(
+            "/snapshots/list",
+            json!({ "page_size": 0, "after_name": ".hidden" })
+        ),
+        [
+            fault("OUT_OF_RANGE", Some("page_size")),
+            fault("INVALID_ARGUMENT", Some("after_name")),
         ]
     );
 }
