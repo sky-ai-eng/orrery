@@ -8,7 +8,7 @@ A deterministic mock of the software-development world. Orrery serves a GitHub-f
 
 - **Real tools are the judge of realness.** Clone, fetch, and push are served by the actual `git http-backend` over bare repositories, not a reimplementation of the pack protocol. If unmodified `git` (and eventually `gh`) works against Orrery, the mock is faithful; if it doesn't, the mock is wrong. This removes an entire class of fidelity bugs by construction.
 
-- **Determinism is enforced, not hoped for.** The virtual clock is the only time source: every stamp — `created_at`, merge-commit dates, log entries — comes from it, tokens and ids are derived rather than random, and wall-clock reads and hash-ordered collections are compile errors (deny-level clippy bans). Because commit dates come from the clock too, replaying the same inputs reproduces the same SHAs byte-for-byte.
+- **Determinism is enforced.** The virtual clock is the only time source: every stamp — `created_at`, merge-commit dates, log entries — comes from it, tokens and ids are derived rather than random, and wall-clock reads and hash-ordered collections are compile errors (deny-level clippy bans). Because commit dates come from the clock too, replaying the same inputs reproduces the same SHAs byte-for-byte.
 
 - **The world is a directory.** Everything a world is — SQLite state, bare repos — lives under one root. So a snapshot is a quiesced copy, restore is the reverse copy, fork is a copy somewhere else, and cleanup is `rm -rf`. There is no hidden state anywhere else to disagree with the copy.
 
