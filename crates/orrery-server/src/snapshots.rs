@@ -21,7 +21,12 @@ use crate::{AppState, json};
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/snapshots", post(create))
-        .route("/snapshots/list", post(list))
+        .route(
+            "/snapshots/list",
+            post(list)
+                .get(get_one_named_list)
+                .delete(delete_one_named_list),
+        )
         .route("/snapshots/{name}", get(get_one).delete(delete_one))
         .route("/snapshots/{name}/restore", post(restore))
         .route("/diff", post(diff))
@@ -52,9 +57,20 @@ async fn create(State(state): State<AppState>, body: Bytes) -> Response<Body> {
 }
 
 async fn get_one(State(state): State<AppState>, UrlPath(name): UrlPath<String>) -> Response<Body> {
-    match orrery_snapshot::info(&state.snapshots_dir, &name) {
+    read_one(&state, &name)
+}
+
+/// `list` is a valid snapshot name, but the list's static path takes
+/// `GET /snapshots/list` before `/snapshots/{name}` can, so the point read
+/// is routed here too.
+async fn get_one_named_list(State(state): State<AppState>) -> Response<Body> {
+    read_one(&state, "list")
+}
+
+fn read_one(state: &AppState, name: &str) -> Response<Body> {
+    match orrery_snapshot::info(&state.snapshots_dir, name) {
         Ok(Some(info)) => json(StatusCode::OK, to_value(&info)),
-        Ok(None) => not_found(&name),
+        Ok(None) => not_found(name),
         Err(e) => snapshot_error(e, Some("name")),
     }
 }
@@ -100,9 +116,19 @@ async fn delete_one(
     State(state): State<AppState>,
     UrlPath(name): UrlPath<String>,
 ) -> Response<Body> {
+    delete_named(&state, &name).await
+}
+
+/// The delete of a snapshot named `list`, routed here for the reason
+/// [`get_one_named_list`] is.
+async fn delete_one_named_list(State(state): State<AppState>) -> Response<Body> {
+    delete_named(&state, "list").await
+}
+
+async fn delete_named(state: &AppState, name: &str) -> Response<Body> {
     let gate = state.git.gate();
     let _guard = gate.write().await;
-    match orrery_snapshot::delete(&state.snapshots_dir, &name) {
+    match orrery_snapshot::delete(&state.snapshots_dir, name) {
         Ok(()) => Response::builder()
             .status(StatusCode::NO_CONTENT)
             .body(Body::empty())

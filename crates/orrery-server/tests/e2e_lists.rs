@@ -1,10 +1,11 @@
 //! End-to-end: the control plane's lists of actors and OAuth apps, which are
 //! how a caller handed a world it did not build learns whom to issue
-//! credentials for.
+//! credentials for, and the point reads of one actor or app by its key.
 
 mod common;
 
 use common::{boot, control_post, fault, faults, mint_actor};
+use orrery_world::{OAUTH_CLIENT_ID_PREFIX, SYSTEM_ACTOR_LOGIN};
 use serde_json::{Value, json};
 
 fn agent() -> ureq::Agent {
@@ -25,6 +26,18 @@ fn post(base: &str, path: &str, body: Value) -> (u16, Value) {
 
 fn list(base: &str, path: &str, body: Value) -> Value {
     let (status, answer) = post(base, path, body);
+    assert_eq!(status, 200, "{path}: {answer}");
+    answer
+}
+
+/// A control-plane GET: `(status, json)`, whatever the status.
+fn get(base: &str, path: &str) -> (u16, Value) {
+    let mut resp = agent().get(format!("{base}/_orrery{path}")).call().unwrap();
+    (resp.status().as_u16(), resp.body_mut().read_json().unwrap())
+}
+
+fn read(base: &str, path: &str) -> Value {
+    let (status, answer) = get(base, path);
     assert_eq!(status, 200, "{path}: {answer}");
     answer
 }
@@ -276,16 +289,91 @@ async fn bad_list_bodies_name_every_fault() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn listing_writes_nothing() {
+async fn a_point_read_answers_as_the_list_does() {
+    let inst = boot().await;
+    let base = &inst.base;
+    mint_actor(base, "bob", "user");
+    mint_actor(base, "Alice", "user");
+    mint_actor(base, "carol", "bot");
+    // `list` is a login like any other, though the list's path ends in it.
+    mint_actor(base, "list", "user");
+    let set = agent()
+        .put(format!("{base}/_orrery/actors/bob/emails"))
+        .send_json(json!({ "emails": [
+            { "email": "bob@home.test", "primary": false, "verified": true },
+            { "email": "bob@work.test", "primary": true, "verified": false },
+        ] }))
+        .unwrap();
+    assert_eq!(set.status(), 200);
+    register_app(base, "Sign-in");
+    register_app(base, "Deploys");
+
+    let actors = list(base, "/actors/list", json!({}));
+    let actors = actors["items"].as_array().unwrap();
+    assert_eq!(actors.len(), 4);
+    for item in actors {
+        let login = item["login"].as_str().unwrap();
+        assert_eq!(&read(base, &format!("/actors/{login}")), item);
+        // The login compares without case, and the answer carries the
+        // stored one.
+        for spelling in [login.to_ascii_uppercase(), login.to_ascii_lowercase()] {
+            assert_eq!(&read(base, &format!("/actors/{spelling}")), item);
+        }
+    }
+
+    let apps = list(base, "/oauth-apps/list", json!({}));
+    let apps = apps["items"].as_array().unwrap();
+    assert_eq!(apps.len(), 2);
+    for item in apps {
+        let client_id = item["client_id"].as_str().unwrap();
+        let answer = read(base, &format!("/oauth-apps/{client_id}"));
+        assert_eq!(&answer, item);
+        assert!(answer.get("client_secret").is_none());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_point_read_of_a_key_nothing_holds_is_not_found() {
     let inst = boot().await;
     let base = &inst.base;
     mint_actor(base, "alice", "user");
-    register_app(base, "Sign-in");
+    let client_id = register_app(base, "Sign-in");
+
+    let missing_app = format!("{OAUTH_CLIENT_ID_PREFIX}00000000000000000000");
+    assert_ne!(missing_app, client_id);
+    let system_upper = SYSTEM_ACTOR_LOGIN.to_ascii_uppercase();
+    for path in [
+        "/actors/ghost".to_string(),
+        "/actors/-not-a-login".to_string(),
+        // The system actor is in no list, so it is not found by key either.
+        format!("/actors/{SYSTEM_ACTOR_LOGIN}"),
+        format!("/actors/{system_upper}"),
+        format!("/oauth-apps/{missing_app}"),
+        "/oauth-apps/abc".to_string(),
+        // No client id is `list`, so this is not found like any other.
+        "/oauth-apps/list".to_string(),
+    ] {
+        let (status, answer) = get(base, &path);
+        assert_eq!(status, 404, "{path}: {answer}");
+        assert_eq!(faults(&answer), [fault("NOT_FOUND", None)], "{path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reading_writes_nothing() {
+    let inst = boot().await;
+    let base = &inst.base;
+    mint_actor(base, "alice", "user");
+    let client_id = register_app(base, "Sign-in");
 
     let log = || list(base, "/log/list", json!({ "page_size": 500 }));
     let before = log();
     list(base, "/actors/list", json!({}));
     list(base, "/oauth-apps/list", json!({}));
+    read(base, "/actors/alice");
+    read(base, &format!("/oauth-apps/{client_id}"));
+    get(base, "/actors/ghost");
+    get(base, "/oauth-apps/abc");
     assert_eq!(log(), before);
 }
 

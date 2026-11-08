@@ -296,6 +296,59 @@ async fn snapshot_diff_restore_over_http() {
     );
 }
 
+/// `list` is a valid snapshot name, though the list's path ends in it, so
+/// every route on one snapshot reaches a snapshot named `list`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_named_list_is_reachable() {
+    let inst = boot().await;
+    let base = inst.base.clone();
+    let (status, created) = control(
+        "POST",
+        &base,
+        "/_orrery/snapshots",
+        Some(serde_json::json!({ "name": "list" })),
+    )
+    .unwrap();
+    assert_eq!(status, 201);
+
+    assert_eq!(
+        control("GET", &base, "/_orrery/snapshots/list", None),
+        Ok((200, created))
+    );
+    // The list itself is still the POST.
+    let (status, listed) = control(
+        "POST",
+        &base,
+        "/_orrery/snapshots/list",
+        Some(serde_json::json!({})),
+    )
+    .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(listed["items"][0]["name"], "list");
+    let (status, restored) = control(
+        "POST",
+        &base,
+        "/_orrery/snapshots/list/restore",
+        Some(serde_json::json!({})),
+    )
+    .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(restored["restored"], "list");
+
+    assert_eq!(
+        control("DELETE", &base, "/_orrery/snapshots/list", None),
+        Ok((204, serde_json::Value::Null))
+    );
+    assert_eq!(
+        control("GET", &base, "/_orrery/snapshots/list", None),
+        Err(404)
+    );
+    assert_eq!(
+        control("DELETE", &base, "/_orrery/snapshots/list", None),
+        Err(404)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn fork_serves_an_independent_world() {
     let inst = boot().await;

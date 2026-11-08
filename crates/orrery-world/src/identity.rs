@@ -19,15 +19,31 @@ const EMAIL_SELECT: &str = "SELECT email, is_primary, verified FROM actor_emails
 const EMAIL_ORDER: &str = "ORDER BY is_primary DESC, email";
 const OAUTH_APP_SELECT: &str =
     "SELECT id, name, client_id, client_secret, callback_url, created_clock_unix FROM oauth_apps";
+const LISTED_OAUTH_APP_SELECT: &str = "SELECT name, client_id, callback_url FROM oauth_apps";
 
 impl World {
     /// An actor's addresses, primary first.
     pub fn actor_emails(&self, actor_id: i64) -> Result<Vec<ActorEmail>> {
+        emails_of(&self.lock(), actor_id)
+    }
+
+    /// The actor holding `login`, as [`World::actors_after`] lists it. The
+    /// login compares under the column's `NOCASE` collation, so `"ALICE"`
+    /// reads `alice`, and the answer carries the stored login. The system
+    /// actor is not listed, so it is not found here either.
+    pub fn listed_actor_by_login(&self, login: &str) -> Result<Option<ListedActor>> {
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare(&format!("{EMAIL_SELECT} WHERE actor_id = ?1 {EMAIL_ORDER}"))?;
-        let rows = stmt.query_map(params![actor_id], row_to_email)?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        let actor = conn
+            .query_row(
+                &format!(
+                    "{} WHERE a.kind != 'system' AND a.login = ?1",
+                    queries::ACTOR_SELECT
+                ),
+                params![login],
+                queries::row_to_actor,
+            )
+            .optional()?;
+        actor.map(|a| listed_actor(&conn, a)).transpose()
     }
 
     /// Actors whose login sorts after `after_login`, in login order, at most
@@ -47,8 +63,6 @@ impl World {
              ORDER BY a.login COLLATE NOCASE LIMIT ?2",
             queries::ACTOR_SELECT
         ))?;
-        let mut emails =
-            conn.prepare(&format!("{EMAIL_SELECT} WHERE actor_id = ?1 {EMAIL_ORDER}"))?;
         // Every login is non-empty, so "" sorts before all of them.
         let rows = actors.query_map(
             params![after_login.unwrap_or(""), limit as i64],
@@ -56,15 +70,7 @@ impl World {
         )?;
         let mut listed = Vec::new();
         for row in rows {
-            let actor = row?;
-            let emails = emails
-                .query_map(params![actor.id], row_to_email)?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            listed.push(ListedActor {
-                login: actor.login,
-                kind: actor.kind,
-                emails,
-            });
+            listed.push(listed_actor(&conn, row?)?);
         }
         Ok(listed)
     }
@@ -204,6 +210,19 @@ impl World {
         Ok(secret)
     }
 
+    /// The app holding `client_id`, as [`World::oauth_apps_after`] lists
+    /// it. The query never reads a secret.
+    pub fn listed_oauth_app_by_client_id(&self, client_id: &str) -> Result<Option<ListedOAuthApp>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                &format!("{LISTED_OAUTH_APP_SELECT} WHERE client_id = ?1"),
+                params![client_id],
+                row_to_listed_oauth_app,
+            )
+            .optional()?)
+    }
+
     pub fn oauth_app_by_client_id(&self, client_id: &str) -> Result<Option<OAuthApp>> {
         let conn = self.lock();
         Ok(conn
@@ -223,18 +242,14 @@ impl World {
         limit: usize,
     ) -> Result<Vec<ListedOAuthApp>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT name, client_id, callback_url FROM oauth_apps
-             WHERE client_id > ?1 ORDER BY client_id LIMIT ?2",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "{LISTED_OAUTH_APP_SELECT} WHERE client_id > ?1 ORDER BY client_id LIMIT ?2"
+        ))?;
         // Every client id is non-empty, so "" sorts before all of them.
-        let rows = stmt.query_map(params![after_client_id.unwrap_or(""), limit as i64], |r| {
-            Ok(ListedOAuthApp {
-                name: r.get(0)?,
-                client_id: r.get(1)?,
-                callback_url: r.get(2)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![after_client_id.unwrap_or(""), limit as i64],
+            row_to_listed_oauth_app,
+        )?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -387,6 +402,23 @@ pub(crate) fn insert_email(conn: &Connection, actor_id: i64, e: &ActorEmail) -> 
     })
 }
 
+fn emails_of(conn: &Connection, actor_id: i64) -> Result<Vec<ActorEmail>> {
+    let mut stmt =
+        conn.prepare_cached(&format!("{EMAIL_SELECT} WHERE actor_id = ?1 {EMAIL_ORDER}"))?;
+    let rows = stmt.query_map(params![actor_id], row_to_email)?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// The one projection the list of actors and the point read share, so the
+/// two answers cannot differ.
+fn listed_actor(conn: &Connection, actor: Actor) -> Result<ListedActor> {
+    Ok(ListedActor {
+        emails: emails_of(conn, actor.id)?,
+        login: actor.login,
+        kind: actor.kind,
+    })
+}
+
 fn row_to_email(r: &Row<'_>) -> rusqlite::Result<ActorEmail> {
     Ok(ActorEmail {
         email: r.get(0)?,
@@ -399,6 +431,14 @@ pub(crate) fn list_oauth_apps(conn: &Connection) -> Result<Vec<OAuthApp>> {
     let mut stmt = conn.prepare(&format!("{OAUTH_APP_SELECT} ORDER BY id"))?;
     let rows = stmt.query_map([], row_to_oauth_app)?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn row_to_listed_oauth_app(r: &Row<'_>) -> rusqlite::Result<ListedOAuthApp> {
+    Ok(ListedOAuthApp {
+        name: r.get(0)?,
+        client_id: r.get(1)?,
+        callback_url: r.get(2)?,
+    })
 }
 
 fn row_to_oauth_app(r: &Row<'_>) -> rusqlite::Result<OAuthApp> {
