@@ -307,6 +307,8 @@ pub(crate) fn validation_custom(resource: &str, message: &str) -> Response<Body>
 /// Loud refusal for a real-GitHub field Orrery chooses not to fake. Shaped
 /// like a GitHub 422 so strict clients parse it, but self-describing so a
 /// human reads exactly what to do (NOT-MOCKED at field granularity).
+// TODO(ORR-46): name each caller's own resource; pulls, reviews, labels,
+// check runs, and OAuth all report `Repository` through this.
 pub(crate) fn orrery_unsupported_field(field: &str) -> Response<Body> {
     orrery_unsupported_field_on("Repository", field)
 }

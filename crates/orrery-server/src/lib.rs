@@ -125,6 +125,8 @@ pub fn routers(
         .merge(orrery_face_git::router(git))
         .nest(
             "/api/v3",
+            // TODO(ORR-41): a served path called with another method answers
+            // axum's bare 405, not this fallback's 501.
             orrery_face_github::router(github).fallback(not_mocked),
         )
         .merge(graphql)
@@ -240,6 +242,8 @@ fn bad_credentials() -> Response<Body> {
 /// The loud refusal for surface Orrery does not implement. 501 with a
 /// self-describing envelope — deliberately unlike any real GitHub response,
 /// so it can never be mistaken for "the thing doesn't exist".
+// TODO(ORR-46): report the path as sent; under `/api/v3` this sees the nested
+// router's path, with the prefix stripped.
 async fn not_mocked(req: Request) -> Response<Body> {
     let method = req.method().to_string();
     let path = req.uri().path().to_string();

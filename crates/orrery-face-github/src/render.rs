@@ -44,6 +44,8 @@ pub fn repo_json(face: &GithubFace, repo: &Repo, owner: &Actor) -> serde_json::V
         "html_url": format!("{base}/{full_name}"),
         "url": format!("{base}/api/v3/repos/{full_name}"),
         "clone_url": format!("{base}/{full_name}.git"),
+        // TODO(ORR-47): `host` carries the listener's port, which makes
+        // `ssh_url` an ill-formed scp-style address.
         "git_url": format!("git://{host}/{full_name}.git"),
         "ssh_url": format!("git@{host}:{full_name}.git"),
         "default_branch": repo.default_branch,
