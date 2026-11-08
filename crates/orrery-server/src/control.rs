@@ -7,6 +7,9 @@
 //! rejected), invalid values rejected with the field named — never clamped —
 //! and the one error shape `{"errors":[{"reason","message","field?"}]}`.
 
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as UrlPath, State};
@@ -16,6 +19,7 @@ use orrery_world::{
     Actor, ActorEmail, ActorKind, OAUTH_CLIENT_ID_PREFIX, SYSTEM_ACTOR_LOGIN, WorldError,
     validate_login,
 };
+use serde_json::value::RawValue;
 
 use crate::{AppState, json};
 
@@ -371,8 +375,12 @@ fn clock_body(clock: i64) -> serde_json::Value {
 /// A control-plane body, read one field at a time so that a refusal names
 /// every fault in it: fields that are missing or fail to decode, fields the
 /// route does not take, and whatever the route's own checks find.
+///
+/// Each field is kept as its JSON text and decoded straight into the route's
+/// type, so a value inside a field is held to that type's own rules, such as
+/// refusing a repeated or unknown key in a nested object.
 pub(crate) struct Fields {
-    unread: serde_json::Map<String, serde_json::Value>,
+    unread: BTreeMap<String, Box<RawValue>>,
     read: Vec<&'static str>,
     faults: Vec<Fault>,
     /// Set when the body is not a JSON object. It has no fields to name, so
@@ -385,7 +393,7 @@ impl Fields {
     /// fields are all optional.
     pub(crate) fn parse(body: &[u8]) -> Fields {
         let mut fields = Fields {
-            unread: serde_json::Map::new(),
+            unread: BTreeMap::new(),
             read: Vec::new(),
             faults: Vec::new(),
             not_an_object: None,
@@ -421,7 +429,7 @@ impl Fields {
     ) -> Option<T> {
         self.read.push(name);
         match self.unread.remove(name) {
-            Some(value) => self.decode(name, value),
+            Some(raw) => self.decode(name, &raw),
             None => {
                 self.fault(Fault::invalid(format!("{name} is required"), name));
                 None
@@ -436,21 +444,20 @@ impl Fields {
         name: &'static str,
     ) -> Option<T> {
         self.read.push(name);
-        match self.unread.remove(name) {
-            None | Some(serde_json::Value::Null) => None,
-            Some(value) => self.decode(name, value),
-        }
+        let raw = self.unread.remove(name)?;
+        self.decode::<Option<T>>(name, &raw).flatten()
     }
 
     fn decode<T: serde::de::DeserializeOwned>(
         &mut self,
         name: &'static str,
-        value: serde_json::Value,
+        raw: &RawValue,
     ) -> Option<T> {
-        match serde_json::from_value(value) {
+        match serde_json::from_str(raw.get()) {
             Ok(v) => Some(v),
             Err(e) => {
-                self.fault(Fault::invalid(format!("{name}: {e}"), name));
+                let message = without_position(&e);
+                self.fault(Fault::invalid(format!("{name}: {message}"), name));
                 None
             }
         }
@@ -470,7 +477,7 @@ impl Fields {
         }
         let takes = self.read.join(", ");
         let mut found = self.faults;
-        found.extend(self.unread.into_iter().map(|(name, _)| {
+        found.extend(self.unread.into_keys().map(|name| {
             Fault::invalid(
                 format!("unknown field {name:?}; this body takes {takes}"),
                 name,
@@ -488,11 +495,22 @@ impl Fields {
     }
 }
 
+/// A field's value is decoded from its own text, so the line and column
+/// serde_json gives point into that value, not into the body.
+fn without_position(e: &serde_json::Error) -> String {
+    let message = e.to_string();
+    let position = format!(" at line {} column {}", e.line(), e.column());
+    match message.strip_suffix(&position) {
+        Some(stripped) => stripped.to_string(),
+        None => message,
+    }
+}
+
 /// A JSON object's members, and the names of any that appear more than once.
-/// A JSON map keeps only the last value under a repeated name, so a body that
-/// repeats one is refused rather than read with a value dropped.
+/// A map keeps one value under each name, so a body that repeats one is
+/// refused rather than read with a value dropped.
 struct Object {
-    members: serde_json::Map<String, serde_json::Value>,
+    members: BTreeMap<String, Box<RawValue>>,
     repeated: Vec<String>,
 }
 
@@ -513,14 +531,19 @@ impl<'de> serde::de::Visitor<'de> for ObjectVisitor {
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Object, A::Error> {
         let mut object = Object {
-            members: serde_json::Map::new(),
+            members: BTreeMap::new(),
             repeated: Vec::new(),
         };
-        while let Some((name, value)) = map.next_entry::<String, serde_json::Value>()? {
-            if !object.members.contains_key(&name) {
-                object.members.insert(name, value);
-            } else if !object.repeated.contains(&name) {
-                object.repeated.push(name);
+        while let Some((name, value)) = map.next_entry::<String, Box<RawValue>>()? {
+            match object.members.entry(name) {
+                Entry::Vacant(slot) => {
+                    slot.insert(value);
+                }
+                Entry::Occupied(held) => {
+                    if !object.repeated.contains(held.key()) {
+                        object.repeated.push(held.key().clone());
+                    }
+                }
             }
         }
         Ok(object)

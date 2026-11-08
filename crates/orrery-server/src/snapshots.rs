@@ -158,12 +158,14 @@ async fn diff(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let guard = gate.write_owned().await;
     let world = state.world.clone();
     let dir = state.snapshots_dir.clone();
+    // A failure to open a snapshot is about the field that named it; one in
+    // the comparison itself is about neither.
     let result = tokio::task::spawn_blocking(move || {
         let _hold = guard;
-        let from = orrery_snapshot::open(&dir, &from)?;
-        match &to {
+        let from = orrery_snapshot::open(&dir, &from).map_err(|e| (e, Some("from")))?;
+        let diffed = match &to {
             Some(to_name) => {
-                let to = orrery_snapshot::open(&dir, to_name)?;
+                let to = orrery_snapshot::open(&dir, to_name).map_err(|e| (e, Some("to")))?;
                 orrery_snapshot::diff::diff(from.side(), to.side())
             }
             None => orrery_snapshot::diff::diff(
@@ -174,15 +176,17 @@ async fn diff(State(state): State<AppState>, body: Bytes) -> Response<Body> {
                     repos_dir: &world.repos_dir(),
                 },
             ),
-        }
+        };
+        diffed.map_err(|e| (e, None))
     })
     .await;
-    match flatten(result) {
-        Ok(d) => match serde_json::to_value(&d) {
+    match result {
+        Ok(Ok(d)) => match serde_json::to_value(&d) {
             Ok(v) => json(StatusCode::OK, v),
             Err(e) => internal(e),
         },
-        Err(e) => snapshot_error(e, None),
+        Ok(Err((e, field))) => snapshot_error(e, field),
+        Err(e) => internal(format!("blocking task failed: {e}")),
     }
 }
 

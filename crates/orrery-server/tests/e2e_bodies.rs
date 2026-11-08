@@ -126,7 +126,19 @@ fn refused(base: &str, route: &Route, body: &[u8]) -> Vec<(String, Option<String
         route.path,
         String::from_utf8_lossy(body)
     );
+    assert_no_field_positions(&answer);
     faults(&answer)
+}
+
+/// A field is decoded from its own text, so a line and column in its
+/// message would point into that value, not into the body the caller sent.
+fn assert_no_field_positions(answer: &Value) {
+    for error in answer["errors"].as_array().unwrap() {
+        if error.get("field").is_some() {
+            let message = error["message"].as_str().unwrap();
+            assert!(!message.contains(" at line "), "{message}");
+        }
+    }
 }
 
 fn with(body: &Value, field: &str, value: Value) -> Vec<u8> {
@@ -234,4 +246,83 @@ async fn a_repeated_field_is_refused_by_name() {
         refused(base, advance, br#"{"seconds": 60, "seconds": 60}"#),
         [fault("INVALID_ARGUMENT", Some("seconds"))]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_value_inside_a_field_is_held_to_its_own_rules() {
+    let inst = boot().await;
+    let base = &inst.base;
+    common::mint_actor(base, "alice", "user");
+    let routes = routes();
+    let emails = routes
+        .iter()
+        .find(|r| r.path == "/actors/alice/emails")
+        .unwrap();
+    // A repeated or unknown key inside an address is a fault in `emails`.
+    for entry in [
+        r#"{"email": "nope", "email": "alice@home.test", "primary": true, "verified": true}"#,
+        r#"{"email": "alice@home.test", "primary": true, "verified": true, "primay": true}"#,
+    ] {
+        let body = format!(r#"{{"emails": [{entry}], "bogus": 1}}"#);
+        assert_eq!(
+            refused(base, emails, body.as_bytes()),
+            [
+                fault("INVALID_ARGUMENT", Some("emails")),
+                fault("INVALID_ARGUMENT", Some("bogus")),
+            ]
+        );
+    }
+
+    // A number too large for any type is a fault in its field, not in the
+    // body.
+    let advance = routes.iter().find(|r| r.path == "/clock/advance").unwrap();
+    assert_eq!(
+        refused(base, advance, br#"{"seconds": 1e400, "bogus": 1}"#),
+        [
+            fault("INVALID_ARGUMENT", Some("seconds")),
+            fault("INVALID_ARGUMENT", Some("bogus")),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_kind_is_named_as_kind() {
+    let inst = boot().await;
+    let (status, answer) = call(
+        &inst.base,
+        "POST",
+        "/actors",
+        br#"{"login": "alice", "kind": "system"}"#,
+    );
+    assert_eq!(status, 400, "{answer}");
+    assert_eq!(faults(&answer), [fault("INVALID_ARGUMENT", Some("kind"))]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diff_names_the_snapshot_it_could_not_open() {
+    let inst = boot().await;
+    let base = &inst.base;
+    let (status, _) = call(base, "POST", "/snapshots", br#"{"name": "before"}"#);
+    assert_eq!(status, 201);
+
+    for (body, status, reason, field) in [
+        (r#"{"from": "../x"}"#, 400, "INVALID_ARGUMENT", "from"),
+        (r#"{"from": "ghost"}"#, 404, "NOT_FOUND", "from"),
+        (
+            r#"{"from": "before", "to": "../x"}"#,
+            400,
+            "INVALID_ARGUMENT",
+            "to",
+        ),
+        (
+            r#"{"from": "before", "to": "ghost"}"#,
+            404,
+            "NOT_FOUND",
+            "to",
+        ),
+    ] {
+        let (got, answer) = call(base, "POST", "/diff", body.as_bytes());
+        assert_eq!(got, status, "{body}: {answer}");
+        assert_eq!(faults(&answer), [fault(reason, Some(field))], "{body}");
+    }
 }
