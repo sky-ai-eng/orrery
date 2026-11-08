@@ -125,6 +125,9 @@ pub(crate) async fn list_pulls(
 
 /// The diff and patch media types, refused on `resource`: answering them
 /// with JSON would be a plausible wrong answer.
+// TODO(ORR-50): refuse every GitHub media type the face doesn't render, on
+// every REST route; the body renderings (`full+json` and the like) on pulls,
+// reviews, and comments, and raw contents, still get the plain JSON answer.
 fn refuse_diff_media(headers: &HeaderMap, resource: &str) -> Option<Response<Body>> {
     let accept = header_str(headers, header::ACCEPT);
     (accept.contains("diff") || accept.contains("patch"))
