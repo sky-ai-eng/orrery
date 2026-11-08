@@ -54,8 +54,8 @@ sboms:
 # signing keys to provision or rotate. Verifying the checksum signature
 # transitively verifies every archive (each line is a sha256 of one
 # archive). Requires `cosign` on PATH and `id-token: write` permission on
-# the goreleaser job — see release.yml. README.md's "Releases" section has
-# the consumer-facing verify commands.
+# the goreleaser job — see release.yml. docs/users/install.md has the
+# consumer-facing verify commands.
 signs:
   - cmd: cosign
     certificate: "${artifact}.pem"
