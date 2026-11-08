@@ -26,6 +26,8 @@ Namespaced away from the face (its own path prefix/port) so it can never be mist
 - **Fabricated subsystem state** — Actions workflow runs, jobs, and logs, when a scenario needs a consumer's log-reading code to work. Real GitHub has no API to create a run in an arbitrary state; Actions itself does it. None is served yet.
 - **Engine operations** — snapshots and restore, diff, and reading the action log. Forking a world is the CLI's `orrery fork`, below, because it acts on a world no process is serving.
 
+**Calls the control plane doesn't serve.** It is Orrery's own API, not mocked surface, so it answers in its error shape (`{"errors": [{"reason", "message", "field"}]}`), never with a face's `501`. A path under `/_orrery` that names no route is `404 NOT_FOUND`. A route called with a method it doesn't take is `405 METHOD_NOT_ALLOWED`, with an `Allow` header listing the methods it does. A route that acts only on what its path names (issuing a token or a client secret, restoring or deleting a snapshot) takes no body fields: it accepts an empty body or `{}`, and refuses any field.
+
 **One door per operation.** If GitHub has an API for something, the control plane must never duplicate it. CLI conveniences are permitted only as literal aliases that issue the face call (and say so). This killed the early `orrery repo create` idea: repo creation has a real API (`POST /orgs/{org}/repos`, `POST /user/repos`), so that endpoint is the door — and since real GitHub has no push-to-create, it becomes the REST face's first endpoint rather than a control-plane verb that would later need deleting.
 
 **Where the doors are.** A caller that starts a world learns its addresses from the world. Once the world is open and every listener is bound, and before it serves a request, `orrery serve` prints one line of JSON to stdout:
@@ -89,7 +91,7 @@ A few rules follow from reading states rather than events:
 The virtual clock is one value — what time the world believes it is — consulted whenever the engine stamps something (`created_at`, `merged_at`) or computes staleness. It is a row in `world.db`, part of the state like everything else. Two operations:
 
 - **Set** — once, when the world is created: `t0` in the instance config, or `orrery create --t0`.
-- **Advance** — forward only, any time (`POST /_orrery/clock/advance` with `seconds`). Writes one value, mutates nothing else (rule 4: nothing in the world decays or fires spontaneously with time).
+- **Advance** — forward only, any time (`POST /_orrery/clock/advance` with `seconds`). Writes one value, mutates nothing else (rule 4: nothing in the world decays or fires spontaneously with time). The clock stops at 9999-12-30T22:00:00Z, the latest time the faces can render; an advance past it is `400 OUT_OF_RANGE` on `seconds` and moves nothing.
 
 Authoring history is replaying it under the crank: set clock to T0, make the calls (they stamp T0), advance, repeat. Backdated worlds need no backdoor.
 

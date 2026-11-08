@@ -7,10 +7,14 @@
 //!
 //! Route classes and their failure behavior (spec/README.md rule 1):
 //! - matched face route, missing data → vendor-faithful 404
-//! - unmatched path anywhere → loud 501 NOT-MOCKED envelope naming the path
+//! - unmatched face path, or a face path called with a method it doesn't
+//!   serve → loud 501 NOT-MOCKED envelope naming the path
+//! - unmatched control path → 404, and a control path called with a method it
+//!   doesn't take → 405, both in the control plane's error shape
 //!
-//! Those two must never blur: a plausible 404 for unimplemented surface is
-//! how consumers silently break.
+//! The first two must never blur: a plausible 404 for unimplemented surface
+//! is how consumers silently break. The control plane is Orrery's own API, so
+//! it has no vendor surface to leave unmocked.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -74,7 +78,7 @@ pub struct Routers {
 impl Routers {
     /// Both on one listener, the control plane at `/_orrery`.
     pub fn combined(self) -> Router {
-        self.control.merge(self.faces).fallback(not_mocked)
+        self.control.merge(self.faces).fallback(no_route)
     }
 
     /// `(faces, control)` for two listeners. The faces router has no
@@ -84,7 +88,7 @@ impl Routers {
     pub fn split(self) -> (Router, Router) {
         (
             self.faces.fallback(not_mocked),
-            self.control.fallback(not_mocked),
+            self.control.fallback(no_route),
         )
     }
 }
@@ -119,17 +123,19 @@ pub fn routers(
 
     // The OAuth web flow lives on the web host and authenticates with client
     // credentials or a signed-in actor, never an API token.
-    let oauth = orrery_face_github::oauth::web_router(github.clone());
+    let oauth = orrery_face_github::oauth::web_router(github.clone())
+        .method_not_allowed_fallback(not_mocked);
 
+    // The method fallback is set before the auth layer so that it is behind
+    // face auth, as the unmatched-path fallback under `/api/v3` is.
     let faces = Router::new()
         .merge(orrery_face_git::router(git))
         .nest(
             "/api/v3",
-            // TODO(ORR-41): a served path called with another method answers
-            // axum's bare 405, not this fallback's 501.
             orrery_face_github::router(github).fallback(not_mocked),
         )
         .merge(graphql)
+        .method_not_allowed_fallback(not_mocked)
         .layer(middleware::from_fn_with_state(state.clone(), face_auth));
 
     Routers {
@@ -237,6 +243,18 @@ fn bad_credentials() -> Response<Body> {
             serde_json::json!({ "message": "Bad credentials" }).to_string(),
         ))
         .expect("static response parts are valid")
+}
+
+/// The fallback for a path no route serves, on a listener that serves the
+/// control plane. A path under `/_orrery` is a control path, answered in the
+/// control plane's error shape; any other is face surface.
+async fn no_route(req: Request) -> Response<Body> {
+    let path = req.uri().path();
+    if path == "/_orrery" || path.starts_with("/_orrery/") {
+        control::no_such_route(req.method(), path)
+    } else {
+        not_mocked(req).await
+    }
 }
 
 /// The loud refusal for surface Orrery does not implement. 501 with a

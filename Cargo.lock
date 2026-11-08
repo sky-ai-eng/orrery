@@ -1269,6 +1269,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "hmac",
+ "jiff",
  "rusqlite",
  "serde",
  "serde_json",

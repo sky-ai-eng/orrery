@@ -211,6 +211,5 @@ Every route here answers `501` until a consumer needs it:
 **Known gaps against the rules above:**
 
 - `GET …/pulls/{n}` with `Accept: application/vnd.github.v3.diff` or `.patch` answers the JSON object with `200`, a plausible wrong answer, where compare refuses the same media types (rule 1).
-- A matched path called with a method Orrery doesn't serve answers a bare `405` rather than the `501` (`grammar.md`).
 - `PATCH …/pulls/{n}` accepts an empty `title`.
 - `git_url` and `ssh_url` include the listener's port.

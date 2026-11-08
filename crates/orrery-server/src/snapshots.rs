@@ -4,8 +4,9 @@
 //! Create, restore, delete, and diff all take the git face's world write gate
 //! exclusively: no push, merge, or fetch is in flight while a world directory
 //! is copied, swapped, or compared, so every one of these reads or writes an
-//! exact moment. The filesystem work runs on the blocking pool with the gate
-//! guard moved into the task.
+//! exact moment. The snapshot reads take its read side, so they never see a
+//! snapshot half made or half removed. All filesystem work runs on the
+//! blocking pool with the gate guard moved into the task.
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -57,20 +58,28 @@ async fn create(State(state): State<AppState>, body: Bytes) -> Response<Body> {
 }
 
 async fn get_one(State(state): State<AppState>, UrlPath(name): UrlPath<String>) -> Response<Body> {
-    read_one(&state, &name)
+    read_one(&state, name).await
 }
 
 /// `list` is a valid snapshot name, but the list's static path takes
 /// `GET /snapshots/list` before `/snapshots/{name}` can, so the point read
 /// is routed here too.
 async fn get_one_named_list(State(state): State<AppState>) -> Response<Body> {
-    read_one(&state, "list")
+    read_one(&state, "list".to_string()).await
 }
 
-fn read_one(state: &AppState, name: &str) -> Response<Body> {
-    match orrery_snapshot::info(&state.snapshots_dir, name) {
+async fn read_one(state: &AppState, name: String) -> Response<Body> {
+    let guard = state.git.gate().read_owned().await;
+    let dir = state.snapshots_dir.clone();
+    let read_name = name.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _hold = guard;
+        orrery_snapshot::info(&dir, &read_name)
+    })
+    .await;
+    match flatten(result) {
         Ok(Some(info)) => json(StatusCode::OK, to_value(&info)),
-        Ok(None) => not_found(name),
+        Ok(None) => not_found(&name),
         Err(e) => snapshot_error(e, Some("name")),
     }
 }
@@ -88,7 +97,14 @@ async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
         Ok(n) => n,
         Err(resp) => return *resp,
     };
-    let all = match orrery_snapshot::list(&state.snapshots_dir) {
+    let guard = state.git.gate().read_owned().await;
+    let dir = state.snapshots_dir.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _hold = guard;
+        orrery_snapshot::list(&dir)
+    })
+    .await;
+    let all = match flatten(result) {
         Ok(a) => a,
         Err(e) => return snapshot_error(e, None),
     };
@@ -115,20 +131,29 @@ async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
 async fn delete_one(
     State(state): State<AppState>,
     UrlPath(name): UrlPath<String>,
+    body: Bytes,
 ) -> Response<Body> {
-    delete_named(&state, &name).await
+    delete_named(&state, name, &body).await
 }
 
 /// The delete of a snapshot named `list`, routed here for the reason
 /// [`get_one_named_list`] is.
-async fn delete_one_named_list(State(state): State<AppState>) -> Response<Body> {
-    delete_named(&state, "list").await
+async fn delete_one_named_list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    delete_named(&state, "list".to_string(), &body).await
 }
 
-async fn delete_named(state: &AppState, name: &str) -> Response<Body> {
-    let gate = state.git.gate();
-    let _guard = gate.write().await;
-    match orrery_snapshot::delete(&state.snapshots_dir, name) {
+async fn delete_named(state: &AppState, name: String, body: &[u8]) -> Response<Body> {
+    if let Err(resp) = Fields::parse(body).finish(Some(())) {
+        return *resp;
+    }
+    let guard = state.git.gate().write_owned().await;
+    let dir = state.snapshots_dir.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _hold = guard;
+        orrery_snapshot::delete(&dir, &name)
+    })
+    .await;
+    match flatten(result) {
         Ok(()) => Response::builder()
             .status(StatusCode::NO_CONTENT)
             .body(Body::empty())
@@ -137,7 +162,14 @@ async fn delete_named(state: &AppState, name: &str) -> Response<Body> {
     }
 }
 
-async fn restore(State(state): State<AppState>, UrlPath(name): UrlPath<String>) -> Response<Body> {
+async fn restore(
+    State(state): State<AppState>,
+    UrlPath(name): UrlPath<String>,
+    body: Bytes,
+) -> Response<Body> {
+    if let Err(resp) = Fields::parse(&body).finish(Some(())) {
+        return *resp;
+    }
     let gate = state.git.gate();
     let guard = gate.write_owned().await;
     let world = state.world.clone();
@@ -169,6 +201,13 @@ async fn diff(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let from: Option<String> = fields.required("from");
     // Another snapshot, or absent for the live world.
     let to: Option<String> = fields.optional("to");
+    for (name, field) in [(&from, "from"), (&to, "to")] {
+        if let Some(name) = name
+            && let Err(e) = orrery_snapshot::validate_name(name)
+        {
+            fields.fault(Fault::invalid(e.to_string(), field));
+        }
+    }
     let from = match fields.finish(from) {
         Ok(f) => f,
         Err(resp) => return *resp,
@@ -259,5 +298,70 @@ fn snapshot_error(e: SnapshotError, field: Option<&str>) -> Response<Body> {
             field,
         ),
         other => internal(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use orrery_world::{DEFAULT_T0_UNIX, World, WorldSecret};
+
+    use super::*;
+
+    fn state(dir: &std::path::Path) -> AppState {
+        let world = Arc::new(
+            World::create(&dir.join("world"), DEFAULT_T0_UNIX, &WorldSecret::LOCAL).unwrap(),
+        );
+        let git = orrery_face_git::GitFace::new(world.clone());
+        let github = orrery_face_github::GithubFace {
+            world: world.clone(),
+            git: git.clone(),
+            base_url: "http://world.test".to_string(),
+        };
+        AppState {
+            world,
+            base_url: "http://world.test".to_string(),
+            git,
+            snapshots_dir: dir.join("snapshots"),
+            schema: orrery_face_github::graphql::schema(github),
+            anonymous_git_reads: true,
+        }
+    }
+
+    /// Long enough for a read that does not wait on the gate to finish.
+    async fn settle() {
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(200)))
+            .await
+            .unwrap();
+    }
+
+    /// The test holds the gate exclusively and removes the snapshot under
+    /// it, as a delete does. Reads sent meanwhile see the snapshot either
+    /// whole or gone, never half removed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn snapshot_reads_wait_out_a_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(dir.path());
+        orrery_snapshot::create(&state.world, &state.snapshots_dir, "before").unwrap();
+
+        let held = state.git.gate().write_owned().await;
+        let point = tokio::spawn(get_one(State(state.clone()), UrlPath("before".to_string())));
+        let listed = tokio::spawn(list(State(state.clone()), Bytes::new()));
+        settle().await;
+        assert!(!point.is_finished(), "the point read did not wait");
+        assert!(!listed.is_finished(), "the list did not wait");
+
+        orrery_snapshot::delete(&state.snapshots_dir, "before").unwrap();
+        drop(held);
+        assert_eq!(point.await.unwrap().status(), StatusCode::NOT_FOUND);
+        let listed = listed.await.unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(listed.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["items"], serde_json::json!([]));
     }
 }

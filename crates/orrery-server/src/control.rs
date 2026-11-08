@@ -7,13 +7,13 @@
 //! rejected), invalid values rejected with the field named — never clamped —
 //! and the one error shape `{"errors":[{"reason","message","field?"}]}`.
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Path as UrlPath, State};
-use axum::http::{Response, StatusCode};
+use axum::extract::{OriginalUri, Path as UrlPath, State};
+use axum::http::{Method, Response, StatusCode};
 use axum::routing::{get, post, put};
 use orrery_world::{
     Actor, ActorEmail, ActorKind, OAUTH_CLIENT_ID_PREFIX, SYSTEM_ACTOR_LOGIN, WorldError,
@@ -48,7 +48,32 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/log/list", post(log_list))
         .merge(crate::snapshots::router())
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
+}
+
+/// A path under `/_orrery` that names no route.
+pub(crate) fn no_such_route(method: &Method, path: &str) -> Response<Body> {
+    errors(
+        StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+        &format!("{method} {path} is not a control-plane route"),
+        None,
+    )
+}
+
+/// A route called with a method it does not take. The path is read from the
+/// request as it arrived, since a nested route sees its prefix stripped.
+async fn method_not_allowed(method: Method, OriginalUri(uri): OriginalUri) -> Response<Body> {
+    errors(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "METHOD_NOT_ALLOWED",
+        &format!(
+            "{} does not take {method}; the Allow header lists the methods it takes",
+            uri.path()
+        ),
+        None,
+    )
 }
 
 async fn healthz(State(state): State<AppState>) -> Response<Body> {
@@ -91,6 +116,12 @@ async fn advance_clock(State(state): State<AppState>, body: Bytes) -> Response<B
     };
     match state.world.advance_clock(seconds, system.id) {
         Ok(clock) => json(StatusCode::OK, clock_body(clock)),
+        Err(e @ WorldError::ClockOutOfRange { .. }) => errors(
+            StatusCode::BAD_REQUEST,
+            "OUT_OF_RANGE",
+            &e.to_string(),
+            Some("seconds"),
+        ),
         Err(e) => internal(e),
     }
 }
@@ -135,7 +166,11 @@ async fn create_actor(State(state): State<AppState>, body: Bytes) -> Response<Bo
 async fn issue_actor_token(
     State(state): State<AppState>,
     UrlPath(login): UrlPath<String>,
+    body: Bytes,
 ) -> Response<Body> {
+    if let Err(resp) = Fields::parse(&body).finish(Some(())) {
+        return *resp;
+    }
     let system = match system_actor(&state) {
         Ok(a) => a,
         Err(resp) => return *resp,
@@ -235,7 +270,11 @@ async fn create_oauth_app(State(state): State<AppState>, body: Bytes) -> Respons
 async fn issue_oauth_client_secret(
     State(state): State<AppState>,
     UrlPath(client_id): UrlPath<String>,
+    body: Bytes,
 ) -> Response<Body> {
+    if let Err(resp) = Fields::parse(&body).finish(Some(())) {
+        return *resp;
+    }
     let system = match system_actor(&state) {
         Ok(a) => a,
         Err(resp) => return *resp,
@@ -263,6 +302,12 @@ fn system_actor(state: &AppState) -> Result<Actor, Box<Response<Body>>> {
 async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let after_seq: i64 = fields.optional("after_seq").unwrap_or(0);
+    if after_seq < 0 {
+        fields.fault(Fault::out_of_range(
+            "after_seq must be 0 or more".to_string(),
+            "after_seq",
+        ));
+    }
     let page_size = page_size(&mut fields);
     let page_size = match fields.finish(page_size) {
         Ok(n) => n,
@@ -540,7 +585,11 @@ impl Fields {
         if let Some(fault) = self.not_an_object {
             return Err(Box::new(faults(StatusCode::BAD_REQUEST, vec![fault])));
         }
-        let takes = self.read.join(", ");
+        let takes = if self.read.is_empty() {
+            "no fields".to_string()
+        } else {
+            self.read.join(", ")
+        };
         let mut found = self.faults;
         found.extend(self.unread.into_keys().map(|name| {
             Fault::invalid(
@@ -571,9 +620,10 @@ fn without_position(e: &serde_json::Error) -> String {
     }
 }
 
-/// A JSON object's members, and the names of any that appear more than once.
-/// A map keeps one value under each name, so a body that repeats one is
-/// refused rather than read with a value dropped.
+/// A JSON object's members, and the names of any that appear more than once,
+/// in the order their first repeat was found. A map keeps one value under
+/// each name, so a body that repeats one is refused rather than read with a
+/// value dropped.
 struct Object {
     members: BTreeMap<String, Box<RawValue>>,
     repeated: Vec<String>,
@@ -599,13 +649,16 @@ impl<'de> serde::de::Visitor<'de> for ObjectVisitor {
             members: BTreeMap::new(),
             repeated: Vec::new(),
         };
+        // `repeated` keeps the order; this set answers membership, so a body
+        // repeating many names is still read in O(n log n).
+        let mut seen_repeated = BTreeSet::new();
         while let Some((name, value)) = map.next_entry::<String, Box<RawValue>>()? {
             match object.members.entry(name) {
                 Entry::Vacant(slot) => {
                     slot.insert(value);
                 }
                 Entry::Occupied(held) => {
-                    if !object.repeated.contains(held.key()) {
+                    if seen_repeated.insert(held.key().clone()) {
                         object.repeated.push(held.key().clone());
                     }
                 }

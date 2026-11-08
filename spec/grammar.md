@@ -71,7 +71,6 @@ Orrery doesn't rate limit. It sends no `X-RateLimit-*` headers, GraphQL `rateLim
 
 ## Known gaps
 
-- A path Orrery routes, called with a method it doesn't serve (`GET /api/graphql`, `PATCH /repos/{o}/{r}`), answers a bare `405` rather than the `501` above.
 - The `path` a REST `501` reports omits the `/api/v3` prefix.
 - Query values are not percent-decoded, so `?ref=a%2Fb` looks for the ref `a%2Fb`.
 - A not-mocked field's `errors[].resource` is `Repository` on most routes, whatever the route's resource.

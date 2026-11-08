@@ -16,13 +16,19 @@ pub struct Instance {
     /// The instance directory: `world/` live, `snapshots/` beside it.
     pub dir: tempfile::TempDir,
     pub world: Arc<World>,
+    /// The faces' origin.
     pub base: String,
-    task: tokio::task::JoinHandle<()>,
+    /// The control plane's origin: `base`, unless the instance was booted
+    /// with [`boot_split`].
+    pub control: String,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for Instance {
     fn drop(&mut self) {
-        self.task.abort();
+        for task in &self.tasks {
+            task.abort();
+        }
     }
 }
 
@@ -56,15 +62,37 @@ pub async fn boot_at(dir: tempfile::TempDir, world_root: &Path) -> Instance {
     serve(dir, world, orrery_server::Options::default()).await
 }
 
+/// Boot a local world with the control plane on a listener of its own, as
+/// `orrery serve` does when `server.control_listen` is set.
+pub async fn boot_split() -> Instance {
+    let (dir, world) = create(&WorldSecret::LOCAL);
+    let (faces, base) = bind().await;
+    let (control, control_base) = bind().await;
+    let (faces_app, control_app) = orrery_server::routers(
+        world.clone(),
+        base.clone(),
+        dir.path().join("snapshots"),
+        orrery_server::Options::default(),
+    )
+    .split();
+    Instance {
+        dir,
+        world,
+        base,
+        control: control_base,
+        tasks: vec![
+            spawn_server(faces, faces_app),
+            spawn_server(control, control_app),
+        ],
+    }
+}
+
 async fn serve(
     dir: tempfile::TempDir,
     world: Arc<World>,
     options: orrery_server::Options,
 ) -> Instance {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (listener, base) = bind().await;
     let app = orrery_server::routers(
         world.clone(),
         base.clone(),
@@ -72,15 +100,30 @@ async fn serve(
         options,
     )
     .combined();
-    let task = tokio::spawn(async move {
-        orrery_server::run(listener, app).await.expect("server run");
-    });
     Instance {
         dir,
         world,
+        control: base.clone(),
         base,
-        task,
+        tasks: vec![spawn_server(listener, app)],
     }
+}
+
+async fn bind() -> (tokio::net::TcpListener, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    (listener, base)
+}
+
+fn spawn_server(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        orrery_server::run(listener, app).await.expect("server run");
+    })
 }
 
 /// Run git hermetically, the way an authoring script would: identity pinned,
