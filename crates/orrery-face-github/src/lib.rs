@@ -1,6 +1,6 @@
 //! The GitHub REST face. Grows strictly on demand (spec/README.md rule 1):
-//! every endpoint here exists because a consumer in `spec/surface-github.md`
-//! or `spec/usage.md` needs it. Currently the authoring surface: repo
+//! every endpoint here exists because a consumer needs it, and is listed in
+//! `spec/surface-github.md`. Currently the authoring surface: repo
 //! creation, org membership and teams, pull requests (open/edit/merge),
 //! review requests, reviews, issue comments, labels, and check runs — the
 //! writes a scenario driver performs (spec/usage.md).
@@ -267,7 +267,7 @@ pub(crate) fn resolve_repo(
 }
 
 /// The GitHub 422 creation-failure envelope, as consumers parse it
-/// (spec/surface-github.md §4.1: `message` + `errors[].{code,field,message}`).
+/// (spec/grammar.md: `message` + `errors[].{code,field,message}`).
 pub(crate) fn creation_failed(code: &str, field: &str, message: &str) -> Response<Body> {
     let body = serde_json::json!({
         "message": "Repository creation failed.",

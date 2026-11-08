@@ -1,291 +1,216 @@
 # GitHub surface
 
-Extracted at TF commit `78c8bfd2` (2026-08-21). File:line references point into the TF tree at that commit. See `grammar.md` for headers/auth/rate-limit/pagination behavior shared across these calls.
+Everything the GitHub face serves, and how it behaves. Behavior every route shares (where the face is mounted, authentication, errors, pagination, conditional requests, and rate limits) is in `grammar.md`.
 
-Three producer classes reach GitHub, over three transports:
+The surface grows when a consumer needs it (rule 1). A route not listed here answers `501` naming itself. A request field GitHub defines but Orrery does not implement is refused with a `422` naming the field, never ignored, because ignoring it would leave the caller's world silently different from what it asked for. Section 4 lists where Orrery chose a behavior it has not observed on GitHub, and section 5 what is not served.
 
-| Producer | Process | Transport |
-| --- | --- | --- |
-| TF Go code (poller, tracker, reconcile, profiling, server handlers) | orchestrator | `internal/github.Client` — REST + GraphQL, org credential |
-| `tfac exec gh` verbs | agent → agenthost daemon → host client | REST only (GraphQL fails closed through the sidecar proxy client, `internal/github/client.go:472-481`) |
-| Real `gh` CLI | agent → per-run TLS injector (`internal/ghinjector`) → GitHub | REST + GraphQL, agent-composed |
+## 1. REST
 
-Base URLs: `https://api.github.com` / GHES `{host}/api/v3` / data-residency `api.<tenant>.ghe.com`; GraphQL at `/graphql` resp. `{host}/api/graphql` (NOT `/api/v3/graphql`). The gh injector presents a GHE-shaped host, so agent traffic arrives as `/api/v3/*` and `/api/graphql`, with `/api/v3` stripped before forwarding.
+Every route is under `/api/v3` and needs a token.
 
----
+### 1.0 Objects
 
-## 1. REST read catalog
+Routes answer with these shapes. Fields GitHub sends that are not listed are absent, never null.
 
-Each entry: consumers → params → response fields actually read → pagination/conditional → cadence → credential class. "Fields read" is the consumption contract — the mock may emit more, but these must be right.
-
-### 1.1 `GET /repos/{owner}/{repo}/pulls` — core discovery ⭐
-
-- **Consumers:** tracker Phase 1a (`internal/tracker/tracker.go:767` via `pulls.go:895,920`); reconcile gh-channel PR backstop (`internal/reconcile/reconcile.go:133`, always `etag=""`).
-- **Params:** `state=open&per_page=100&page=N`. No sort param — GitHub's default order (created desc) is load-bearing for the ETag fast path.
-- **Fields read** (`restPR` → `toDiscoverySnapshot`, `pulls.go:840,963`): `number`, `node_id`, `title`, `state` (upper-cased), `draft`, `html_url`, `created_at`, `updated_at`, `user.login`, `head.sha`, `head.ref`, `head.repo.full_name`, `base.ref`, `requested_reviewers[].login`, `requested_teams[].slug` (rendered `{owner}/{slug}`), `labels[].name`. `base.repo.full_name` is decoded but never read.
-- **Conditional:** the ONLY ETag consumer in the poll path. `If-None-Match` on page 1 only (`client.go:284-316`); etag stored in `repositories.pulls_etag`. On 304: stored snapshot fed back as fresh, repo enters the quiet set, suppressing both discovery and the GraphQL refresh for that repo. 304s don't consume rate budget.
-- **Pagination:** pages ≥2 unconditional while `len%100==0`, cap 10 pages (1,000 PRs) with WARN.
-- **Cadence:** once per tracked repo per poll cycle, errgroup width `TF_POLL_REPO_CONCURRENCY` (default 4, clamp [1,16]).
-- **Credential:** either. 403/404 → "repo unreachable, skip"; `ErrRateLimited` pins the round-robin resume cursor.
-
-### 1.2 `GET /repos/{owner}/{repo}/pulls/{number}` — single PR object
-
-Multiple consumers with different field consumption:
-- **Stub enrichment** (`tracker.go:650` via `GetPRBasic`, `pulls.go:74`): decoded to map via `prViewFromRaw` (`pulls.go:88`) but tracker consumes only `node_id`, `merged`, `state`. Fires once per snapshot-less stub entity per cycle, forever, until resolved; 404 deliberately NOT terminal.
-- **`gh pr view` / delegate run setup** (`GetPR`, `pulls.go:130-207`): full set — `number, node_id, title, body, state, merged, additions, deletions, changed_files, html_url, created_at, updated_at, user.login, head.{ref,sha,repo.clone_url,repo.ssh_url}, base.{ref,sha,repo.clone_url,repo.ssh_url}`. The delegate consumes the clone/ssh URLs + refs.
-- **prskeleton header** (`internal/prskeleton/fetch.go:64`): `title, state, draft, merged, created_at, updated_at, user.login, head.ref, head.sha, base.ref, mergeable_state, additions, deletions, changed_files, commits, comments, review_comments`.
-- **Live status** (`GetPRStatus`, `status.go:44`, `GET /api/dashboard/prs/.../status`): `mergeable`, `auto_merge` (presence), `mergeable_state`, `head.sha`.
-- **Artifact overlays** (`artifacts_handler.go:240,320,581`): `title`, `body` — fires on every artifact GET/PATCH/approve.
-- **Claim guards & freshness** (`review_freshness.go:41`, agenthost paths): `head.sha`, `base.ref`.
-- **node_id resolution for draft-flip mutations** (`status.go:200-208`): `node_id` only.
-
-### 1.3 `GET /repos/{o}/{r}/pulls/{n}/reviews` — `?per_page=100`, single page
-
-Consumers: `GetPR` (`pulls.go:145` — `id, user.login, state, body, submitted_at`); `GetPRStatus` (`status.go:63` — `user.login, state, submitted_at`; COMMENTED skipped, latest-per-author kept). Errors swallowed (partial result).
-
-### 1.4 `GET /repos/{o}/{r}/pulls/{n}/comments` — `?per_page=100`, single page
-
-`GetPR` (`pulls.go:151`): reads only `pull_request_review_id` (per-review comment counts).
-
-### 1.5 `GET /repos/{o}/{r}/issues/{n}/comments` — `?per_page=100`, single page
-
-`GetPR` (`pulls.go:187`): `id, user.login, body, created_at`.
-
-### 1.6 `GET /repos/{o}/{r}/issues/{n}/timeline` — prskeleton feed
-
-- `internal/prskeleton/fetch.go:88`. `per_page=100`, pages 1..5 (hard cap 500 events), stops on short page; mid-walk failure → partial + truncation marker. Plain `Accept: application/vnd.github.v3+json` — NOT the historical mockingbird-preview type.
-- Fields (union `timelineItem`, `fetch.go:213`): always `event`, `created_at`; actors `actor.login`/`user.login`; reviews `id, state, submitted_at`; commits `sha, message, author.name, author.date`; labels `label.name`; review requests `requested_reviewer.login` / `requested_team.slug`; renames `rename.to`; `line-commented` batches `comments[].{created_at, user.login, pull_request_review_id}`.
-- Event values mapped (all else dropped): `committed, reviewed, commented, labeled, unlabeled, review_requested, review_request_removed, ready_for_review, convert_to_draft, head_ref_force_pushed, renamed, base_ref_changed, merged, closed, reopened, line-commented`.
-- Fires once per delegated GitHub-PR run setup and once per follow-up blueprint step; best-effort.
-
-### 1.7 `GET /repos/{o}/{r}/commits/{sha}/check-runs` — `?per_page=100`, single page
-
-`GetPRStatus` (`status.go:111`): `check_runs[].{id (int64 on purpose), name, status, conclusion, completed_at, details_url}`; `details_url` parsed for `/actions/runs/{id}/`; deduped by name keeping highest id.
-
-### 1.8 `GET /repos/{owner}/{repo}` — repo object, three distinct uses
-
-- **Profile / rename detection** (`GetRepoMeta`, `events.go:280`; `profiler.go:293`): `id, full_name, default_branch, clone_url, ssh_url`. Rename detection depends on GitHub 301-redirecting a renamed repo and answering with the new `full_name` (⚠️ see `findings.md` — inferred, not test-asserted). Also `projects.go:407` (bundle preflight, consumes `clone_url`).
-- **Reachability probe** (`CheckRepoAccess`, `events.go:222` — hand-built request, no retry): body drained, status only. 200 → reachable/conclusive; 404 OR 403 → unreachable/conclusive; anything else → indeterminate → fail open. Callers: team-repos cold path (≤20 concurrent, 3s timeout each, probed across every credential tier at once) and the App repo-coverage probe in `ClientForRepo` (positives memoized 5 min).
-
-### 1.9 `GET /repos/{o}/{r}/contents/{path}` — profile docs
-
-`GetFileContent` (`events.go:347`); `profiler.go:290-292` fetches exactly `README.md`, `CLAUDE.md`, `AGENTS.md` (no `?ref=`). Fields: `content` (base64, newlines stripped), `encoding` (must be `"base64"` or hard error). ONLY 404 = absent; any other non-2xx errors the whole repo's profile pass. TTL: 3 days per repo unless forced. No `/languages`, `/git/trees`, `/commits`, or search calls anywhere in repoprofile.
-
-### 1.10 `GET /repos/{o}/{r}/compare/{base}...{head}` — three media shapes
-
-Path built with `url.PathEscape` on base/head; `...` literal.
-- JSON (`CompareCommits`, `pulls.go:366`): `ahead_by`, `files[].{filename,status,previous_filename,additions,deletions,patch}`. First page only, deliberately.
-- Diff media (`GetCompareDiff`, `pulls.go:312`, `Accept: application/vnd.github.v3.diff`): raw text. 406 = "too large" is a first-class response → falls back to files form.
-- Files form (`GetCompareFiles`, `pulls.go:324`): `files[]` only.
-Consumers: review freshness annotation (every review-artifact GET, best-effort), finalize frame, `pr add-review-comment` anchoring, `pr diff` staleness probe (`ahead_by` only; errors → 0).
-
-TF's base-branch watch (sky-ai-eng/triage-factory#1417) is a fourth consumer: it reads `old...tip` as JSON when a base branch's tip moves, and takes `status` (`identical`, `ahead`, `behind`, `diverged`), `total_commits`, `files[].{filename,status,previous_filename}` and `commits[].{sha,parents[].sha}`. A 404 (an old tip that no longer exists) means the base was rewritten. Its compare limits are GitHub's: at most 300 files and 250 commits listed. **What Orrery serves:** the JSON shape only, for revisions that resolve to commits in the repository (a sha, a branch name, or a `{ref}` either side), with renames detected and the files in path order. `ahead_by`, `behind_by` and `total_commits` count commits, `commits` lists the range oldest first, and an unresolvable end is the vendor-faithful 404. The diff and patch media shapes answer the NOT-MOCKED 422 on `Accept`.
-
-### 1.11 `GET /repos/{o}/{r}/pulls/{n}/files` — `?per_page=100&page=N`
-
-`GetPRFiles` (`pulls.go:239`): `filename, status, previous_filename, additions, deletions, patch`. Paged to `MaxPRFiles = 1000` with WARN. Consumers: `gh pr files`, 406 fallbacks. TF's base-branch watch reads `filename` and `previous_filename` of a pull with a renamed or copied file, up to 3000 files, because GraphQL gives no previous path. **What Orrery serves:** `filename`, `status` and `previous_filename` for each file the pull changes against its base branch's tip while open (the pinned base once terminal), paged by `per_page`/`page`; `additions`, `deletions` and `patch` are absent.
-
-### 1.12 PR diff media — `GET /repos/{o}/{r}/pulls/{n}` with `Accept: application/vnd.github.v3.diff`
-
-`GetPRDiff` (`pulls.go:283`): raw diff text; optional client-side single-file filter; 406 → files fallback.
-
-### 1.13 `GET /repos/{o}/{r}/issues/comments/{id}` — thread view
-
-`GetCommentThread` (`pulls.go:406`): `id, user.login, body, created_at`. Despite its doc comment there is NO review-comment fallback, and the verb's `--page` arg is ignored (see `findings.md`).
-
-### 1.14 `GET /repos/{o}/{r}/pulls/{n}/reviews/{review_id}` + `/comments`
-
-`GetReviewDetail` (`pulls.go:453,476`): review `id, user.login, state, body, submitted_at`; comments (`per_page=100`) `id, path, line, start_line, body, user.login, created_at`.
-
-### 1.15 Actions (agent tools only)
-
-- `GET /repos/{o}/{r}/actions/runs?head_sha={sha}&per_page=20&exclude_pull_requests=true` (`actions.go:199-204`): `workflow_runs[].{id,name,event,status,conclusion,head_sha,head_branch,created_at,html_url}`.
-- `GET .../actions/runs/{run_id}/jobs?per_page=100` (`actions.go:421`): `total_count`, `jobs[].{id,name,status,conclusion,started_at,completed_at}`.
-- `GET .../actions/runs/{run_id}/logs` (`actions.go:630` via `DownloadArtifact`): streamed zip, redirect-following (mock must serve a `Location`-redirected blob), 500 MB cap, 15-min timeout.
-- On 404 only, per completed job: `GET .../actions/jobs/{job_id}/logs` — plain text.
-
-### 1.16 Repo enumeration
-
-- `GET /user/repos?sort=pushed&direction=desc&per_page=100&page=N` (`events.go:102`): PAT-tier reachable mirror (`reachcache/refresher.go:265`) + PAT preflight. Fields: `id, full_name, html_url, description, language, pushed_at, private`. Cap 100 pages / 10,000 repos; truncation → `complete=false` → nothing written, previous mirror kept.
-- `GET /installation/repositories?per_page=100&page=N` (`events.go:186`): App tier. Envelope `total_count`, `repositories[]` with the same seven fields. Walks until `len >= total_count` or empty page; same cap and refuse-on-incomplete. **Called by two independent walkers back-to-back each cycle** (grant mirror + poll intersection — acknowledged duplication). App installation token ONLY (PAT gets 403). Suspended installations skipped without a request.
-
-### 1.17 Teams
-
-- `GET /orgs/{org}/teams?per_page=100&page=N` (`teams.go:354`): poller group-prune, once per distinct repo owner per cycle. Fields: `slug` (used), `name` (decoded). Cap 20 pages. An error must NOT prune — 403/404 behavior is load-bearing. Orrery answers an org's teams oldest first, `[]` for an org that never made one (which the poller skips rather than prunes against), and 404 for any other login. A listed team is GitHub's listing shape: `id, node_id, url, html_url, name, slug, description, privacy, notification_setting, permission, members_url, repositories_url, parent`.
-- `GET /orgs/{org}` (TF `50266e9b`: `GetOrg`, `teams.go:64`, called from `internal/poller/manager.go:1017`): the poller's team reconcile, once per distinct repo owner per cycle whose team listing above is non-empty, for the organization's id, which the team mappings record, so a renamed organization's mappings are found by id. Fields: `id`, `login`. GitHub answers 404 for a user account's login or one nobody holds; TF surfaces it as an error and skips the owner rather than pruning. Orrery answers an org with GitHub's organization object (the object a team carries — `login, id, node_id, type, url, repos_url, members_url, description` — plus `avatar_url, html_url, created_at, updated_at`), and 404 for any other login. TF's poll end-to-end test reads the id here too, to build the mappings it polls against.
-- `GET /user/teams?per_page=100&page=N` (`teams.go:68,111`): local/PAT only — poll cycle (`slug`, `organization.login`) and the include-membership settings read (`slug, name, members_count, organization.login`). App tokens can't answer this; failure non-fatal. Orrery answers the user's teams across organizations as full team objects (the listing shape plus `members_count, repos_count, created_at, updated_at, organization`), and refuses a bot (App) token 403 "Resource not accessible by integration", as GitHub refuses an installation token.
-- GraphQL `organization.teams` — see § 3.
-
-### 1.18 `GET /repos/{o}/{r}/branches?per_page={n}&page={n}` — branch picker
-
-`ListBranchesPage` (`events.go:317`; `repos_handler.go:969`): `name` only. Pass-through proxied list; no server-side search (client filters).
-
-### 1.20 `GET /repos/{o}/{r}/git/ref/heads/{branch}` — a base branch's tip
-
-TF's base-branch watch (sky-ai-eng/triage-factory#1417; `BranchTip`, `internal/github/branch_moves.go`): one read per base branch an open pull targets, per poll cycle, conditional on the `ETag` of the last 200 (`If-None-Match`). It reads `object.sha`; a 304 costs nothing against the rate limit and means the tip has not moved. The branch name's `/` stays a path separator, each segment escaped. A missing branch is a 404. **What Orrery serves:** `{ref, url, object: {sha, type: "commit", url}}`; the `ETag` is derived from the body, so it changes iff the tip does, and a replayed tag answers 304 with no body.
-
-### 1.19 Identity & validation
-
-- `GET /user` + `GET /user/emails` (`validate.go:128,183`; also GoTrue, §2.1): `id, login, avatar_url, name`; emails `email, primary, verified` (Orrery serves an actor's stored addresses, primary first; every actor starts with `<login>@orrery.invalid`, and the control plane sets the rest) — first primary+verified wins, else hard error. Status contract: 200 / 401 bad token / 403 missing scopes (`/user/emails` 403 → dedicated error). ⚠️ Builds its own URL, hardcoding `{base}/api/v3/user` for non-github.com — diverges from `github.APIBase` on `.ghe.com` hosts (probable bug; `findings.md`).
-- **Bot actors.** A `bot` actor stands for a GitHub App: REST spells its login `<login>[bot]` with `"type": "Bot"`, GraphQL types its author `Bot` with the bare login (TF's `restLogin` reconciles the two spellings), and its token is refused on `GET /user`, `GET /user/emails` and `/user/repos` with 403 "Resource not accessible by integration", as GitHub refuses an installation token there. A PAT is not an actor of its own: it is a user actor's token, a machine user's included, so it renders as that user.
-- `GET /users/{login}` (`client.go` `UserID`, called from `github_app_register.go` and `deploymentapp.go` `fetchBotUserID`): an App bot's user id (`"<slug>[bot]"` path-escaped), from which TF builds the noreply email on the App's commits. TF sends it **without a token**: App registration has no installation token yet, and the deployment App's startup check makes the same read. Field: `id`. Failure non-fatal: TF falls back to the plain `<slug>[bot]@users.noreply.github.com` email. TF's poll end-to-end test reads a user's `id` here too, with a token (TF `50266e9b`). Orrery answers a user's or an organization's login, or a bot as `<slug>[bot]`, with the object `GET /user` answers for that account (`type` `User`, `Organization` or `Bot`), and 404 for a bot's bare slug or a login nobody holds. Like the rest of the REST face it requires a token, so TF's tokenless reads get 401. No TF test drives App registration or the deployment App through Orrery, so nothing consumes the tokenless form yet.
-- API-root reachability probe (`reachability.go:66`): bare `GET {APIBase(url)}`, UA `triage-factory-reachability`, redirects not followed; ANY HTTP status = reachable.
-
----
-
-## 2. GitHub App / auth endpoints
-
-All `internal/githubapp` calls carry `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`, `User-Agent: triage-factory-githubapp` — unlike the main client (see `grammar.md`).
-
-| Endpoint | Auth | Contract |
-| --- | --- | --- |
-| `GET /app/installations?per_page=100` | app JWT | Link-header pagination (`rel="next"`), same-origin pinned (cross-origin Link = hard error). Fields: `id, account.{id,login,type}, created_at, suspended_at, suspended_by.login, repository_selection`. Fires every poll cycle (grant reconcile) + cutover/settings paths. |
-| `POST /app/installations/{id}/access_tokens` | app JWT | **201 exactly** (200 fails the mint). Optional body `{"repositories":[bare names],"permissions":{...}}` — narrowing; out-of-grant → 422 expected. Response: `token`, `expires_at` (required, must be strictly future). Cached per installation, 5-min expiry guard; scoped mints bypass cache. The hot path for every credential mint. |
-| `GET /app` | app JWT | Fields: `id, slug, client_id, owner.{login,type}, permissions, events`. 401 = bad App-ID/key pair. |
-| `GET /app/hook/config` | app JWT | Fields: `url, content_type, secret` (emptiness only). 404 → `ErrHookAPIUnavailable` (GHES < 3.2). 10-min/2-min TTL cache. |
-| `GET /app/hook/deliveries` | app JWT | Link-paginated, same-origin pinned. Params vary: `per_page=1` / `per_page=30` (health), `status=failure&per_page=100`, ≤2 pages (replay). Fields: `id, guid, delivered_at, redelivery, status, status_code, event, action, installation_id`. |
-| `POST /app/hook/deliveries/{id}/attempts` | app JWT | any 2xx (GitHub sends 202); body ignored. |
-| `POST /app-manifests/{code}/conversions` | none (code is the credential) | **201 exactly**. Fields: `id, slug, client_id, client_secret, pem, webhook_secret` (last optional). |
-| `POST /applications/{client_id}/token` | Basic `client_id:client_secret` | Body: bogus token. **401 = bad secret, 404 = valid secret**, else inconclusive. Response body never read. |
-| `POST {webBase}/login/oauth/access_token` | none | Web host, not API base. Form: `client_id, client_secret, code, redirect_uri`; `Accept: application/json`. Reads `access_token, token_type, error, error_description` — 200 even on logical failure, `error` checked independently. |
-
-JWT shape (mint side, for reference): RS256, claims exactly `{iss: <numeric app id>, iat: now-60s, exp: now+9m}`; PKCS#1 and PKCS#8 keys both accepted.
-
-### 2.1 The OAuth web flow (GoTrue's GitHub provider)
-
-TF's multi mode signs people in through GoTrue, whose GitHub provider runs GitHub's OAuth web flow against `GOTRUE_EXTERNAL_GITHUB_URL`. With that URL set to a GHES-style host, GoTrue sends the browser to `{url}/login/oauth/authorize`, exchanges at `{url}/login/oauth/access_token`, and reads identity at `{url}/api/v3/user` and `{url}/api/v3/user/emails` (§1.19). Observed in GoTrue v2.189.0 (`internal/api/provider/github.go`) and in TF's SSO end-to-end suite (`e2e/sso`).
-
-| Endpoint | Auth | Contract |
-| --- | --- | --- |
-| `GET {webBase}/login/oauth/authorize` | none (browser) | Query: `client_id, redirect_uri, scope, state` (GoTrue's scope is `user:email`). Unknown `client_id` → 404 page. `redirect_uri` optional, defaulting to the app's callback URL; when given, scheme, host and port must equal the callback's and the path must be the callback's or below it, else a 302 to the callback with `error=redirect_uri_mismatch, error_description, error_uri, state`. GitHub's sub-domain allowance and loopback-port exception are not modeled (refused). |
-| `POST {webBase}/login/oauth/authorize` | an actor's login (form) | Orrery's stand-in for GitHub's sign-in and consent pages: form fields as above plus `login`, naming an existing **user** actor (rule 12: no passwords exist). An unknown login or a non-user actor re-renders the page with "Incorrect username or password." Success → 302 to `redirect_uri` with `code` and `state`. |
-| `POST {webBase}/login/oauth/access_token` | `client_id` + `client_secret` | Params from the query, a form body or a JSON body; the client pair may instead be HTTP Basic. Response form-encoded unless `Accept: application/json` (`application/xml` is not mocked). Success: `access_token, token_type=bearer, scope`. Refusals are **200** with `error, error_description, error_uri`: `incorrect_client_credentials`, `bad_verification_code` (unknown, spent, or older than 10 minutes on the virtual clock), `redirect_uri_mismatch` (a `redirect_uri` that differs from the one the code was issued for). A code is spent by its first successful exchange. |
-
-Scopes are recorded and echoed, not enforced: no face route checks a token's scopes.
-
----
-
-## 3. GraphQL surface (TF's own client)
-
-Updated at TF commit `a53a770e` (2026-10-20), where triage-factory's poll end-to-end test (`internal/poller/poll_e2e_test.go`, the `poll-e2e` workflow) found the queries had grown since the extraction: `fullDatabaseId`, backward paging on `reviews`/`comments`, and `rateLimit`. Updated again at TF commit `50266e9b` (2026-10-22), where TF identifies the accounts and teams it routes by GitHub's ids rather than their handles: `databaseId` on every `User`, `Bot`, `Team` and `Organization` it selects. Updated again at TF commit `1a6b86e0` (2026-10-22, sky-ai-eng/triage-factory#1282), where TF's merged and closed events name who merged or closed the pull request: `mergedBy`, and the actor of the newest `ClosedEvent` through an aliased `timelineItems`. Updated again at TF commit `b05a76fd` (2026-10-31, sky-ai-eng/triage-factory#1409), where a probe worker becomes TF's only reader of a pull request's mergeability: `mergeable` leaves `prBaseFields`, and the `PRMergeability` query reads it with `headRefOid`.
-
-`PostGraphQL` (`client.go:472-542`): empty Accept header; queries only (never mutations except the two below); refused through the sidecar REST proxy (fails closed). **A 200 carrying both `data` and `errors[]` is partial success** — the mock must be able to produce this (e.g. FORBIDDEN `statusCheckRollup` on one node), and `null` entries in `nodes` are skipped.
-
-### Queries
-
-- **`search(query,type:ISSUE,first:50)` — discovery/backfill** (`graphql.go:198`). Only when a viewer login exists (local/PAT; multi dashboard backfill once per user/host). Four query bases over 30 days, batched ≤3 `repo:` scopes / ≤256 chars each: `is:pr is:merged author:{u} merged:>=`, `is:pr is:merged reviewed-by:{u} merged:>=`, `is:pr is:closed is:unmerged author:{u} closed:>=`, same with `reviewed-by`. Single page, no cursor. Fragment: `prDiscoveryFragment` (below), no `statusCheckRollup`.
-- **`nodes(ids:[ID!]!)` — Phase-2 batch refresh** (`graphql.go:287`). Chunks of 20 ids. Open batch uses `prFullFragment`; terminal batch and reconcile use `prDiscoveryFragment`.
-- **`nodes(ids:[ID!]!){...on PullRequest{id, mergeable, headRefOid}}` — the mergeability probe** (`graphql.go`, query `PRMergeability`). Up to 100 ids per document, one document per repository; a `null` entry, or a node that is not a pull, is skipped. `headRefOid` is the head the answer was read at.
-- **`node(id:){...on PullRequest}{comments(last:50, before:$before)}`** — the tracker's new-comment read (`pr_comments.go`, query `PRComments`): `totalCount, pageInfo{hasPreviousPage, startCursor}, nodes{fullDatabaseId, createdAt, author{__typename, login, ...on User{databaseId}, ...on Bot{databaseId}}, body}`. Walks backwards from the newest comment through `startCursor` until it reaches what it saw last cycle.
-- **`node(id:){...on PullRequest}{reviews(last:50, before:$before, states:[APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED])}`** — the tracker's new-review read (`pr_reviews.go`, query `PRReviews`): `totalCount, pageInfo{hasPreviousPage, startCursor}, nodes{fullDatabaseId, state, submittedAt, author{__typename, login, ...on User{databaseId}, ...on Bot{databaseId}}, body, comments(first:100){totalCount, nodes{fullDatabaseId, path, body}}}`. `totalCount` counts the `states`-filtered set.
-- **`nodes(ids:[ID!]!){...on PullRequest{id, headRefOid, changedFiles, files(first:100){pageInfo{hasNextPage, endCursor}, nodes{path, changeType}}}}` — the base-branch watch's changed paths** (query `PRChangedPaths`, sky-ai-eng/triage-factory#1417). Up to 100 ids per document. TF pages a pull with more files through `node(id:){...on PullRequest{headRefOid, files(first:100, after:$cursor){...}}}` (query `PRChangedPathsPage`), and checks that each page was read at the head the first was. **What Orrery serves for `files`:** the pull's files in path order, paged by `first`/`after` (a cursor names how many files precede it); `changeType` is `ADDED`, `DELETED`, `RENAMED`, `COPIED`, `MODIFIED` or `CHANGED`, and there is no previous path, which is why TF reads that over REST (§1.11). `changedFiles` counts a rename once, as `files` does.
-- **`rateLimit { cost }`** is selected by every query document, and its cost is recorded per operation (`client.go` `recordQueryCost`). A null `rateLimit` is allowed — a GHES with rate limiting off sends it — and records nothing; Orrery, which presents as that GHES, answers null.
-- **`node(id:){...on PullRequestReview}`** (`pending_reviews.go:58`): `state, body, comments(first:100){pageInfo.hasNextPage, nodes{id, path, line, startLine, body}}` — `line`/`startLine` are nullable and null is meaningful (outdated comment), must not collapse to 0. `null` node = absence, not error.
-- **Aliased branch existence** (`branches.go:65`): batches of 50 aliases, `r{i}: repository(owner:$o{i}, name:$n{i}){ref(qualifiedName:$q{i}){id}}` with `q = refs/heads/<branch>`. Presence only; a null repository alias or an alias named in `errors[].path[0]` = unknown, never "deleted".
-- **`organization.teams`** (`teams.go:159,258`): with/without `userLogins:` filter; cursor-paged, cap 20; `organization.databaseId`, `pageInfo.{hasNextPage,endCursor}`, `nodes[].{databaseId,slug,name,members.totalCount}`; null organization = empty result. Settings and onboarding reads only (TF `50266e9b`: `internal/server/github_teams.go`, `github_groups.go`); the poll path reads teams through REST (§1.17).
-
-### Fragments (exact consumption)
-
-`prBaseFields` (`graphql.go:15`): `id, number, title, body, author{__typename, login, ...on User{databaseId}, ...on Bot{databaseId}}, state, isDraft, merged, mergedBy{__typename, login, ...on User{databaseId}, ...on Bot{databaseId}}, headRefName, baseRefName, url, repository.nameWithOwner, headRepository.nameWithOwner, additions, deletions, changedFiles, reviewRequests(first:100){pageInfo.hasNextPage, nodes.requestedReviewer{User.{login, databaseId} | Team.{databaseId, slug, organization.login}}}, latestReviews(first:20){nodes{id, fullDatabaseId, author{__typename, login, ...on User{databaseId}, ...on Bot{databaseId}}, state, submittedAt, comments.totalCount}}, reviews(last:1, states:[APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]){totalCount, nodes{fullDatabaseId, submittedAt}}, closedEvents: timelineItems(last:1, itemTypes:[CLOSED_EVENT]){nodes{...on ClosedEvent{actor{__typename, login, ...on User{databaseId}, ...on Bot{databaseId}}}}}`. `PullRequest` has no closer field, so TF reads who closed a pull from the newest `ClosedEvent`, and only while `state` is `CLOSED`. `fullDatabaseId` is GitHub's `BigInt` scalar, a string on the wire; TF also accepts a number. `databaseId` on `User`, `Bot`, `Team` and `Organization` is GitHub's `Int` — the id REST answers as `id`. A selection naming a field Orrery lacks fails the whole document, so every query carrying these fragments needs the `Bot` field even when no bot authored anything.
-
-`prDiscoveryFragment` (`graphql.go:67`) = base + `commits(last:1){nodes.commit{oid, committedDate}}, labels(first:10){nodes.name}, comments(last:1){totalCount, nodes{fullDatabaseId, createdAt}}, createdAt, updatedAt, mergedAt, closedAt`.
-
-`prFullFragment` (`graphql.go:107`) = base + commits with `statusCheckRollup{contexts(first:100){pageInfo.hasNextPage, nodes{__typename, ...on CheckRun{databaseId, name, status, conclusion, completedAt, detailsUrl, checkSuite.workflowRun.databaseId}}}}` + labels/comments/timestamps + `timelineItems(last:20, itemTypes:[LABELED_EVENT, UNLABELED_EVENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT]){nodes{__typename, createdAt, label.name, requestedReviewer{User.login | Team.slug + Team.organization.login}}}`. `StatusContext` union members are decoded then dropped — legacy commit statuses are silently ignored; only CheckRun survives.
-
-**What Orrery serves for `timelineItems`:** `LabeledEvent` and `UnlabeledEvent` from the label writes in §4.1, and `ReadyForReviewEvent` from `markPullRequestReadyForReview`, each dated at the world clock when it happened. `itemTypes` filters, and `first`/`last`/`before` page as on `reviews`. `ReviewRequestedEvent` and `ReviewRequestRemovedEvent` come from the review-request writes in §4.1, each naming its `requestedReviewer` (a `User`, or a `Team` with its `organization`); a request whose team has since been deleted keeps its item with a null `requestedReviewer`, even after a new team takes the slug (the item names the team by id). `ClosedEvent` comes from a close (`PATCH …/pulls/{n}` with `"state": "closed"`) and from a merge, naming its `actor`: GitHub logs a `closed` issue event beside `merged`, by the same actor at the same time, so a merged pull's newest `ClosedEvent` is its merger. The full fragment's own `timelineItems` does not ask for it. `labels(first:)` returns the pull's labels ordered by name.
-
-**What Orrery serves for `mergeable` and `headRefOid`:** `mergeable` is a test merge of the pull's head onto its base branch's tip, computed when it is read: `MERGEABLE` when it merges clean, `CONFLICTING` when it does not, and `UNKNOWN` for a pull that is not open or whose base branch is gone. Unlike GitHub, which answers `UNKNOWN` until its own test merge finishes, Orrery computes it on the read. `headRefOid` is the pull's head commit.
-
-**What Orrery serves for `mergedBy`:** the actor who merged the pull (`PUT …/pulls/{n}/merge`), typed `User` or `Bot` like an author, with its `databaseId`; null until the pull merges.
-
-**What Orrery serves for `reviewRequests` and `organization.teams`:** `reviewRequests(first:)` lists the pull's pending requests, users then teams, each in request order. Every `User`, `Bot`, `Team` and `Organization` carries its `databaseId`, the id REST gives the same account or team; a user whose actor row is missing reads with a null one. `organization.teams` lists an org's teams oldest first, `userLogins` keeping those with any of the logins on them, paged by `first`/`after`; `members.totalCount` counts the team's members.
-
-**Page bounds:** every connection Orrery pages takes exactly one of `first` and `last`, neither negative nor above 100, and refuses otherwise with GitHub's messages: "You must provide a `first` or `last` value to properly paginate the `X` connection.", "Requesting N records on the `X` connection exceeds the `first` limit of 100 records.", and "Passing both `first` and `last` …". A negative value is refused as "`first` on the `X` connection cannot be less than zero." (Orrery's wording; see `findings.md`). Every connection TF selects passes `first` or `last`.
-
-### TF's two GraphQL mutations
-
-`markPullRequestReadyForReview` and `convertPullRequestToDraft` (`status.go:198-248`; approval + dashboard drag): each preceded by a REST PR read for `node_id`; response discarded.
-
----
-
-## 4. Write surface
-
-### 4.1 TF Go direct writes (13 REST sites + the 2 mutations above)
-
-| Call | Site | Body / contract |
-| --- | --- | --- |
-| `POST /repos/{o}/{r}/pulls` | `CreatePR` (`pulls.go:612`) ← `exec gh pr create` | `{title, head, base, body, draft}` — draft hardcoded `true` by the verb. Response: `number, html_url, node_id`. 422 envelope `message` + `errors[].{code,field,message}` parsed. |
-| `PATCH /repos/{o}/{r}/pulls/{n}` | `UpdatePR` (`pulls.go:643`) ← artifact edit + approval footer | `{title, body}` whole-field replace (omitted field pre-read live). |
-| `PATCH /repos/{o}/{r}/pulls/{n}` | `ClosePR` (`pulls.go:662`) ← abandon draft | `{"state":"closed"}`; failures logged only. |
-| `POST /repos/{o}/{r}/pulls/{n}/reviews` | `SubmitReview` (`pulls.go:541`) ← human approval of staged review + auto-post posture | `{commit_id, event: APPROVE\|COMMENT\|REQUEST_CHANGES, body, comments[]?{path, line, start_line?, body}}`. Response: `id` only; URL composed locally as `<pull url>#pullrequestreview-<id>`. Wire-relevant errors: 422+REQUEST_CHANGES → "own PR"; body containing `must be part of the same hunk` → hunk message. |
-| `PUT /repos/{o}/{r}/pulls/{n}/reviews/{id}/dismissals` | `pulls.go:730` ← `exec gh pr review-dismiss` | `{"message": ...}` — TF does NOT send `event: DISMISS` (see `findings.md`). Response ignored. |
-| `POST /repos/{o}/{r}/issues/{n}/comments` | `pulls.go:752` ← `exec gh pr add-comment` | `{"body"}`. Response: `id, html_url`. |
-| `POST /repos/{o}/{r}/pulls/{n}/comments/{id}/replies` | `pulls.go:767` ← `exec gh pr comment-reply` | `{"body"}`. Response: `id`. |
-| `POST .../reactions` (two-path probe) | `pulls.go:782` ← comment-react | Tries `/issues/comments/{id}/reactions`, on ANY error retries `/pulls/comments/{id}/reactions`. `{"content": emoji}`. Response ignored. |
-| `PATCH` comment (two-path probe) | `pulls.go:806` ← comment-update (numeric id) | `/issues/comments/{id}` then `/pulls/comments/{id}`. `{"body"}`. |
-| `DELETE` comment (two-path probe) | `pulls.go:826` ← comment-delete (numeric id) | Same two paths; no body. |
-
-Affirmatively absent: TF posts no comments/labels/statuses/check-runs of its own accord; no RUN_URL is ever written to GitHub by Go code (`{{RUN_URL}}` is a prompt placeholder only); poller/tracker/reconcile/curator/grantmirror are read-only.
-
-**Authoring writes beyond TF's inventory**, which TF's poll end-to-end test uses to build its world:
-- `POST`/`PATCH .../check-runs` (`usage.md`).
-- `POST /repos/{o}/{r}/issues/{n}/labels`, taking `{"labels": [names]}` or a bare array of names, answering 200 with the issue's labels. Label objects (`{"name": ...}`) are refused as not mocked. A name already on the pull is skipped, matched without case, and an empty or longer-than-50-character name is a 422.
-- `DELETE /repos/{o}/{r}/issues/{n}/labels/{name}`, answering 200 with the labels left, or 404 "Label does not exist".
-- Orrery keeps labels per pull, not per repository: a label object carries `name`, `color` `ededed` (what GitHub gives a label it creates on first use), `default` false and `description` null, and no `id`.
-- `PUT /orgs/{org}/memberships/{username}`, `{"role": "admin"|"member"}` (`member` when absent), answering 200 with the membership (`url, state, role, organization_url, organization, user`). Orrery presents as a GitHub Enterprise Server, which adds a member directly rather than inviting them, so `state` is always `active`. Only a user actor can be a member; an unknown org or user is 404, an unknown role 422.
-- `POST /orgs/{org}/teams`, `{"name", "description"?, "privacy"?}`, answering 201 with the full team object (§1.17). An empty body, or a missing, null or blank `name`, is 422 `missing_field`; a `name` that is not a string is 422 `invalid`. The slug is the name lower-cased with each run of other characters turned into one hyphen. A creator who is a member of the org becomes the team's first maintainer, as on GitHub. A name or slug already in the org is 422 `already_exists`. `maintainers`, `repo_names`, `parent_team_id` and `privacy: secret` are refused as not mocked.
-- `DELETE /orgs/{org}/teams/{team_slug}`, answering 204. The team's pending review requests go with it.
-- `PUT /orgs/{org}/teams/{team_slug}/memberships/{username}`, `{"role": "member"|"maintainer"}`, answering 200 `{url, role, state: "active"}`; `DELETE` on the same path answers 204, including for a user who is not on the team (GitHub documents only 204 and 403 for it), and 404 for an unknown org, team or user. Only a member of the org can join its teams; Orrery refuses anyone else with a 422 (see `findings.md`).
-- `POST /repos/{o}/{r}/pulls/{n}/requested_reviewers`, `{"reviewers": [logins], "team_reviewers": [slugs]}`, answering 201 with the pull, whose `requested_reviewers` and `requested_teams` now list them. A reviewer already pending is skipped. The pull's author is refused 422 `{"message": "Validation Failed", "errors": ["Review cannot be requested from pull request author."]}`; a login that is not a user, or a team not in the org that owns the repository (a user's repository has no teams), is refused 422 with GitHub's "Reviews may only be requested from collaborators…" message. Neither array, or both empty, is 422 `missing_field`.
-- `DELETE /repos/{o}/{r}/pulls/{n}/requested_reviewers`, `{"reviewers": [...], "team_reviewers"?: [...]}` (`reviewers` required, possibly empty), answering 200 with the pull. A name with no pending request is skipped.
-- A submitted review removes its author's pending request — GitHub: "Once a requested reviewer submits a review, they are no longer considered a requested reviewer" (REST reference, "Get all requested reviewers for a pull request"). A team's request stays.
-- Orrery models no permissions: any authenticated actor may make these writes, as any actor may label or merge.
-
-### 4.2 `tfac exec gh` verbs (agent-initiated, host-executed)
-
-Read verbs compose §1 endpoints (view=4 GETs; diff=diff-media+406 fallback+compare; files; thread-view; review-view; actions×2). Write verbs map to the table above. Review staging is TF-side: `start-review` = 1 read (zero writes), `add-review-comment` = reads only (staged into artifact `details_json`), `finalize-review` = 0 writes (approval posture, default) or 1 `POST .../reviews` (auto-post posture). `SubmitReview` exists on the IPC seam but no verb calls it — don't over-provision from the IPC surface.
-
-### 4.3 Real `gh` CLI through the injector
-
-Env contract: `GH_HOST=<injector host>`, `GH_ENTERPRISE_TOKEN=<placeholder>`, `SSL_CERT_FILE=<per-run CA>`, `GH_CONFIG_DIR=<empty dir>`. Injector strips `/api/v3`, swaps auth to `token <real>` upstream (fail-anonymous on resolution failure), deletes forwarding headers, routes `/api/graphql` to the GraphQL upstream. Git smart-HTTP shares the same port-443 listener, routed by path suffix BEFORE the API auth gate.
-
-**Porcelain is GraphQL-first** (pinned-gh conformance, `gh_conformance_test.go`):
-
-| gh command | Wire |
+| Object | Fields |
 | --- | --- |
-| `pr create` | `createPullRequest` — selection is only `pullRequest{id url}`, so no number in the response; parsed from the URL |
-| `pr comment` / `--edit-last` / `--delete-last` | `addComment` / `updateIssueComment` / `deleteIssueComment` |
-| `pr close` / `reopen` / `edit` | `closePullRequest` / `reopenPullRequest` / `updatePullRequest` |
-| `pr edit --add-label/--remove-label` | `addLabelsToLabelable` / `removeLabelsFromLabelable` (separate request) |
-| `pr edit --add-reviewer` | TWO requests: REST `POST .../requested_reviewers` AND `updatePullRequest` |
-| `pr ready` / `--undo` | `markPullRequestReadyForReview` / `convertPullRequestToDraft` |
-| `pr merge --merge` / `--auto` / `--disable-auto` | `mergePullRequest` / `enablePullRequestAutoMerge` / `disablePullRequestAutoMerge` |
-| `pr review` | `addPullRequestReview` — **refused by the gate** |
-| `pr lock/unlock`, `pr revert`, `pr update-branch` | `lockLockable`/`unlockLockable`, `revertPullRequest`, `updatePullRequestBranch` |
-| `issue` family | `createIssue, addComment, closeIssue, reopenIssue, deleteIssue, updateIssue, pinIssue, unpinIssue, transferIssue, createLinkedBranch, lockLockable, unlockLockable` |
-| `repo archive/unarchive/edit/fork/delete` | GraphQL archive/unarchive; REST `PATCH /repos`, `POST .../forks`, `DELETE /repos` |
-| `repo create` | `createRepository` / `cloneTemplateRepository` — **refused**; `--add-readme` variant is REST `POST /user/repos` or `/orgs/{org}/repos` — **refused** |
-| `label create/edit/delete` | REST `POST/PATCH/DELETE /repos/{o}/{r}/labels[/{name}]` |
-| `release create/edit` | REST `POST .../releases`, `PATCH .../releases/{id}` |
-| inline review comments | ONLY via `gh api` REST — porcelain has no flags for them |
+| Nested user | `login, id, node_id, type, site_admin` (`false`). `type` is `User`, `Organization`, or `Bot`; a bot's `login` is `<slug>[bot]`. |
+| User | A nested user plus `name` (the login), `avatar_url`, `url`, `html_url` (`{base}/apps/{slug}` for a bot), `created_at`, `updated_at` |
+| Organization | A nested user plus `url, repos_url, members_url, description` (null), `avatar_url, html_url, created_at, updated_at` |
+| Team | `id, node_id, url, html_url, name, slug, description, privacy` (`closed`), `notification_setting, permission` (`pull`), `members_url, repositories_url, parent` (null). A full team adds `members_count, repos_count` (0), `created_at, updated_at, organization`. |
+| Repository | `id, node_id, name, full_name, owner, private, visibility, description, fork` (false), `html_url, url, clone_url, git_url, ssh_url, default_branch, language` (null), `archived, disabled` (false), `created_at, updated_at, pushed_at` (null until a push or merge) |
+| Pull request | `id, node_id, number, state` (`open` or `closed`), `locked` (false), `title, body, draft, user, html_url, url, issue_url, merged, mergeable` (always null; see GraphQL `mergeable`), `merge_commit_sha, merged_by, created_at, updated_at, closed_at, merged_at, head, base` (each `label, ref, sha, user, repo`), `labels, requested_reviewers, requested_teams, assignees` (empty), `milestone` (null) |
+| Review | `id, node_id, user, body, state` (`APPROVED`, `CHANGES_REQUESTED`, or `COMMENTED`), `commit_id, html_url, pull_request_url, submitted_at, author_association` (`NONE`) |
+| Issue comment | `id, node_id, user, body, html_url, url, issue_url, created_at, updated_at, author_association` (`NONE`) |
+| Label | `name, color` (`ededed`, what GitHub gives a label created on first use), `default` (false), `description` (null). No `id`. |
+| Check run | `id, node_id, name, head_sha, status, conclusion, external_id, details_url, url, html_url, started_at, completed_at, output, check_suite` (null), `app` (`slug` and `name`, the bot's bare login) |
 
-**Gate (refusals, 403 + JSON envelope `{message, triage_factory:{refused, reason, ...}}`, pre-forward):** three families — `review` (`addPullRequestReview`, `submitPullRequestReview`, `addPullRequestReviewThread`, REST `POST .../reviews`), `repo_create` (`createRepository`, `cloneTemplateRepository`, REST `/generate`, `POST /user/repos`, `POST /orgs/{org}/repos`), `unreadable` (GraphQL body over 1 MiB cap, malformed, ambiguous operation, unresolved fragment). Merging is deliberately NOT gated. REST paths are `path.Clean`-normalized before matching.
+A pull request's `labels` are ordered by name, ignoring case, and its `requested_reviewers` and `requested_teams` are in request order. Its `head.repo` and `base.repo` are always the same repository.
 
-**Observation (artifact capture):** 2xx POSTs only. GraphQL arm keys on exact `data.createPullRequest` → consumes `pullRequest.{id, url}` (head/base/title stay empty — gh doesn't select them). REST arm recognizes post-rewrite `.../pulls` (fields `number, node_id, html_url, title, body, draft, head.ref, base.ref`) and `.../pulls/{n}/reviews` (dead under the current gate). **Audit** fires for every mutation on any status; REST bodies never read (method+path classification only); GraphQL response read for `errors[]` presence + first `url` at depth ≤6.
+### 1.1 Users and organizations
 
-**Classification tables** (`internal/ghwrite/classify.go:339-668`, `graphql.go:130-211`) enumerate ~30 REST shapes and ~30 mutations → action names (`pr_created`, `review_submitted`, `label_added`, …). These tables are the ready-made write-action vocabulary for the mock's semantic diff.
+| Route | Behavior |
+| --- | --- |
+| `GET /user` | The caller as a user object. An organization's token answers the organization. |
+| `GET /user/emails` | `[{email, primary, verified, visibility}]`, the primary first, then by address. `visibility` is `private` on the primary and null otherwise. Every actor starts with `<login>@orrery.invalid`, primary and verified; the control plane replaces the set. |
+| `GET /users/{username}` | A user or organization by login, or a bot as `<slug>[bot]`. A bot's bare slug, or a login nobody holds, is `404`. |
+| `GET /user/teams` | The caller's teams in every organization, as full teams, paged. |
+| `GET /orgs/{org}` | The organization object, or `404` for any login that is not an organization. |
 
-**Structural blind spot (accepted):** gh commands following absolute URLs from response bodies (release-asset `upload_url`) leave the channel entirely — not injected, gated, or logged.
+A bot's token is refused on `GET /user`, `/user/emails`, `/user/teams`, and `/user/repos` with `403` `{"message": "Resource not accessible by integration", ...}`, as GitHub refuses an installation token.
 
----
+### 1.2 Organization membership and teams
 
-## 5. Inbound webhooks (what the mock must be able to SEND)
+| Route | Behavior |
+| --- | --- |
+| `PUT /orgs/{org}/memberships/{username}` | Body optional; `role` is `member` (the default) or `admin`, else `422`. Answers `{url, state, role, organization_url, organization, user}`. Orrery presents as a GitHub Enterprise Server, which adds a member directly, so `state` is always `active`. Only a user can be a member; an unknown organization or user is `404`. |
+| `GET /orgs/{org}/teams` | Teams oldest first, paged; `[]` for an organization with none, `404` for a login that is not an organization. |
+| `POST /orgs/{org}/teams` | `{name, description?, privacy?}`. A missing, null, or blank `name` is `422 missing_field`; a non-string `name`, or one with no ASCII letter or digit, is `422 invalid`. The slug is the name lower-cased with each run of other characters turned into one hyphen. A name or slug already in the organization, ignoring case, is `422 already_exists`. A creator who is a member of the organization becomes the team's first maintainer. `maintainers`, `repo_names`, `parent_team_id`, and `privacy: secret` are not mocked. Answers `201` with the full team. |
+| `DELETE /orgs/{org}/teams/{team_slug}` | `204`. The team's memberships and pending review requests go with it. Team ids are never reused. |
+| `PUT /orgs/{org}/teams/{team_slug}/memberships/{username}` | Body optional; `role` is `member` (the default) or `maintainer`, else `422`. Answers `{url, role, state: "active"}`. A login that is not a user is `404`; a user who is not a member of the organization is a `422`. |
+| `DELETE /orgs/{org}/teams/{team_slug}/memberships/{username}` | `204`, including for a user not on the team. |
 
-`POST /api/webhooks/github/{org_id}` (`internal/server/github_webhooks.go:53-182`), App-class orgs only:
+### 1.3 Repositories
 
-- Headers required: `X-GitHub-Event` (400 if missing), `X-Hub-Signature-256` (401), `X-GitHub-Delivery` (400; the dedup key).
-- Signature: HMAC-SHA256 over the raw body with the org's stored `webhook_secret`; empty secret short-circuits to 401. Body cap 25 MiB.
-- Uniform 401 for no-App / PAT-org / bad-signature (anti-enumeration). Dedup on `(installation_id, delivery_guid)` → duplicate = 204. Success = 204.
-- Specially handled events: `installation.created/deleted/suspend/unsuspend` (the suspend/delete path invalidates the token cache). Everything else → event bus.
+| Route | Behavior |
+| --- | --- |
+| `POST /user/repos`, `POST /orgs/{org}/repos` | `{name, description?, private?, visibility?}`; `visibility` (`public` or `private`) overrides `private`. A name is 1 to 100 characters from `[A-Za-z0-9._-]`, not `.` or `..`, and not ending in `.git`; a missing or invalid name, or one the owner already has (ignoring case), is GitHub's `422` "Repository creation failed." envelope. `auto_init`, `gitignore_template`, `license_template`, `is_template`, and `team_id` are not mocked, whatever their value. The repository starts empty with `default_branch: main` until its first push (`surface-git.md`). Answers `201`. |
+| `GET /repos/{owner}/{repo}` | The repository, or `404`. |
+| `GET /user/repos` | The repositories the caller owns, paged. `sort` is `pushed` (the default); any other `sort` is not mocked. `direction` is `desc` (the default) or `asc`, else `422`. Never-pushed repositories sort last. |
 
-The mock's App face therefore needs: webhook delivery with correct signature/headers, a delivery log to back `GET /app/hook/deliveries`, and redelivery on `POST .../attempts`. Polling remains the primary event channel; webhook fidelity matters for App-credential scenarios and the webhook-health UI.
+### 1.4 Pull requests
+
+| Route | Behavior |
+| --- | --- |
+| `GET /repos/{o}/{r}/pulls` | `state` is `open` (the default), `closed` (merged included), or `all`, else `422`. Newest first, paged, with an `ETag` on every page (`grammar.md`). `head`, `base`, `sort`, and `direction` are ignored. |
+| `POST /repos/{o}/{r}/pulls` | `{title, head, base, body?, draft?}`. `head` is a branch, or `owner:branch` naming the repository's own owner. Missing fields are `422 missing_field`; a branch that doesn't exist is `422 invalid`. No commits between base and head, or an open pull request with the same head and base, is GitHub's `422` with its message. A cross-repository `head`, `issue`, and `head_repo` are not mocked. The head and base commits are pinned at creation. Answers `201`. |
+| `GET /repos/{o}/{r}/pulls/{n}` | The pull request. |
+| `PATCH /repos/{o}/{r}/pulls/{n}` | `title`, `body` (null clears), `state` (`open` or `closed`), and `base` (an existing branch; the base commit is re-pinned). Reopening a merged pull request is GitHub's `422`. |
+| `PUT /repos/{o}/{r}/pulls/{n}/merge` | A real merge: `git merge-tree` and `commit-tree`, a two-parent commit authored and committed by `<login> <login@orrery.invalid>` at the world clock, with GitHub's default message unless `commit_title` or `commit_message` is given. A pull request that is not open, is a draft, or conflicts with its base is `405` "Pull Request is not mergeable" (a draft: "Pull Request is still a work in progress"); a `sha` that is not the head is `409`. A `merge_method` other than `merge` is not mocked. The base branch moves by compare-and-swap, the move is logged as a `ref.update`, and open pull requests whose head is the base branch take its new tip. Answers `{sha, merged: true, message}`. |
+| `GET /repos/{o}/{r}/pulls/{n}/files` | `[{filename, status, previous_filename?}]` in path order, paged, from `git diff -M` between the base and the head: against the base branch's tip while the pull request is open (or the pinned base if the branch is gone), and against the pinned base once it is closed. `status` is `added`, `removed`, `modified`, `renamed`, `copied`, or `changed`. `additions`, `deletions`, `changes`, `patch`, `sha`, and the URLs are absent. |
+
+### 1.5 Reviews, review requests, and comments
+
+| Route | Behavior |
+| --- | --- |
+| `GET /repos/{o}/{r}/pulls/{n}/reviews` | Oldest first, paged. |
+| `POST /repos/{o}/{r}/pulls/{n}/reviews` | `{event, body?, commit_id?}`. `event` is `APPROVE`, `REQUEST_CHANGES`, or `COMMENT`, else `422`; an absent `event` (a pending review) and `comments` are not mocked. The author approving or requesting changes on their own pull request is GitHub's `422`. `commit_id` defaults to the head. A review removes its author's pending request; a team's request stays. |
+| `POST /repos/{o}/{r}/pulls/{n}/requested_reviewers` | `{reviewers?, team_reviewers?}`; neither, or both empty, is `422 missing_field`. Every name is checked before anything is written. The author is refused with GitHub's "Review cannot be requested from pull request author." A login that is not a user, or a team not in the organization that owns the repository, is GitHub's `422` "Reviews may only be requested from collaborators…". A pending reviewer is skipped. Answers `201` with the pull request. |
+| `DELETE /repos/{o}/{r}/pulls/{n}/requested_reviewers` | `{reviewers, team_reviewers?}`, `reviewers` required and possibly empty. A name with no pending request is skipped. Answers `200` with the pull request. |
+| `GET /repos/{o}/{r}/pulls/{n}/comments` | Always `[]`: Orrery has no inline review comments. |
+| `GET /repos/{o}/{r}/issues/{n}/comments` | Oldest first, paged. `{n}` is a pull request; the world has no issues. |
+| `POST /repos/{o}/{r}/issues/{n}/comments` | `{body}`, non-empty, else `422 missing_field`. Answers `201`. |
+
+### 1.6 Labels
+
+Orrery keeps labels per pull request, not per repository, unique on the pull request ignoring case. There is no repository label API.
+
+| Route | Behavior |
+| --- | --- |
+| `POST /repos/{o}/{r}/issues/{n}/labels` | `{"labels": [names]}` or a bare array of names. A label object (`{"name": ...}`) is not mocked; an empty name, or one longer than 50 characters, is `422`. A name already on the pull request is skipped. Answers `200` with all its labels. |
+| `DELETE /repos/{o}/{r}/issues/{n}/labels/{name}` | Matches ignoring case. Answers `200` with the labels left, or `404` "Label does not exist". |
+
+### 1.7 Check runs
+
+| Route | Behavior |
+| --- | --- |
+| `POST /repos/{o}/{r}/check-runs` | `{name, head_sha, status?, conclusion?, started_at?, completed_at?, details_url?, external_id?, output?}`. `status` is `queued` (the default), `in_progress`, or `completed`; `conclusion` is one of GitHub's eight values, and implies `completed`. `started_at` defaults to the world clock, and `completed_at` to the clock once the run completes. `output` is stored as sent. `actions` is not mocked. Answers `201`. |
+| `PATCH /repos/{o}/{r}/check-runs/{id}` | The same fields, each kept when absent. Moving a run to another `head_sha`, and `actions`, are not mocked. |
+| `GET /repos/{o}/{r}/commits/{ref}/check-runs` | `{total_count, check_runs}` for a full sha or a branch, oldest first, paged; anything else is `422` "No commit found for ref". Every run on the commit is listed. `check_name`, `status`, `filter`, and `app_id` are ignored. |
+
+Only a bot creates or updates check runs; any other actor gets a `403` naming the bot to use. On GitHub only an App can.
+
+### 1.8 Branches, refs, compare, and contents
+
+| Route | Behavior |
+| --- | --- |
+| `GET /repos/{o}/{r}/branches` | `[{name, commit: {sha}, protected: false}]` ordered by name, paged. |
+| `GET /repos/{o}/{r}/git/ref/heads/{branch}` | `{ref, url, object: {sha, type: "commit", url}}`, with an `ETag` derived from the body, so it changes exactly when the tip does (`grammar.md`). A branch name's `/` stays a path separator. A missing branch is `404`. |
+| `GET /repos/{o}/{r}/compare/{base}...{head}` | `{status, ahead_by, behind_by, total_commits, commits, files}`. Each end is anything `git rev-parse` resolves to a commit (a sha, a branch, a tag, a ref); `owner:branch`, the two-dot form, and an end that doesn't resolve are `404`. `status` is `identical`, `ahead`, `behind`, or `diverged`. `commits` is `[{sha, parents: [{sha}]}]` oldest first, at most 250; `files` is as on pull request files, renames detected, in path order, at most 300. The diff and patch media types are not mocked. |
+| `GET /repos/{o}/{r}/contents/{path}` | A file at `ref` (default `HEAD`): `{type: "file", encoding: "base64", name, path, sha, size, content, url, html_url, download_url: null}`. `content` is not line-wrapped. A directory, a missing file, or an empty repository is `404`. |
+
+## 2. OAuth web flow
+
+GitHub's OAuth web flow on the web host, without a token. An OAuth app is registered on the control plane (`POST /_orrery/oauth-apps`).
+
+| Route | Behavior |
+| --- | --- |
+| `GET /login/oauth/authorize` | `client_id, redirect_uri?, scope?, state?`. An unknown `client_id` is a `404` page. `redirect_uri` defaults to the app's callback; when given, its scheme, host, and port must equal the callback's and its path must be the callback's or below it, else a `302` to the callback with `error=redirect_uri_mismatch`, `error_description`, `error_uri`, and `state`. GitHub's sub-domain allowance and loopback-port exception are not modeled. Answers Orrery's stand-in for GitHub's sign-in and consent pages: a form asking for a login. |
+| `POST /login/oauth/authorize` | The same fields as a form, plus `login`, naming a user actor (rule 12: no passwords exist). Any other login re-renders the page with "Incorrect username or password." Success is a `302` to `redirect_uri` with `code` and `state`. |
+| `POST /login/oauth/access_token` | `client_id, client_secret, code, redirect_uri?` from the query, a form body, or a JSON body; the client pair may instead be HTTP Basic. Success is `access_token` (a new token for the actor who authorized), `token_type=bearer`, and `scope`, form-encoded unless `Accept: application/json`; `application/xml` is not mocked. Refusals are `200` with `error, error_description, error_uri`: `incorrect_client_credentials`, `bad_verification_code` (unknown, spent, or older than 10 minutes on the world clock), and `redirect_uri_mismatch` (a `redirect_uri` that differs from the one the code was issued for). A code is spent by its first successful exchange. |
+
+Scopes are recorded and echoed, not enforced: no route checks a token's scopes. The token reads the identity routes in §1.1.
+
+## 3. GraphQL
+
+### 3.1 Requests and errors
+
+`POST /api/graphql` with a token, taking `{query, variables?, operationName?}`. A body that isn't one such object is `400` "Problems parsing JSON"; everything else is `200` with `data` and `errors`. A field resolver's error is a partial result: its parent is null, the error carries a `path`, and `data` holds the rest, as on GitHub. Introspection is on. The root types are named `QueryRoot` and `MutationRoot`.
+
+A selection naming a field, type, or argument Orrery lacks fails the whole document. Its message starts `orrery (not mocked):` and carries `extensions.orrery.not_mocked: true`, so it can't be mistaken for GitHub's own validation error.
+
+### 3.2 Root fields and mutations
+
+- `node(id:)` and `nodes(ids:)`: a pull request (`PullRequest`) or a review (`PullRequestReview`). Any other id is `null`.
+- `repository(owner:, name:)` and `organization(login:)`: `null` when there is none.
+- `search(query:, type: ISSUE, first:)`: pull requests, newest first, as `{pageInfo, nodes}`. The query takes `is:pr`, `is:issue` (matches nothing), `is:open`, `is:closed`, `is:merged`, `is:unmerged`, `author:`, `reviewed-by:`, `repo:` (repeatable, any of), `merged:>=`, and `closed:>=` (a date or a timestamp; a merge is a close). Values compare ignoring case. Any other qualifier fails the field as not mocked, because answering a query Orrery half understands would return wrong results.
+- `rateLimit`: always `null`, as a GitHub Enterprise Server with rate limiting off answers.
+- Mutations: `markPullRequestReadyForReview` and `convertPullRequestToDraft`, each taking `input: {pullRequestId, clientMutationId?}` and answering `{pullRequest, clientMutationId}`. A pull request that is closed, or already in the requested state, is an error.
+
+### 3.3 Types
+
+| Type | Fields |
+| --- | --- |
+| `PullRequest` | `id, number, title, body, author, state, isDraft, merged, mergedBy, mergeable, headRefName, headRefOid, baseRefName, url, repository, headRepository, additions, deletions, changedFiles, files, reviewRequests, latestReviews, reviews, commits, labels, comments, createdAt, updatedAt, mergedAt, closedAt, timelineItems` |
+| `PullRequestReview` | `id, fullDatabaseId, author, state, submittedAt, body, comments` (always empty) |
+| `IssueComment` | `fullDatabaseId, author, body, createdAt` |
+| `User`, `Bot` | `login, databaseId`. `Bot` carries the bare slug. An organization authoring something renders as `User`. |
+| `Organization` | `databaseId, login, teams(first, after, userLogins)` |
+| `Team` | `databaseId, slug, name, organization, members { totalCount }` |
+| `Repository` | `nameWithOwner, ref(qualifiedName:)` (`Ref { id }`, or null) |
+| `Commit` | `oid, committedDate, statusCheckRollup` (null with no check runs, else `contexts`, whose only member is `CheckRun`) |
+| `CheckRun` | `databaseId, name, status, conclusion, completedAt, detailsUrl, checkSuite` (always null) |
+
+`databaseId` on `User`, `Bot`, `Team`, and `Organization` is the id REST gives the same account or team. `fullDatabaseId` is GitHub's `BigInt`, a string on the wire. A pull request's `body` is `""` when unset, as GitHub's non-null `String!`.
+
+- `mergeable` is a test merge of the head onto the base branch's tip, computed when it is read: `MERGEABLE` or `CONFLICTING`, or `UNKNOWN` for a pull request that is not open or whose base branch is gone. GitHub answers `UNKNOWN` until its own test merge finishes; Orrery never needs to.
+- `additions`, `deletions`, and `changedFiles` come from the same diff as REST pull request files, and a rename counts once. `files` lists `{path, changeType}` in path order; `changeType` is `ADDED`, `DELETED`, `RENAMED`, `COPIED`, `MODIFIED`, or `CHANGED`, and there is no previous path, as on GitHub.
+- `reviewRequests` lists pending requests, users then teams, each in request order. A request's `requestedReviewer` is a `User` or a `Team`.
+- `latestReviews` is each author's newest review. `reviews` takes `states`, and its `totalCount` counts the filtered set.
+- `commits(last:)` has one node, the head commit.
+- `labels` are ordered by name, ignoring case.
+- `mergedBy` is the actor who merged, typed like an author, and null until a merge.
+- `timelineItems` takes `itemTypes` and lists, oldest first: `LabeledEvent` and `UnlabeledEvent` from the label routes, `ReviewRequestedEvent` and `ReviewRequestRemovedEvent` from the review-request routes, `ReadyForReviewEvent` from the mutation, and `ClosedEvent` (with its `actor`) from a close or a merge, since GitHub records a close beside every merge. A request whose team has since been deleted keeps its item with a null `requestedReviewer`, even after a new team takes the slug. Reopening a pull request and converting it to a draft add no item.
+
+### 3.4 Connections
+
+A connection takes exactly one of `first` and `last`, from 0 to 100, and refuses otherwise with GitHub's messages: "You must provide a `first` or `last` value to properly paginate the `X` connection.", "Passing both `first` and `last` to paginate the `X` connection is not supported.", and "Requesting N records on the `X` connection exceeds the `first` limit of 100 records." `first` pages forward with `after`, and `last` backward with `before`, where the connection takes them: `reviews`, `comments`, and `timelineItems` take `before`; `files` and `teams` take `after`. A cursor Orrery didn't issue is refused. `commits(last:)` and a review's `comments(first:)` are not bounded.
+
+## 4. Behaviors Orrery chose
+
+Where GitHub's behavior has not been observed, or Orrery deliberately differs, this is what Orrery does. Each is a candidate to check against GitHub when a consumer depends on it.
+
+**Not yet observed on GitHub:**
+
+- A team member's review leaves the team's pending request in place.
+- Adding a user who is not a member of the organization to a team is a `422` with Orrery's own message.
+- The `422` bodies for requesting a review from the pull request's author, and from someone who is not a collaborator.
+- A review request and a withdrawal move the pull request's `updated_at`; deleting a team with a pending request does not.
+- A review request on a closed or merged pull request is accepted.
+- `DELETE …/teams/{team_slug}/memberships/{username}` for a user not on the team is `204`; GitHub documents only `204` and `403`.
+- Team slugs keep ASCII letters and digits only, so "Équipe" becomes `quipe` and "日本" has no slug (`422 invalid` on `name`), where GitHub may transliterate. Two names with one slug ("Café" and "Caf") collide as `already_exists` on `name`. No length limit is applied.
+- An id `node` or `nodes` can't resolve is `null` with no entry in `errors`.
+- The message for a negative `first` or `last` on a GraphQL connection: "`first` on the `X` connection cannot be less than zero."
+
+**Deliberate differences:**
+
+- There are no permissions. Any authenticated actor may read any repository, create repositories in any organization, label, request reviews, review, and merge.
+- A repository name outside `[A-Za-z0-9._-]` is refused rather than slugified.
+- Repositories are never renamed, so nothing redirects.
+- A file's `content` is not line-wrapped, and a directory's contents are `404`, not a listing.
+- `GET /user/repos` sorts by `pushed` by default (GitHub: `full_name`) and lists only the caller's own repositories.
+- `GET …/commits/{ref}/check-runs` lists every run on the commit; GitHub's default `filter=latest` keeps the newest run per name.
+- Only a bot creates or updates a check run, and a check run's `head_sha` and a review's `commit_id` are not checked against the repository.
+- `mergeable` is computed on read rather than eventually.
+- Labels belong to a pull request, not to a repository.
+- A merge commit's author and committer address is `<login>@orrery.invalid`, not the actor's stored primary address.
+
+## 5. Not served
+
+Every route here answers `501` until a consumer needs it:
+
+- issues, and an issue's or pull request's REST timeline;
+- reading a single comment or review, dismissing a review, review comment replies, reactions, and editing or deleting a comment;
+- inline review comments (a review with `comments`, or `POST …/pulls/{n}/comments`);
+- repository labels, branch protection, `GET …/branches/{branch}`, tags, and refs other than branches;
+- commits, trees, statuses, and the diff and patch media types of a pull request;
+- Actions: workflow runs, jobs, and logs;
+- GitHub Apps and installations (`/app`, `/app/installations`, installation tokens), and webhook delivery;
+- REST search, organization member listings, and `/rate_limit`.
+
+**Known gaps against the rules above:**
+
+- `GET …/pulls/{n}` with `Accept: application/vnd.github.v3.diff` or `.patch` answers the JSON object with `200`, a plausible wrong answer, where compare refuses the same media types (rule 1).
+- A matched path called with a method Orrery doesn't serve answers a bare `405` rather than the `501` (`grammar.md`).
+- `PATCH …/pulls/{n}` accepts an empty `title`.
+- `git_url` and `ssh_url` include the listener's port.

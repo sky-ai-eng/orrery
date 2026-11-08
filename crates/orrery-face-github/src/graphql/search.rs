@@ -1,8 +1,8 @@
 //! The GitHub issue-search query language, restricted to the qualifiers
-//! consumers actually send (spec/surface-github.md §3: TF's four backfill
-//! templates plus `repo:` scoping). A qualifier outside that set is refused
-//! loudly by the caller — evaluating a half-understood query would silently
-//! return wrong results, the one failure mode rule 1 forbids.
+//! consumers actually send (spec/surface-github.md §3.2 lists them). A
+//! qualifier outside that set is refused loudly by the caller — evaluating a
+//! half-understood query would silently return wrong results, the one failure
+//! mode rule 1 forbids.
 
 use orrery_world::{Pull, PullState, Repo, WorldView};
 

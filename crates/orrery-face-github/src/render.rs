@@ -1,6 +1,6 @@
 //! Renderers from kernel domain types to GitHub wire objects, populated
-//! generously (rule 1: fields liberal, endpoints strict). Field values a
-//! consumer reads are listed in spec/surface-github.md.
+//! generously (rule 1: fields liberal, endpoints strict). The fields each
+//! object carries are listed in spec/surface-github.md §1.0.
 
 use orrery_world::{Actor, ActorKind, CheckRun, IssueComment, Pull, Repo, Review, Team};
 

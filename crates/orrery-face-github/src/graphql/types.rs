@@ -1,6 +1,6 @@
 //! The GitHub GraphQL schema subset, grown strictly on demand (spec/README.md
-//! rule 1): every type and field exists because a consumer query in
-//! spec/surface-github.md §3 selects it. Fields the world genuinely has are
+//! rule 1): every type and field exists because a consumer's query selects
+//! it, and is listed in spec/surface-github.md §3. Fields the world genuinely has are
 //! resolved from it; fields whose *write surface* doesn't exist yet (inline
 //! review comments) resolve truthfully empty — a world with no way to write
 //! one has none. A field

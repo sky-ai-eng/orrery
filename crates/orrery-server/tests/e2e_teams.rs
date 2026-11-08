@@ -1,6 +1,6 @@
 //! End-to-end for organization membership, teams and review requests:
 //! the authoring writes a scenario uses to build them, the REST reads TF's
-//! poller and settings make (spec/surface-github.md §1.17), and TF's GraphQL
+//! poller and settings make (spec/surface-github.md §1.1 and §1.2), and TF's GraphQL
 //! selections over teams, pending requests and request timeline items, using
 //! the query texts from triage-factory's `internal/github`.
 

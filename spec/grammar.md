@@ -1,75 +1,77 @@
-# Platform grammar (build once, engine-wide)
+# Shared behavior
 
-Extracted at TF commit `78c8bfd2` (2026-08-21). These are the cross-cutting behaviors every endpoint implicitly relies on. Per the constraint preamble (README rule 1), grammar is implemented once up front, not per endpoint — and a mock that gets grammar wrong breaks consumers in ways no endpoint test catches.
+What every route of the GitHub face shares. It is built once for the engine, not per endpoint (rule 1), because a mock that gets it wrong breaks clients in ways no single endpoint's test catches.
 
-## GitHub
+## Where the face is
 
-### Seven clients, different header disciplines
+Orrery presents itself as a GitHub Enterprise Server at its `base_url`, so a client that takes a GitHub Enterprise base URL needs nothing else:
 
-There is no single shared client. A strict mock that requires headers uniformly will break the data plane:
+| Surface | Path |
+| --- | --- |
+| REST | `{base_url}/api/v3/…` |
+| GraphQL | `POST {base_url}/api/graphql`, a sibling of `/api/v3`, never under it |
+| git | `{base_url}/{owner}/{repo}[.git]/…` (`surface-git.md`) |
+| OAuth web flow | `{base_url}/login/oauth/…` |
 
-| Client | Auth | Accept | `X-GitHub-Api-Version` | User-Agent |
-| --- | --- | --- | --- | --- |
-| `internal/github.Client` (main REST+GraphQL data plane) | `Bearer <tok>` — omitted entirely when token empty (deliberate anonymous mode) | `application/vnd.github.v3+json`; `.v3.diff` for raw diffs; EMPTY for GraphQL | **none** | **Go default** |
-| `internal/githubapp.Minter` (all `/app/*`) | `Bearer <RS256 JWT>` | `application/vnd.github+json` | `2022-11-28` | `triage-factory-githubapp` |
-| `internal/auth` validation | `Bearer <PAT>` | `.v3+json` | none | Go default |
-| manifest/import client | none / Basic | `vnd.github+json` | mixed | mixed |
-| reachability probe | none | `*/*` | n/a | `triage-factory-reachability`; redirects NOT followed |
-| gh injector upstream hop | rewrites to `token <tok>` (not Bearer) | passthrough | passthrough | passthrough (gh's own) |
-| git smart-HTTP | `Basic base64("x-access-token:"+tok)` | n/a | n/a | git's own |
+github.com's `api.github.com` and the data-residency `api.<tenant>.ghe.com` host shapes are not served. The control plane is under `/_orrery`, on the same listener unless `server.control_listen` moves it; a faces listener then answers `/_orrery/…` as surface it does not serve.
 
-No preview media types anywhere. `Content-Type: application/json` only when a body is present.
+## Authentication
 
-### Base URLs — three host classes (GHES is first-class)
+REST, GraphQL, and git need a token, in any of the spellings GitHub's clients send:
 
-`internal/github/baseurl.go`: `github.com` → `https://api.github.com`; `*.ghe.com` → `https://api.<tenant>.ghe.com`; everything else → `{base}/api/v3`. GraphQL: `/graphql` resp. `{host}/api/graphql` (NOT `/api/v3/graphql`). Resolution: `org_settings.github_base_url` → `github_url` secret → default; a read failure propagates rather than defaulting (a GHES tenant must never route to the public host). Known divergence: the validation path hand-builds `{base}/api/v3/user` and mishandles `.ghe.com` (see `findings.md`); `internal/db/github_app_backfill.go` holds a private duplicate of the derivation (drift risk).
+- `Authorization: Bearer <token>` or `Authorization: token <token>` (the scheme ignoring case), or
+- `Authorization: Basic base64(<anything>:<token>)`, git's `x-access-token:<token>` convention.
 
-### Rate limiting (the contract a mock should emit)
+A missing, malformed, or unknown token is `401` `{"message": "Bad credentials"}` with `WWW-Authenticate: Basic realm="orrery"`. The one exception is anonymous git fetch, described in `surface-git.md`. The OAuth web flow authenticates with client credentials and a login instead (`surface-github.md` §2).
 
-- Headers read: `X-RateLimit-Remaining` + `X-RateLimit-Reset` (both required for state to update — absent headers leave state untouched, deliberately supporting GHES with rate limiting off), `X-RateLimit-Used` best-effort.
-- Retry triggers: 429 always; 403 only when confirmed rate-limit-shaped by ANY of: `Retry-After` present, `X-RateLimit-Remaining: 0`, or body containing `secondary rate limit` / `abuse detection mechanism` (case-insensitive). **A 403 matching none of these is a permissions error and the drained body is replayed to the caller — the 403 body TEXT is semantically meaningful.**
-- Wait: `Retry-After` (delay-seconds or HTTP-date; ≤0 treated as absent) → primary reset → exponential backoff (1s base, doubling); max 3 extra attempts, 5-min wait cap; give-up → typed `ErrRateLimited{ResumeAt}` which the poll cycle treats as a first-class outcome (resume cursor + reschedule).
-- Pre-flight throttle: a request is blocked client-side before sending when last-seen remaining is 0; reset >5 min out returns `ErrRateLimited` with no request.
-- Idempotency split: GETs + GraphQL queries retry; **mutations get exactly one attempt**.
-- 304s don't count against budget. No live `GET /rate_limit` call exists anywhere.
-- 5xx is NOT retried; transport errors NOT retried.
+Every token is fake, prefixed `orrfake_`, and derived from the world's secret, so a world holds no real credential (rule 12). Tokens carry no scopes, and no route checks permissions: a token is only an actor's identity.
 
-### Pagination — two regimes
+## Requests
 
-- Main client: NO Link-header parsing anywhere. Hand-rolled `?per_page=100&page=N` with termination heuristics (`len%100==0` continue; or body `total_count`). Caps: 10 pages general (1,000 items), 100 pages for whole-account repo walks (10,000) — truncation always WARN-logged, and the repo-mirror walkers return `complete=false` and refuse to persist an incomplete answer.
-- `internal/githubapp`: real `Link: <url>; rel="next"` parsing, with the next URL pinned same-origin (scheme+host) against the configured API base — cross-origin Link is a hard error (the request carries the App JWT).
+- **Bodies decode laxly, as GitHub's do.** An unknown field is ignored. A known field Orrery does not implement is refused by its presence, whatever its value, with `422`:
 
-### Conditional requests
+  ```json
+  {"message": "orrery: request field \"F\" is not mocked",
+   "orrery": {"not_mocked": true, "field": "F", "hint": "…"},
+   "errors": [{"resource": "…", "code": "custom", "field": "F", "message": "not mocked by orrery"}]}
+  ```
 
-One shared mechanism (`GetConditional`): `If-None-Match` when an etag is held; 304 → typed empty result, body drained; 200 → new `ETag` captured. Exactly one consumer today: open-PR discovery page 1, etag persisted per-repo in `repositories.pulls_etag`. The apiproxy passes `If-None-Match` through untouched.
+- A body that isn't valid JSON is `400` `{"message": "Problems parsing JSON"}`, and on most routes so is a known field of the wrong type. A body over 2 MiB is `413`.
+- Logins, organization names, and repository names match ignoring case; responses carry each one's stored spelling. A `{number}` that isn't an integer is `404`.
 
-### Status-code contracts worth pinning
+## Responses
 
-- `POST .../access_tokens` and `POST /app-manifests/{code}/conversions`: **201 exactly** (200 fails).
-- `POST /applications/{client_id}/token`: 401 = bad secret, **404 = valid secret**.
-- `GET /app/hook/*`: 404 → GHES-too-old sentinel.
-- `CheckRepoAccess`: 200 conclusive-reachable; 403 OR 404 conclusive-unreachable; else indeterminate → fail open.
-- Installation-token `expires_at` must be strictly in the future; 5-min expiry guard on the cache.
-- GraphQL: 200 with `data` + `errors[]` = partial success; `data` null/absent = failure; `null` nodes skipped.
-- OAuth token endpoint: 200 with `error` field on logical failure.
+- JSON, `application/json; charset=utf-8`. Times are RFC 3339 in UTC, read from the world clock.
+- Node ids are stable strings that REST's `node_id` and GraphQL's `id` share: `O_actor_N`, `O_repo_N`, `O_pull_N`, `O_review_N`, `O_comment_N`, `O_check_N`, and `O_team_N`.
+- GitHub's error bodies: `{"message"}` for `404` "Not Found" and the like, and for a validation failure `422` `{"message": "Validation Failed", "errors": [{"resource", "code", "field"}]}`, where `code` is `missing_field`, `invalid`, `already_exists`, or `custom` (with a `message` and no `field`). Repository creation uses GitHub's own envelope, "Repository creation failed.". A route reports the first failing field.
 
-### Credential classes
+## Surface Orrery doesn't serve
 
-Org-level, App XOR PAT (never both; decided by `org_settings.github_credential_class`, never inferred). App = installation tokens (indistinguishable from PATs on the wire — same Bearer shape). Scoped mints narrow by bare repo names + permissions; out-of-grant → 422. No per-user GitHub API credential exists (OAuth user tokens are used once for identity capture, then discarded). Suspended installations: never served from token cache; skipped without a request in enumeration.
+A REST path or method with no route answers `501`, deliberately unlike any GitHub response, so it can't be read as "no such thing":
 
-## Jira
+```json
+{"message": "orrery: GET /rate_limit is not mocked",
+ "orrery": {"not_mocked": true, "method": "GET", "path": "/rate_limit",
+            "hint": "If a consumer needs this endpoint, add it to the surface inventory (spec/surface-github.md) and implement it."}}
+```
 
-- URL: `{BaseURL}/rest/api/{2|3}/{path}`; version follows the deployment marker (Cloud 3 / DC 2); Cloud enhanced search pins `/rest/api/3/search/jql` unconditionally; `serverInfo` probe pins v2.
-- Retry: 429 always (incl. mutations); 5xx + transport errors only for idempotent (GETs and the two read-shaped search POSTs, via an explicit flag); max 3 extra; `Retry-After` (delay-seconds or HTTP-date) honored to a 30s cap — longer surfaces the throttle to the caller; backoff 500ms→1s→2s cap 30s.
-- Only `Retry-After` is read — no `X-RateLimit-*` equivalents.
-- `Content-Type: application/json` on every request including GETs; no Accept header.
-- GET requires exactly 200; PUT/POST accept <300. `StatusError`/`IsNotFound` produced only by GETs (Jira 404s permission-denied to avoid existence disclosure).
-- 15s timeout, traced; the validation path uses a separate 10s no-retry client.
-- Pagination: DC `/search` startAt offsets (cap 50 pages); Cloud `nextPageToken`+`isLast`; Cloud project search startAt with `isLast`→`total`→short-page precedence; DC project catalog entirely unpaged.
+GraphQL marks the same fault in its `errors` entry (`surface-github.md` §3.1). A matched route with no data answers GitHub's own `404`; the two never blur.
 
-## Webhooks / push channels (inbound receivers that exist)
+## Pagination
 
-- GitHub: `POST /api/webhooks/github/{org_id}` — HMAC-SHA256 (`X-Hub-Signature-256`), `X-GitHub-Event` + `X-GitHub-Delivery` required, 25 MiB cap, dedup on `(installation_id, delivery_guid)`, uniform 401 anti-enumeration, 204 on success. App-class orgs only.
-- Slack Events API: `POST /api/webhooks/slack/{org_id}` — v0 signing, 5-min replay window, `url_verification` challenge.
-- Jira: none. Pure polling.
-- Slack Socket Mode: outbound wss (see `surface-jira-slack.md`).
+REST lists page with `?per_page=&page=`: `per_page` defaults to 30 and is limited to 1 through 100, as on GitHub, and `page` starts at 1. There is no `Link` header and no total, so a client pages until a short page. Every list has a fixed total order, so a page boundary never drops or repeats an item. GraphQL connections are in `surface-github.md` §3.4.
+
+## Conditional requests
+
+`GET …/pulls` (every page) and `GET …/git/ref/heads/{branch}` carry a weak `ETag` derived from the exact body. An `If-None-Match` equal to it answers `304` with no body and the same `ETag`, so the tag changes exactly when the answer does. No other route answers `304`.
+
+## Rate limits
+
+Orrery doesn't rate limit. It sends no `X-RateLimit-*` headers, GraphQL `rateLimit` is `null`, and `/rate_limit` is not served: the shape of a GitHub Enterprise Server with rate limiting turned off, which GitHub's clients handle.
+
+## Known gaps
+
+- A path Orrery routes, called with a method it doesn't serve (`GET /api/graphql`, `PATCH /repos/{o}/{r}`), answers a bare `405` rather than the `501` above.
+- The `path` a REST `501` reports omits the `/api/v3` prefix.
+- Query values are not percent-decoded, so `?ref=a%2Fb` looks for the ref `a%2Fb`.
+- A not-mocked field's `errors[].resource` is `Repository` on most routes, whatever the route's resource.
