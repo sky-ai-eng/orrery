@@ -174,3 +174,23 @@ pub fn face(
         Err(other) => panic!("{method} {url} transport error: {other:?}"),
     }
 }
+
+/// Each control-plane error's `(reason, field)`, in the order the answer
+/// lists them.
+pub fn faults(answer: &serde_json::Value) -> Vec<(String, Option<String>)> {
+    answer["errors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no errors list in {answer}"))
+        .iter()
+        .map(|e| {
+            (
+                e["reason"].as_str().unwrap().to_string(),
+                e["field"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+pub fn fault(reason: &str, field: Option<&str>) -> (String, Option<String>) {
+    (reason.to_string(), field.map(str::to_string))
+}

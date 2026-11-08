@@ -15,7 +15,7 @@ use axum::routing::{get, post};
 use orrery_snapshot::{DiffSide, SnapshotError};
 use orrery_world::{WorldError, WorldView};
 
-use crate::control::{decode_strict, errors, internal};
+use crate::control::{Fault, Fields, errors, internal};
 use crate::{AppState, json};
 
 const LIST_PAGE_MAX: usize = 500;
@@ -30,15 +30,11 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/diff", post(diff))
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateBody {
-    name: String,
-}
-
 async fn create(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: CreateBody = match decode_strict(&body) {
-        Ok(p) => p,
+    let mut fields = Fields::parse(&body);
+    let name: Option<String> = fields.required("name");
+    let name = match fields.finish(name) {
+        Ok(n) => n,
         Err(resp) => return *resp,
     };
     let gate = state.git.gate();
@@ -47,7 +43,7 @@ async fn create(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let dir = state.snapshots_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _hold = guard;
-        orrery_snapshot::create(&world, &dir, &parsed.name)
+        orrery_snapshot::create(&world, &dir, &name)
     })
     .await;
     match flatten(result) {
@@ -64,30 +60,23 @@ async fn get_one(State(state): State<AppState>, UrlPath(name): UrlPath<String>) 
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ListBody {
-    after_name: Option<String>,
-    page_size: Option<usize>,
-}
-
 // TODO(ORR-37): a last page that is exactly full answers a non-null
 // `next_after_name`, and the page-size bounds are a second copy of
 // control.rs's.
 async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: ListBody = match decode_strict(&body) {
+    let mut fields = Fields::parse(&body);
+    let page_size = fields.optional("page_size").unwrap_or(LIST_PAGE_DEFAULT);
+    if page_size == 0 || page_size > LIST_PAGE_MAX {
+        fields.fault(Fault::out_of_range(
+            format!("page_size must be 1..={LIST_PAGE_MAX}"),
+            "page_size",
+        ));
+    }
+    let after_name: Option<String> = fields.optional("after_name");
+    let (page_size, after_name) = match fields.finish(Some((page_size, after_name))) {
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let page_size = parsed.page_size.unwrap_or(LIST_PAGE_DEFAULT);
-    if page_size == 0 || page_size > LIST_PAGE_MAX {
-        return errors(
-            StatusCode::BAD_REQUEST,
-            "OUT_OF_RANGE",
-            &format!("page_size must be 1..={LIST_PAGE_MAX}"),
-            Some("page_size"),
-        );
-    }
     let all = match orrery_snapshot::list(&state.snapshots_dir) {
         Ok(a) => a,
         Err(e) => return snapshot_error(e, None),
@@ -96,7 +85,7 @@ async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     // operator created, but the read contract is uniform anyway.
     let items: Vec<_> = all
         .into_iter()
-        .filter(|s| match &parsed.after_name {
+        .filter(|s| match &after_name {
             Some(after) => s.name.as_str() > after.as_str(),
             None => true,
         })
@@ -156,17 +145,13 @@ async fn restore(State(state): State<AppState>, UrlPath(name): UrlPath<String>) 
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DiffBody {
-    from: String,
-    /// Another snapshot, or absent for the live world.
-    to: Option<String>,
-}
-
 async fn diff(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: DiffBody = match decode_strict(&body) {
-        Ok(p) => p,
+    let mut fields = Fields::parse(&body);
+    let from: Option<String> = fields.required("from");
+    // Another snapshot, or absent for the live world.
+    let to: Option<String> = fields.optional("to");
+    let from = match fields.finish(from) {
+        Ok(f) => f,
         Err(resp) => return *resp,
     };
     let gate = state.git.gate();
@@ -175,8 +160,8 @@ async fn diff(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let dir = state.snapshots_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _hold = guard;
-        let from = orrery_snapshot::open(&dir, &parsed.from)?;
-        match &parsed.to {
+        let from = orrery_snapshot::open(&dir, &from)?;
+        match &to {
             Some(to_name) => {
                 let to = orrery_snapshot::open(&dir, to_name)?;
                 orrery_snapshot::diff::diff(from.side(), to.side())

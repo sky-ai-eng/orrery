@@ -65,54 +65,50 @@ async fn get_clock(State(state): State<AppState>) -> Response<Body> {
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AdvanceClockBody {
-    seconds: i64,
-}
-
 async fn advance_clock(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: AdvanceClockBody = match decode_strict(&body) {
-        Ok(p) => p,
+    let mut fields = Fields::parse(&body);
+    let seconds: Option<i64> = fields.required("seconds");
+    if seconds.is_some_and(|s| s <= 0) {
+        fields.fault(Fault::invalid(
+            "the clock only moves forward; seconds must be positive".to_string(),
+            "seconds",
+        ));
+    }
+    let seconds = match fields.finish(seconds) {
+        Ok(s) => s,
         Err(resp) => return *resp,
     };
-    if parsed.seconds <= 0 {
-        return errors(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            "the clock only moves forward; seconds must be positive",
-            Some("seconds"),
-        );
-    }
     let system = match system_actor(&state) {
         Ok(a) => a,
         Err(resp) => return *resp,
     };
-    match state.world.advance_clock(parsed.seconds, system.id) {
+    match state.world.advance_clock(seconds, system.id) {
         Ok(clock) => json(StatusCode::OK, clock_body(clock)),
         Err(e) => internal(e),
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateActorBody {
-    login: String,
-    kind: ActorKind,
-}
-
 async fn create_actor(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: CreateActorBody = match decode_strict(&body) {
+    let mut fields = Fields::parse(&body);
+    let login: Option<String> = fields.required("login");
+    let kind: Option<ActorKind> = fields.required("kind");
+    let (login, kind) = match fields.finish(login.zip(kind)) {
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    match state.world.create_actor(&parsed.login, parsed.kind) {
+    match state.world.create_actor(&login, kind) {
         Ok((actor, token)) => actor_token_created(&actor, &token),
-        Err(e @ (WorldError::InvalidLogin(_) | WorldError::InvalidActorKind)) => errors(
+        Err(e @ WorldError::InvalidLogin(_)) => errors(
             StatusCode::BAD_REQUEST,
             "INVALID_ARGUMENT",
             &e.to_string(),
             Some("login"),
+        ),
+        Err(e @ WorldError::InvalidActorKind) => errors(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            &e.to_string(),
+            Some("kind"),
         ),
         Err(e @ WorldError::ActorExists(_)) => errors(
             StatusCode::CONFLICT,
@@ -160,12 +156,6 @@ fn actor_token_created(actor: &Actor, token: &str) -> Response<Body> {
     )
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SetEmailsBody {
-    emails: Vec<ActorEmail>,
-}
-
 /// Replace an actor's addresses: verifying one and choosing the primary are
 /// things a person does in GitHub's settings, with no API behind them.
 async fn set_actor_emails(
@@ -173,18 +163,17 @@ async fn set_actor_emails(
     UrlPath(login): UrlPath<String>,
     body: Bytes,
 ) -> Response<Body> {
-    let parsed: SetEmailsBody = match decode_strict(&body) {
-        Ok(p) => p,
+    let mut fields = Fields::parse(&body);
+    let emails: Option<Vec<ActorEmail>> = fields.required("emails");
+    let emails = match fields.finish(emails) {
+        Ok(e) => e,
         Err(resp) => return *resp,
     };
     let system = match system_actor(&state) {
         Ok(a) => a,
         Err(resp) => return *resp,
     };
-    match state
-        .world
-        .set_actor_emails(&login, &parsed.emails, system.id)
-    {
+    match state.world.set_actor_emails(&login, &emails, system.id) {
         Ok(emails) => json(StatusCode::OK, serde_json::json!({ "emails": emails })),
         Err(e @ WorldError::InvalidEmails(_)) => errors(
             StatusCode::BAD_REQUEST,
@@ -199,17 +188,13 @@ async fn set_actor_emails(
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateOAuthAppBody {
-    name: String,
-    callback_url: String,
-}
-
 /// Register an OAuth app. GitHub offers this only in its web settings, so it
 /// is reality's to do, and the control plane's.
 async fn create_oauth_app(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: CreateOAuthAppBody = match decode_strict(&body) {
+    let mut fields = Fields::parse(&body);
+    let name: Option<String> = fields.required("name");
+    let callback_url: Option<String> = fields.required("callback_url");
+    let (name, callback_url) = match fields.finish(name.zip(callback_url)) {
         Ok(p) => p,
         Err(resp) => return *resp,
     };
@@ -219,7 +204,7 @@ async fn create_oauth_app(State(state): State<AppState>, body: Bytes) -> Respons
     };
     match state
         .world
-        .create_oauth_app(&parsed.name, &parsed.callback_url, system.id)
+        .create_oauth_app(&name, &callback_url, system.id)
     {
         Ok(app) => json(StatusCode::CREATED, serde_json::json!(app)),
         Err(WorldError::InvalidOAuthApp { field, message }) => errors(
@@ -263,24 +248,15 @@ fn system_actor(state: &AppState) -> Result<Actor, Box<Response<Body>>> {
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LogListBody {
-    #[serde(default)]
-    after_seq: i64,
-    page_size: Option<usize>,
-}
-
 async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: LogListBody = match decode_strict(&body) {
-        Ok(p) => p,
+    let mut fields = Fields::parse(&body);
+    let after_seq: i64 = fields.optional("after_seq").unwrap_or(0);
+    let page_size = page_size(&mut fields);
+    let page_size = match fields.finish(page_size) {
+        Ok(n) => n,
         Err(resp) => return *resp,
     };
-    let page_size = match page_size(parsed.page_size) {
-        Ok(n) => n,
-        Err(fault) => return faults(StatusCode::BAD_REQUEST, vec![fault]),
-    };
-    match state.world.log_after(parsed.after_seq, page_size + 1) {
+    match state.world.log_after(after_seq, page_size + 1) {
         Ok(items) => {
             let (items, next) = keyset_page(items, page_size, |e| e.seq);
             json(
@@ -292,36 +268,24 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ActorListBody {
-    page_size: Option<usize>,
-    after_login: Option<String>,
-}
-
 /// Which actors a world holds, so a caller handed a world it did not build
 /// knows whom it may issue tokens for. Never a token.
 async fn list_actors(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: ActorListBody = match decode_strict(&body) {
-        Ok(p) => p,
-        Err(resp) => return *resp,
-    };
-    let mut found = Vec::new();
-    let page_size = page_size(parsed.page_size).unwrap_or_else(|fault| {
-        found.push(fault);
-        0
-    });
-    if let Some(after) = &parsed.after_login
+    let mut fields = Fields::parse(&body);
+    let page_size = page_size(&mut fields);
+    let after_login: Option<String> = fields.optional("after_login");
+    if let Some(after) = &after_login
         && let Err(e) = validate_login(after)
     {
-        found.push(Fault::invalid(e.to_string(), "after_login"));
+        fields.fault(Fault::invalid(e.to_string(), "after_login"));
     }
-    if !found.is_empty() {
-        return faults(StatusCode::BAD_REQUEST, found);
-    }
+    let page_size = match fields.finish(page_size) {
+        Ok(n) => n,
+        Err(resp) => return *resp,
+    };
     match state
         .world
-        .actors_after(parsed.after_login.as_deref(), page_size + 1)
+        .actors_after(after_login.as_deref(), page_size + 1)
     {
         Ok(items) => {
             let (items, next) = keyset_page(items, page_size, |a| a.login.clone());
@@ -334,39 +298,27 @@ async fn list_actors(State(state): State<AppState>, body: Bytes) -> Response<Bod
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OAuthAppListBody {
-    page_size: Option<usize>,
-    after_client_id: Option<String>,
-}
-
 /// Which OAuth apps a world holds, so a caller handed a world it did not
 /// build knows which it may issue secrets for. Never a secret.
 async fn list_oauth_apps(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let parsed: OAuthAppListBody = match decode_strict(&body) {
-        Ok(p) => p,
-        Err(resp) => return *resp,
-    };
-    let mut found = Vec::new();
-    let page_size = page_size(parsed.page_size).unwrap_or_else(|fault| {
-        found.push(fault);
-        0
-    });
-    if let Some(after) = &parsed.after_client_id
+    let mut fields = Fields::parse(&body);
+    let page_size = page_size(&mut fields);
+    let after_client_id: Option<String> = fields.optional("after_client_id");
+    if let Some(after) = &after_client_id
         && !after.starts_with(OAUTH_CLIENT_ID_PREFIX)
     {
-        found.push(Fault::invalid(
+        fields.fault(Fault::invalid(
             format!("{after:?} is not a client id: every one starts with {OAUTH_CLIENT_ID_PREFIX}"),
             "after_client_id",
         ));
     }
-    if !found.is_empty() {
-        return faults(StatusCode::BAD_REQUEST, found);
-    }
+    let page_size = match fields.finish(page_size) {
+        Ok(n) => n,
+        Err(resp) => return *resp,
+    };
     match state
         .world
-        .oauth_apps_after(parsed.after_client_id.as_deref(), page_size + 1)
+        .oauth_apps_after(after_client_id.as_deref(), page_size + 1)
     {
         Ok(items) => {
             let (items, next) = keyset_page(items, page_size, |a| a.client_id.clone());
@@ -379,16 +331,19 @@ async fn list_oauth_apps(State(state): State<AppState>, body: Bytes) -> Response
     }
 }
 
-fn page_size(requested: Option<usize>) -> Result<usize, Fault> {
-    let page_size = requested.unwrap_or(LIST_PAGE_DEFAULT);
+/// The page size a list body asks for, or `None` when it is out of range,
+/// which is recorded. One that fails to decode reads as the default here:
+/// its fault is already recorded, and a second one would report it twice.
+fn page_size(fields: &mut Fields) -> Option<usize> {
+    let page_size = fields.optional("page_size").unwrap_or(LIST_PAGE_DEFAULT);
     if (1..=LIST_PAGE_MAX).contains(&page_size) {
-        Ok(page_size)
+        Some(page_size)
     } else {
-        Err(Fault {
-            reason: "OUT_OF_RANGE",
-            message: format!("page_size must be 1..={LIST_PAGE_MAX}"),
-            field: Some("page_size"),
-        })
+        fields.fault(Fault::out_of_range(
+            format!("page_size must be 1..={LIST_PAGE_MAX}"),
+            "page_size",
+        ));
+        None
     }
 }
 
@@ -413,38 +368,186 @@ fn clock_body(clock: i64) -> serde_json::Value {
     serde_json::json!({ "clock_unix": clock, "rfc3339": rfc3339 })
 }
 
-/// An empty body is a valid spelling of "all defaults" for bodies whose fields
-/// are all optional; callers with required fields still fail on the missing
-/// field, named by serde.
-// TODO(ORR-35): a body that fails to decode answers one fault with no
-// `field`, and hides every other fault in it.
-pub(crate) fn decode_strict<T: serde::de::DeserializeOwned>(
-    body: &[u8],
-) -> Result<T, Box<Response<Body>>> {
-    let raw: &[u8] = if body.is_empty() { b"{}" } else { body };
-    serde_json::from_slice(raw).map_err(|e| {
-        Box::new(errors(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            &e.to_string(),
-            None,
-        ))
-    })
+/// A control-plane body, read one field at a time so that a refusal names
+/// every fault in it: fields that are missing or fail to decode, fields the
+/// route does not take, and whatever the route's own checks find.
+pub(crate) struct Fields {
+    unread: serde_json::Map<String, serde_json::Value>,
+    read: Vec<&'static str>,
+    faults: Vec<Fault>,
+    /// Set when the body is not a JSON object. It has no fields to name, so
+    /// this is its only fault.
+    not_an_object: Option<Fault>,
+}
+
+impl Fields {
+    /// An empty body is a valid spelling of "all defaults" for routes whose
+    /// fields are all optional.
+    pub(crate) fn parse(body: &[u8]) -> Fields {
+        let mut fields = Fields {
+            unread: serde_json::Map::new(),
+            read: Vec::new(),
+            faults: Vec::new(),
+            not_an_object: None,
+        };
+        if body.is_empty() {
+            return fields;
+        }
+        match serde_json::from_slice::<Object>(body) {
+            Ok(object) => {
+                fields.unread = object.members;
+                fields.faults = object
+                    .repeated
+                    .into_iter()
+                    .map(|name| Fault::invalid(format!("{name} appears more than once"), name))
+                    .collect();
+            }
+            Err(e) => {
+                fields.not_an_object = Some(Fault {
+                    reason: "INVALID_ARGUMENT",
+                    message: e.to_string(),
+                    field: None,
+                });
+            }
+        }
+        fields
+    }
+
+    /// A field the route cannot go without. `None` when it is missing or
+    /// fails to decode, and either is recorded.
+    pub(crate) fn required<T: serde::de::DeserializeOwned>(
+        &mut self,
+        name: &'static str,
+    ) -> Option<T> {
+        self.read.push(name);
+        match self.unread.remove(name) {
+            Some(value) => self.decode(name, value),
+            None => {
+                self.fault(Fault::invalid(format!("{name} is required"), name));
+                None
+            }
+        }
+    }
+
+    /// A field the route can go without: absent and `null` are both `None`.
+    /// One that fails to decode is also `None`, and is recorded.
+    pub(crate) fn optional<T: serde::de::DeserializeOwned>(
+        &mut self,
+        name: &'static str,
+    ) -> Option<T> {
+        self.read.push(name);
+        match self.unread.remove(name) {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => self.decode(name, value),
+        }
+    }
+
+    fn decode<T: serde::de::DeserializeOwned>(
+        &mut self,
+        name: &'static str,
+        value: serde_json::Value,
+    ) -> Option<T> {
+        match serde_json::from_value(value) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                self.fault(Fault::invalid(format!("{name}: {e}"), name));
+                None
+            }
+        }
+    }
+
+    /// Record a fault the route's own checks found.
+    pub(crate) fn fault(&mut self, fault: Fault) {
+        self.faults.push(fault);
+    }
+
+    /// What the route read, if the body has no fault. Otherwise the error
+    /// shape with every fault, in the order found, then one for each field
+    /// the route does not take.
+    pub(crate) fn finish<T>(self, read: Option<T>) -> Result<T, Box<Response<Body>>> {
+        if let Some(fault) = self.not_an_object {
+            return Err(Box::new(faults(StatusCode::BAD_REQUEST, vec![fault])));
+        }
+        let takes = self.read.join(", ");
+        let mut found = self.faults;
+        found.extend(self.unread.into_iter().map(|(name, _)| {
+            Fault::invalid(
+                format!("unknown field {name:?}; this body takes {takes}"),
+                name,
+            )
+        }));
+        match read {
+            Some(value) if found.is_empty() => Ok(value),
+            // A route reads `None` only where it recorded a fault, so this is
+            // a bug in the route, not in the call.
+            None if found.is_empty() => Err(Box::new(internal(
+                "a body read came back empty without a fault",
+            ))),
+            _ => Err(Box::new(faults(StatusCode::BAD_REQUEST, found))),
+        }
+    }
+}
+
+/// A JSON object's members, and the names of any that appear more than once.
+/// A JSON map keeps only the last value under a repeated name, so a body that
+/// repeats one is refused rather than read with a value dropped.
+struct Object {
+    members: serde_json::Map<String, serde_json::Value>,
+    repeated: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for Object {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Object, D::Error> {
+        deserializer.deserialize_map(ObjectVisitor)
+    }
+}
+
+struct ObjectVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ObjectVisitor {
+    type Value = Object;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON object")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Object, A::Error> {
+        let mut object = Object {
+            members: serde_json::Map::new(),
+            repeated: Vec::new(),
+        };
+        while let Some((name, value)) = map.next_entry::<String, serde_json::Value>()? {
+            if !object.members.contains_key(&name) {
+                object.members.insert(name, value);
+            } else if !object.repeated.contains(&name) {
+                object.repeated.push(name);
+            }
+        }
+        Ok(object)
+    }
 }
 
 /// One entry of the error shape's `errors` list.
 pub(crate) struct Fault {
     reason: &'static str,
     message: String,
-    field: Option<&'static str>,
+    field: Option<String>,
 }
 
 impl Fault {
-    fn invalid(message: String, field: &'static str) -> Fault {
+    fn invalid(message: String, field: impl Into<String>) -> Fault {
         Fault {
             reason: "INVALID_ARGUMENT",
             message,
-            field: Some(field),
+            field: Some(field.into()),
+        }
+    }
+
+    pub(crate) fn out_of_range(message: String, field: &'static str) -> Fault {
+        Fault {
+            reason: "OUT_OF_RANGE",
+            message,
+            field: Some(field.to_string()),
         }
     }
 }
@@ -454,7 +557,7 @@ impl Fault {
 pub(crate) fn faults(status: StatusCode, faults: Vec<Fault>) -> Response<Body> {
     let errors: Vec<_> = faults
         .iter()
-        .map(|f| error_entry(f.reason, &f.message, f.field))
+        .map(|f| error_entry(f.reason, &f.message, f.field.as_deref()))
         .collect();
     json(status, serde_json::json!({ "errors": errors }))
 }
