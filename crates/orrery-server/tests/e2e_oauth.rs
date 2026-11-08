@@ -1,4 +1,4 @@
-//! End-to-end for GitHub's OAuth web flow (spec/surface-github.md §2.1): the
+//! End-to-end for GitHub's OAuth web flow (spec/surface-github.md §2): the
 //! authorize page, the code exchange in both response encodings, the token's
 //! use on the identity reads, and the refusals each step makes.
 

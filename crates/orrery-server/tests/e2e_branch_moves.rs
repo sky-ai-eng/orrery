@@ -1,5 +1,5 @@
 //! End-to-end for the reads Triage Factory's base-branch watch makes
-//! (spec/surface-github.md §1.10, §1.11, §1.20 and §3): a branch's tip with its
+//! (spec/surface-github.md §1.4, §1.8 and §3): a branch's tip with its
 //! ETag, the compare between two tips, and a pull request's changed files over
 //! REST and GraphQL.
 

@@ -27,6 +27,8 @@ struct CreatePullBody {
     rest: BTreeMap<String, serde_json::Value>,
 }
 
+// TODO(ORR-48): set `refs/pull/{n}/head` in the repository, and move it with
+// the head; a client fetching a pull request by number finds no ref.
 pub(crate) async fn create_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
@@ -179,6 +181,8 @@ pub(crate) async fn patch_pull(
         }
     };
 
+    // TODO(ORR-47): refuse a blank `title` with the create's 422; an edit stores
+    // an empty one.
     if parsed.title.is_some() || parsed.body.is_some() || base.is_some() {
         let edited = face.world.edit_pull(
             pull.id,

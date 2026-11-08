@@ -1,81 +1,67 @@
-# Orrery
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/imgs/lockup-display-on-dark.svg">
+    <img src="docs/imgs/lockup-display-on-light.svg" alt="Orrery" width="360">
+  </picture>
+</h1>
 
-*(ORR-uh-ree — a clockwork model of a world: turn the crank and everything advances deterministically, in lockstep, while observers watch.)*
+<p align="center"><em>(ORR-uh-ree — a clockwork model of a world: turn the crank and everything advances deterministically, in lockstep, while observers watch.)</em></p>
 
-A deterministic mock of the software-development world. Orrery serves a GitHub-faithful API backed by **real git**, all from one snapshotable directory, advanced by a virtual clock. It exists so that the tools that watch and act on that world — pollers, CI reactors, coding agents — can be tested and benchmarked against controlled, replayable conditions instead of live SaaS state.
+<p align="center">A local GitHub for testing software that acts on GitHub.</p>
 
-## Why it's built this way
+Orrery serves GitHub's REST and GraphQL APIs and real git from one directory, on a clock you control. Point a bot, a poller, a CI integration, or a coding agent at it and it behaves like GitHub, except that you can snapshot the world, fork it, advance time by an hour in one call, and ask exactly what changed.
 
-- **Real tools are the judge of realness.** Clone, fetch, and push are served by the actual `git http-backend` over bare repositories, not a reimplementation of the pack protocol. If unmodified `git` (and eventually `gh`) works against Orrery, the mock is faithful; if it doesn't, the mock is wrong. This removes an entire class of fidelity bugs by construction.
+- **Real git.** Clone, fetch, and push are served by `git http-backend` over bare repositories, so unmodified `git` works against it.
+- **Same inputs, same world.** Every timestamp comes from the world's clock and every id is derived rather than random, so replaying the same calls reproduces the same commit SHAs.
+- **The diff is the result.** Snapshot, run the thing under test, then diff: pull requests opened and merged, reviews posted, labels added, refs moved, each attributed to an actor. Whether something happened is answered from the world's state, so the same scenario works as an integration test or as an agent benchmark.
 
-- **Determinism is enforced.** The virtual clock is the only time source: every stamp — `created_at`, merge-commit dates, log entries — comes from it, tokens and ids are derived rather than random, and wall-clock reads and hash-ordered collections are compile errors (deny-level clippy bans). Because commit dates come from the clock too, replaying the same inputs reproduces the same SHAs byte-for-byte.
+Orrery implements the parts of GitHub its users have needed so far, and grows as they need more. An endpoint it doesn't implement returns `501` naming the path instead of a `404`, and contributions are welcome. A world never makes a network call of its own.
 
-- **The world is a directory.** Everything a world is — SQLite state, bare repos — lives under one root. So a snapshot is a quiesced copy, restore is the reverse copy, fork is a copy somewhere else, and cleanup is `rm -rf`. There is no hidden state anywhere else to disagree with the copy.
+## Quick start
 
-- **The diff is the verdict.** Every mutation is attributed to an actor and appended to an action log, and the engine can semantically diff any two world states: PRs opened/merged, labels and review requests, reviews posted, refs moved, teams and memberships, sign-ins (`spec/usage.md` lists every section). "Did the thing actually happen?" is answered from state, never from transcripts or vibes — which is what makes a scenario simultaneously an integration test and a benchmark task.
-
-- **Two doors, one door per operation.** Anything real GitHub has an API for goes through the face, performed by synthetic actors — including CI, since real CI systems are just GitHub Apps posting check runs. The `/_orrery/` control plane holds only what no public API can express: identity, time, snapshots. Nothing is reachable through both.
-
-- **Unknown surface fails loudly.** The face grows strictly on observed consumer demand. An unimplemented endpoint returns a self-describing `501` naming the path — never a plausible `404` that a consumer would mistake for "no data". The two must never blur; the design docs in [`spec/`](spec/README.md) carry the full rulebook and surface inventory.
-
-## Running it
-
-Requires Rust and `git` on `PATH`.
-
-```bash
-cargo build --workspace
-cargo test --workspace          # the E2E suite drives real git against a served world
-```
-
-Serve an instance from a config (see [`orrery.example.toml`](orrery.example.toml)):
+Download the binary for your platform from the [latest release](https://github.com/sky-ai-eng/orrery/releases); [Install](docs/users/install.md) covers every platform and how to verify the download. `git` must be on `PATH`.
 
 ```bash
-target/debug/orrery serve --config orrery.toml
+gh release download --repo sky-ai-eng/orrery --pattern 'orrery_*_linux_amd64.tar.gz'
+tar xzf orrery_*_linux_amd64.tar.gz orrery
 ```
 
-Then mint an actor and act through the face like any GitHub client would:
+Serve a world. An instance is one config file and the directory it names; [`orrery.example.toml`](orrery.example.toml) lists every setting.
 
 ```bash
-# control plane: identity and time
-curl -X POST localhost:4180/_orrery/actors -d '{"login":"alice","kind":"user"}'
-curl -X POST localhost:4180/_orrery/clock/advance -d '{"seconds":3600}'
-
-# face: real GitHub shapes, real git
-curl -X POST localhost:4180/api/v3/user/repos -H "authorization: token $TOKEN" -d '{"name":"webapp"}'
-git clone http://x-access-token:$TOKEN@localhost:4180/alice/webapp.git
-eval "$(target/debug/orrery env)"   # date the next commits at the world clock, not the laptop's
-
-# engine ops: pause the world, act, ask what happened
-curl -X POST localhost:4180/_orrery/snapshots -d '{"name":"before"}'
-curl -X POST localhost:4180/_orrery/diff -d '{"from":"before"}'
+printf '[instance]\ndir = "./instance"\n' > orrery.toml
+./orrery serve --config orrery.toml
 ```
 
-A snapshot, or a stopped instance's world, can seed a whole new instance, and a world can be made without serving it ([`spec/usage.md`](spec/usage.md) has both commands and their `--json` output):
+In another terminal, make an actor, take a snapshot, act through GitHub's API and git, and ask what changed:
 
 ```bash
-target/debug/orrery fork --instance ./instance --snapshot before --dest ./instance2
-target/debug/orrery fork --world ./instance2/world --dest ./instance3 --secret random
-target/debug/orrery create --instance ./instance4 --t0 2026-01-01T00:00:00Z
+# control plane: an actor and its token, then a snapshot to diff against
+TOKEN=$(curl -s -X POST localhost:4180/_orrery/actors -d '{"login":"alice","kind":"user"}' | jq -r .token)
+curl -s -X POST localhost:4180/_orrery/snapshots -d '{"name":"before"}'
+
+# face: GitHub's REST API and real git
+curl -s -X POST localhost:4180/api/v3/user/repos -H "authorization: token $TOKEN" -d '{"name":"webapp"}'
+git clone http://x-access-token:$TOKEN@localhost:4180/alice/webapp.git && cd webapp
+eval "$(../orrery env)"   # date commits at the world's clock, not your machine's
+git commit --allow-empty -m 'first commit' && git push origin HEAD:main
+
+# control plane: everything that happened since the snapshot
+curl -s -X POST localhost:4180/_orrery/diff -d '{"from":"before"}'
 ```
 
-## Releases
+## How it works
 
-Each [release](https://github.com/sky-ai-eng/orrery/releases) carries an `orrery` binary for Linux and macOS, on x86_64 and arm64, one `tar.gz` per platform. The Linux binaries are static, so they run on any distribution. `git` must be on `PATH`.
+Orrery has two doors, and every operation goes through exactly one of them.
 
-```bash
-gh release download --repo sky-ai-eng/orrery \
-  --pattern 'orrery_*_linux_amd64.tar.gz' --pattern 'checksums.txt*'
-```
+- **The face** is GitHub: the REST API under `/api/v3`, GraphQL at `/api/graphql`, git at `/{owner}/{repo}.git`, and the OAuth web flow under `/login/oauth`. Orrery presents itself as a GitHub Enterprise Server, so a client that takes a GitHub base URL needs nothing else. Every call is made by an actor holding a token, including CI, which on GitHub is an App posting check runs.
+- **The control plane**, under `/_orrery`, holds what GitHub has no API for: creating actors and issuing their tokens, setting their email addresses, registering OAuth apps, the clock, snapshots, restore, and diff.
 
-**Versions.** Orrery is versioned `0.y.z`. A release that moves `y` (0.3.4 to 0.4.0) breaks something an existing caller relies on: a command or flag, `--json` output or the ready line, a control-plane route, the instance config file, or opening a world an earlier release wrote. Every other release moves only `z`. That includes new face surface and any change that brings a face closer to GitHub, because GitHub's behavior is what a face promises. [`CHANGELOG.md`](CHANGELOG.md) lists each release's changes.
+A world is a directory: a SQLite database and bare git repositories. A snapshot is a copy of it, `orrery fork` turns a snapshot into a new instance, and deleting the directory deletes the world. Every credential in a world is fake, so a snapshot is safe to share.
 
-**Verifying a download.** `checksums.txt` holds the sha256 of every archive, and it is signed keylessly with [cosign](https://docs.sigstore.dev/) through GitHub Actions' OIDC identity, so there is no key to fetch first. With the archive, `checksums.txt`, `checksums.txt.sig`, and `checksums.txt.pem` in one directory:
+## Documentation
 
-```bash
-cosign verify-blob --certificate checksums.txt.pem --signature checksums.txt.sig \
-  --certificate-identity-regexp '^https://github\.com/sky-ai-eng/orrery/\.github/workflows/release\.yml@refs/tags/.+$' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
-sha256sum --ignore-missing -c checksums.txt
-```
-
-The identity names the release workflow and a tag push, not just the repository, so a signature made by any other workflow here fails. Each archive also has an SPDX SBOM beside it, `<archive>.sbom.json`.
+- [Documentation index](docs/README.md): installing, verifying a release, and contributing
+- [Usage model](spec/usage.md): the two doors, the clock, snapshots, forks, and what a diff reports
+- [GitHub surface](spec/surface-github.md): every endpoint and GraphQL field Orrery serves, and how it behaves
+- [Design rules](spec/README.md): the rules every change to Orrery follows

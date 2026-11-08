@@ -1,52 +1,47 @@
-# Git protocol surface
+# Git surface
 
-Extracted at TF commit `78c8bfd2` (2026-08-21). Bottom line: **plain `git http-backend` over real bare repos is sufficient**, proven by two in-tree fixtures that drive the production code paths (`internal/worktree/blobless_auth_test.go:24-52`, `internal/ghinjector/sharedorigin_git_test.go:36-55`). No go-git/libgit2 anywhere — every operation execs the `git` binary. No submodules, no LFS, no shallow clones (`--depth` appears nowhere), no tags refspecs, no `git-upload-archive`.
+Orrery serves git's smart-HTTP protocol by running the real `git http-backend` over bare repositories (rule 2). It reimplements nothing in the pack protocol, so what `git` can do over smart-HTTP against GitHub it can do against Orrery, within the limits below.
 
-## The server recipe
+## Paths
 
-1. **Layout:** `GIT_PROJECT_ROOT=<root>` with bare repos at `<root>/<owner>/<repo>.git`. Must answer both `/owner/repo/...` and `/owner/repo.git/...` (TF's clone URLs carry `.git`; the proxy gate strips it).
-2. **Per-repo config, every bare:**
-   - `uploadpack.allowFilter = true` — mandatory; every TF clone is `--filter=blob:none`.
-   - `uploadpack.allowAnySHA1InWant = true` — mandatory; lazy promisor fetches request blobs by OID during `worktree add` / `checkout` / `reset --hard`.
-   - `http.receivepack = true` — mandatory for pushes (`GIT_HTTP_EXPORT_ALL` does not enable it).
-   - A meaningful `HEAD` symref — default-branch detection reads the clone's HEAD (`worktree_branch.go:884`); a missing one falls back to literal `"main"`.
-3. **`refs/pull/{N}/head` must exist** on the upstream bare for every reviewable PR (seeded by pushing `HEAD:refs/pull/{N}/head`). This is how fork PRs are fetched without touching the fork.
-4. **Fork PRs:** the head repo needs its own path with `http.receivepack=true` — the push remote points at `headCloneURL`.
-5. **Auth:** accept `Authorization: Basic base64("x-access-token:" + <token>)`. Behind TF's gitproxy the mock's own auth is irrelevant (the proxy injects).
-6. **URL shape constraints (hardcoded in TF):** exactly two path segments `/{owner}/{repo}[.git]` (the proxy gate rejects anything else — no sub-path mounting); owner/repo match `[A-Za-z0-9._-]+`; `gitproxy.Upstream` must be scheme+host only and https unless loopback. Host is fully configurable via org `GitHubBaseURL`; path layout is not.
+A repository answers at `/{owner}/{repo}` and `/{owner}/{repo}.git`: exactly two path segments, GitHub's shape. The owner and name are matched against the repository's row, and git is always run against the row's own spelling. Three requests make up the protocol:
 
-## Operations the server will see
+| Request | Purpose |
+| --- | --- |
+| `GET /{owner}/{repo}[.git]/info/refs?service=git-upload-pack` or `?service=git-receive-pack` | Ref advertisement. Any other `service`, or none, is `400`: Orrery serves smart HTTP only. |
+| `POST /{owner}/{repo}[.git]/git-upload-pack` | Clone and fetch |
+| `POST /{owner}/{repo}[.git]/git-receive-pack` | Push |
 
-| Op | Command shape | When |
-| --- | --- | --- |
-| Bare clone | `git clone --bare --filter=blob:none <cloneURL> <dir>` (`worktree.go:553`) | first need per repo (run setup, curator seed, bootstrap warm, restore, bundle import) |
-| PR fetch | `git fetch origin +refs/pull/N/head:refs/heads/triagefactory/<rootKey>/pr-N +refs/pull/N/head:refs/remotes/origin/...` (`worktree_pr.go:138`) | every PR-run materialization |
-| Base refresh | `git fetch origin +refs/heads/<base>:refs/remotes/origin/<base>` (`worktree_pr.go:156`, best-effort) | PR materialization with a known base |
-| Branch fetch | same refspec shape into `refs/remotes/origin/*` (5 sites: branch/checkout worktrees, curator pinned ×2) | workspace add, every curator turn (local) / 0→1 reader (multi shared) |
-| Promisor fetches | git-initiated `fetch` during `worktree add` / `checkout` / `reset --hard` (≈10 sites) | constantly; auth rides the inherited `GIT_CONFIG_*` env |
-| ls-remote | `git ls-remote --exit-code --heads origin <head>` (`cmd/exec/gh/pr.go:1020`) | every `pr create`; non-zero exit hard-fails |
-| Push | agent-originated only — **TF Go never pushes** | through the proxy (multi + managed local) or gated by the pre-push hook (unmanaged local) |
+An unknown repository is `404`. A request body is capped at 256 MiB.
 
-## Credential delivery (host side)
+## Authentication
 
-Never argv, never persisted into `remote.origin.url` — always process-env `GIT_CONFIG_COUNT/KEY_n/VALUE_n`:
-- Token mode: `http.https://<host>/.extraHeader = Authorization: Basic base64("x-access-token:"+token)` (no-op for non-https URLs → SSH remotes silently get no injection).
-- Proxy mode: `url.<proxy>/.insteadOf = <upstream>/` + `http.<proxy>/.extraHeader = ... base64("x-run:"+placeholder)`.
-- `GIT_TERMINAL_PROMPT=0` forced; `GIT_ASKPASS`/`SSH_ASKPASS` stripped; `HOME` inherited (operator `~/.gitconfig` IS read by host-side git — see below).
+An actor authenticates with HTTP Basic, its token as the password, the way GitHub documents for tokens (`x-access-token:<token>`; the username is not checked). Without credentials, clone and fetch of a public repository succeed unless the instance sets `anonymous_git_reads = false`, which a world whose faces are on the public internet does. A push, or any request for a private repository, without credentials is `401`, not `404`, so `git` knows credentials would change the answer.
 
-## The per-run git proxy (`internal/gitproxy`)
+## The bare repository recipe
 
-- Path allowlist: only `GET .../info/refs`, `POST .../git-upload-pack`, `POST .../git-receive-pack` on two-segment paths; all else 403 pre-token.
-- Inbound auth: per-run token as the Basic password (username conventionally `x-run`), constant-time.
-- Outbound: sets `Authorization: Basic base64("x-access-token:"+real)`; strips forwarding headers. CONNECT → 501 (agent remote URLs are plain `http://` at the proxy address, or ride the shared TLS origin).
-- Receive-pack gate: pkt-line command block buffered (64 KiB cap, overflow fails closed), every ref checked against `Decision.AllowedRefs` (= `refs/heads/<PushTargetBranch>` minus `pushpolicy.ProtectedFor` — always main+master + profile default/base branch, modulated by team `BaseBranchPushPolicy`), **all deletes rejected**, body reconstructed byte-identically, upstream status recorded per ref.
-- Multi mode: the proxy handler is re-mounted behind the gh injector's port-443 TLS listener so one fake-GHE origin serves REST + GraphQL + git (routing: `/api/v3`+`/api/graphql` prefixes win, then smart-HTTP path suffixes, before API auth).
+Each repository is a bare repository at `<world>/repos/<owner>/<repo>.git`, created with its default branch as `HEAD` and configured with:
 
-## Ambient escapes (local mode only — mock design should route around them by always configuring HTTPS clone URLs)
+| Setting | Why |
+| --- | --- |
+| `uploadpack.allowFilter = true` | Partial clones (`git clone --filter=blob:none`) |
+| `uploadpack.allowAnySHA1InWant = true` | A partial clone fetches missing blobs by object id during checkout |
+| `http.receivepack = true` | `git http-backend` refuses pushes without it |
+| `gc.auto = 0` | Object files are never rewritten, so a snapshot can share them with the live world |
 
-1. Local curator pinned-repo refresh is fully uncredentialed (`cloneTokenFor` returns `""` in local) — an `ssh_url` row means real ambient SSH.
-2. Local delegated clone falls back to SSH URLs when the managed git channel isn't up.
-3. Local bootstrap warm injects the raw PAT directly (not proxied) and goes ambient on SSH URLs; project-bundle import clones with no auth options at all.
-4. `PreflightSSH` diagnostics run real `ssh -T` with `StrictHostKeyChecking=accept-new` (writes operator `known_hosts`).
+Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`, and `GIT_TERMINAL_PROMPT=0`, so the operator's own git configuration never changes a world.
 
-One synthesized clone URL exists (`workspace_snapshot.go:657`): `<orgBase>/<owner>/<repo>.git` — host configurable, path shape hardcoded.
+## What a push does
+
+`git-receive-pack` runs under a per-repository lock, and Orrery compares the repository's refs before and after it. For each ref that changed it appends one `ref.update` entry to the action log, attributed to the pushing actor, naming the ref and its old and new object ids. Then:
+
+- an open pull request whose head branch moved takes the new tip as its head, GitHub's `synchronize`; a deleted branch leaves its pull requests on their last head;
+- the repository's `pushed_at` moves to the world clock; and
+- the first push of a branch into an empty repository sets the default branch, as on GitHub.
+
+A commit's author and committer dates come from the client that made it, not from Orrery. A script that commits sets them from the world clock first (`orrery env`, `usage.md`), or replaying it produces different commit ids.
+
+## Not served
+
+- `refs/pull/{n}/head` and `refs/pull/{n}/merge`. GitHub keeps both for every pull request; Orrery doesn't create them yet, so a client that fetches a pull request by number finds no such ref.
+- SSH, the `git://` protocol, `git-upload-archive`, and Git LFS.

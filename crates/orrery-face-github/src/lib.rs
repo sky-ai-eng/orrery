@@ -1,6 +1,6 @@
 //! The GitHub REST face. Grows strictly on demand (spec/README.md rule 1):
-//! every endpoint here exists because a consumer in `spec/surface-github.md`
-//! or `spec/usage.md` needs it. Currently the authoring surface: repo
+//! every endpoint here exists because a consumer needs it, and is listed in
+//! `spec/surface-github.md`. Currently the authoring surface: repo
 //! creation, org membership and teams, pull requests (open/edit/merge),
 //! review requests, reviews, issue comments, labels, and check runs — the
 //! writes a scenario driver performs (spec/usage.md).
@@ -267,7 +267,7 @@ pub(crate) fn resolve_repo(
 }
 
 /// The GitHub 422 creation-failure envelope, as consumers parse it
-/// (spec/surface-github.md §4.1: `message` + `errors[].{code,field,message}`).
+/// (spec/grammar.md: `message` + `errors[].{code,field,message}`).
 pub(crate) fn creation_failed(code: &str, field: &str, message: &str) -> Response<Body> {
     let body = serde_json::json!({
         "message": "Repository creation failed.",
@@ -307,6 +307,8 @@ pub(crate) fn validation_custom(resource: &str, message: &str) -> Response<Body>
 /// Loud refusal for a real-GitHub field Orrery chooses not to fake. Shaped
 /// like a GitHub 422 so strict clients parse it, but self-describing so a
 /// human reads exactly what to do (NOT-MOCKED at field granularity).
+// TODO(ORR-46): name each caller's own resource; pulls, reviews, labels,
+// check runs, and OAuth all report `Repository` through this.
 pub(crate) fn orrery_unsupported_field(field: &str) -> Response<Body> {
     orrery_unsupported_field_on("Repository", field)
 }

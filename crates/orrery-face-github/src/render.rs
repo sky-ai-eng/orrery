@@ -1,6 +1,6 @@
 //! Renderers from kernel domain types to GitHub wire objects, populated
-//! generously (rule 1: fields liberal, endpoints strict). Field values a
-//! consumer reads are listed in spec/surface-github.md.
+//! generously (rule 1: fields liberal, endpoints strict). The fields each
+//! object carries are listed in spec/surface-github.md §1.0.
 
 use orrery_world::{Actor, ActorKind, CheckRun, IssueComment, Pull, Repo, Review, Team};
 
@@ -44,6 +44,8 @@ pub fn repo_json(face: &GithubFace, repo: &Repo, owner: &Actor) -> serde_json::V
         "html_url": format!("{base}/{full_name}"),
         "url": format!("{base}/api/v3/repos/{full_name}"),
         "clone_url": format!("{base}/{full_name}.git"),
+        // TODO(ORR-47): `host` carries the listener's port, which makes
+        // `ssh_url` an ill-formed scp-style address.
         "git_url": format!("git://{host}/{full_name}.git"),
         "ssh_url": format!("git@{host}:{full_name}.git"),
         "default_branch": repo.default_branch,

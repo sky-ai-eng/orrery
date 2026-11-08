@@ -41,6 +41,8 @@ fn page_params(query: &str) -> (usize, usize) {
     (per_page, page)
 }
 
+// TODO(ORR-47): values are not percent-decoded, so `?ref=a%2Fb` looks for a
+// ref named `a%2Fb`; every query value the face reads comes through here.
 fn query_param(query: &str, name: &str) -> Option<String> {
     query
         .split('&')
@@ -121,6 +123,8 @@ pub(crate) async fn list_pulls(
         .expect("static response parts are valid")
 }
 
+// TODO(ORR-46): refuse `Accept` diff and patch media as compare does; until
+// then a client asking for a diff gets the JSON object.
 pub(crate) async fn get_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
