@@ -5,6 +5,8 @@
   </picture>
 </h1>
 
+<p align="center"><em>(ORR-uh-ree — a clockwork model of a world: turn the crank and everything advances deterministically, in lockstep, while observers watch.)</em></p>
+
 <p align="center">A local GitHub for testing software that acts on GitHub.</p>
 
 Orrery serves GitHub's REST and GraphQL APIs and real git from one directory, on a clock you control. Point a bot, a poller, a CI integration, or a coding agent at it and it behaves like GitHub, except that you can snapshot the world, fork it, advance time by an hour in one call, and ask exactly what changed.
@@ -14,8 +16,6 @@ Orrery serves GitHub's REST and GraphQL APIs and real git from one directory, on
 - **The diff is the result.** Snapshot, run the thing under test, then diff: pull requests opened and merged, reviews posted, labels added, refs moved, each attributed to an actor. Whether something happened is answered from the world's state, so the same scenario works as an integration test or as an agent benchmark.
 
 Orrery implements the parts of GitHub its users have needed so far, and grows as they need more. An endpoint it doesn't implement returns `501` naming the path instead of a `404`, and contributions are welcome. A world never makes a network call of its own.
-
-*Orrery (ORR-uh-ree) is named for the clockwork models of the solar system, which move only when someone turns the crank.*
 
 ## Quick start
 
