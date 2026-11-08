@@ -24,12 +24,18 @@ This project uses an individual Contributor License Agreement so contributors
 keep copyright to their work while granting the maintainer broad rights to use,
 relicense, and distribute contributions as part of the project.
 
-For pull requests submitted through GitHub, the expected workflow is:
+The agreement is signed through [CLA Assistant](https://cla-assistant.io/):
 
 1. Open a pull request.
-2. If prompted by CLA Assistant, review [`docs/contributors/CLA.md`](docs/contributors/CLA.md) and sign the agreement in the
-   PR flow.
-3. Wait for the CLA status check to pass before requesting review or merge.
+2. CLA Assistant comments on it with a link. Review
+   [`docs/contributors/CLA.md`](docs/contributors/CLA.md), then follow the
+   link, sign in with GitHub, and accept the agreement. Later pull requests
+   reuse your signature until the agreement changes.
+3. Wait for the `license/cla` check to pass before requesting review or merge.
+
+Every author of a commit in the pull request signs. CLA Assistant matches a
+commit to a GitHub account by its author email, so author your commits with an
+address your account has verified.
 
 If you are contributing on behalf of an employer or client, make sure you have
 permission to submit the work under the terms in [`docs/contributors/CLA.md`](docs/contributors/CLA.md).
