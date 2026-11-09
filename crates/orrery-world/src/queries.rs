@@ -7,12 +7,12 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::types::*;
 use crate::{Result, WorldError};
 
-pub(crate) const ACTOR_SELECT: &str = "SELECT id, login, kind, created_clock_unix FROM actors a";
-
 // The projections below name only their own table's columns, reaching other
 // tables through scalar subqueries, so the same text serves a point read
 // (`SELECT {cols} FROM <table>`) and the RETURNING clause of a write to that
 // table: the write returns exactly what the read would.
+
+pub(crate) const ACTOR_COLUMNS: &str = "id, login, kind, created_clock_unix";
 
 pub(crate) const REPO_COLUMNS: &str = "id,
     (SELECT login FROM actors WHERE actors.id = repos.owner_id),
@@ -228,7 +228,11 @@ pub(crate) fn log_seq_at_or_before(conn: &Connection, seq: i64) -> Result<i64> {
 }
 
 pub(crate) fn list_actors(conn: &Connection) -> Result<Vec<Actor>> {
-    list(conn, &format!("{ACTOR_SELECT} ORDER BY id"), row_to_actor)
+    list(
+        conn,
+        &format!("SELECT {ACTOR_COLUMNS} FROM actors ORDER BY id"),
+        row_to_actor,
+    )
 }
 
 pub(crate) fn list_repos(conn: &Connection) -> Result<Vec<Repo>> {

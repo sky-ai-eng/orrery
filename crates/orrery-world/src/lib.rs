@@ -243,8 +243,11 @@ impl World {
         let clock = queries::clock(&conn)?;
         let actor = conn
             .query_row(
-                "INSERT INTO actors (login, kind, created_clock_unix) VALUES (?1, ?2, ?3)
-                 RETURNING id, login, kind, created_clock_unix",
+                &format!(
+                    "INSERT INTO actors (login, kind, created_clock_unix) VALUES (?1, ?2, ?3)
+                     RETURNING {}",
+                    queries::ACTOR_COLUMNS
+                ),
                 params![login, kind.as_str(), clock],
                 queries::row_to_actor,
             )
@@ -283,7 +286,10 @@ impl World {
         let tx = conn.unchecked_transaction()?;
         let actor = tx
             .query_row(
-                &format!("{} WHERE login = ?1", queries::ACTOR_SELECT),
+                &format!(
+                    "SELECT {} FROM actors WHERE login = ?1",
+                    queries::ACTOR_COLUMNS
+                ),
                 params![login],
                 queries::row_to_actor,
             )
@@ -329,7 +335,10 @@ impl World {
         let conn = self.lock();
         Ok(conn
             .query_row(
-                &format!("{} WHERE login = ?1", queries::ACTOR_SELECT),
+                &format!(
+                    "SELECT {} FROM actors WHERE login = ?1",
+                    queries::ACTOR_COLUMNS
+                ),
                 params![login],
                 queries::row_to_actor,
             )
@@ -340,9 +349,11 @@ impl World {
         let conn = self.lock();
         Ok(conn
             .query_row(
-                "SELECT a.id, a.login, a.kind, a.created_clock_unix
-                 FROM tokens t JOIN actors a ON a.id = t.actor_id
-                 WHERE t.token = ?1",
+                &format!(
+                    "SELECT {} FROM actors
+                     WHERE id = (SELECT actor_id FROM tokens WHERE token = ?1)",
+                    queries::ACTOR_COLUMNS
+                ),
                 params![token],
                 queries::row_to_actor,
             )
