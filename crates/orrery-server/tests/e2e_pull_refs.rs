@@ -1,8 +1,9 @@
 //! End-to-end: the `refs/pull/{n}/head` ref every pull request keeps
 //! (spec/surface-git.md), fetched by number with real `git`. It is set when the
 //! pull request opens, follows its head while it is open, stays where it is
-//! once the pull request closes or its branch goes, refuses pushes, and is
-//! rebuilt by replaying the action log (rule 5).
+//! once the pull request closes or its branch goes, takes its branch's tip
+//! when the pull request reopens, refuses pushes, and is rebuilt by replaying
+//! the action log (rule 5).
 
 mod common;
 
@@ -10,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use common::{Instance, boot, face, face_ok, git, git_output, mint_actor};
+use common::{Instance, boot, face, face_answer, face_ok, git, git_output, mint_actor};
 use orrery_face_git::store;
 use orrery_world::{LogEntry, Signal};
 
@@ -36,9 +37,9 @@ fn fetch_pull(client: &Path, clock: i64, number: i64) -> String {
 }
 
 /// The refs the action log implies for one repository, rebuilt from its
-/// entries alone: a `ref.update` moves its ref, a `pull.open` pins
-/// `refs/pull/{n}/head` at its head branch's tip, and an open pull request's
-/// ref follows every later move of that branch.
+/// entries alone: a `ref.update` moves its ref, a `pull.open` or `pull.reopen`
+/// pins `refs/pull/{n}/head` at its head branch's tip, and an open pull
+/// request's ref follows every later move of that branch.
 fn refs_from_log(log: &[LogEntry], repo: &str) -> BTreeMap<String, String> {
     let mut refs = BTreeMap::new();
     let mut heads: BTreeMap<i64, String> = BTreeMap::new();
@@ -70,7 +71,12 @@ fn refs_from_log(log: &[LogEntry], repo: &str) -> BTreeMap<String, String> {
                 open.push(n);
             }
             "pull.close" | "pull.merge" => open.retain(|n| Some(*n) != number),
-            "pull.reopen" => open.push(number.unwrap()),
+            "pull.reopen" => {
+                let n = number.unwrap();
+                let tip = refs[&format!("refs/heads/{}", heads[&n])].clone();
+                refs.insert(store::pull_head_ref(n), tip);
+                open.push(n);
+            }
             _ => {}
         }
     }
@@ -493,4 +499,205 @@ async fn a_merge_that_fails_puts_its_refs_back() {
     ] {
         assert_eq!(rev(&r).as_deref(), Some(merge_sha), "{r}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reopened_pull_takes_its_head_branchs_tip() {
+    let inst = boot().await;
+    let base = inst.base.clone();
+    let token = mint_actor(&base, "alice", "user");
+    let repo = face_ok(
+        "POST",
+        &format!("{base}/api/v3/user/repos"),
+        &token,
+        serde_json::json!({ "name": "webapp" }),
+    );
+    let authed_url = repo["clone_url"]
+        .as_str()
+        .unwrap()
+        .replace("http://", &format!("http://x-access-token:{token}@"));
+    let api = format!("{base}/api/v3/repos/alice/webapp");
+    let bare = store::bare_dir(&inst.world.repos_dir(), "alice", "webapp");
+    let pull_ref = |n: i64| store::rev_parse(&bare, &store::pull_head_ref(n)).unwrap();
+    let patch = |n: i64, body: serde_json::Value| {
+        face_answer(
+            "PATCH",
+            &format!("{api}/pulls/{n}"),
+            &token,
+            &[],
+            Some(body),
+        )
+    };
+    let get = |n: i64| {
+        face_ok(
+            "GET",
+            &format!("{api}/pulls/{n}"),
+            &token,
+            serde_json::json!(null),
+        )
+    };
+
+    // Every ref a listener reads at a log entry is the earliest view a reader
+    // woken by that entry could have (see the test above). At each entry:
+    // where `refs/pull/1/head` points.
+    type Read = Result<Option<String>, String>;
+    let seen: Arc<Mutex<Vec<Read>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let watched = bare.clone();
+    inst.world.listen(move |signal| {
+        if signal == Signal::LogMayHaveGrown {
+            let read =
+                store::rev_parse(&watched, &store::pull_head_ref(1)).map_err(|e| e.to_string());
+            if let Ok(mut seen) = sink.lock() {
+                seen.push(read);
+            }
+        }
+    });
+
+    let clock = inst.world.clock().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    git(&src, clock, &["init", "-b", "main", "."]);
+    commit(&src, clock, "README.md", "# webapp\n");
+    git(&src, clock, &["checkout", "-b", "feature"]);
+    let feature_v1 = commit(&src, clock, "feature.txt", "v1\n");
+    git(&src, clock, &["push", &authed_url, "main", "feature"]);
+    face_ok(
+        "POST",
+        &format!("{api}/pulls"),
+        &token,
+        serde_json::json!({ "title": "Add feature", "head": "feature", "base": "main" }),
+    );
+
+    // Closed, the pull request stays on its head while the branch moves on.
+    let (status, _) = patch(1, serde_json::json!({ "state": "closed" }));
+    assert_eq!(status, 200);
+    let feature_v2 = commit(&src, clock, "feature.txt", "v2\n");
+    git(&src, clock, &["push", &authed_url, "feature"]);
+    assert_eq!(get(1)["head"]["sha"], feature_v1.as_str());
+    assert_eq!(pull_ref(1).as_deref(), Some(feature_v1.as_str()));
+
+    // Reopened, it takes the branch's tip, and its ref has moved by the time
+    // a reader can see the reopen.
+    seen.lock().unwrap().clear();
+    let (status, reopened) = patch(1, serde_json::json!({ "state": "open" }));
+    assert_eq!(status, 200, "{reopened}");
+    assert_eq!(reopened["state"], "open");
+    assert_eq!(reopened["head"]["sha"], feature_v2.as_str());
+    assert_eq!(get(1)["head"]["sha"], feature_v2.as_str());
+    assert_eq!(pull_ref(1).as_deref(), Some(feature_v2.as_str()));
+    let during = std::mem::take(&mut *seen.lock().unwrap());
+    assert!(!during.is_empty());
+    for read in &during {
+        assert_eq!(read, &Ok(Some(feature_v2.clone())), "{during:?}");
+    }
+
+    // A merge with no `sha` merges the tip the reopen took.
+    let merged = face_ok(
+        "PUT",
+        &format!("{api}/pulls/1/merge"),
+        &token,
+        serde_json::json!({}),
+    );
+    let merge_sha = merged["sha"].as_str().unwrap();
+    assert_eq!(
+        store::rev_parse(&bare, &format!("{merge_sha}^2")).unwrap(),
+        Some(feature_v2.clone())
+    );
+
+    // A second pull request, closed, then its branch force-pushed.
+    git(&src, clock, &["checkout", "main"]);
+    git(&src, clock, &["checkout", "-b", "rewrite"]);
+    let rewrite_v1 = commit(&src, clock, "rewrite.txt", "v1\n");
+    git(&src, clock, &["push", &authed_url, "rewrite"]);
+    face_ok(
+        "POST",
+        &format!("{api}/pulls"),
+        &token,
+        serde_json::json!({ "title": "Rewrite", "head": "rewrite", "base": "main" }),
+    );
+    let (status, _) = patch(2, serde_json::json!({ "state": "closed" }));
+    assert_eq!(status, 200);
+    git(&src, clock, &["commit", "--amend", "-m", "rewritten"]);
+    git(&src, clock, &["push", "--force", &authed_url, "rewrite"]);
+
+    // GitHub refuses to reopen a pull request whose branch no longer
+    // contains its head, and one whose branch is gone; the refusal writes
+    // nothing, the title beside it included.
+    let refusal = |message: &str| {
+        serde_json::json!({
+            "message": "Validation Failed",
+            "errors": [{
+                "resource": "PullRequest",
+                "code": "custom",
+                "field": "state",
+                "message": message,
+            }],
+        })
+    };
+    let reopen_entries = || {
+        inst.world
+            .log_after(0, 10_000)
+            .unwrap()
+            .iter()
+            .filter(|e| e.action == "pull.reopen")
+            .count()
+    };
+    let reopens = reopen_entries();
+
+    // A merged pull request is refused before its branch is looked at:
+    // GitHub answers the same once the merged head branch is deleted.
+    let merged = (
+        422,
+        refusal("state cannot be changed. The pull request cannot be reopened."),
+    );
+    assert_eq!(patch(1, serde_json::json!({ "state": "open" })), merged);
+    git(&src, clock, &["push", &authed_url, ":feature"]);
+    assert_eq!(patch(1, serde_json::json!({ "state": "open" })), merged);
+
+    let reopen_and_retitle = serde_json::json!({ "state": "open", "title": "Retitled" });
+    assert_eq!(
+        patch(2, reopen_and_retitle.clone()),
+        (
+            422,
+            refusal("state cannot be changed. The rewrite branch was force-pushed or recreated.")
+        )
+    );
+    git(&src, clock, &["push", &authed_url, ":rewrite"]);
+    assert_eq!(
+        patch(2, reopen_and_retitle.clone()),
+        (
+            422,
+            refusal("state cannot be changed. The rewrite branch has been deleted.")
+        )
+    );
+    let kept = get(2);
+    assert_eq!(kept["state"], "closed");
+    assert_eq!(kept["title"], "Rewrite");
+    assert_eq!(kept["head"]["sha"], rewrite_v1.as_str());
+    assert_eq!(pull_ref(2).as_deref(), Some(rewrite_v1.as_str()));
+    assert_eq!(reopen_entries(), reopens);
+
+    // Restoring the branch at the pull request's head lets it reopen.
+    git(
+        &src,
+        clock,
+        &[
+            "push",
+            &authed_url,
+            &format!("{rewrite_v1}:refs/heads/rewrite"),
+        ],
+    );
+    let (status, reopened) = patch(2, reopen_and_retitle);
+    assert_eq!(status, 200, "{reopened}");
+    assert_eq!(reopened["title"], "Retitled");
+    assert_eq!(reopened["head"]["sha"], rewrite_v1.as_str());
+
+    // Replay: the log alone rebuilds the refs, the reopens' included.
+    let log = inst.world.log_after(0, 10_000).unwrap();
+    assert_eq!(
+        refs_from_log(&log, "alice/webapp"),
+        store::list_refs(&bare).unwrap()
+    );
 }

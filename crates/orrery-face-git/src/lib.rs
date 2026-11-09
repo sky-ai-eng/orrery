@@ -76,9 +76,10 @@ impl GitFace {
     }
 
     /// Point a pull request's `refs/pull/{n}/head` at `head_sha`. The move
-    /// has no log entry of its own: it follows from the pull's `pull.open` and
-    /// from the `ref.update` that moved its head branch, so replaying those
-    /// entries rebuilds it. The caller holds the repository's lock for write.
+    /// has no log entry of its own: it follows from the pull's `pull.open` or
+    /// `pull.reopen` and from the `ref.update` that moved its head branch, so
+    /// replaying those entries rebuilds it. The caller holds the repository's
+    /// lock for write.
     pub fn pin_pull_ref(
         &self,
         repo: &Repo,

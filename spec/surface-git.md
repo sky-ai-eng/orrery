@@ -42,6 +42,8 @@ Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CO
 
 The entries and the state they describe land in one commit, after every ref the push moved is in place, so a reader that can see any of a push's entries sees the repository, its refs, and its pull requests as the push left them. Opening, closing, reopening, and merging a pull request take the same per-repository lock, so the pull requests a push re-pins are the ones open on its branch when it lands.
 
+A commit's author and committer dates come from the client that made it, not from Orrery. A script that commits sets them from the world clock first (`orrery env`, `usage.md`), or replaying it produces different commit ids.
+
 ## What a fetch sees
 
 Every other git request, a fetch's ref advertisement and pack in particular, holds the same per-repository lock for read, while a push, a merge, and opening, closing, or reopening a pull request hold it for write. A fetch request therefore sees the repository as it was before a write or after the write's record commits, never in between: not a write's refs ahead of its entries, and not a merge commit that a merge whose record failed moves back.
@@ -52,19 +54,17 @@ Every other git request, a fetch's ref advertisement and pack in particular, hol
 
 A fetch is several requests (the ref advertisement, then the pack, and with protocol v2, `ls-refs` and `fetch` as separate POSTs), and a write can land between two of them. `uploadpack.allowAnySHA1InWant` is on, so a fetch that asks for a commit a ref has since moved off still gets it.
 
-A commit's author and committer dates come from the client that made it, not from Orrery. A script that commits sets them from the world clock first (`orrery env`, `usage.md`), or replaying it produces different commit ids.
-
 ## Pull request refs
 
 Every pull request has a ref, `refs/pull/{n}/head`, at its head, as on GitHub, so a client fetches a pull request by number without knowing its head branch (`git fetch origin pull/7/head`). It always names the pull request's pinned head commit:
 
 - creating the pull request sets it;
-- it moves whenever the head does: on a push to the head branch, and on the merge of another pull request into it; and
+- it moves whenever the head does: on a push to the head branch, on the merge of another pull request into it, and on reopening the pull request, which takes the head branch's tip as its head (`surface-github.md`); and
 - closing or merging the pull request, or deleting its head branch, leaves it where it is.
 
 The ref is advertised to fetches, so `git ls-remote` lists it, and hidden from pushes. A push that creates or moves any ref under `refs/pull/` is refused, as GitHub refuses it: `git` reports `deny updating a hidden ref`, and nothing moves.
 
-Orrery moves these refs itself, so they have no `ref.update` entries in the action log. Each one follows from the pull request's `pull.open` entry and from the `ref.update` entries of its head branch, so replaying the log rebuilds it. A diff reads refs from the repositories themselves, so its `ref_changes` lists them with the rest.
+Orrery moves these refs itself, so they have no `ref.update` entries in the action log. Each one follows from the pull request's `pull.open` and `pull.reopen` entries and from the `ref.update` entries of its head branch, so replaying the log rebuilds it. A diff reads refs from the repositories themselves, so its `ref_changes` lists them with the rest.
 
 ## Not served
 

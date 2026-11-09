@@ -138,13 +138,19 @@ fn close_reopen_merge_state_machine() {
         Err(WorldError::InvalidTransition(_))
     ));
 
-    let reopened = f.w.reopen_pull(pull.id, f.bob).unwrap();
+    // A reopen takes the head its caller resolved, in the same write.
+    let reopened = f.w.reopen_pull(pull.id, f.bob, SHA_C).unwrap();
     assert_eq!(reopened.state, PullState::Open);
     assert_eq!(reopened.closed_clock_unix, None);
+    assert_eq!(reopened.head_sha, SHA_C);
+    let read = f.w.pull_by_number(f.repo, pull.number).unwrap().unwrap();
+    assert_eq!(reopened, read);
     assert!(matches!(
-        f.w.reopen_pull(pull.id, f.bob),
+        f.w.reopen_pull(pull.id, f.bob, SHA_B),
         Err(WorldError::InvalidTransition(_))
     ));
+    let unchanged = f.w.pull_by_number(f.repo, pull.number).unwrap().unwrap();
+    assert_eq!(unchanged.head_sha, SHA_C, "a refused reopen moves nothing");
 
     let merge = into_main(SHA_A, SHA_C, Vec::new());
     let merged = f.w.record_merge(pull.id, f.bob, &merge).unwrap();
@@ -157,7 +163,7 @@ fn close_reopen_merge_state_machine() {
 
     // A merged pull is terminal: no reopen, no second merge.
     assert!(matches!(
-        f.w.reopen_pull(pull.id, f.bob),
+        f.w.reopen_pull(pull.id, f.bob, SHA_B),
         Err(WorldError::InvalidTransition(_))
     ));
     assert!(matches!(

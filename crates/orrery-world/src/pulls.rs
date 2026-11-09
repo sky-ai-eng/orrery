@@ -128,7 +128,7 @@ impl World {
         } else {
             ("pull.ready_for_review", Some(TimelineKind::ReadyForReview))
         };
-        self.transition(pull_id, actor_id, action, timeline, |p| {
+        self.transition(pull_id, actor_id, action, timeline, None, |p| {
             if p.state != PullState::Open {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} is not open",
@@ -452,7 +452,7 @@ impl World {
 
     pub fn close_pull(&self, pull_id: i64, actor_id: i64) -> Result<Pull> {
         let timeline = Some(TimelineKind::Closed);
-        self.transition(pull_id, actor_id, "pull.close", timeline, |p| {
+        self.transition(pull_id, actor_id, "pull.close", timeline, None, |p| {
             if p.state != PullState::Open {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} is not open",
@@ -465,8 +465,12 @@ impl World {
         })
     }
 
-    pub fn reopen_pull(&self, pull_id: i64, actor_id: i64) -> Result<Pull> {
-        self.transition(pull_id, actor_id, "pull.reopen", None, |p| {
+    /// Reopen a closed pull with `head_sha` as its head: the reopen and the
+    /// head move commit together. The caller resolves the head from its head
+    /// branch, since the kernel never touches git.
+    pub fn reopen_pull(&self, pull_id: i64, actor_id: i64, head_sha: &str) -> Result<Pull> {
+        let head = Some(head_sha);
+        self.transition(pull_id, actor_id, "pull.reopen", None, head, |p| {
             if p.merged {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} has been merged",
@@ -479,6 +483,8 @@ impl World {
                     p.number
                 )));
             }
+            // TODO(ORR-68): `create_pull`'s one-open-pull-per-(head, base)
+            // rule is not checked here, so a reopen can leave two open.
             Ok("UPDATE pulls SET state = 'open', closed_clock_unix = NULL WHERE id = ?1")
         })
     }
@@ -673,14 +679,15 @@ impl World {
     }
 
     /// Shared shape of close/reopen/draft: guard the current state, run one
-    /// UPDATE, record the timeline item if there is one, bump `updated`, log,
-    /// return the stored row.
+    /// UPDATE, move the head to `head` if given, record the timeline item if
+    /// there is one, bump `updated`, log, return the stored row.
     fn transition(
         &self,
         pull_id: i64,
         actor_id: i64,
         action: &str,
         timeline: Option<TimelineKind>,
+        head: Option<&str>,
         guard: impl FnOnce(&Pull) -> Result<&'static str>,
     ) -> Result<Pull> {
         self.with_conn(|conn| {
@@ -688,6 +695,9 @@ impl World {
             let before = queries::require_pull(&tx, pull_id)?;
             let sql = guard(&before)?;
             tx.execute(sql, params![pull_id])?;
+            if let Some(sha) = head {
+                repin_open_pull(&tx, before.repo_id, before.number, sha)?;
+            }
             if let Some(kind) = &timeline {
                 record_timeline(&tx, pull_id, actor_id, kind)?;
             }
@@ -802,6 +812,28 @@ fn slug_of(conn: &Connection, team_id: i64) -> Result<String> {
         params![team_id],
         |r| r.get(0),
     )?)
+}
+
+/// Move an open pull's head to `sha`. A pull that is not open is an error,
+/// not a skip: a closed pull's head stays where it closed.
+pub(crate) fn repin_open_pull(
+    conn: &Connection,
+    repo_id: i64,
+    number: i64,
+    sha: &str,
+) -> Result<()> {
+    let n = conn.execute(
+        "UPDATE pulls SET head_sha = ?1,
+         updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+         WHERE repo_id = ?2 AND number = ?3 AND state = 'open'",
+        params![sha, repo_id, number],
+    )?;
+    if n == 0 {
+        return Err(WorldError::InvalidTransition(format!(
+            "pull #{number} is not open"
+        )));
+    }
+    Ok(())
 }
 
 fn touch_pull(conn: &Connection, pull_id: i64) -> Result<()> {
