@@ -14,10 +14,11 @@ use std::path::Path;
 
 use orrery_world::{
     ActorEmail, ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX,
-    NewCheckRun, NewPull, OrgRole, ReviewState, SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, TeamRole,
-    World, WorldSecret,
+    NewCheckRun, NewPull, OrgRole, RefMove, ReviewState, SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN,
+    TeamRole, World, WorldSecret,
 };
 
+const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
 const BASE_SHA: &str = "1111111111111111111111111111111111111111";
 const HEAD_SHA: &str = "2222222222222222222222222222222222222222";
 const MERGE_SHA: &str = "3333333333333333333333333333333333333333";
@@ -85,7 +86,13 @@ fn populate(w: &World) -> orrery_world::Result<()> {
     w.create_team("acme", "Interim", None, alice.id)?;
 
     let repo = w.create_repo(acme.id, "webapp", Some("the app"), false, "main", alice.id)?;
-    w.touch_pushed(repo.id)?;
+    let first_push = RefMove {
+        name: "refs/heads/main",
+        old: ZERO_SHA,
+        new: BASE_SHA,
+        repins: Vec::new(),
+    };
+    w.record_push(repo.id, alice.id, &[first_push], None)?;
     w.advance_clock(3600, system.id)?;
 
     let merged = w.create_pull(NewPull {
@@ -143,7 +150,13 @@ fn populate(w: &World) -> orrery_world::Result<()> {
             ..Default::default()
         },
     )?;
-    w.record_merge(merged.id, bob.id, MERGE_SHA)?;
+    let merge = RefMove {
+        name: "refs/heads/main",
+        old: BASE_SHA,
+        new: MERGE_SHA,
+        repins: Vec::new(),
+    };
+    w.record_merge(merged.id, bob.id, &merge)?;
 
     let closed = w.create_pull(NewPull {
         repo_id: repo.id,

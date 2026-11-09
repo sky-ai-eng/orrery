@@ -3,12 +3,13 @@
 //! those routes live under `/issues/`, exactly as on GitHub).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use orrery_face_git::store;
-use orrery_world::{Actor, NewPull, Pull, PullState, Repo, ReviewState, WorldError};
+use orrery_world::{Actor, NewPull, Pull, PullState, RefMove, Repo, ReviewState, WorldError};
 
 use crate::render::{comment_json, label_json, pull_json, review_json};
 use crate::{
@@ -389,35 +390,39 @@ pub(crate) async fn merge_pull(
         Ok(s) => s,
         Err(e) => return internal(e),
     };
+    // The open pull requests whose head is the base branch take the merge
+    // commit as their head, as on a push of it. They are read before the base
+    // moves, so a failed read moves nothing; the repository lock keeps the set
+    // from changing before the record.
     let base_refname = format!("refs/heads/{}", pull.base_ref);
+    let repins = match face
+        .world
+        .pulls_to_sync(repo.id, &pull.base_ref, &merge_sha)
+    {
+        Ok(r) => r,
+        Err(e) => return internal(e),
+    };
     if let Err(e) = store::update_ref_cas(&bare, &base_refname, &merge_sha, &base_tip) {
         return internal(e);
     }
+    let base = RefMove {
+        name: &base_refname,
+        old: &base_tip,
+        new: &merge_sha,
+        repins,
+    };
 
-    // Bookkeeping mirrors what a push of this ref would have recorded, plus
-    // the merge itself; base-branch PRs (if any) re-pin like any head move.
-    // TODO(ORR-64): these are four separate commits, so a failure partway
-    // leaves the base moved with the pull still open, and a reader with its
-    // own connection can see the merge partway; record it in one commit,
-    // after its refs move, as a push is.
+    // Every ref the merge moves is in place before its record commits, so a
+    // reader that can see the merge's entries also sees its refs.
     let record = || -> Result<(), orrery_face_git::GitFaceError> {
-        face.world.log_action(
-            actor.id,
-            "ref.update",
-            &serde_json::json!({
-                "repo": repo.full_name(),
-                "ref": base_refname,
-                "old": base_tip,
-                "new": merge_sha,
-            }),
-        )?;
-        face.world.touch_pushed(repo.id)?;
-        face.git
-            .sync_pull_heads(&repo, &pull.base_ref, &merge_sha)?;
-        face.world.record_merge(pull.id, actor.id, &merge_sha)?;
+        for &number in &base.repins {
+            face.git.pin_pull_ref(&repo, number, &merge_sha)?;
+        }
+        face.world.record_merge(pull.id, actor.id, &base)?;
         Ok(())
     };
     if let Err(e) = record() {
+        unwind_merge(&face, &repo, &bare, &base);
         return internal(e);
     }
 
@@ -429,6 +434,32 @@ pub(crate) async fn merge_pull(
             "message": "Pull Request successfully merged",
         }),
     )
+}
+
+/// Put back the refs a merge moved when recording it failed, so the
+/// repository agrees with the world, which holds no trace of the merge: the
+/// base branch returns to `base.old` by compare-and-swap, and each pull
+/// request's ref to the head the world still pins it at. A retry then starts
+/// from the state the failed merge started from. The route answers 500
+/// either way, so a ref that cannot be put back is logged, not answered.
+fn unwind_merge(face: &GithubFace, repo: &Repo, bare: &Path, base: &RefMove<'_>) {
+    if let Err(e) = store::update_ref_cas(bare, base.name, base.old, base.new) {
+        tracing::error!(error = %e, git_ref = base.name, "merge unwind left a ref moved");
+    }
+    for &number in &base.repins {
+        let pinned = match face.world.pull_by_number(repo.id, number) {
+            Ok(Some(p)) => face.git.pin_pull_ref(repo, number, &p.head_sha),
+            Ok(None) => Ok(()),
+            Err(e) => Err(e.into()),
+        };
+        if let Err(e) = pinned {
+            tracing::error!(
+                error = %e,
+                git_ref = store::pull_head_ref(number),
+                "merge unwind left a ref moved"
+            );
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]

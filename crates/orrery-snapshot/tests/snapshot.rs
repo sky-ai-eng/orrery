@@ -5,12 +5,13 @@
 
 use orrery_snapshot::{DiffSide, SnapshotError, diff};
 use orrery_world::{
-    ActorEmail, ActorKind, DEFAULT_T0_UNIX, NewPull, OrgRole, Pull, ReviewState, TeamRole, World,
-    WorldError, WorldSecret, WorldView,
+    ActorEmail, ActorKind, DEFAULT_T0_UNIX, NewPull, OrgRole, Pull, RefMove, ReviewState, TeamRole,
+    World, WorldError, WorldSecret, WorldView,
 };
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const SHA_C: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
 /// The secret every test instance is created with, and its stored form.
 const SECRET: WorldSecret = WorldSecret::from_bytes([0x5a; 32]);
@@ -451,7 +452,13 @@ fn diff_reports_the_interval_between_states() {
             None,
         )
         .unwrap();
-    inst.world.record_merge(pull.id, bob.id, SHA_A).unwrap();
+    let merge = RefMove {
+        name: "refs/heads/main",
+        old: SHA_A,
+        new: SHA_C,
+        repins: Vec::new(),
+    };
+    inst.world.record_merge(pull.id, bob.id, &merge).unwrap();
     orrery_snapshot::create(&inst.world, &inst.snapshots(), "after").unwrap();
 
     let open = |name: &str| {

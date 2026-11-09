@@ -86,21 +86,6 @@ impl GitFace {
         store::update_ref(&bare, &store::pull_head_ref(number), head_sha)
     }
 
-    /// GitHub's "synchronize": every open pull request whose head is `branch`
-    /// takes `new_sha` as its head, and its `refs/pull/{n}/head` moves with
-    /// it. A closed or merged pull request keeps both where they are.
-    pub fn sync_pull_heads(
-        &self,
-        repo: &Repo,
-        branch: &str,
-        new_sha: &str,
-    ) -> Result<(), GitFaceError> {
-        for number in self.world.sync_pull_heads(repo.id, branch, new_sha)? {
-            self.pin_pull_ref(repo, number, new_sha)?;
-        }
-        Ok(())
-    }
-
     pub fn repo_lock(&self, repo_id: i64) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.repo_locks.lock().expect("repo_locks mutex poisoned");
         locks.entry(repo_id).or_default().clone()

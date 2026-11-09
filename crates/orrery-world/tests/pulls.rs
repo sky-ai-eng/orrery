@@ -3,9 +3,11 @@
 //! entries every transition owes. Shas here are caller-supplied strings —
 //! the kernel takes no view on git; the git face owns resolution.
 
+use std::sync::{Arc, Mutex};
+
 use orrery_world::{
     ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX, NewCheckRun, NewPull,
-    Pull, PullState, RefMove, ReviewState, TimelineKind, World, WorldError, WorldSecret,
+    Pull, PullState, RefMove, ReviewState, Signal, TimelineKind, World, WorldError, WorldSecret,
 };
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -13,7 +15,7 @@ const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SHA_C: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
 struct Fixture {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     w: World,
     alice: i64,
     bob: i64,
@@ -34,7 +36,7 @@ fn fixture() -> Fixture {
         .create_repo(alice.id, "webapp", None, false, "main", alice.id)
         .unwrap();
     Fixture {
-        _dir: dir,
+        dir,
         w,
         alice: alice.id,
         bob: bob.id,
@@ -55,6 +57,33 @@ fn open_pull(f: &Fixture, head: &str, sha: &str) -> Pull {
         draft: false,
     })
     .unwrap()
+}
+
+/// A pull whose head is `main`, into `release`: a merge into `main` re-pins
+/// it.
+fn open_release_pull(f: &Fixture) -> Pull {
+    f.w.create_pull(NewPull {
+        repo_id: f.repo,
+        author_id: f.alice,
+        title: "release",
+        body: None,
+        head_ref: "main",
+        head_sha: SHA_A,
+        base_ref: "release",
+        base_sha: SHA_A,
+        draft: false,
+    })
+    .unwrap()
+}
+
+/// The move of `main` from `old` to the merge commit `new`.
+fn into_main<'a>(old: &'a str, new: &'a str, repins: Vec<i64>) -> RefMove<'a> {
+    RefMove {
+        name: "refs/heads/main",
+        old,
+        new,
+        repins,
+    }
 }
 
 #[test]
@@ -117,7 +146,8 @@ fn close_reopen_merge_state_machine() {
         Err(WorldError::InvalidTransition(_))
     ));
 
-    let merged = f.w.record_merge(pull.id, f.bob, SHA_C).unwrap();
+    let merge = into_main(SHA_A, SHA_C, Vec::new());
+    let merged = f.w.record_merge(pull.id, f.bob, &merge).unwrap();
     assert!(merged.merged);
     assert_eq!(merged.state, PullState::Closed);
     assert_eq!(merged.merge_commit_sha.as_deref(), Some(SHA_C));
@@ -131,7 +161,7 @@ fn close_reopen_merge_state_machine() {
         Err(WorldError::InvalidTransition(_))
     ));
     assert!(matches!(
-        f.w.record_merge(pull.id, f.bob, SHA_C),
+        f.w.record_merge(pull.id, f.bob, &merge),
         Err(WorldError::InvalidTransition(_))
     ));
 
@@ -156,32 +186,6 @@ fn close_reopen_merge_state_machine() {
 }
 
 #[test]
-fn sync_pull_heads_repins_open_pulls_only() {
-    let f = fixture();
-    let open = open_pull(&f, "feature", SHA_B);
-    let closed = open_pull(&f, "stale", SHA_B);
-    f.w.close_pull(closed.id, f.alice).unwrap();
-
-    let sys = f.w.actor_by_login("orrery").unwrap().unwrap();
-    f.w.advance_clock(60, sys.id).unwrap();
-
-    let touched = f.w.sync_pull_heads(f.repo, "feature", SHA_C).unwrap();
-    assert_eq!(touched, vec![open.number]);
-    let read = f.w.pull_by_number(f.repo, open.number).unwrap().unwrap();
-    assert_eq!(read.head_sha, SHA_C);
-    assert_eq!(read.updated_clock_unix, DEFAULT_T0_UNIX + 60);
-
-    // The closed pull keeps its last pinned sha, and a no-op move touches
-    // nothing.
-    let stale = f.w.pull_by_number(f.repo, closed.number).unwrap().unwrap();
-    assert_eq!(stale.head_sha, SHA_B);
-    assert_eq!(
-        f.w.sync_pull_heads(f.repo, "feature", SHA_C).unwrap(),
-        vec![] as Vec<i64>
-    );
-}
-
-#[test]
 fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
     let f = fixture();
     let closed = open_pull(&f, "feature", SHA_B);
@@ -200,6 +204,8 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
         vec![] as Vec<i64>
     );
 
+    let sys = f.w.actor_by_login("orrery").unwrap().unwrap();
+    f.w.advance_clock(60, sys.id).unwrap();
     let moves = [RefMove {
         name: "refs/heads/feature",
         old: SHA_B,
@@ -209,6 +215,8 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
     f.w.record_push(f.repo, f.alice, &moves, None).unwrap();
     let head = |n| f.w.pull_by_number(f.repo, n).unwrap().unwrap().head_sha;
     assert_eq!(head(open.number), SHA_C);
+    let repinned = f.w.pull_by_number(f.repo, open.number).unwrap().unwrap();
+    assert_eq!(repinned.updated_clock_unix, DEFAULT_T0_UNIX + 60);
     assert_eq!(head(closed.number), SHA_B);
     assert_eq!(head(elsewhere.number), SHA_B);
 
@@ -227,6 +235,157 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
     ));
     assert_eq!(head(open.number), SHA_C);
     assert!(f.w.log_after(mark, 1000).unwrap().is_empty());
+}
+
+#[test]
+fn a_merge_records_its_base_move_and_the_merge_together() {
+    let f = fixture();
+    let pull = open_pull(&f, "feature", SHA_B);
+    let release = open_release_pull(&f);
+    let sys = f.w.actor_by_login("orrery").unwrap().unwrap();
+    f.w.advance_clock(60, sys.id).unwrap();
+    let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
+
+    let merge = into_main(SHA_A, SHA_C, vec![release.number]);
+    let merged = f.w.record_merge(pull.id, f.bob, &merge).unwrap();
+    assert_eq!(
+        merged,
+        f.w.pull_by_number(f.repo, pull.number).unwrap().unwrap()
+    );
+    assert!(merged.merged);
+    assert_eq!(merged.merge_commit_sha.as_deref(), Some(SHA_C));
+
+    // The base move's entry, then the merge's: the entries a merge has
+    // always appended, in the order replay reads them.
+    let entries = f.w.log_after(mark, 1000).unwrap();
+    let recorded: Vec<(&str, &serde_json::Value)> = entries
+        .iter()
+        .inspect(|e| {
+            assert_eq!(e.actor_login, "bob");
+            assert_eq!(e.clock_unix, DEFAULT_T0_UNIX + 60);
+        })
+        .map(|e| (e.action.as_str(), &e.details))
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            (
+                "ref.update",
+                &serde_json::json!({
+                    "repo": "alice/webapp", "ref": "refs/heads/main", "old": SHA_A, "new": SHA_C,
+                }),
+            ),
+            (
+                "pull.merge",
+                &serde_json::json!({
+                    "repo": "alice/webapp", "number": pull.number, "merge_commit_sha": SHA_C,
+                }),
+            ),
+        ]
+    );
+    let repo = f.w.repo_by_id(f.repo).unwrap().unwrap();
+    assert_eq!(repo.pushed_at_clock_unix, Some(DEFAULT_T0_UNIX + 60));
+    let repinned = f.w.pull_by_number(f.repo, release.number).unwrap().unwrap();
+    assert_eq!(repinned.head_sha, SHA_C);
+    assert_eq!(repinned.updated_clock_unix, DEFAULT_T0_UNIX + 60);
+}
+
+#[test]
+fn a_merge_whose_record_is_refused_records_none_of_it() {
+    let f = fixture();
+    let pull = open_pull(&f, "feature", SHA_B);
+    let closed = open_release_pull(&f);
+    f.w.close_pull(closed.id, f.alice).unwrap();
+    let release = open_release_pull(&f);
+    let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
+
+    // A move of a branch the pull does not merge into, and a re-pin of a
+    // pull that is not open: each refuses the whole record.
+    let elsewhere = RefMove {
+        name: "refs/heads/release",
+        ..into_main(SHA_A, SHA_C, vec![release.number])
+    };
+    let stale = into_main(SHA_A, SHA_C, vec![release.number, closed.number]);
+    for refused in [&elsewhere, &stale] {
+        assert!(matches!(
+            f.w.record_merge(pull.id, f.bob, refused),
+            Err(WorldError::InvalidTransition(_))
+        ));
+    }
+    assert!(f.w.log_after(mark, 1000).unwrap().is_empty());
+    let read = |n| f.w.pull_by_number(f.repo, n).unwrap().unwrap();
+    assert_eq!(read(pull.number).state, PullState::Open);
+    assert!(!read(pull.number).merged);
+    assert_eq!(read(release.number).head_sha, SHA_A);
+    assert_eq!(
+        f.w.repo_by_id(f.repo)
+            .unwrap()
+            .unwrap()
+            .pushed_at_clock_unix,
+        None
+    );
+    assert!(f.w.list_pull_timeline(pull.id).unwrap().is_empty());
+}
+
+#[test]
+fn a_reader_sees_all_of_a_merge_or_none_of_it() {
+    let f = fixture();
+    let pull = open_pull(&f, "feature", SHA_B);
+    let release = open_release_pull(&f);
+    let sys = f.w.actor_by_login("orrery").unwrap().unwrap();
+    f.w.advance_clock(60, sys.id).unwrap();
+
+    // A connection of its own reads only what has committed. Reading through
+    // it each time the log may have grown shows what a reader woken by either
+    // of the merge's entries can see.
+    let db = f.dir.path().join("world").join("world.db");
+    let read_merge = move |conn: &rusqlite::Connection| {
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM action_log
+                     WHERE action IN ('ref.update', 'pull.merge')),
+                    (SELECT pushed_at_clock_unix FROM repos WHERE id = ?1),
+                    (SELECT merged FROM pulls WHERE id = ?2),
+                    (SELECT head_sha FROM pulls WHERE id = ?3)",
+            [f.repo, pull.id, release.id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .unwrap()
+    };
+    let open_reader = || {
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+    };
+    let reader = Mutex::new(open_reader());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    f.w.listen(move |signal| {
+        if signal == Signal::LogMayHaveGrown {
+            let state = read_merge(&reader.lock().unwrap());
+            sink.lock().unwrap().push(state);
+        }
+    });
+
+    let merge = into_main(SHA_A, SHA_C, vec![release.number]);
+    f.w.record_merge(pull.id, f.bob, &merge).unwrap();
+
+    let none = (0, None, false, SHA_A.to_string());
+    let all = (2, Some(DEFAULT_T0_UNIX + 60), true, SHA_C.to_string());
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "one signal per entry: {seen:?}");
+    for state in seen.iter() {
+        assert!(
+            *state == none || *state == all,
+            "a reader saw part of a merge: {state:?}"
+        );
+    }
+    assert_eq!(read_merge(&open_reader()), all);
 }
 
 #[test]
