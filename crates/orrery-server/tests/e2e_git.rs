@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{boot, boot_with, control_post, face_answer, git, git_output, mint_actor};
+use common::{boot, boot_with, control_post, face_answer, face_ok, git, git_output, mint_actor};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn author_push_clone_observe() {
@@ -116,6 +116,55 @@ async fn author_push_clone_observe() {
     assert_eq!(
         (&last_push["forced"], &last_push["commits"]),
         (&false.into(), &serde_json::json!([sha2]))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tag_moved_onto_a_tree_is_a_forced_update() {
+    let inst = boot().await;
+    let base = &inst.base;
+    let token = mint_actor(base, "alice", "user");
+    face_ok(
+        "POST",
+        &format!("{base}/api/v3/user/repos"),
+        &token,
+        serde_json::json!({ "name": "webapp" }),
+    );
+    let url = format!("{base}/alice/webapp.git")
+        .replace("http://", &format!("http://x-access-token:{token}@"));
+    let clock = inst.world.clock().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path();
+    git(src, clock, &["init", "-b", "main", "."]);
+    git(src, clock, &["commit", "--allow-empty", "-m", "init"]);
+    git(src, clock, &["push", &url, "main", "HEAD:refs/tags/v1"]);
+    let commit = git(src, clock, &["rev-parse", "HEAD"]).trim().to_string();
+    let tree = git(src, clock, &["rev-parse", "HEAD^{tree}"])
+        .trim()
+        .to_string();
+
+    // A tag can hold any object, so git accepts the move, and a commit is
+    // never an ancestor of a tree.
+    git(
+        src,
+        clock,
+        &["push", "--force", &url, &format!("{tree}:refs/tags/v1")],
+    );
+    let log = control_post(base, "/_orrery/log/list", serde_json::json!({}));
+    let moved = log["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|e| e["type"] == "ref:updated")
+        .expect("the move is recorded");
+    assert_eq!(moved["subject"]["name"], "refs/tags/v1");
+    assert_eq!(
+        moved["changes"]["sha"],
+        serde_json::json!({ "from": commit, "to": tree })
+    );
+    assert_eq!(
+        (&moved["forced"], &moved["commits"], &moved["commit_count"]),
+        (&true.into(), &serde_json::json!([]), &0.into())
     );
 }
 

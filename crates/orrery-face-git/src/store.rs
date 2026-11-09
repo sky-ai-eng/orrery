@@ -165,17 +165,33 @@ pub fn added_commits(
 
 /// Whether `ancestor` is reachable from `descendant`, a commit counting as its
 /// own ancestor: `git merge-base --is-ancestor`, whose exit code 1 is "no".
+/// An object that is not a commit, such as a tree a tag points at, is no
+/// commit's ancestor and has none.
 pub fn is_ancestor(bare: &Path, ancestor: &str, descendant: &str) -> Result<bool, GitFaceError> {
     let (status, _, stderr) =
         run_raw(hermetic_git(bare).args(["merge-base", "--is-ancestor", ancestor, descendant]))?;
     match status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
+        // git refuses a non-commit with the same code as any other failure,
+        // so a refusal is "no" only when one side is not a commit.
+        _ if !is_commit(bare, ancestor)? || !is_commit(bare, descendant)? => Ok(false),
         _ => Err(GitFaceError::Git {
             args: format!("merge-base --is-ancestor {ancestor} {descendant}"),
             stderr,
         }),
     }
+}
+
+/// Whether `oid` names a commit, or a tag that peels to one.
+fn is_commit(bare: &Path, oid: &str) -> Result<bool, GitFaceError> {
+    let (status, _, _) = run_raw(hermetic_git(bare).args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("{oid}^{{commit}}"),
+    ]))?;
+    Ok(status.success())
 }
 
 /// Totals of `git diff --numstat -M base...head` — GitHub's additions /
