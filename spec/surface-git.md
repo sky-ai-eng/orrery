@@ -46,7 +46,7 @@ A commit's author and committer dates come from the client that made it, not fro
 
 ## What a fetch sees
 
-Every other git request, a fetch's ref advertisement and pack in particular, holds the same per-repository lock for read. A push, a merge, opening a pull request, and every edit of one (an edit can close, reopen, or retarget it) hold it for write. A fetch request therefore sees the repository as it was before a write or after the write's record commits, never in between: not a write's refs ahead of its entries, and not a merge commit that a merge whose record failed moves back.
+Every other git request, a fetch's ref advertisement and pack in particular, holds the same per-repository lock for read. A push, a merge, opening a pull request, and an edit that closes, reopens, or retargets one (sets its `state` or `base`) hold it for write. A fetch request therefore sees the repository as it was before a write or after the write's record commits, never in between: not a write's refs ahead of its entries, and not a merge commit that a merge whose record failed moves back. An edit that sets neither `state` nor `base`, such as one of only a pull request's title or body, reads and moves no ref, so it takes no lock: it doesn't wait for fetch requests, and they don't wait for it.
 
 - Fetch requests to a repository don't wait on each other.
 - A write waits for the fetch requests already running, and a fetch request that arrives while a write runs or waits waits for it.

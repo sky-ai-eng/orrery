@@ -418,9 +418,10 @@ mod ref_read_tests {
     use std::process::Stdio;
     use std::task::{Context, Poll, Waker};
 
+    use axum::body::Bytes;
     use axum::extract::RawQuery;
     use orrery_face_git::store;
-    use orrery_world::{DEFAULT_T0_UNIX, NewPull, Pull, RefMove, WorldSecret};
+    use orrery_world::{DEFAULT_T0_UNIX, NewPull, Pull, PullState, RefMove, WorldSecret};
 
     use super::*;
 
@@ -755,6 +756,114 @@ mod ref_read_tests {
                 "mergeable": "UNKNOWN",
                 "files": { "nodes": [{ "path": "feature.txt" }] },
             })
+        );
+    }
+
+    /// `PATCH …/pulls/1` with `body`, as alice.
+    fn edit<'a>(f: &'a Fixture, body: &'static str) -> Read<'a> {
+        unbudgeted(pulls::patch_pull(
+            State(f.face.clone()),
+            UrlPath((
+                "alice".to_string(),
+                "widgets".to_string(),
+                f.pull.number.to_string(),
+            )),
+            Extension(f.alice.clone()),
+            HeaderMap::new(),
+            Bytes::from_static(body.as_bytes()),
+        ))
+    }
+
+    /// The test holds the repository's lock for read, as a fetch in progress
+    /// does. An edit that sets neither `state` nor `base` is answered on its
+    /// first poll.
+    #[tokio::test]
+    async fn a_title_or_body_edit_does_not_wait_for_fetches() {
+        let f = fixture();
+        let _fetch = f.face.git.read_lock(f.repo.id).await;
+        for body in [
+            r#"{"title": "Renamed"}"#,
+            r#"{"body": "Details"}"#,
+            r#"{"title": "Renamed again", "body": null}"#,
+            r#"{"state": "merged"}"#,
+            "{}",
+        ] {
+            let mut edit = edit(&f, body);
+            match poll_once(edit.as_mut()) {
+                Poll::Ready(resp) => drop(answer(body, resp).await),
+                Poll::Pending => panic!("{body}: waited for a fetch"),
+            }
+        }
+        let pull = f.face.world.pull_by_number(f.repo.id, 1).unwrap().unwrap();
+        assert_eq!(
+            (pull.title.as_str(), pull.body, pull.state),
+            ("Renamed again", None, PullState::Open)
+        );
+    }
+
+    /// A title edit waits for the gate, held as a restore holds it, and the
+    /// pull is closed while it waits. The edit lands on the closed pull and
+    /// answers it closed, as an edit of a closed pull's title does.
+    #[tokio::test]
+    async fn a_title_edit_sees_a_close_that_landed_while_it_waited() {
+        let f = fixture();
+        let gate = f.face.git.gate().write_owned().await;
+        let mut edit = edit(&f, r#"{"title": "Renamed"}"#);
+        assert!(poll_once(edit.as_mut()).is_pending());
+        f.face.world.close_pull(f.pull.id, f.alice.id).unwrap();
+        drop(gate);
+
+        let body = answer("the title edit", edit.await).await;
+        assert_eq!(
+            (&body["title"], &body["state"]),
+            (&serde_json::json!("Renamed"), &serde_json::json!("closed"))
+        );
+    }
+
+    /// The test holds the repository's lock for read, as a fetch in progress
+    /// does. An edit that sets `state` or `base`, alone or beside other
+    /// fields, waits for it, and a fetch request sent after the edit waits
+    /// for the edit. A `state` the pull is already in waits too.
+    #[tokio::test]
+    async fn a_state_or_base_edit_waits_for_fetches_and_holds_off_later_ones() {
+        let f = fixture();
+        store::update_ref(&f.bare, "refs/heads/develop", &f.main).unwrap();
+        let lock = f.face.git.repo_lock(f.repo.id);
+        for body in [
+            r#"{"state": "closed"}"#,
+            r#"{"title": "Reopened", "state": "open"}"#,
+            r#"{"state": "open"}"#,
+            r#"{"base": "develop"}"#,
+            r#"{"body": "Back to main", "base": "main"}"#,
+        ] {
+            let fetch = f.face.git.read_lock(f.repo.id).await;
+            let mut edit = edit(&f, body);
+            assert!(
+                poll_once(edit.as_mut()).is_pending(),
+                "{body}: landed during a fetch"
+            );
+            let mut later = Box::pin(tokio::task::unconstrained(f.face.git.read_lock(f.repo.id)));
+            assert!(
+                poll_once(later.as_mut()).is_pending(),
+                "{body}: a later fetch request was let in ahead of the edit"
+            );
+
+            drop(fetch);
+            assert!(
+                lock.try_read().is_err(),
+                "{body}: the edit was not waiting for the repository's lock"
+            );
+            answer(body, edit.await).await;
+            assert!(
+                lock.try_write().is_err(),
+                "{body}: the later fetch request was not waiting for the edit"
+            );
+            drop(later.await);
+        }
+        let pull = f.face.world.pull_by_number(f.repo.id, 1).unwrap().unwrap();
+        assert_eq!(
+            (pull.title.as_str(), pull.state, pull.base_ref.as_str()),
+            ("Reopened", PullState::Open, "main")
         );
     }
 }

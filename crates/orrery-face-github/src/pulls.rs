@@ -203,21 +203,25 @@ pub(crate) async fn patch_pull(
     // The world write gate keeps a snapshot from copying, or a restore from
     // replacing, the world between the re-read below and the writes after
     // it, a reopen's ref move among them, so the pull row and the shas read
-    // from the bare repository belong to the world the edit writes into. The
-    // repo write lock keeps a push from interleaving with the edit: a push
-    // moves the refs of the pulls open on its branch before it records them,
-    // so a close or reopen must not land in between, and a new base's sha
-    // and a reopened pull's head must still be their branches' tips when the
-    // edit lands. Opening a pull takes the lock too, so none opens on a
-    // reopened pull's head and base between the check and the reopen. The
-    // pull is read again once both are held, so the state checks below see
-    // current truth.
+    // from the bare repository belong to the world the edit writes into.
     let _gate = face.git.gate().read_owned().await;
-    // TODO(ORR-71): an edit of only the title or body takes the write side
-    // too, and so waits for every fetch in progress; only an edit that sets
-    // `state` or `base` needs it.
-    let lock = face.git.repo_lock(repo.id);
-    let _guard = lock.write().await;
+    // An edit that sets `state` or `base` holds the repo write lock, so a
+    // push cannot interleave with it: a push moves the refs of the pulls open
+    // on its branch before it records them, so a close or reopen must not
+    // land in between, and a new base's sha and a reopened pull's head must
+    // still be their branches' tips when the edit lands. Opening a pull takes
+    // the lock too, so none opens on a reopened pull's head and base between
+    // the check and the reopen. A `state` naming the state the pull is in
+    // takes the lock as well, since another request can change that state
+    // before the re-read. An edit that sets neither reads and moves no ref,
+    // so it takes no lock and does not wait for fetches in progress.
+    let _guard = if state.is_some() || parsed.base.is_some() {
+        Some(face.git.repo_lock(repo.id).write_owned().await)
+    } else {
+        None
+    };
+    // Read again once the gate, and the lock if it is taken, are held, so the
+    // state checks below see current truth.
     let mut pull = match face.world.pull_by_number(repo.id, pull.number) {
         Ok(Some(p)) => p,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
