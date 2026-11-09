@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{boot, boot_at, control_post, face, face_ok, git, mint_actor};
+use common::{boot, boot_at, control_post, face, face_ok, git, mint_actor, restore, snapshot};
 use orrery_world::WorldSecret;
 use serde_json::json;
 
@@ -437,20 +437,6 @@ async fn fork_serves_an_independent_world() {
     assert!(
         !origin_clone.join("fork.txt").exists(),
         "the origin never saw the fork's push"
-    );
-}
-
-fn snapshot(base: &str, name: &str) -> i64 {
-    control_post(base, "/_orrery/snapshots", json!({ "name": name }))["last_seq"]
-        .as_i64()
-        .unwrap()
-}
-
-fn restore(base: &str, name: &str) {
-    control_post(
-        base,
-        &format!("/_orrery/snapshots/{name}/restore"),
-        json!({}),
     );
 }
 

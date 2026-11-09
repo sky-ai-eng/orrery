@@ -180,6 +180,26 @@ pub fn mint_actor(base: &str, login: &str, kind: &str) -> String {
         .to_string()
 }
 
+/// Snapshot the world as `name`; returns the snapshot's newest `seq`.
+pub fn snapshot(base: &str, name: &str) -> i64 {
+    control_post(
+        base,
+        "/_orrery/snapshots",
+        serde_json::json!({ "name": name }),
+    )["last_seq"]
+        .as_i64()
+        .expect("last_seq in response")
+}
+
+/// Restore the snapshot `name` over the live world.
+pub fn restore(base: &str, name: &str) {
+    control_post(
+        base,
+        &format!("/_orrery/snapshots/{name}/restore"),
+        serde_json::json!({}),
+    );
+}
+
 /// A face call that must succeed; panics with the status on failure.
 pub fn face_ok(method: &str, url: &str, token: &str, body: serde_json::Value) -> serde_json::Value {
     match face(method, url, token, body) {

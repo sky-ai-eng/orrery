@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{boot, boot_at, control_post, fault, faults, mint_actor};
+use common::{boot, boot_at, control_post, fault, faults, mint_actor, restore, snapshot};
 use orrery_world::{OAUTH_CLIENT_ID_PREFIX, SYSTEM_ACTOR_LOGIN};
 use serde_json::{Value, json};
 
@@ -731,20 +731,6 @@ async fn entries_from_before_real_times_were_recorded_read_null() {
     for item in items {
         assert_eq!(item.get("wall_unix_ms"), Some(&Value::Null), "{item}");
     }
-}
-
-fn snapshot(base: &str, name: &str) -> i64 {
-    control_post(base, "/_orrery/snapshots", json!({ "name": name }))["last_seq"]
-        .as_i64()
-        .unwrap()
-}
-
-fn restore(base: &str, name: &str) {
-    control_post(
-        base,
-        &format!("/_orrery/snapshots/{name}/restore"),
-        json!({}),
-    );
 }
 
 /// A position a restore discarded, or one never issued, is refused: the
