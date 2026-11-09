@@ -46,11 +46,14 @@ A commit's author and committer dates come from the client that made it, not fro
 
 ## What a fetch sees
 
-Every other git request, a fetch's ref advertisement and pack in particular, holds the same per-repository lock for read, while a push, a merge, and opening, closing, or reopening a pull request hold it for write. A fetch request therefore sees the repository as it was before a write or after the write's record commits, never in between: not a write's refs ahead of its entries, and not a merge commit that a merge whose record failed moves back.
+Every other git request, a fetch's ref advertisement and pack in particular, holds the same per-repository lock for read. A push, a merge, opening a pull request, and every edit of one (an edit can close, reopen, or retarget it) hold it for write. A fetch request therefore sees the repository as it was before a write or after the write's record commits, never in between: not a write's refs ahead of its entries, and not a merge commit that a merge whose record failed moves back.
 
 - Fetch requests to a repository don't wait on each other.
 - A write waits for the fetch requests already running, and a fetch request that arrives while a write runs or waits waits for it.
 - The lock is held while `git http-backend` runs, not while its answer is sent, since the face buffers the answer whole.
+- A push that has started runs to its end, holding the lock and recording what it moved, even when its client goes away.
+
+A push whose record fails is the exception: `git-receive-pack` has already moved its refs, nothing moves them back, and the push answers `500`, so its refs stay ahead of the log.
 
 A fetch is several requests (the ref advertisement, then the pack, and with protocol v2, `ls-refs` and `fetch` as separate POSTs), and a write can land between two of them. `uploadpack.allowAnySHA1InWant` is on, so a fetch that asks for a commit a ref has since moved off still gets it.
 
@@ -59,7 +62,7 @@ The GitHub face's reads of a repository's refs hold the same lock for read, and 
 - the REST reads of branches, a branch's ref, a compare, contents, check runs for a branch name, and a pull request's files; and
 - the GraphQL fields `Repository.ref`, and a pull request's `mergeable`, `additions`, `deletions`, `changedFiles`, and `files`.
 
-A REST read that also reads a pull request, as a pull request's files do, reads it under the same hold, so the pull request and its base branch's tip come from one state. A GraphQL field holds the lock only for its own reads, so a write can land between two fields of one query, as between two requests of a fetch.
+A REST read and a GraphQL query also hold the world write gate for read for the whole request, as git traffic does, so a snapshot restore never replaces the repository under one. A read that also reads a pull request, as the REST pull request files and each of those pull request fields do, reads it under the same hold as its base branch's tip, so the two come from one state. A GraphQL field holds the lock only for its own reads, so a write can land between two fields of one query, as between two requests of a fetch.
 
 ## Pull request refs
 

@@ -400,13 +400,13 @@ mod ref_read_tests {
     use std::future::Future;
     use std::io::Write;
     use std::path::Path;
-    use std::pin::{Pin, pin};
+    use std::pin::Pin;
     use std::process::Stdio;
     use std::task::{Context, Poll, Waker};
 
     use axum::extract::RawQuery;
     use orrery_face_git::store;
-    use orrery_world::{DEFAULT_T0_UNIX, NewPull, WorldSecret};
+    use orrery_world::{DEFAULT_T0_UNIX, NewPull, Pull, RefMove, WorldSecret};
 
     use super::*;
 
@@ -419,6 +419,10 @@ mod ref_read_tests {
         schema: graphql::GithubSchema,
         alice: Actor,
         repo: Repo,
+        bare: std::path::PathBuf,
+        main: String,
+        feature: String,
+        pull: Pull,
         pull_node: String,
         _dir: tempfile::TempDir,
     }
@@ -470,7 +474,11 @@ mod ref_read_tests {
             face,
             alice,
             repo,
+            bare,
+            main,
+            feature,
             pull_node: nodeid::pull(pull.id),
+            pull,
             _dir: dir,
         }
     }
@@ -505,29 +513,25 @@ mod ref_read_tests {
         store::commit_tree(bare, &tree, parents, "commit", "alice", DEFAULT_T0_UNIX).unwrap()
     }
 
-    /// Every REST read, and every GraphQL field, that reads the repository's
-    /// refs.
-    fn ref_reads(f: &Fixture) -> Vec<(&'static str, Read<'_>)> {
+    /// `read`, boxed and polled outside tokio's cooperative budget, so a lock
+    /// that is free is taken on its first poll however much the test polled
+    /// before it.
+    fn unbudgeted<'a>(read: impl Future<Output = Response<Body>> + Send + 'a) -> Read<'a> {
+        Box::pin(tokio::task::unconstrained(read))
+    }
+
+    /// Every REST read that reads the repository's refs.
+    fn rest_reads(f: &Fixture) -> Vec<(&'static str, Read<'_>)> {
         let path = || ("alice".to_string(), "widgets".to_string());
         let path3 = |third: &str| {
             let (owner, repo) = path();
             UrlPath((owner, repo, third.to_string()))
         };
         let face = || State(f.face.clone());
-        let graphql = |query: String| -> Read<'_> {
-            let body = serde_json::to_vec(&serde_json::json!({ "query": query })).unwrap();
-            Box::pin(async move { graphql::handle(&f.schema, f.alice.clone(), &body).await })
-        };
-        let pull = |selection: &str| {
-            graphql(format!(
-                r#"{{ node(id: "{}") {{ ... on PullRequest {{ {selection} }} }} }}"#,
-                f.pull_node
-            ))
-        };
         vec![
             (
                 "GET branches",
-                Box::pin(reads::list_branches(
+                unbudgeted(reads::list_branches(
                     face(),
                     UrlPath(path()),
                     RawQuery(None),
@@ -536,7 +540,7 @@ mod ref_read_tests {
             ),
             (
                 "GET git/ref/heads/main",
-                Box::pin(reads::get_branch_ref(
+                unbudgeted(reads::get_branch_ref(
                     face(),
                     path3("main"),
                     HeaderMap::new(),
@@ -544,7 +548,7 @@ mod ref_read_tests {
             ),
             (
                 "GET compare",
-                Box::pin(reads::compare(
+                unbudgeted(reads::compare(
                     face(),
                     path3("main...feature"),
                     HeaderMap::new(),
@@ -552,7 +556,7 @@ mod ref_read_tests {
             ),
             (
                 "GET contents",
-                Box::pin(reads::get_contents(
+                unbudgeted(reads::get_contents(
                     face(),
                     path3("README.md"),
                     RawQuery(None),
@@ -561,7 +565,7 @@ mod ref_read_tests {
             ),
             (
                 "GET check-runs for a branch",
-                Box::pin(reads::list_check_runs_for_ref(
+                unbudgeted(reads::list_check_runs_for_ref(
                     face(),
                     path3("main"),
                     RawQuery(None),
@@ -570,39 +574,76 @@ mod ref_read_tests {
             ),
             (
                 "GET pull files",
-                Box::pin(reads::list_pull_files(
+                unbudgeted(reads::list_pull_files(
                     face(),
                     path3("1"),
                     RawQuery(None),
                     HeaderMap::new(),
                 )),
             ),
+        ]
+    }
+
+    /// One GraphQL query, as alice.
+    fn graphql(f: &Fixture, query: String) -> Read<'_> {
+        let body = serde_json::to_vec(&serde_json::json!({ "query": query })).unwrap();
+        unbudgeted(async move { graphql::handle(&f.schema, f.alice.clone(), &body).await })
+    }
+
+    /// A query selecting `selection` on pull request #1.
+    fn pull_query<'a>(f: &'a Fixture, selection: &str) -> Read<'a> {
+        graphql(
+            f,
+            format!(
+                r#"{{ node(id: "{}") {{ ... on PullRequest {{ {selection} }} }} }}"#,
+                f.pull_node
+            ),
+        )
+    }
+
+    /// Every GraphQL field that reads the repository's refs, one to a query.
+    fn graphql_reads(f: &Fixture) -> Vec<(&'static str, Read<'_>)> {
+        vec![
             (
                 "Repository.ref",
                 graphql(
+                    f,
                     r#"{ repository(owner: "alice", name: "widgets") { ref(qualifiedName: "refs/heads/main") { id } } }"#
                         .to_string(),
                 ),
             ),
-            ("PullRequest.mergeable", pull("mergeable")),
-            ("PullRequest.additions", pull("additions deletions changedFiles")),
-            ("PullRequest.files", pull("files(first: 10) { nodes { path } }")),
+            ("PullRequest.mergeable", pull_query(f, "mergeable")),
+            (
+                "PullRequest.additions",
+                pull_query(f, "additions deletions changedFiles"),
+            ),
+            (
+                "PullRequest.files",
+                pull_query(f, "files(first: 10) { nodes { path } }"),
+            ),
         ]
     }
 
-    /// Poll once, outside tokio's cooperative budget, so a lock that is free
-    /// is taken on this poll however much the test has polled before it.
-    fn poll_once<F: Future>(fut: Pin<&mut F>) -> Poll<F::Output> {
+    fn ref_reads(f: &Fixture) -> Vec<(&'static str, Read<'_>)> {
+        let mut reads = rest_reads(f);
+        reads.extend(graphql_reads(f));
+        reads
+    }
+
+    /// Poll once, with a waker that does nothing: a read that is waiting
+    /// stays where it is until it is polled again.
+    fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
         fut.poll(&mut Context::from_waker(Waker::noop()))
     }
 
-    async fn assert_answered(what: &str, resp: Response<Body>) {
+    async fn answer(what: &str, resp: Response<Body>) -> serde_json::Value {
         assert_eq!(resp.status(), StatusCode::OK, "{what}");
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(body.get("errors").is_none(), "{what}: {body}");
+        body
     }
 
     /// The test holds the repository's lock for write, as a merge does. Each
@@ -612,15 +653,14 @@ mod ref_read_tests {
     async fn ref_reads_wait_out_a_write() {
         let f = fixture();
         let lock = f.face.git.repo_lock(f.repo.id);
-        for (what, read) in ref_reads(&f) {
+        for (what, mut read) in ref_reads(&f) {
             let write = lock.clone().write_owned().await;
-            let mut read = pin!(tokio::task::unconstrained(read));
             assert!(
                 poll_once(read.as_mut()).is_pending(),
                 "{what}: read the refs during a write"
             );
             drop(write);
-            assert_answered(what, read.await).await;
+            answer(what, read.await).await;
         }
     }
 
@@ -630,12 +670,77 @@ mod ref_read_tests {
     async fn ref_reads_do_not_wait_on_each_other() {
         let f = fixture();
         let _read = f.face.git.read_lock(f.repo.id).await;
-        for (what, read) in ref_reads(&f) {
-            let mut read = pin!(tokio::task::unconstrained(read));
+        for (what, mut read) in ref_reads(&f) {
             match poll_once(read.as_mut()) {
-                Poll::Ready(resp) => assert_answered(what, resp).await,
+                Poll::Ready(resp) => drop(answer(what, resp).await),
                 Poll::Pending => panic!("{what}: waited for another read"),
             }
         }
+    }
+
+    /// The test holds the world write gate, as a snapshot restore does while
+    /// it replaces the bare repositories. Each REST read waits for it. The
+    /// GraphQL handler holds the gate for a whole query, outside this crate.
+    #[tokio::test]
+    async fn rest_ref_reads_wait_out_a_restore() {
+        let f = fixture();
+        for (what, mut read) in rest_reads(&f) {
+            let restore = f.face.git.gate().write_owned().await;
+            assert!(
+                poll_once(read.as_mut()).is_pending(),
+                "{what}: read the repository during a restore"
+            );
+            drop(restore);
+            answer(what, read.await).await;
+        }
+    }
+
+    /// A query loads pull request #1 while it is open, and its diff fields
+    /// then wait for a merge of it that holds the lock. The fields compute
+    /// from the merged pull, against its pinned base, rather than comparing
+    /// the open row's head with the commit that merged it, which would answer
+    /// an open pull request with nothing to merge.
+    #[tokio::test]
+    async fn pull_fields_read_after_a_merge_see_the_merged_pull() {
+        let f = fixture();
+        let lock = f.face.git.repo_lock(f.repo.id);
+        let mut read = pull_query(
+            &f,
+            "additions changedFiles mergeable files(first: 10) { nodes { path } }",
+        );
+
+        let merging = lock.clone().write_owned().await;
+        assert!(poll_once(read.as_mut()).is_pending());
+        let merge = commit(
+            &f.bare,
+            &[&f.main, &f.feature],
+            &[("README.md", "# widgets\n"), ("feature.txt", "v1\n")],
+        );
+        store::update_ref_cas(&f.bare, "refs/heads/main", &merge, &f.main).unwrap();
+        f.face
+            .world
+            .record_merge(
+                f.pull.id,
+                f.alice.id,
+                &RefMove {
+                    name: "refs/heads/main",
+                    old: &f.main,
+                    new: &merge,
+                    repins: Vec::new(),
+                },
+            )
+            .unwrap();
+        drop(merging);
+
+        let body = answer("the pull's diff fields", read.await).await;
+        assert_eq!(
+            body["data"]["node"],
+            serde_json::json!({
+                "additions": 1,
+                "changedFiles": 1,
+                "mergeable": "UNKNOWN",
+                "files": { "nodes": [{ "path": "feature.txt" }] },
+            })
+        );
     }
 }

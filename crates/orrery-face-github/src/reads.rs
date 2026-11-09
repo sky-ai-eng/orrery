@@ -237,6 +237,9 @@ pub(crate) async fn list_check_runs_for_ref(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -284,6 +287,9 @@ pub(crate) async fn get_contents(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -292,8 +298,6 @@ pub(crate) async fn get_contents(
     let rev = query_param(&query, "ref").unwrap_or_else(|| "HEAD".to_string());
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
     let spec = format!("{rev}:{path}");
-    // The blob's id and its bytes are two reads of `rev`, so they hold the
-    // lock together.
     let refs = face.git.read_lock(repo.id).await;
     // A directory answers 404 here where GitHub would return a listing —
     // accepted divergence, because a consumer reading contents fetches a file
@@ -303,12 +307,14 @@ pub(crate) async fn get_contents(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(e) => return internal(e),
     };
-    let bytes = match store::cat_file_blob(&bare, &spec) {
+    drop(refs);
+    // Read by its id, the blob is the one `rev` named above, whatever the
+    // refs have done since.
+    let bytes = match store::cat_file_blob(&bare, &blob_sha) {
         Ok(Some(b)) => b,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(e) => return internal(e),
     };
-    drop(refs);
     // For a file, the object media type answers the object the JSON one does.
     if let Some(refused) = media::refuse_unrendered_except(&headers, "Content", &["object"]) {
         return refused;
@@ -341,6 +347,9 @@ pub(crate) async fn list_branches(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -396,6 +405,9 @@ pub(crate) async fn get_branch_ref(
     UrlPath((owner, repo_name, branch)): UrlPath<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -501,6 +513,9 @@ pub(crate) async fn compare(
     UrlPath((owner, repo_name, basehead)): UrlPath<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -539,6 +554,9 @@ pub(crate) async fn list_pull_files(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,

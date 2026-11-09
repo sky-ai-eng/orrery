@@ -39,9 +39,9 @@ pub struct GitFace {
     /// One read-write lock per repo. A write holds it for write, from the
     /// refs it reads before moving any until its record commits: a push
     /// (receive-pack's before/after ref observation), a merge (its
-    /// check-then-move), and opening, closing, or reopening a pull request,
-    /// since which pulls are open on a branch decides which pull refs a push
-    /// moves before it is recorded. Every other git request, a fetch's in
+    /// check-then-move), and opening or editing a pull request (an edit can
+    /// close, reopen, or retarget it), since which pulls are open on a branch
+    /// decides which pull refs a push moves before it is recorded. Every other git request, a fetch's in
     /// particular, holds it for read, so it sees the repository before a write
     /// or after its record, never partway.
     repo_locks: std::sync::Mutex<BTreeMap<i64, Arc<tokio::sync::RwLock<()>>>>,
@@ -96,10 +96,11 @@ impl GitFace {
     }
 
     /// The repository's lock, held for read, for a read of its refs outside
-    /// git traffic. A caller holds it only while it reads, never across an
-    /// await for another repository's lock: a waiting write lets no new read
-    /// in, so two reads each holding one repository and waiting on the other
-    /// could each wait on the other's writer forever.
+    /// git traffic. The caller already holds the world write gate for read,
+    /// as git traffic does. It holds this lock only while it reads, never
+    /// across an await for another repository's lock: a waiting write lets no
+    /// new read in, so two reads each holding one repository and waiting on
+    /// the other could each wait on the other's writer forever.
     pub async fn read_lock(&self, repo_id: i64) -> tokio::sync::OwnedRwLockReadGuard<()> {
         self.repo_lock(repo_id).read_owned().await
     }
@@ -266,18 +267,31 @@ async fn receive_pack(
     body: Bytes,
 ) -> Response<Body> {
     let query = query.unwrap_or_default();
-    serve(
-        face,
-        &owner,
-        &repo_name,
-        actor.as_deref(),
-        "POST",
-        "git-receive-pack",
-        &query,
-        &headers,
-        &body,
-    )
-    .await
+    // The push runs in a task of its own, which a dropped handler doesn't
+    // cancel. The server drops a handler whose client has gone away, and the
+    // receive-pack it started moves refs whether anyone waits for it or not,
+    // so the push must still hold the lock and record what it moved.
+    let push = tokio::spawn(async move {
+        serve(
+            face,
+            &owner,
+            &repo_name,
+            actor.as_deref(),
+            "POST",
+            "git-receive-pack",
+            &query,
+            &headers,
+            &body,
+        )
+        .await
+    });
+    match push.await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!(error = %e, "push task failed");
+            plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -472,6 +486,8 @@ mod tests {
 
     /// The two requests of a fetch that read the repository's refs: the ref
     /// advertisement, and protocol v2's `ls-refs`, a POST to upload-pack.
+    /// Each is polled outside tokio's cooperative budget, so a lock that is
+    /// free is taken on the first poll however much the test polled before.
     fn ref_reads(face: &Arc<GitFace>) -> [(&'static str, Request); 2] {
         let path = || UrlPath(("alice".to_string(), "webapp".to_string()));
         let mut v2 = HeaderMap::new();
@@ -483,32 +499,93 @@ mod tests {
         [
             (
                 "ref advertisement",
-                Box::pin(info_refs(
+                Box::pin(tokio::task::unconstrained(info_refs(
                     State(face.clone()),
                     path(),
                     None,
                     RawQuery(Some("service=git-upload-pack".to_string())),
                     HeaderMap::new(),
-                )),
+                ))),
             ),
             (
                 "ls-refs",
-                Box::pin(upload_pack(
+                Box::pin(tokio::task::unconstrained(upload_pack(
                     State(face.clone()),
                     path(),
                     None,
                     RawQuery(None),
                     v2,
                     Bytes::from_static(b"0014command=ls-refs\n00010000"),
-                )),
+                ))),
             ),
         ]
     }
 
     /// Poll once, with a waker that does nothing: a request that is
     /// waiting stays where it is until it is polled again.
-    fn poll_once<F: Future>(fut: Pin<&mut F>) -> Poll<F::Output> {
+    fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
         fut.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    /// A push of `body` to `alice/webapp`, as alice.
+    fn push(f: &Fixture, body: Bytes) -> Request {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/x-git-receive-pack-request".parse().unwrap(),
+        );
+        Box::pin(tokio::task::unconstrained(receive_pack(
+            State(f.face.clone()),
+            UrlPath(("alice".to_string(), "webapp".to_string())),
+            Some(Extension(f.alice.clone())),
+            RawQuery(None),
+            headers,
+            body,
+        )))
+    }
+
+    /// A push's body creating `refs/heads/topic` at a new root commit, as a
+    /// client sends it: the command, a flush, and a pack of the commit and its
+    /// tree. Returns the commit and the body.
+    fn push_topic() -> (String, Bytes) {
+        let src = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| store::hermetic_git(src.path()).args(args).output().unwrap();
+        assert!(git(&["init", "-q", "--bare", "."]).status.success());
+        let topic = commit(src.path(), &[], "topic");
+        let mut pack = store::hermetic_git(src.path())
+            .args(["pack-objects", "-q", "--stdout", "--revs"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(
+            &mut pack.stdin.take().unwrap(),
+            format!("{topic}\n").as_bytes(),
+        )
+        .unwrap();
+        let pack = pack.wait_with_output().unwrap();
+        assert!(pack.status.success());
+        let command = format!("{} {topic} refs/heads/topic\n", store::ZERO_OID);
+        let mut body = format!("{:04x}{command}0000", command.len() + 4).into_bytes();
+        body.extend_from_slice(&pack.stdout);
+        (topic, Bytes::from(body))
+    }
+
+    /// Poll `push` until it waits for the repository's lock for write, which
+    /// it does in the task it runs in, so possibly after its first poll. A
+    /// waiting write lets no new read in. A push that answers before it
+    /// waits ran during the read.
+    async fn until_waiting<F: Future + ?Sized>(
+        lock: &tokio::sync::RwLock<()>,
+        mut push: Pin<&mut F>,
+    ) {
+        while lock.try_read().is_ok() {
+            assert!(
+                poll_once(push.as_mut()).is_pending(),
+                "the push ran during a read"
+            );
+            tokio::task::yield_now().await;
+        }
     }
 
     async fn body_text(resp: Response<Body>) -> String {
@@ -588,24 +665,9 @@ mod tests {
         let lock = f.face.repo_lock(f.repo.id);
         let read = lock.clone().read_owned().await;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "content-type",
-            "application/x-git-receive-pack-request".parse().unwrap(),
-        );
         // A push that moves nothing: a flush, with no commands before it.
-        let mut push = pin!(receive_pack(
-            State(f.face.clone()),
-            UrlPath(("alice".to_string(), "webapp".to_string())),
-            Some(Extension(f.alice.clone())),
-            RawQuery(None),
-            headers,
-            Bytes::from_static(b"0000"),
-        ));
-        assert!(
-            poll_once(push.as_mut()).is_pending(),
-            "the push ran during a read"
-        );
+        let mut push = push(&f, Bytes::from_static(b"0000"));
+        until_waiting(&lock, push.as_mut()).await;
         let [(_, later), _] = ref_reads(&f.face);
         let mut later = pin!(later);
         assert!(
@@ -624,5 +686,39 @@ mod tests {
             "the later fetch request was not waiting for the push"
         );
         body_text(later.await).await;
+    }
+
+    /// The test holds the repository's lock for read, as a fetch request in
+    /// progress does, and a push creating `topic` waits for it. The push's
+    /// client then goes away and the server drops its handler. The push keeps
+    /// its place for the lock, and lands and is recorded once the read ends.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_push_whose_client_goes_away_still_lands_and_is_recorded() {
+        let f = fixture();
+        let lock = f.face.repo_lock(f.repo.id);
+        let read = lock.clone().read_owned().await;
+        let (topic, body) = push_topic();
+
+        let mut push = push(&f, body);
+        until_waiting(&lock, push.as_mut()).await;
+        drop(push);
+        assert!(
+            lock.try_read().is_err(),
+            "the push stopped waiting when its handler was dropped"
+        );
+
+        drop(read);
+        let _after = lock.clone().write_owned().await;
+        assert_eq!(
+            store::rev_parse(&f.bare, "refs/heads/topic").unwrap(),
+            Some(topic.clone())
+        );
+        let log = f.face.world.log_after(0, 100).unwrap();
+        assert!(
+            log.iter().any(|e| e.action == "ref.update"
+                && e.details["ref"] == "refs/heads/topic"
+                && e.details["new"] == topic.as_str()),
+            "{log:?}"
+        );
     }
 }
