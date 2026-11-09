@@ -127,8 +127,17 @@ fn create_oauth_app_returns_the_stored_row_with_derived_credentials() {
         "replay issues the same credentials"
     );
 
+    // A name is measured in characters, not bytes: each of these is three.
+    let longest = "名".repeat(100);
+    let app = w
+        .create_oauth_app(&longest, "http://auth.test/cb", sys.id)
+        .unwrap();
+    assert_eq!(app.name, longest);
+
+    let too_long = "名".repeat(101);
     for (name, url, field) in [
         ("", "http://auth.test/cb", "name"),
+        (too_long.as_str(), "http://auth.test/cb", "name"),
         ("x", "auth.test/cb", "callback_url"),
         ("x", "ftp://auth.test/cb", "callback_url"),
         ("x", "http:///cb", "callback_url"),

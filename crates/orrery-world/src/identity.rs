@@ -473,9 +473,7 @@ fn validate_emails(emails: &[ActorEmail]) -> Result<()> {
 /// The name an OAuth app is registered under. Each of an app's values has a
 /// check of its own, so a caller holding only some of them can check those.
 pub fn validate_oauth_app_name(name: &str) -> Result<()> {
-    // TODO(ORR-51): the limit counts bytes, not the characters its message
-    // names, so a name in a multi-byte script is refused below 100.
-    if name.trim().is_empty() || name.len() > 100 {
+    if name.trim().is_empty() || name.chars().count() > 100 {
         return Err(WorldError::InvalidOAuthApp {
             field: "name",
             message: "must be 1-100 characters and not blank".to_string(),
