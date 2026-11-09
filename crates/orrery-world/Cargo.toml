@@ -2,7 +2,8 @@
 name = "orrery-world"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
+publish.workspace = true
 repository.workspace = true
 description = "Orrery's world kernel: world-root layout, SQLite state, the virtual clock, actors, and the append-only action log"
 
