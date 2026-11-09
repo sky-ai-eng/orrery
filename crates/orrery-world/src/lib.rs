@@ -56,7 +56,7 @@ const DB_FILE: &str = "world.db";
 const REPOS_DIR: &str = "repos";
 
 /// A ref a push moved, as the git side observed it, for [`World::record_push`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefMove<'a> {
     /// The ref's full name, as its `ref.update` entry records it.
     pub name: &'a str,
@@ -66,9 +66,9 @@ pub struct RefMove<'a> {
     /// The object id after the push, in the caller's spelling for a ref the
     /// push deleted.
     pub new: &'a str,
-    /// The branch this ref is, when its open pulls take `new` as their head;
-    /// `None` leaves every pull where it is.
-    pub branch: Option<&'a str>,
+    /// The pulls, by number, that take `new` as their head: for a branch,
+    /// what [`World::pulls_to_sync`] named for this move.
+    pub repins: Vec<i64>,
 }
 
 pub struct World {
@@ -458,22 +458,22 @@ impl World {
     /// Record a push the git side has taken: `pushed_at` moves to the current
     /// clock, `default_branch` (when given) becomes the repository's default
     /// branch, and each move in `moves`, in order, appends a `ref.update`
-    /// entry and re-pins the open pulls whose head is the move's branch. It
-    /// is one transaction, so a reader that sees any of the push's entries
-    /// sees the repository and its pulls as the push left them. A push that
-    /// moved no ref records nothing.
+    /// entry and re-pins the pulls it names. It is one transaction, so a
+    /// reader that sees any of the push's entries sees the repository and its
+    /// pulls as the push left them. A push that moved no ref records nothing.
     ///
-    /// Returns each re-pinned pull as `(number, head_sha)`, in the order they
-    /// moved, for the caller to move the pull's ref.
+    /// A named pull that is not open refuses the whole record: the caller
+    /// moved that pull's ref on the strength of it being open, and the world
+    /// no longer agrees.
     pub fn record_push(
         &self,
         repo_id: i64,
         actor_id: i64,
         moves: &[RefMove<'_>],
         default_branch: Option<&str>,
-    ) -> Result<Vec<(i64, String)>> {
+    ) -> Result<()> {
         if moves.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
@@ -488,7 +488,6 @@ impl World {
             return Err(WorldError::NoSuchRepo(repo_id));
         }
         let repo = pulls::repo_full_name(&tx, repo_id)?;
-        let mut repinned = Vec::new();
         for m in moves {
             self.log_locked(
                 &tx,
@@ -501,14 +500,22 @@ impl World {
                     "new": m.new,
                 }),
             )?;
-            if let Some(branch) = m.branch {
-                for number in pulls::sync_heads(&tx, repo_id, branch, m.new)? {
-                    repinned.push((number, m.new.to_string()));
+            for &number in &m.repins {
+                let n = tx.execute(
+                    "UPDATE pulls SET head_sha = ?1,
+                     updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+                     WHERE repo_id = ?2 AND number = ?3 AND state = 'open'",
+                    params![m.new, repo_id, number],
+                )?;
+                if n == 0 {
+                    return Err(WorldError::InvalidTransition(format!(
+                        "pull #{number} is not open"
+                    )));
                 }
             }
         }
         tx.commit()?;
-        Ok(repinned)
+        Ok(())
     }
 
     // ---- action log ----

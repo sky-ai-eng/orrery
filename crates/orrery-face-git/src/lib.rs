@@ -38,7 +38,9 @@ pub struct GitFace {
     world: Arc<World>,
     /// Serializes git-side writes per repo — receive-pack's before/after ref
     /// observation and the merge endpoint's check-then-move — so neither can
-    /// interleave with a concurrent write to the same repo.
+    /// interleave with a concurrent write to the same repo. Opening, closing,
+    /// and reopening a pull request take it too: which pulls are open on a
+    /// branch decides which pull refs a push moves before it is recorded.
     repo_locks: std::sync::Mutex<BTreeMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     /// World-wide write gate: every git-side operation holds it for read;
     /// snapshot create/restore hold it for write, so a copy of the world
@@ -112,7 +114,7 @@ impl GitFace {
     /// ref (sorted, so replay order is stable), GitHub's "synchronize" for the
     /// pull requests on each pushed branch, a `pushed_at` bump, and GitHub's
     /// first-push rule — the first branch pushed into an empty repo becomes
-    /// the default branch. The kernel records all of it in one transaction.
+    /// the default branch. The caller holds the repository's lock.
     fn observe_push(
         &self,
         repo: &Repo,
@@ -122,29 +124,34 @@ impl GitFace {
     ) -> Result<(), GitFaceError> {
         let names: std::collections::BTreeSet<&String> =
             before.keys().chain(after.keys()).collect();
-        let moves: Vec<RefMove<'_>> = names
-            .into_iter()
-            .filter_map(|name| {
-                let old = before
-                    .get(name)
-                    .map(String::as_str)
-                    .unwrap_or(store::ZERO_OID);
-                let new = after
-                    .get(name)
-                    .map(String::as_str)
-                    .unwrap_or(store::ZERO_OID);
-                (old != new).then(|| RefMove {
-                    name,
-                    old,
-                    new,
-                    // A deleted branch leaves its pull requests pinned to the
-                    // last sha, as GitHub does.
-                    branch: name
-                        .strip_prefix("refs/heads/")
-                        .filter(|_| new != store::ZERO_OID),
-                })
-            })
-            .collect();
+        let mut moves = Vec::new();
+        for name in names {
+            let old = before
+                .get(name)
+                .map(String::as_str)
+                .unwrap_or(store::ZERO_OID);
+            let new = after
+                .get(name)
+                .map(String::as_str)
+                .unwrap_or(store::ZERO_OID);
+            if old == new {
+                continue;
+            }
+            // A deleted branch leaves its pull requests pinned to the last
+            // sha, as GitHub does.
+            let repins = match name.strip_prefix("refs/heads/") {
+                Some(branch) if new != store::ZERO_OID => {
+                    self.world.pulls_to_sync(repo.id, branch, new)?
+                }
+                _ => Vec::new(),
+            };
+            moves.push(RefMove {
+                name,
+                old,
+                new,
+                repins,
+            });
+        }
         if moves.is_empty() {
             return Ok(());
         }
@@ -163,17 +170,19 @@ impl GitFace {
                 .or(new_branches.first().copied())
                 .filter(|b| *b != repo.default_branch)
         };
+        // Every ref the push moves is in place before the record commits, as
+        // receive-pack moved the pushed branches before this ran, so a reader
+        // that can see the push's entries also sees its refs.
         let bare = store::bare_dir(&self.world.repos_dir(), &repo.owner_login, &repo.name);
-        // HEAD moves before the record commits, so a clone made once the
-        // push's entries can be read checks out the adopted branch.
         if let Some(branch) = adopted {
             store::set_head_symref(&bare, branch)?;
         }
-        // Which pull requests re-pin is decided inside the record, so their
-        // refs can only move after it commits.
-        for (number, head_sha) in self.world.record_push(repo.id, actor.id, &moves, adopted)? {
-            self.pin_pull_ref(repo, number, &head_sha)?;
+        for m in &moves {
+            for &number in &m.repins {
+                self.pin_pull_ref(repo, number, m.new)?;
+            }
         }
+        self.world.record_push(repo.id, actor.id, &moves, adopted)?;
         Ok(())
     }
 }

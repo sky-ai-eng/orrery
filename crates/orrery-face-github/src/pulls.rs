@@ -198,6 +198,12 @@ pub(crate) async fn patch_pull(
         Ok(t) => t,
         Err(resp) => return *resp,
     };
+    // The repo write lock keeps a push from interleaving with the edit: a
+    // push moves the refs of the pulls open on its branch before it records
+    // them, so a close or reopen must not land in between, and a new base's
+    // sha must still be the base's tip when the edit lands.
+    let lock = face.git.repo_lock(repo.id);
+    let _guard = lock.lock().await;
     let base = match parsed.base.as_deref() {
         None => None,
         Some(b) => {

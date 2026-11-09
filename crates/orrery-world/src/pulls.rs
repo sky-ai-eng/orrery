@@ -9,6 +9,10 @@ use crate::queries;
 use crate::types::*;
 use crate::{Result, World, WorldError};
 
+/// The open pulls a move of branch `?3` to sha `?1` in repo `?2` re-pins:
+/// those whose head is the branch and not already at the sha.
+const SYNC_TARGETS: &str = "repo_id = ?2 AND head_ref = ?3 AND state = 'open' AND head_sha <> ?1";
+
 pub struct NewPull<'a> {
     pub repo_id: i64,
     pub author_id: i64,
@@ -530,7 +534,32 @@ impl World {
     /// Re-pin the head sha of every open pull whose head branch just moved —
     /// GitHub's "synchronize". Returns the affected pull numbers.
     pub fn sync_pull_heads(&self, repo_id: i64, branch: &str, new_sha: &str) -> Result<Vec<i64>> {
-        self.with_conn(|conn| sync_heads(conn, repo_id, branch, new_sha))
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "UPDATE pulls SET head_sha = ?1,
+                 updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+                 WHERE {SYNC_TARGETS}
+                 RETURNING number"
+            ))?;
+            let numbers = stmt
+                .query_map(params![new_sha, repo_id, branch], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            Ok(numbers)
+        })
+    }
+
+    /// The pulls [`World::sync_pull_heads`] would re-pin for the same move,
+    /// by number, without re-pinning them.
+    pub fn pulls_to_sync(&self, repo_id: i64, branch: &str, new_sha: &str) -> Result<Vec<i64>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT number FROM pulls WHERE {SYNC_TARGETS} ORDER BY number"
+            ))?;
+            let numbers = stmt
+                .query_map(params![new_sha, repo_id, branch], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            Ok(numbers)
+        })
     }
 
     /// Submit a review, pinned to the pull's current head. Bumps the pull's
@@ -778,26 +807,6 @@ fn touch_pull(conn: &Connection, pull_id: i64) -> Result<()> {
         params![pull_id],
     )?;
     Ok(())
-}
-
-/// [`World::sync_pull_heads`] through an already-held connection or an open
-/// transaction.
-pub(crate) fn sync_heads(
-    conn: &Connection,
-    repo_id: i64,
-    branch: &str,
-    new_sha: &str,
-) -> Result<Vec<i64>> {
-    let mut stmt = conn.prepare(
-        "UPDATE pulls SET head_sha = ?1,
-         updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
-         WHERE repo_id = ?2 AND head_ref = ?3 AND state = 'open' AND head_sha <> ?1
-         RETURNING number",
-    )?;
-    let numbers = stmt
-        .query_map(params![new_sha, repo_id, branch], |r| r.get(0))?
-        .collect::<rusqlite::Result<Vec<i64>>>()?;
-    Ok(numbers)
 }
 
 pub(crate) fn repo_full_name(conn: &Connection, repo_id: i64) -> Result<String> {

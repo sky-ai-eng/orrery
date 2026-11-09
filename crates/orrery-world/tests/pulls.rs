@@ -11,7 +11,6 @@ use orrery_world::{
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SHA_C: &str = "cccccccccccccccccccccccccccccccccccccccc";
-const ABSENT: &str = "0000000000000000000000000000000000000000";
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -183,33 +182,51 @@ fn sync_pull_heads_repins_open_pulls_only() {
 }
 
 #[test]
-fn a_push_repins_the_open_pulls_on_each_branch_it_moved() {
+fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
     let f = fixture();
     let closed = open_pull(&f, "feature", SHA_B);
     f.w.close_pull(closed.id, f.alice).unwrap();
     let open = open_pull(&f, "feature", SHA_B);
-    let gone = open_pull(&f, "gone", SHA_B);
+    let elsewhere = open_pull(&f, "other", SHA_B);
 
-    let moves = [
-        RefMove {
-            name: "refs/heads/feature",
-            old: SHA_B,
-            new: SHA_C,
-            branch: Some("feature"),
-        },
-        RefMove {
-            name: "refs/heads/gone",
-            old: SHA_B,
-            new: ABSENT,
-            branch: None,
-        },
-    ];
-    let repinned = f.w.record_push(f.repo, f.alice, &moves, None).unwrap();
-    assert_eq!(repinned, vec![(open.number, SHA_C.to_string())]);
+    // What a move of `feature` re-pins: its open pulls, and none already at
+    // the new sha.
+    assert_eq!(
+        f.w.pulls_to_sync(f.repo, "feature", SHA_C).unwrap(),
+        vec![open.number]
+    );
+    assert_eq!(
+        f.w.pulls_to_sync(f.repo, "feature", SHA_B).unwrap(),
+        vec![] as Vec<i64>
+    );
+
+    let moves = [RefMove {
+        name: "refs/heads/feature",
+        old: SHA_B,
+        new: SHA_C,
+        repins: vec![open.number],
+    }];
+    f.w.record_push(f.repo, f.alice, &moves, None).unwrap();
     let head = |n| f.w.pull_by_number(f.repo, n).unwrap().unwrap().head_sha;
     assert_eq!(head(open.number), SHA_C);
     assert_eq!(head(closed.number), SHA_B);
-    assert_eq!(head(gone.number), SHA_B, "a deleted branch moves no pull");
+    assert_eq!(head(elsewhere.number), SHA_B);
+
+    // Naming a pull that is not open refuses the whole push: no entry, and
+    // no pull moves.
+    let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
+    let stale = [RefMove {
+        name: "refs/heads/feature",
+        old: SHA_C,
+        new: SHA_A,
+        repins: vec![open.number, closed.number],
+    }];
+    assert!(matches!(
+        f.w.record_push(f.repo, f.alice, &stale, None),
+        Err(WorldError::InvalidTransition(_))
+    ));
+    assert_eq!(head(open.number), SHA_C);
+    assert!(f.w.log_after(mark, 1000).unwrap().is_empty());
 }
 
 #[test]

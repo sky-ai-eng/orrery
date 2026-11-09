@@ -308,13 +308,13 @@ fn first_push() -> [RefMove<'static>; 2] {
             name: "refs/heads/trunk",
             old: ABSENT,
             new: SHA_A,
-            branch: Some("trunk"),
+            repins: Vec::new(),
         },
         RefMove {
             name: "refs/tags/v1",
             old: ABSENT,
             new: SHA_B,
-            branch: None,
+            repins: Vec::new(),
         },
     ]
 }
@@ -330,10 +330,8 @@ fn a_push_records_its_entries_pushed_at_and_default_branch() {
     w.advance_clock(60, sys.id).unwrap();
     let mark = w.log_after(0, 1000).unwrap().last().unwrap().seq;
 
-    let repinned = w
-        .record_push(repo.id, alice.id, &first_push(), Some("trunk"))
+    w.record_push(repo.id, alice.id, &first_push(), Some("trunk"))
         .unwrap();
-    assert!(repinned.is_empty(), "no pull is open: {repinned:?}");
     let read = w.repo_by_id(repo.id).unwrap().unwrap();
     assert_eq!(read.pushed_at_clock_unix, Some(DEFAULT_T0_UNIX + 60));
     assert_eq!(read.default_branch, "trunk");
@@ -366,7 +364,7 @@ fn a_push_records_its_entries_pushed_at_and_default_branch() {
         name: "refs/heads/trunk",
         old: SHA_A,
         new: SHA_B,
-        branch: Some("trunk"),
+        repins: Vec::new(),
     }];
     w.record_push(repo.id, alice.id, &later, None).unwrap();
     let read = w.repo_by_id(repo.id).unwrap().unwrap();
