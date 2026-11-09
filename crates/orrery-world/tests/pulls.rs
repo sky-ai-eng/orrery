@@ -5,12 +5,13 @@
 
 use orrery_world::{
     ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX, NewCheckRun, NewPull,
-    Pull, PullState, ReviewState, TimelineKind, World, WorldError, WorldSecret,
+    Pull, PullState, RefMove, ReviewState, TimelineKind, World, WorldError, WorldSecret,
 };
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SHA_C: &str = "cccccccccccccccccccccccccccccccccccccccc";
+const ABSENT: &str = "0000000000000000000000000000000000000000";
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -179,6 +180,36 @@ fn sync_pull_heads_repins_open_pulls_only() {
         f.w.sync_pull_heads(f.repo, "feature", SHA_C).unwrap(),
         vec![] as Vec<i64>
     );
+}
+
+#[test]
+fn a_push_repins_the_open_pulls_on_each_branch_it_moved() {
+    let f = fixture();
+    let closed = open_pull(&f, "feature", SHA_B);
+    f.w.close_pull(closed.id, f.alice).unwrap();
+    let open = open_pull(&f, "feature", SHA_B);
+    let gone = open_pull(&f, "gone", SHA_B);
+
+    let moves = [
+        RefMove {
+            name: "refs/heads/feature",
+            old: SHA_B,
+            new: SHA_C,
+            branch: Some("feature"),
+        },
+        RefMove {
+            name: "refs/heads/gone",
+            old: SHA_B,
+            new: ABSENT,
+            branch: None,
+        },
+    ];
+    let repinned = f.w.record_push(f.repo, f.alice, &moves, None).unwrap();
+    assert_eq!(repinned, vec![(open.number, SHA_C.to_string())]);
+    let head = |n| f.w.pull_by_number(f.repo, n).unwrap().unwrap().head_sha;
+    assert_eq!(head(open.number), SHA_C);
+    assert_eq!(head(closed.number), SHA_B);
+    assert_eq!(head(gone.number), SHA_B, "a deleted branch moves no pull");
 }
 
 #[test]

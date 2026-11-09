@@ -530,18 +530,7 @@ impl World {
     /// Re-pin the head sha of every open pull whose head branch just moved —
     /// GitHub's "synchronize". Returns the affected pull numbers.
     pub fn sync_pull_heads(&self, repo_id: i64, branch: &str, new_sha: &str) -> Result<Vec<i64>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "UPDATE pulls SET head_sha = ?1,
-                 updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
-                 WHERE repo_id = ?2 AND head_ref = ?3 AND state = 'open' AND head_sha <> ?1
-                 RETURNING number",
-            )?;
-            let numbers = stmt
-                .query_map(params![new_sha, repo_id, branch], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<i64>>>()?;
-            Ok(numbers)
-        })
+        self.with_conn(|conn| sync_heads(conn, repo_id, branch, new_sha))
     }
 
     /// Submit a review, pinned to the pull's current head. Bumps the pull's
@@ -789,6 +778,26 @@ fn touch_pull(conn: &Connection, pull_id: i64) -> Result<()> {
         params![pull_id],
     )?;
     Ok(())
+}
+
+/// [`World::sync_pull_heads`] through an already-held connection or an open
+/// transaction.
+pub(crate) fn sync_heads(
+    conn: &Connection,
+    repo_id: i64,
+    branch: &str,
+    new_sha: &str,
+) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "UPDATE pulls SET head_sha = ?1,
+         updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+         WHERE repo_id = ?2 AND head_ref = ?3 AND state = 'open' AND head_sha <> ?1
+         RETURNING number",
+    )?;
+    let numbers = stmt
+        .query_map(params![new_sha, repo_id, branch], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<i64>>>()?;
+    Ok(numbers)
 }
 
 pub(crate) fn repo_full_name(conn: &Connection, repo_id: i64) -> Result<String> {

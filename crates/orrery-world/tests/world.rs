@@ -1,5 +1,8 @@
+use std::sync::{Arc, Mutex};
+
 use orrery_world::{
-    ActorKind, DEFAULT_T0_UNIX, World, WorldError, WorldReader, WorldSecret, WorldView,
+    ActorKind, DEFAULT_T0_UNIX, RefMove, Signal, World, WorldError, WorldReader, WorldSecret,
+    WorldView,
 };
 use sha2::{Digest, Sha256};
 
@@ -294,8 +297,30 @@ fn create_repo_returns_the_stored_row() {
     ));
 }
 
+const ABSENT: &str = "0000000000000000000000000000000000000000";
+const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/// A first push into an empty repository: a new branch and a new tag.
+fn first_push() -> [RefMove<'static>; 2] {
+    [
+        RefMove {
+            name: "refs/heads/trunk",
+            old: ABSENT,
+            new: SHA_A,
+            branch: Some("trunk"),
+        },
+        RefMove {
+            name: "refs/tags/v1",
+            old: ABSENT,
+            new: SHA_B,
+            branch: None,
+        },
+    ]
+}
+
 #[test]
-fn pushed_at_and_default_branch_updates() {
+fn a_push_records_its_entries_pushed_at_and_default_branch() {
     let (_dir, w) = fresh();
     let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
     let repo = w
@@ -303,15 +328,124 @@ fn pushed_at_and_default_branch_updates() {
         .unwrap();
     let sys = w.actor_by_login("orrery").unwrap().unwrap();
     w.advance_clock(60, sys.id).unwrap();
-    w.touch_pushed(repo.id).unwrap();
-    w.set_default_branch(repo.id, "trunk").unwrap();
+    let mark = w.log_after(0, 1000).unwrap().last().unwrap().seq;
+
+    let repinned = w
+        .record_push(repo.id, alice.id, &first_push(), Some("trunk"))
+        .unwrap();
+    assert!(repinned.is_empty(), "no pull is open: {repinned:?}");
     let read = w.repo_by_id(repo.id).unwrap().unwrap();
     assert_eq!(read.pushed_at_clock_unix, Some(DEFAULT_T0_UNIX + 60));
     assert_eq!(read.default_branch, "trunk");
+    let entries = w.log_after(mark, 1000).unwrap();
+    let details: Vec<&serde_json::Value> = entries
+        .iter()
+        .inspect(|e| {
+            assert_eq!(e.action, "ref.update");
+            assert_eq!(e.actor_login, "alice");
+            assert_eq!(e.clock_unix, DEFAULT_T0_UNIX + 60);
+        })
+        .map(|e| &e.details)
+        .collect();
+    assert_eq!(
+        details,
+        [
+            &serde_json::json!({
+                "repo": "alice/dots", "ref": "refs/heads/trunk", "old": ABSENT, "new": SHA_A,
+            }),
+            &serde_json::json!({
+                "repo": "alice/dots", "ref": "refs/tags/v1", "old": ABSENT, "new": SHA_B,
+            }),
+        ],
+        "one entry per move, in the order given"
+    );
+
+    // A later push moves `pushed_at` and keeps the default branch.
+    w.advance_clock(60, sys.id).unwrap();
+    let later = [RefMove {
+        name: "refs/heads/trunk",
+        old: SHA_A,
+        new: SHA_B,
+        branch: Some("trunk"),
+    }];
+    w.record_push(repo.id, alice.id, &later, None).unwrap();
+    let read = w.repo_by_id(repo.id).unwrap().unwrap();
+    assert_eq!(read.pushed_at_clock_unix, Some(DEFAULT_T0_UNIX + 120));
+    assert_eq!(read.default_branch, "trunk");
+
+    // A push that moved nothing records nothing, and a push into a
+    // repository the world does not hold records none of its entries.
+    let mark = w.log_after(0, 1000).unwrap().last().unwrap().seq;
+    w.record_push(repo.id, alice.id, &[], Some("main")).unwrap();
+    assert_eq!(
+        w.repo_by_id(repo.id).unwrap().unwrap().default_branch,
+        "trunk"
+    );
     assert!(matches!(
-        w.touch_pushed(999),
+        w.record_push(999, alice.id, &first_push(), None),
         Err(WorldError::NoSuchRepo(999))
     ));
+    assert!(w.log_after(mark, 1000).unwrap().is_empty());
+}
+
+#[test]
+fn a_reader_sees_all_of_a_push_or_none_of_it() {
+    let (dir, w) = fresh();
+    let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+    let repo = w
+        .create_repo(alice.id, "dots", None, true, "main", alice.id)
+        .unwrap();
+    let sys = w.actor_by_login("orrery").unwrap().unwrap();
+    w.advance_clock(60, sys.id).unwrap();
+
+    // A connection of its own reads only what has committed. Reading through
+    // it each time the log may have grown shows what a reader woken by any of
+    // the push's entries can see.
+    let db = dir.path().join("world").join("world.db");
+    let read_push = move |conn: &rusqlite::Connection| {
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM action_log WHERE action = 'ref.update'),
+                    pushed_at_clock_unix, default_branch
+             FROM repos WHERE id = ?1",
+            [repo.id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .unwrap()
+    };
+    let open_reader = || {
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+    };
+    let reader = Mutex::new(open_reader());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    w.listen(move |signal| {
+        if signal == Signal::LogMayHaveGrown {
+            let state = read_push(&reader.lock().unwrap());
+            sink.lock().unwrap().push(state);
+        }
+    });
+
+    w.record_push(repo.id, alice.id, &first_push(), Some("trunk"))
+        .unwrap();
+
+    let none = (0, None, "main".to_string());
+    let all = (2, Some(DEFAULT_T0_UNIX + 60), "trunk".to_string());
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "one signal per entry: {seen:?}");
+    for state in seen.iter() {
+        assert!(
+            *state == none || *state == all,
+            "a reader saw part of a push: {state:?}"
+        );
+    }
+    assert_eq!(read_push(&open_reader()), all);
 }
 
 #[test]

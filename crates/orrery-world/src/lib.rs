@@ -55,6 +55,22 @@ pub const SYSTEM_ACTOR_LOGIN: &str = "orrery";
 const DB_FILE: &str = "world.db";
 const REPOS_DIR: &str = "repos";
 
+/// A ref a push moved, as the git side observed it, for [`World::record_push`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefMove<'a> {
+    /// The ref's full name, as its `ref.update` entry records it.
+    pub name: &'a str,
+    /// The object id before the push, in the caller's spelling for a ref
+    /// that did not exist.
+    pub old: &'a str,
+    /// The object id after the push, in the caller's spelling for a ref the
+    /// push deleted.
+    pub new: &'a str,
+    /// The branch this ref is, when its open pulls take `new` as their head;
+    /// `None` leaves every pull where it is.
+    pub branch: Option<&'a str>,
+}
+
 pub struct World {
     root: PathBuf,
     conn: Mutex<Connection>,
@@ -439,16 +455,60 @@ impl World {
         Ok(())
     }
 
-    pub fn set_default_branch(&self, repo_id: i64, branch: &str) -> Result<()> {
+    /// Record a push the git side has taken: `pushed_at` moves to the current
+    /// clock, `default_branch` (when given) becomes the repository's default
+    /// branch, and each move in `moves`, in order, appends a `ref.update`
+    /// entry and re-pins the open pulls whose head is the move's branch. It
+    /// is one transaction, so a reader that sees any of the push's entries
+    /// sees the repository and its pulls as the push left them. A push that
+    /// moved no ref records nothing.
+    ///
+    /// Returns each re-pinned pull as `(number, head_sha)`, in the order they
+    /// moved, for the caller to move the pull's ref.
+    pub fn record_push(
+        &self,
+        repo_id: i64,
+        actor_id: i64,
+        moves: &[RefMove<'_>],
+        default_branch: Option<&str>,
+    ) -> Result<Vec<(i64, String)>> {
+        if moves.is_empty() {
+            return Ok(Vec::new());
+        }
         let conn = self.lock();
-        let n = conn.execute(
-            "UPDATE repos SET default_branch = ?1 WHERE id = ?2",
-            params![branch, repo_id],
+        let tx = conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "UPDATE repos
+             SET pushed_at_clock_unix = (SELECT clock_unix FROM world WHERE id = 1),
+                 default_branch = COALESCE(?2, default_branch)
+             WHERE id = ?1",
+            params![repo_id, default_branch],
         )?;
         if n == 0 {
             return Err(WorldError::NoSuchRepo(repo_id));
         }
-        Ok(())
+        let repo = pulls::repo_full_name(&tx, repo_id)?;
+        let mut repinned = Vec::new();
+        for m in moves {
+            self.log_locked(
+                &tx,
+                actor_id,
+                "ref.update",
+                &serde_json::json!({
+                    "repo": repo,
+                    "ref": m.name,
+                    "old": m.old,
+                    "new": m.new,
+                }),
+            )?;
+            if let Some(branch) = m.branch {
+                for number in pulls::sync_heads(&tx, repo_id, branch, m.new)? {
+                    repinned.push((number, m.new.to_string()));
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(repinned)
     }
 
     // ---- action log ----
