@@ -198,12 +198,16 @@ pub(crate) async fn patch_pull(
         Ok(t) => t,
         Err(resp) => return *resp,
     };
-    // The repo write lock keeps a push from interleaving with the edit: a
-    // push moves the refs of the pulls open on its branch before it records
-    // them, so a close or reopen must not land in between, and a new base's
-    // sha must still be the base's tip when the edit lands. The pull is read
-    // again once the lock is held, so the state checks below see current
-    // truth.
+    // The world write gate keeps a snapshot from copying, or a restore from
+    // replacing, the world between the re-read below and the writes after
+    // it, so the pull row and a new base's sha belong to the world the edit
+    // writes into. The repo write lock keeps a push from interleaving with
+    // the edit: a push moves the refs of the pulls open on its branch before
+    // it records them, so a close or reopen must not land in between, and a
+    // new base's sha must still be the base's tip when the edit lands. The
+    // pull is read again once both are held, so the state checks below see
+    // current truth.
+    let _gate = face.git.gate().read_owned().await;
     let lock = face.git.repo_lock(repo.id);
     let _guard = lock.lock().await;
     let mut pull = match face.world.pull_by_number(repo.id, pull.number) {
@@ -776,4 +780,93 @@ pub(crate) fn pull_by_path_number(
 
 fn is_full_sha(s: &str) -> bool {
     s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use orrery_world::{ActorKind, DEFAULT_T0_UNIX, World, WorldSecret};
+
+    use super::*;
+
+    /// Long enough for an edit that does not wait on the gate to finish.
+    async fn settle() {
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(200)))
+            .await
+            .unwrap();
+    }
+
+    /// The test holds the gate exclusively, as a restore does. An edit sent
+    /// meanwhile waits, and lands once the gate is released.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pull_edit_waits_on_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let world = Arc::new(
+            World::create(
+                &dir.path().join("world"),
+                DEFAULT_T0_UNIX,
+                &WorldSecret::LOCAL,
+            )
+            .unwrap(),
+        );
+        let face = GithubFace {
+            world: world.clone(),
+            git: orrery_face_git::GitFace::new(world.clone()),
+            base_url: "http://world.test".to_string(),
+        };
+        let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
+        let repo = world
+            .create_repo(alice.id, "widgets", None, false, "main", alice.id)
+            .unwrap();
+        let sha = "a".repeat(40);
+        let pull = world
+            .create_pull(NewPull {
+                repo_id: repo.id,
+                author_id: alice.id,
+                title: "before",
+                body: None,
+                head_ref: "feature",
+                head_sha: &sha,
+                base_ref: "main",
+                base_sha: &sha,
+                draft: false,
+            })
+            .unwrap();
+
+        let held = face.git.gate().write_owned().await;
+        let edit = tokio::spawn(patch_pull(
+            State(face.clone()),
+            UrlPath((
+                "alice".to_string(),
+                "widgets".to_string(),
+                pull.number.to_string(),
+            )),
+            Extension(alice),
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"title": "after"}"#),
+        ));
+        settle().await;
+        assert!(!edit.is_finished(), "the edit did not wait");
+        assert_eq!(
+            world
+                .pull_by_number(repo.id, pull.number)
+                .unwrap()
+                .unwrap()
+                .title,
+            "before"
+        );
+
+        drop(held);
+        assert_eq!(edit.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            world
+                .pull_by_number(repo.id, pull.number)
+                .unwrap()
+                .unwrap()
+                .title,
+            "after"
+        );
+    }
 }
