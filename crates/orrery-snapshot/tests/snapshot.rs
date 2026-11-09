@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orrery_snapshot::{DiffSide, SnapshotError, diff};
 use orrery_world::{
-    ActorEmail, ActorKind, DEFAULT_T0_UNIX, NewPull, OrgRole, Pull, RefMove, ReviewState, TeamRole,
-    World, WorldError, WorldSecret, WorldView,
+    ActorEmail, ActorKind, DEFAULT_T0_UNIX, NewPull, OrgRole, Pull, RefChange, RefMove,
+    ReviewState, TeamRole, World, WorldError, WorldSecret, WorldView,
 };
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -525,6 +525,7 @@ fn diff_reports_the_interval_between_states() {
         old: SHA_A,
         new: SHA_C,
         repins: Vec::new(),
+        change: RefChange::Moved,
     };
     inst.world.record_merge(pull.id, bob.id, &merge).unwrap();
     orrery_snapshot::create(&inst.world, &inst.snapshots(), "after").unwrap();

@@ -9,7 +9,9 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use orrery_face_git::store;
-use orrery_world::{Actor, NewPull, Pull, PullState, RefMove, Repo, ReviewState, WorldError};
+use orrery_world::{
+    Actor, NewPull, Pull, PullState, RefChange, RefMove, Repo, ReviewState, WorldError,
+};
 
 use crate::render::{comment_json, label_json, pull_json, review_json};
 use crate::{
@@ -591,6 +593,7 @@ pub(crate) async fn merge_pull(
         old: &base_tip,
         new: &merge_sha,
         repins,
+        change: RefChange::Moved,
     };
 
     // Every ref the merge moves is in place before its record commits, so a

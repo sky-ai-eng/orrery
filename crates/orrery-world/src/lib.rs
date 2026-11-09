@@ -71,6 +71,17 @@ pub struct RefMove<'a> {
     /// The pulls, by number, that take `new` as their head: for a branch,
     /// what [`World::pulls_to_sync`] named for this move.
     pub repins: Vec<i64>,
+    /// Whether the move created the ref, moved it, or deleted it, which the
+    /// kernel cannot read from `old` and `new` in the caller's spelling.
+    pub change: RefChange,
+}
+
+/// What a [`RefMove`] did to its ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefChange {
+    Created,
+    Moved,
+    Deleted,
 }
 
 pub struct World {
@@ -445,9 +456,22 @@ impl World {
     /// Record a push the git side has taken: `pushed_at` moves to the current
     /// clock, `default_branch` (when given) becomes the repository's default
     /// branch, and each move in `moves`, in order, appends a `ref.update`
-    /// entry and re-pins the pulls it names. It is one transaction, so a
-    /// reader that sees any of the push's entries sees the repository and its
-    /// pulls as the push left them. A push that moved no ref records nothing.
+    /// entry and re-pins the pulls it names. Then each branch a move deleted
+    /// or created changes the pulls on it, in the same order, as GitHub
+    /// changes them:
+    ///
+    /// - a deleted branch closes every open pull whose head it is, then
+    ///   records its deletion on every pull whose head it is, closed and
+    ///   merged ones too; and it records its deletion on every open pull whose
+    ///   base it is, then closes that pull, one pull at a time;
+    /// - a created branch records its restoration on every closed pull whose
+    ///   head it is, which stays closed.
+    ///
+    /// Each close appends a `pull.close` entry by the pusher, after all of the
+    /// push's `ref.update` entries, and leaves the pull's head, base, and draft
+    /// flag as they were. It is one transaction, so a reader that sees any of
+    /// the push's entries sees the repository and its pulls as the push left
+    /// them. A push that moved no ref records nothing.
     ///
     /// A named pull that is not open refuses the whole record: the caller
     /// moved that pull's ref on the strength of it being open, and the world
@@ -470,8 +494,10 @@ impl World {
     }
 
     /// The writes a push and a merge share, inside the caller's transaction:
-    /// `pushed_at` and `default_branch` as [`World::record_push`] describes,
-    /// and for each move, in order, its `ref.update` entry and its re-pins.
+    /// `pushed_at` and `default_branch` as [`World::record_push`] describes;
+    /// for each move, in order, its `ref.update` entry and its re-pins; and
+    /// then, for each move of a branch it created or deleted, the changes to
+    /// the pulls on it.
     pub(crate) fn record_moves(
         &self,
         tx: &Connection,
@@ -505,6 +531,13 @@ impl World {
             )?;
             for &number in &m.repins {
                 pulls::repin_open_pull(tx, repo_id, number, m.new)?;
+            }
+        }
+        // After every re-pin, so a pull a move re-pins is still open when it
+        // is re-pinned, though a later move's deletion closes it.
+        for m in moves {
+            if let Some(branch) = m.name.strip_prefix("refs/heads/") {
+                self.record_branch_change(tx, repo_id, actor_id, branch, m.change)?;
             }
         }
         Ok(())

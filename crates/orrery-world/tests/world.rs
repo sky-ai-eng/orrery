@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use orrery_world::{
-    ActorKind, DEFAULT_T0_UNIX, RefMove, Signal, World, WorldError, WorldReader, WorldSecret,
-    WorldView,
+    ActorKind, DEFAULT_T0_UNIX, RefChange, RefMove, Signal, World, WorldError, WorldReader,
+    WorldSecret, WorldView,
 };
 use sha2::{Digest, Sha256};
 
@@ -309,12 +309,14 @@ fn first_push() -> [RefMove<'static>; 2] {
             old: ABSENT,
             new: SHA_A,
             repins: Vec::new(),
+            change: RefChange::Created,
         },
         RefMove {
             name: "refs/tags/v1",
             old: ABSENT,
             new: SHA_B,
             repins: Vec::new(),
+            change: RefChange::Created,
         },
     ]
 }
@@ -365,6 +367,7 @@ fn a_push_records_its_entries_pushed_at_and_default_branch() {
         old: SHA_A,
         new: SHA_B,
         repins: Vec::new(),
+        change: RefChange::Moved,
     }];
     w.record_push(repo.id, alice.id, &later, None).unwrap();
     let read = w.repo_by_id(repo.id).unwrap().unwrap();

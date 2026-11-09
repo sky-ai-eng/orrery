@@ -304,12 +304,13 @@ pub(crate) fn list_comments_for_pull(conn: &Connection, pull_id: i64) -> Result<
 }
 
 const TIMELINE_SELECT: &str = "SELECT t.id, t.pull_id, t.kind, t.label, a.login, t.clock_unix,
-    rv.login, t.team_id, t.team_slug
+    rv.login, t.team_id, t.team_slug, t.ref_name
     FROM pull_timeline t JOIN actors a ON a.id = t.actor_id
     LEFT JOIN actors rv ON rv.id = t.reviewer_id";
 
 fn row_to_timeline(r: &Row<'_>) -> rusqlite::Result<TimelineItem> {
     let label: Option<String> = r.get(3)?;
+    let ref_name: Option<String> = r.get(9)?;
     let reviewer = match (
         r.get::<_, Option<String>>(6)?,
         r.get::<_, Option<i64>>(7)?,
@@ -319,14 +320,17 @@ fn row_to_timeline(r: &Row<'_>) -> rusqlite::Result<TimelineItem> {
         (None, Some(id), Some(slug)) => Some(RequestedReviewer::Team { id, slug }),
         _ => None,
     };
-    let kind = match (r.get::<_, String>(2)?.as_str(), label, reviewer) {
-        ("labeled", Some(name), None) => TimelineKind::Labeled(name),
-        ("unlabeled", Some(name), None) => TimelineKind::Unlabeled(name),
-        ("ready_for_review", None, None) => TimelineKind::ReadyForReview,
-        ("review_requested", None, Some(rv)) => TimelineKind::ReviewRequested(rv),
-        ("review_request_removed", None, Some(rv)) => TimelineKind::ReviewRequestRemoved(rv),
-        ("closed", None, None) => TimelineKind::Closed,
-        (other, _, _) => {
+    let kind = match (r.get::<_, String>(2)?.as_str(), label, ref_name, reviewer) {
+        ("labeled", Some(name), None, None) => TimelineKind::Labeled(name),
+        ("unlabeled", Some(name), None, None) => TimelineKind::Unlabeled(name),
+        ("ready_for_review", None, None, None) => TimelineKind::ReadyForReview,
+        ("review_requested", None, None, Some(rv)) => TimelineKind::ReviewRequested(rv),
+        ("review_request_removed", None, None, Some(rv)) => TimelineKind::ReviewRequestRemoved(rv),
+        ("closed", None, None, None) => TimelineKind::Closed,
+        ("head_ref_deleted", None, Some(name), None) => TimelineKind::HeadRefDeleted(name),
+        ("base_ref_deleted", None, Some(name), None) => TimelineKind::BaseRefDeleted(name),
+        ("head_ref_restored", None, None, None) => TimelineKind::HeadRefRestored,
+        (other, _, _, _) => {
             return Err(rusqlite::Error::FromSqlConversionFailure(
                 2,
                 rusqlite::types::Type::Text,

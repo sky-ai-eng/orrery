@@ -154,6 +154,13 @@ pub enum TimelineKind {
     /// Recorded by a merge as well as a plain close: GitHub logs a `closed`
     /// event beside `merged`, by the same actor at the same time.
     Closed,
+    /// A push deleted the pull's head branch, by the name it had.
+    HeadRefDeleted(String),
+    /// A push deleted the pull's base branch, by the name it had, while the
+    /// pull was open.
+    BaseRefDeleted(String),
+    /// A push created the pull's head branch again after it was deleted.
+    HeadRefRestored,
 }
 
 /// Whose review a request asks for: a user by login, or a team by its id,

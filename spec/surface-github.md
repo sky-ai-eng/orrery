@@ -160,7 +160,7 @@ A selection naming a field, type, or argument Orrery lacks fails the whole docum
 - `commits(last:)` has one node, the head commit.
 - `labels` are ordered by name, ignoring case.
 - `mergedBy` is the actor who merged, typed like an author, and null until a merge.
-- `timelineItems` takes `itemTypes` and lists, oldest first: `LabeledEvent` and `UnlabeledEvent` from the label routes, `ReviewRequestedEvent` and `ReviewRequestRemovedEvent` from the review-request routes, `ReadyForReviewEvent` from the mutation, and `ClosedEvent` (with its `actor`) from a close or a merge, since GitHub records a close beside every merge. A request whose team has since been deleted keeps its item with a null `requestedReviewer`, even after a new team takes the slug. Reopening a pull request and converting it to a draft add no item.
+- `timelineItems` takes `itemTypes` and lists, oldest first: `LabeledEvent` and `UnlabeledEvent` from the label routes, `ReviewRequestedEvent` and `ReviewRequestRemovedEvent` from the review-request routes, `ReadyForReviewEvent` from the mutation, `ClosedEvent` (with its `actor`) from a close or a merge, since GitHub records a close beside every merge, and `HeadRefDeletedEvent` (with `actor` and `headRefName`), `BaseRefDeletedEvent` (with `actor` and `baseRefName`), and `HeadRefRestoredEvent` (with `actor`) from a push that deletes or restores a branch (`surface-git.md`, "Deleting and restoring a branch"). A request whose team has since been deleted keeps its item with a null `requestedReviewer`, even after a new team takes the slug. Reopening a pull request and converting it to a draft add no item.
 
 ### 3.4 Connections
 
@@ -180,6 +180,8 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `DELETE …/teams/{team_slug}/memberships/{username}` for a user not on the team is `204`; GitHub documents only `204` and `403`.
 - Team slugs keep ASCII letters and digits only, so "Équipe" becomes `quipe` and "日本" has no slug (`422 invalid` on `name`), where GitHub may transliterate. Two names with one slug ("Café" and "Caf") collide as `already_exists` on `name`. No length limit is applied.
 - An id `node` or `nodes` can't resolve is `null` with no entry in `errors`.
+- Pushing a deleted head branch back moves the `updated_at` of each closed pull request it restores.
+- One push that deletes several branches, or a branch that is the head of some pull requests and the base of others, handles the branches in ref-name order, and each branch's head pull requests before its base pull requests.
 - The message for a negative `first` or `last` on a GraphQL connection: "`first` on the `X` connection cannot be less than zero."
 
 **Deliberate differences:**

@@ -12,7 +12,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Extension, Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::{get, post};
-use orrery_world::{Actor, RefMove, Repo, World};
+use orrery_world::{Actor, RefChange, RefMove, Repo, World};
 
 pub mod cgi;
 pub mod store;
@@ -98,9 +98,11 @@ impl GitFace {
 
     /// Record a completed receive-pack: one `ref.update` log entry per changed
     /// ref (sorted, so replay order is stable), GitHub's "synchronize" for the
-    /// pull requests on each pushed branch, a `pushed_at` bump, and GitHub's
-    /// first-push rule — the first branch pushed into an empty repo becomes
-    /// the default branch. The caller holds the repository's lock.
+    /// pull requests on each pushed branch, the closes and timeline items a
+    /// deleted or restored branch brings its pull requests
+    /// ([`World::record_push`]), a `pushed_at` bump, and GitHub's first-push
+    /// rule — the first branch pushed into an empty repo becomes the default
+    /// branch. The caller holds the repository's lock.
     fn observe_push(
         &self,
         repo: &Repo,
@@ -123,10 +125,17 @@ impl GitFace {
             if old == new {
                 continue;
             }
+            let change = if old == store::ZERO_OID {
+                RefChange::Created
+            } else if new == store::ZERO_OID {
+                RefChange::Deleted
+            } else {
+                RefChange::Moved
+            };
             // A deleted branch leaves its pull requests pinned to the last
             // sha, as GitHub does.
             let repins = match name.strip_prefix("refs/heads/") {
-                Some(branch) if new != store::ZERO_OID => {
+                Some(branch) if change != RefChange::Deleted => {
                     self.world.pulls_to_sync(repo.id, branch, new)?
                 }
                 _ => Vec::new(),
@@ -136,6 +145,7 @@ impl GitFace {
                 old,
                 new,
                 repins,
+                change,
             });
         }
         if moves.is_empty() {

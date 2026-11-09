@@ -94,6 +94,9 @@ pub enum PullRequestTimelineItemsItemType {
     ReviewRequestRemovedEvent,
     ReadyForReviewEvent,
     ClosedEvent,
+    HeadRefDeletedEvent,
+    BaseRefDeletedEvent,
+    HeadRefRestoredEvent,
 }
 
 // ---- shared plumbing ------------------------------------------------------
@@ -550,6 +553,23 @@ pub struct ClosedEvent {
     pub actor: Option<GqlActor>,
 }
 
+#[derive(SimpleObject)]
+pub struct HeadRefDeletedEvent {
+    pub actor: Option<GqlActor>,
+    pub head_ref_name: String,
+}
+
+#[derive(SimpleObject)]
+pub struct BaseRefDeletedEvent {
+    pub actor: Option<GqlActor>,
+    pub base_ref_name: Option<String>,
+}
+
+#[derive(SimpleObject)]
+pub struct HeadRefRestoredEvent {
+    pub actor: Option<GqlActor>,
+}
+
 // Variant names mirror GitHub's type names; the postfix is theirs.
 #[allow(clippy::enum_variant_names)]
 #[derive(Union)]
@@ -560,6 +580,9 @@ pub enum PullRequestTimelineItems {
     ReviewRequestRemovedEvent(ReviewRequestRemovedEvent),
     ReadyForReviewEvent(ReadyForReviewEvent),
     ClosedEvent(ClosedEvent),
+    HeadRefDeletedEvent(HeadRefDeletedEvent),
+    BaseRefDeletedEvent(BaseRefDeletedEvent),
+    HeadRefRestoredEvent(HeadRefRestoredEvent),
 }
 
 #[derive(SimpleObject)]
@@ -1205,6 +1228,15 @@ fn timeline_item_type(kind: &world::TimelineKind) -> PullRequestTimelineItemsIte
             PullRequestTimelineItemsItemType::ReviewRequestRemovedEvent
         }
         world::TimelineKind::Closed => PullRequestTimelineItemsItemType::ClosedEvent,
+        world::TimelineKind::HeadRefDeleted(_) => {
+            PullRequestTimelineItemsItemType::HeadRefDeletedEvent
+        }
+        world::TimelineKind::BaseRefDeleted(_) => {
+            PullRequestTimelineItemsItemType::BaseRefDeletedEvent
+        }
+        world::TimelineKind::HeadRefRestored => {
+            PullRequestTimelineItemsItemType::HeadRefRestoredEvent
+        }
     }
 }
 
@@ -1244,6 +1276,23 @@ fn timeline_item(
         world::TimelineKind::Closed => PullRequestTimelineItems::ClosedEvent(ClosedEvent {
             actor: Some(author(face, &item.actor_login)),
         }),
+        world::TimelineKind::HeadRefDeleted(head_ref_name) => {
+            PullRequestTimelineItems::HeadRefDeletedEvent(HeadRefDeletedEvent {
+                actor: Some(author(face, &item.actor_login)),
+                head_ref_name,
+            })
+        }
+        world::TimelineKind::BaseRefDeleted(base_ref_name) => {
+            PullRequestTimelineItems::BaseRefDeletedEvent(BaseRefDeletedEvent {
+                actor: Some(author(face, &item.actor_login)),
+                base_ref_name: Some(base_ref_name),
+            })
+        }
+        world::TimelineKind::HeadRefRestored => {
+            PullRequestTimelineItems::HeadRefRestoredEvent(HeadRefRestoredEvent {
+                actor: Some(author(face, &item.actor_login)),
+            })
+        }
     })
 }
 

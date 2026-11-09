@@ -37,12 +37,26 @@ Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CO
 `git-receive-pack` runs under a per-repository lock, and Orrery compares the repository's refs before and after it. For each ref that changed, in ref-name order, it appends one `ref.update` entry to the action log, attributed to the pushing actor, naming the ref and its old and new object ids. With them:
 
 - an open pull request whose head branch moved takes the new tip as its head, GitHub's `synchronize`, and its `refs/pull/{n}/head` moves with it; a deleted branch leaves its pull requests on their last head;
+- a deleted branch closes the open pull requests on it, and a deleted head branch pushed back is recorded on the closed ones (below);
 - the repository's `pushed_at` moves to the world clock; and
 - the first push of a branch into an empty repository sets the default branch, and `HEAD` with it, as on GitHub.
 
 The entries and the state they describe land in one commit, after every ref the push moved is in place, so a reader that can see any of a push's entries sees the repository, its refs, and its pull requests as the push left them. Opening, closing, reopening, and merging a pull request take the same per-repository lock, so the pull requests a push re-pins are the ones open on its branch when it lands.
 
 A commit's author and committer dates come from the client that made it, not from Orrery. A script that commits sets them from the world clock first (`orrery env`, `usage.md`), or replaying it produces different commit ids.
+
+## Deleting and restoring a branch
+
+A push that deletes a branch changes the pull requests on it as GitHub does when the deletion is a push:
+
+- Every open pull request whose head is the branch closes. Then every pull request whose head it is, closed and merged ones included, records the deletion. So the timeline of each pull request it closes gains a close and then a head deletion, and across the pull requests every close comes first.
+- Every open pull request whose base is the branch records the deletion and then closes, one pull request at a time. A closed pull request whose base it is records nothing.
+- Nothing is retargeted, even when the branch was the head of a merged pull request. GitHub documents a retarget onto the merged pull request's base, but it does not happen when the deletion is a push.
+- A pull request keeps its head and base branches and their shas, and a draft stays a draft. Its `refs/pull/{n}/head` stays where it was.
+
+A push that creates a branch records its restoration on every closed pull request whose head it is, merged ones included. They stay closed, and a reopen is then judged by the rules in `surface-github.md`.
+
+When one push deletes or creates several branches, they are handled in ref-name order, and a deleted branch's head pull requests before its base pull requests. Every close and every timeline item is attributed to the pusher and moves the pull request's `updated_at`. Each close appends a `pull.close` entry, after all of the push's `ref.update` entries, in the order the pull requests close. The timeline items have no entries of their own: each follows from a `ref.update` entry and the states of the pull requests on its branch, so replaying the log rebuilds them. They land in the push's commit with its entries. GraphQL serves them as `timelineItems` (`surface-github.md` §3.3).
 
 ## Pull request refs
 

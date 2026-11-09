@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use orrery_world::{
     ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX, NewCheckRun, NewPull,
-    Pull, PullState, RefMove, ReviewState, Signal, TimelineKind, World, WorldError, WorldSecret,
+    Pull, PullState, RefChange, RefMove, ReviewState, Signal, TimelineKind, World, WorldError,
+    WorldSecret,
 };
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -83,6 +84,7 @@ fn into_main<'a>(old: &'a str, new: &'a str, repins: Vec<i64>) -> RefMove<'a> {
         old,
         new,
         repins,
+        change: RefChange::Moved,
     }
 }
 
@@ -293,6 +295,7 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
         old: SHA_B,
         new: SHA_C,
         repins: vec![open.number],
+        change: RefChange::Moved,
     }];
     f.w.record_push(f.repo, f.alice, &moves, None).unwrap();
     let head = |n| f.w.pull_by_number(f.repo, n).unwrap().unwrap().head_sha;
@@ -310,6 +313,7 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
         old: SHA_C,
         new: SHA_A,
         repins: vec![open.number, closed.number],
+        change: RefChange::Moved,
     }];
     assert!(matches!(
         f.w.record_push(f.repo, f.alice, &stale, None),
@@ -381,14 +385,19 @@ fn a_merge_whose_record_is_refused_records_none_of_it() {
     let release = open_release_pull(&f);
     let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
 
-    // A move of a branch the pull does not merge into, and a re-pin of a
-    // pull that is not open: each refuses the whole record.
+    // A move of a branch the pull does not merge into, a re-pin of a pull
+    // that is not open, and a move that deletes the base: each refuses the
+    // whole record.
     let elsewhere = RefMove {
         name: "refs/heads/release",
         ..into_main(SHA_A, SHA_C, vec![release.number])
     };
     let stale = into_main(SHA_A, SHA_C, vec![release.number, closed.number]);
-    for refused in [&elsewhere, &stale] {
+    let deleting = RefMove {
+        change: RefChange::Deleted,
+        ..into_main(SHA_A, SHA_C, vec![release.number])
+    };
+    for refused in [&elsewhere, &stale, &deleting] {
         assert!(matches!(
             f.w.record_merge(pull.id, f.bob, refused),
             Err(WorldError::InvalidTransition(_))
