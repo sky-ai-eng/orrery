@@ -32,6 +32,10 @@ pub enum GitFaceError {
     World(#[from] orrery_world::WorldError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// Refs that disagree with the world and could not be put back, one
+    /// line each naming the repository and the ref.
+    #[error("refs disagree with the world and could not be moved back: {}", .0.join("; "))]
+    RefsNotRestored(Vec<String>),
 }
 
 pub struct GitFace {
@@ -121,6 +125,8 @@ impl GitFace {
     /// are still put back. The caller holds the repository's lock for write.
     pub fn move_back(&self, repo: &Repo, refs: &[(&str, &str, &str)], pinned: &[i64]) {
         let bare = store::bare_dir(&self.world.repos_dir(), &repo.owner_login, &repo.name);
+        // TODO(ORR-79): refs go back in name order, so a push that replaced
+        // `a` with `a/b` leaves `a` deleted until the world is next served.
         for &(name, old, new) in refs {
             if let Err(e) = store::update_ref_cas(&bare, name, old, new) {
                 tracing::error!(error = %e, git_ref = name, "unwind left a ref moved");
@@ -272,6 +278,104 @@ fn changed_refs<'a>(
 
 fn has_branches(refs: &BTreeMap<String, String>) -> bool {
     refs.keys().any(|r| r.starts_with("refs/heads/"))
+}
+
+/// Put every repository's refs where the world puts them, before the world
+/// serves anything (spec/surface-git.md, "Starting a world"). A push is
+/// recorded only by the process that serves it, so one cut off by that
+/// process dying can leave refs no event describes; this moves them back, as
+/// a push that fails moves back what it moved.
+///
+/// Per repository: a missing directory is created with the recipe; every
+/// ref lock file is removed, since only a git that was killed partway leaves
+/// one; each branch and tag goes to the sha of its last ref event in the log
+/// ([`World::logged_refs`]), and is deleted when that event deletes it or
+/// there is none; each pull request's `refs/pull/{n}/head` goes to its head;
+/// and `HEAD` names the default branch. Each change is logged. A ref that
+/// can't be moved back is reported in [`GitFaceError::RefsNotRestored`],
+/// after every other repository has been put right, and the world must not
+/// be served: it would serve refs its log does not describe. It takes no
+/// repository lock, so nothing may serve the world while it runs.
+pub fn restore_refs(world: &World) -> Result<(), GitFaceError> {
+    use orrery_world::WorldView as _;
+
+    let mut expected_by_repo = world.logged_refs()?;
+    for pull in world.list_pulls()? {
+        expected_by_repo
+            .entry(pull.repo_id)
+            .or_default()
+            .insert(store::pull_head_ref(pull.number), pull.head_sha);
+    }
+    let repos_dir = world.repos_dir();
+    let mut stuck = Vec::new();
+    for repo in world.list_repos()? {
+        let expected = expected_by_repo.remove(&repo.id).unwrap_or_default();
+        if let Err(e) = restore_repo(&repos_dir, &repo, &expected, &mut stuck) {
+            stuck.push(format!("{}: {e}", repo.full_name()));
+        }
+    }
+    if stuck.is_empty() {
+        Ok(())
+    } else {
+        Err(GitFaceError::RefsNotRestored(stuck))
+    }
+}
+
+/// [`restore_refs`] for one repository, whose refs belong at `expected`. A
+/// ref or `HEAD` that won't move is added to `stuck`; an error is one that
+/// stopped the repository from being checked at all.
+fn restore_repo(
+    repos_dir: &std::path::Path,
+    repo: &Repo,
+    expected: &BTreeMap<String, String>,
+    stuck: &mut Vec<String>,
+) -> Result<(), GitFaceError> {
+    let full_name = repo.full_name();
+    let bare = store::bare_dir(repos_dir, &repo.owner_login, &repo.name);
+    if !bare.join("HEAD").exists() {
+        tracing::warn!(repo = %full_name, "the repository had no directory; creating it");
+        store::init_bare(
+            repos_dir,
+            &repo.owner_login,
+            &repo.name,
+            &repo.default_branch,
+        )?;
+    }
+    for lock in store::ref_lock_files(&bare)? {
+        std::fs::remove_file(&lock)?;
+        tracing::warn!(repo = %full_name, lock = %lock.display(), "removed a stale ref lock file");
+    }
+    let actual = store::list_refs(&bare)?;
+    let mut changes = changed_refs(expected, &actual);
+    // Deletions first: a ref put back can need a path a deleted one holds, as
+    // `refs/heads/a` does while `refs/heads/a/b` exists.
+    changes.sort_by_key(|&(_, to, _)| to != store::ZERO_OID);
+    for (name, to, from) in changes {
+        match store::update_ref_cas(&bare, name, to, from) {
+            Ok(()) => tracing::warn!(
+                repo = %full_name,
+                git_ref = name,
+                from,
+                to,
+                "moved a ref the log does not describe back to where the world puts it"
+            ),
+            Err(e) => stuck.push(format!("{full_name} {name}: {e}")),
+        }
+    }
+    let head = format!("refs/heads/{}", repo.default_branch);
+    let named = store::head_symref(&bare)?;
+    if named.as_deref() != Some(head.as_str()) {
+        match store::set_head_symref(&bare, &repo.default_branch) {
+            Ok(()) => tracing::warn!(
+                repo = %full_name,
+                from = named.as_deref().unwrap_or("no ref"),
+                to = %head,
+                "pointed HEAD back at the default branch"
+            ),
+            Err(e) => stuck.push(format!("{full_name} HEAD: {e}")),
+        }
+    }
+    Ok(())
 }
 
 /// A push from the moment it reads the repository's refs, before
@@ -895,6 +999,146 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    /// Record the repository's refs as one push by alice that created them
+    /// all, as if receive-pack had moved them.
+    fn record_refs(f: &Fixture) {
+        f.face
+            .observe_push(
+                &f.repo,
+                &f.alice,
+                &BTreeMap::new(),
+                &store::list_refs(&f.bare).unwrap(),
+            )
+            .unwrap();
+    }
+
+    /// A world whose log records `main`, `feature`, and `a` in
+    /// `alice/webapp`, and which has a pull request from `feature` into
+    /// `main`, has every kind of damage a killed push or a hand-run git can
+    /// leave: a branch moved, one deleted, one created, `refs/heads/a`
+    /// replaced by `refs/heads/a/b`, the pull request's ref moved, a symbolic
+    /// ref to `main`, `HEAD` naming another branch, and lock files left on
+    /// refs. Start-up puts
+    /// every ref back where the world puts it, removes the lock files, and
+    /// appends nothing to the log.
+    #[test]
+    fn start_up_puts_back_every_ref_the_world_does_not_describe() {
+        let f = fixture();
+        let feature = commit(&f.bare, &[&f.main], "feature");
+        store::update_ref(&f.bare, "refs/heads/feature", &feature).unwrap();
+        store::update_ref(&f.bare, "refs/heads/a", &f.main).unwrap();
+        record_refs(&f);
+        f.face
+            .world
+            .create_pull(
+                Attribution::new(f.alice.actor.id, Door::Rest),
+                orrery_world::NewPull {
+                    repo_id: f.repo.id,
+                    title: "Add the feature",
+                    body: None,
+                    head_ref: "feature",
+                    head_sha: &feature,
+                    base_ref: "main",
+                    base_sha: &f.main,
+                    draft: false,
+                },
+            )
+            .unwrap();
+        f.face.pin_pull_ref(&f.repo, 1, &feature).unwrap();
+        let recorded = store::list_refs(&f.bare).unwrap();
+        let mark = f.face.world.log_after(0, 100).unwrap().last().unwrap().seq;
+
+        let stray = commit(&f.bare, &[&feature], "stray");
+        store::update_ref(&f.bare, "refs/heads/main", &stray).unwrap();
+        store::update_ref_cas(&f.bare, "refs/heads/feature", store::ZERO_OID, &feature).unwrap();
+        store::update_ref(&f.bare, "refs/heads/topic", &stray).unwrap();
+        store::update_ref_cas(&f.bare, "refs/heads/a", store::ZERO_OID, &f.main).unwrap();
+        store::update_ref(&f.bare, "refs/heads/a/b", &stray).unwrap();
+        store::update_ref(&f.bare, &store::pull_head_ref(1), &stray).unwrap();
+        let alias = store::hermetic_git(&f.bare)
+            .args(["symbolic-ref", "refs/heads/alias", "refs/heads/main"])
+            .status()
+            .unwrap();
+        assert!(alias.success());
+        store::set_head_symref(&f.bare, "topic").unwrap();
+        for lock in [
+            "refs/heads/main.lock",
+            "refs/heads/a/b.lock",
+            "packed-refs.lock",
+        ] {
+            std::fs::write(f.bare.join(lock), "").unwrap();
+        }
+
+        restore_refs(&f.face.world).unwrap();
+        assert_eq!(store::list_refs(&f.bare).unwrap(), recorded);
+        assert_eq!(head(&f.bare), "refs/heads/main");
+        assert_eq!(
+            store::ref_lock_files(&f.bare).unwrap(),
+            Vec::<PathBuf>::new()
+        );
+        assert!(f.face.world.log_after(mark, 100).unwrap().is_empty());
+
+        // A repository that agrees with the world is left as it is.
+        restore_refs(&f.face.world).unwrap();
+        assert_eq!(store::list_refs(&f.bare).unwrap(), recorded);
+    }
+
+    /// The log puts `ghost` at a commit the repository does not hold, so
+    /// start-up cannot put it back. It still deletes the branch no event
+    /// describes, and then names the repository and the ref it could not
+    /// move.
+    #[test]
+    fn start_up_names_a_ref_it_cannot_put_back() {
+        let f = fixture();
+        record_refs(&f);
+        let missing = "1111111111111111111111111111111111111111";
+        f.face
+            .world
+            .record_push(
+                f.repo.id,
+                f.alice.via(Door::Git),
+                &[RefMove {
+                    name: "refs/heads/ghost",
+                    old: store::ZERO_OID,
+                    new: missing,
+                    repins: Vec::new(),
+                    change: RefChange::Created,
+                    forced: false,
+                    commits: vec![missing.to_string()],
+                    commit_count: 1,
+                }],
+                None,
+            )
+            .unwrap();
+        store::update_ref(&f.bare, "refs/heads/topic", &f.main).unwrap();
+
+        let err = restore_refs(&f.face.world).unwrap_err();
+        let GitFaceError::RefsNotRestored(stuck) = &err else {
+            panic!("{err}");
+        };
+        assert_eq!(stuck.len(), 1, "{stuck:?}");
+        assert!(
+            stuck[0].starts_with("alice/webapp refs/heads/ghost: "),
+            "{stuck:?}"
+        );
+        assert_eq!(
+            store::list_refs(&f.bare).unwrap(),
+            [("refs/heads/main".to_string(), f.main.clone())].into()
+        );
+    }
+
+    /// A repository the world holds a row for and no directory, as a
+    /// process that died between the two leaves it, is created at start-up
+    /// with the recipe.
+    #[test]
+    fn start_up_creates_a_missing_repository() {
+        let f = fixture();
+        std::fs::remove_dir_all(&f.bare).unwrap();
+        restore_refs(&f.face.world).unwrap();
+        assert_eq!(head(&f.bare), "refs/heads/main");
+        assert!(store::list_refs(&f.bare).unwrap().is_empty());
     }
 
     /// The first push into a repository with no branches sets `HEAD`, and a

@@ -92,6 +92,24 @@ The ref is advertised to fetches, so `git ls-remote` lists it, and hidden from p
 
 Orrery moves these refs itself, so they have no ref events of their own. Each one is its pull request's `head.sha`, which every event that moves the head carries: `pull:opened`, `pull:reopened`, and `pull:head_moved`. A diff reads refs from the repositories themselves, so its `ref_changes` lists them with the rest.
 
+## Starting a world
+
+A push is recorded only by the process that serves it. If that process dies while a push is in flight, from a kill, a crash, or running out of memory, `git-receive-pack` can have moved refs that nothing records. So can a `git` someone runs in a bare repository by hand. Once `orrery serve` has bound its listeners, and before it prints its ready line or serves a request, it puts every repository's refs where the world puts them:
+
+- a branch or tag at the sha of the last `ref:created` or `ref:updated` event about it, and absent when the last event about it is a `ref:deleted` or there is none. A world written before its log held events (`events.md`) logged each ref a push or a merge moved as a `ref.update` entry, and those count as the ref events they were;
+- each pull request's `refs/pull/{n}/head` at the pull request's `head.sha`; and
+- `HEAD` at the repository's default branch.
+
+First, it removes every ref lock file it finds: `HEAD.lock`, `packed-refs.lock`, and `<ref>.lock` under `refs/`. git leaves one only when it is killed partway through moving a ref, and while it is there every move of that ref fails. A repository whose directory is missing is created with the recipe above.
+
+Each ref is moved by compare-and-swap, deletions first, a symbolic ref as itself rather than the ref it points at, and is logged on stderr with the sha it held and the sha it was moved to. The commit a ref is moved off stays in the repository, since nothing collects objects (`gc.auto = 0`). Nothing is appended to the log. The client of a push cut off this way was never told it succeeded, so this is what a push that fails does (above), and a retry lands and is recorded as if the cut-off push had not happened.
+
+A ref that cannot be moved back is named, with its repository, and `orrery serve` exits without serving the world, which would otherwise serve refs its log does not describe. A world whose refs agree with its log starts unchanged.
+
+A snapshot is a quiesced copy, so restoring one needs none of this. `orrery fork --world` copies a stopped world's directory as it is, refs that disagree with its log included, so a fork is put right the first time it is served.
+
+Start-up assumes nothing else moves the world's refs while it runs. A second `orrery serve` of an instance that is already served fails to bind its listeners before it reaches this step, unless both listen on port 0, which nothing prevents. But a signal sent only to the `orrery serve` process leaves its `git http-backend` children running, and receive-pack can still move refs after it exits. Stop a world by signaling its process group, as Ctrl-C in a terminal does, and wait for the group to exit before serving the world again.
+
 ## Not served
 
 - `refs/pull/{n}/merge`, GitHub's test merge of a pull request into its base.

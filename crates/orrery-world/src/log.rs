@@ -2,6 +2,8 @@
 //! read back. Every kernel write runs through [`World::write`], which commits
 //! the write's state and its events in one transaction.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::events::*;
@@ -238,6 +240,83 @@ impl World {
         )?;
         Ok((events, total))
     }
+
+    /// The branches and tags each repository holds according to the log, by
+    /// repository id, as `ref -> sha`: every ref at the sha of the last ref
+    /// event about it, and absent when that event deletes it or there is
+    /// none. A repository whose log moved no ref has no entry. A pull
+    /// request's `refs/pull/{n}/head` has no events of its own and is not
+    /// here: it belongs at the pull request's head.
+    ///
+    /// A world migrated from a schema version before its log held events
+    /// keeps the entries it logged then. Each push and merge then logged one
+    /// `ref.update` per ref it moved, naming the repository as `owner/name`
+    /// and the ref's new sha as `new` (all zeros for a delete), and those
+    /// count as the ref events they were.
+    pub fn logged_refs(&self) -> Result<BTreeMap<i64, BTreeMap<String, String>>> {
+        let conn = self.lock();
+        let by_name: BTreeMap<String, i64> = queries::list_repos(&conn)?
+            .into_iter()
+            .map(|r| (r.full_name(), r.id))
+            .collect();
+        let mut stmt = conn.prepare(
+            "SELECT seq, type, body FROM action_log
+             WHERE type IN ('ref:created', 'ref:updated', 'ref:deleted', 'ref.update')
+             ORDER BY seq",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut refs: BTreeMap<i64, BTreeMap<String, String>> = BTreeMap::new();
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let kind: String = row.get(1)?;
+            let body: String = row.get(2)?;
+            let malformed = |e: &dyn std::fmt::Display| {
+                conversion_failure(2, format!("log entry {seq} ({kind}): {e}"))
+            };
+            let (repo_id, name, sha) = if kind == "ref.update" {
+                let entry: LegacyRefUpdate =
+                    serde_json::from_str(&body).map_err(|e| malformed(&e))?;
+                let repo_id = *by_name
+                    .get(&entry.repo)
+                    .ok_or_else(|| malformed(&format!("no repository {}", entry.repo)))?;
+                let deleted = entry.new.bytes().all(|b| b == b'0');
+                (repo_id, entry.name, (!deleted).then_some(entry.new))
+            } else {
+                let entry: RefEntry = serde_json::from_str(&body).map_err(|e| malformed(&e))?;
+                let sha = match (kind.as_str(), entry.object, entry.changes) {
+                    ("ref:created", Some(object), _) => Some(object.sha),
+                    ("ref:updated", _, Some(RefChanges { sha: Some(sha), .. })) => Some(sha.to),
+                    ("ref:deleted", _, _) => None,
+                    _ => return Err(malformed(&"it names no sha").into()),
+                };
+                (entry.subject.repo.id, entry.subject.name, sha)
+            };
+            let repo = refs.entry(repo_id).or_default();
+            match sha {
+                Some(sha) => repo.insert(name, sha),
+                None => repo.remove(&name),
+            };
+        }
+        Ok(refs)
+    }
+}
+
+/// The fields of a ref event that say where it left the ref. The commits it
+/// lists are skipped, not read.
+#[derive(serde::Deserialize)]
+struct RefEntry {
+    subject: RefSubject,
+    object: Option<RefObject>,
+    changes: Option<RefChanges>,
+}
+
+/// A ref move as a world logged it before its log held events.
+#[derive(serde::Deserialize)]
+struct LegacyRefUpdate {
+    repo: String,
+    #[serde(rename = "ref")]
+    name: String,
+    new: String,
 }
 
 /// Append a write's events, numbered from the next `seq` this database

@@ -76,6 +76,50 @@ pub fn set_head_symref(bare: &Path, branch: &str) -> Result<(), GitFaceError> {
     Ok(())
 }
 
+/// The ref `HEAD` names, such as `refs/heads/main`; `None` when it names no
+/// ref, which `git symbolic-ref -q` reports with exit code 1.
+pub fn head_symref(bare: &Path) -> Result<Option<String>, GitFaceError> {
+    let (status, stdout, stderr) =
+        run_raw(hermetic_git(bare).args(["symbolic-ref", "-q", "HEAD"]))?;
+    match status.code() {
+        Some(0) => Ok(Some(stdout.trim().to_string())),
+        Some(1) => Ok(None),
+        _ => Err(GitFaceError::Git {
+            args: "symbolic-ref -q HEAD".to_string(),
+            stderr,
+        }),
+    }
+}
+
+/// The lock files of a repository's refs, in path order: `HEAD.lock`,
+/// `packed-refs.lock`, and `<ref>.lock` under `refs/`. git creates one while
+/// it moves a ref and removes it once the move is done, so one is left only
+/// by a git that was killed partway, and every later move of that ref fails
+/// while it is there. git refuses a ref name ending in `.lock`, so every such
+/// file under `refs/` is a lock file.
+pub fn ref_lock_files(bare: &Path) -> Result<Vec<PathBuf>, GitFaceError> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                walk(&path, out)?;
+            } else if path.extension().is_some_and(|e| e == "lock") {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut locks: Vec<PathBuf> = ["HEAD.lock", "packed-refs.lock"]
+        .into_iter()
+        .map(|name| bare.join(name))
+        .filter(|path| path.exists())
+        .collect();
+    walk(&bare.join("refs"), &mut locks)?;
+    locks.sort();
+    Ok(locks)
+}
+
 /// Resolve a revision to an oid; `None` when it doesn't resolve. Any failure
 /// of `rev-parse --verify --quiet` reads as "doesn't resolve" — the command
 /// distinguishes nothing further on its exit code. Callers pass names from
@@ -415,14 +459,16 @@ pub fn update_ref(bare: &Path, refname: &str, new: &str) -> Result<(), GitFaceEr
 /// Move a ref with compare-and-swap on its old value, so a concurrent push
 /// between mergeability check and ref move fails loudly instead of clobbering.
 /// [`ZERO_OID`] spells an absent ref on either side: as `old`, the ref must
-/// not exist; as `new`, the ref is deleted.
+/// not exist; as `new`, the ref is deleted. A symbolic ref is moved or
+/// deleted itself: without `--no-deref`, git moves the ref it points at, so
+/// deleting `refs/heads/alias -> refs/heads/main` would delete `main`.
 pub fn update_ref_cas(
     bare: &Path,
     refname: &str,
     new: &str,
     old: &str,
 ) -> Result<(), GitFaceError> {
-    run(hermetic_git(bare).args(["update-ref", refname, new, old]))?;
+    run(hermetic_git(bare).args(["update-ref", "--no-deref", refname, new, old]))?;
     Ok(())
 }
 
