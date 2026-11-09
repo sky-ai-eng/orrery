@@ -255,8 +255,8 @@ fn a_merge_records_its_base_move_and_the_merge_together() {
     assert!(merged.merged);
     assert_eq!(merged.merge_commit_sha.as_deref(), Some(SHA_C));
 
-    // The base move's entry, then the merge's: the entries a merge has
-    // always appended, in the order replay reads them.
+    // The base move's entry, then the merge's. Stored logs carry a merge as
+    // these two entries in this order, and replay reads them that way.
     let entries = f.w.log_after(mark, 1000).unwrap();
     let recorded: Vec<(&str, &serde_json::Value)> = entries
         .iter()
@@ -325,6 +325,17 @@ fn a_merge_whose_record_is_refused_records_none_of_it() {
         None
     );
     assert!(f.w.list_pull_timeline(pull.id).unwrap().is_empty());
+
+    // A draft is refused too, though its move is right.
+    f.w.set_pull_draft(pull.id, f.alice, true).unwrap();
+    let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
+    let merge = into_main(SHA_A, SHA_C, vec![release.number]);
+    assert!(matches!(
+        f.w.record_merge(pull.id, f.bob, &merge),
+        Err(WorldError::InvalidTransition(_))
+    ));
+    assert!(f.w.log_after(mark, 1000).unwrap().is_empty());
+    assert!(!read(pull.number).merged);
 }
 
 #[test]

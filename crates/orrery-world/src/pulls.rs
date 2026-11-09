@@ -493,8 +493,8 @@ impl World {
     /// The kernel never touches git: the caller has moved the base branch,
     /// and each named pull's ref, before it calls.
     ///
-    /// A pull that is not open, a `base` that is not the pull's base branch,
-    /// or a named pull that is not open refuses the whole record.
+    /// A pull that is not open or is a draft, a `base` that is not the pull's
+    /// base branch, or a named pull that is not open refuses the whole record.
     pub fn record_merge(&self, pull_id: i64, actor_id: i64, base: &RefMove<'_>) -> Result<Pull> {
         self.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
@@ -502,6 +502,12 @@ impl World {
             if before.state != PullState::Open || before.merged {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} is not open",
+                    before.number
+                )));
+            }
+            if before.draft {
+                return Err(WorldError::InvalidTransition(format!(
+                    "pull #{} is a draft",
                     before.number
                 )));
             }
