@@ -31,7 +31,9 @@ mod types;
 pub use checks::{CheckRunPatch, NewCheckRun};
 pub use credentials::{OAUTH_CLIENT_ID_PREFIX, WorldSecret};
 pub use error::WorldError;
-pub use identity::OAUTH_CODE_TTL_SECONDS;
+pub use identity::{
+    OAUTH_CODE_TTL_SECONDS, validate_oauth_app_callback_url, validate_oauth_app_name,
+};
 pub use pulls::NewPull;
 pub use reader::{ViewMeta, WorldReader, WorldView};
 #[cfg(feature = "test-support")]
@@ -174,9 +176,7 @@ impl World {
     /// and keyed by the world secret, so it cannot be guessed.
     pub fn create_actor(&self, login: &str, kind: ActorKind) -> Result<(Actor, String)> {
         validate_login(login)?;
-        if kind == ActorKind::System {
-            return Err(WorldError::InvalidActorKind);
-        }
+        validate_actor_kind(kind)?;
         let conn = self.lock();
         let clock = queries::clock(&conn)?;
         let actor = conn
@@ -550,6 +550,16 @@ pub fn validate_login(login: &str) -> Result<()> {
         Ok(())
     } else {
         Err(WorldError::InvalidLogin(login.to_string()))
+    }
+}
+
+/// The kinds an actor can be created as: the engine seeds the one system
+/// actor itself.
+pub fn validate_actor_kind(kind: ActorKind) -> Result<()> {
+    if kind == ActorKind::System {
+        Err(WorldError::InvalidActorKind)
+    } else {
+        Ok(())
     }
 }
 
