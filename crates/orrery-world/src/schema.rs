@@ -22,6 +22,12 @@ const MIGRATIONS: &[&str] = &[
     // milliseconds. Entries appended before this version never recorded one,
     // so they hold NULL.
     "ALTER TABLE action_log ADD COLUMN wall_unix_ms INTEGER;",
+    // 8: at most one open pull per head and base in a repository. Every write
+    // that opens or retargets a pull checks this first and answers its own
+    // error; the index makes a write that skips the check fail instead of
+    // leaving two open.
+    "CREATE UNIQUE INDEX pulls_one_open_per_pair ON pulls (repo_id, head_ref, base_ref)
+     WHERE state = 'open';",
 ];
 
 /// The version this binary reads and writes.
