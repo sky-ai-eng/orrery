@@ -298,3 +298,59 @@ async fn a_restore_ends_open_streams_and_no_seq_is_issued_twice() {
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["errors"][0]["reason"], "NOT_FOUND");
 }
+
+/// `POST /_orrery/log/list` with `after_seq` set to `seq`: `(status, json)`.
+fn list_after(control: &str, seq: i64) -> (u16, serde_json::Value) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut resp = agent
+        .post(format!("{control}/_orrery/log/list"))
+        .send_json(serde_json::json!({ "after_seq": seq }))
+        .expect("call the list route");
+    let status = resp.status().as_u16();
+    (status, resp.body_mut().read_json().expect("list json"))
+}
+
+/// The stream and the list read a position by one rule, so each refuses
+/// what the other refuses, with the same answer, and takes what it takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stream_and_the_list_check_a_position_alike() {
+    let inst = boot().await;
+    let control = inst.control.clone();
+    append(&control);
+    let kept = control_post(
+        &control,
+        "/_orrery/snapshots",
+        serde_json::json!({ "name": "kept" }),
+    )["last_seq"]
+        .as_i64()
+        .unwrap();
+    append(&control);
+    let discarded = whole_log(&control).last().unwrap()["seq"].as_i64().unwrap();
+    control_post(
+        &control,
+        "/_orrery/snapshots/kept/restore",
+        serde_json::json!({}),
+    );
+    append(&control);
+    let newest = whole_log(&control).last().unwrap()["seq"].as_i64().unwrap();
+
+    for seq in [discarded, newest + 1000] {
+        let streamed = refused(&control, &format!("after_seq={seq}"), None);
+        assert_eq!(streamed.0, 404, "{seq}: {}", streamed.1);
+        assert_eq!(list_after(&control, seq), streamed, "{seq}");
+    }
+    for seq in [0, kept, newest] {
+        let (status, body) = list_after(&control, seq);
+        assert_eq!(status, 200, "{seq}: {body}");
+        let events = open(&control, &format!("after_seq={seq}"), None);
+        if seq < newest {
+            assert_eq!(
+                entries_through(&events, newest),
+                body["items"].as_array().unwrap()[..]
+            );
+        }
+    }
+}

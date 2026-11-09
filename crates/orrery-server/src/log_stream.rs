@@ -16,7 +16,7 @@ use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use orrery_world::{LogEntry, Signal, World, WorldView};
+use orrery_world::{LogEntry, Signal, World, WorldError};
 use tokio::sync::watch;
 
 use crate::AppState;
@@ -73,21 +73,11 @@ pub(crate) async fn stream(
 
     let world = state.world.clone();
     let seq = position.seq;
-    let known = tokio::task::spawn_blocking(move || -> orrery_world::Result<Option<i64>> {
-        if seq == 0 {
-            return Ok(None);
+    match tokio::task::spawn_blocking(move || world.check_log_position(seq)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(WorldError::NoSuchLogPosition { newest_seq, .. })) => {
+            return position.not_found(newest_seq);
         }
-        // The entry at `seq`, if the log holds one, is the first after `seq - 1`.
-        let held = world.log_after(seq - 1, 1)?;
-        if held.first().is_some_and(|e| e.seq == seq) {
-            return Ok(None);
-        }
-        Ok(Some(world.view_meta()?.last_seq))
-    })
-    .await;
-    match known {
-        Ok(Ok(None)) => {}
-        Ok(Ok(Some(newest))) => return position.not_found(newest),
         Ok(Err(e)) => return internal(e),
         Err(e) => return internal(format!("blocking task failed: {e}")),
     }
@@ -205,24 +195,37 @@ impl Position {
         }
     }
 
-    /// The position names no entry: it was never issued, or a restore
-    /// discarded it.
     fn not_found(&self, newest: i64) -> Response<Body> {
-        let (named, field) = match self.from_header {
-            true => (format!("the {LAST_EVENT_ID} header"), None),
-            false => ("after_seq".to_string(), Some("after_seq")),
-        };
-        errors(
-            StatusCode::NOT_FOUND,
-            "NOT_FOUND",
-            &format!(
-                "{named} names seq {}, which is not in the action log; \
-                 a position is 0 or the seq of an entry, and the newest is {newest}",
-                self.seq
+        match self.from_header {
+            true => not_in_log(
+                &format!("the {LAST_EVENT_ID} header"),
+                None,
+                self.seq,
+                newest,
             ),
-            field,
-        )
+            false => not_in_log("after_seq", Some("after_seq"), self.seq, newest),
+        }
     }
+}
+
+/// A position, `seq`, that names no entry: it was never issued, or a restore
+/// discarded it. `named` is what held it, and `field` is its name when that
+/// was a field.
+pub(crate) fn not_in_log(
+    named: &str,
+    field: Option<&str>,
+    seq: i64,
+    newest: i64,
+) -> Response<Body> {
+    errors(
+        StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+        &format!(
+            "{named} names seq {seq}, which is not in the action log; \
+             a position is 0 or the seq of an entry, and the newest is {newest}"
+        ),
+        field,
+    )
 }
 
 /// A position: a decimal integer, 0 or more. The error is the reason and a

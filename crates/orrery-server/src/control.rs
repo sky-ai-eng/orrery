@@ -308,7 +308,9 @@ fn system_actor(state: &AppState) -> Result<Actor, Box<Response<Body>>> {
 
 /// The action log, oldest first unless the body orders it newest first.
 /// `after_seq` narrows it to what followed a position another call reported,
-/// such as a diff's `log.from_seq` or a snapshot's `last_seq`.
+/// such as a diff's `log.from_seq` or a snapshot's `last_seq`. A position the
+/// log does not hold is refused: what follows it in this log did not follow
+/// it.
 async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let after_seq: i64 = fields.optional("after_seq").unwrap_or(0);
@@ -334,6 +336,17 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
         .log_page(after_seq, order, window.resume, window.fetch())
     {
         Ok((rows, total)) => list::answer(rows, &window, total, |e| e.seq),
+        Err(WorldError::NoSuchLogPosition { seq, newest_seq }) => {
+            crate::log_stream::not_in_log("after_seq", Some("after_seq"), seq, newest_seq)
+        }
+        Err(WorldError::ResumeNotInLog(_)) => errors(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "page_token resumes from an entry the action log no longer holds: \
+             a restore replaced the log since the token was issued; \
+             start again from the first page",
+            Some("page_token"),
+        ),
         Err(e) => internal(e),
     }
 }
