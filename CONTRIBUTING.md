@@ -24,18 +24,26 @@ This project uses an individual Contributor License Agreement so contributors
 keep copyright to their work while granting the maintainer broad rights to use,
 relicense, and distribute contributions as part of the project.
 
-The agreement is signed through [CLA Assistant](https://cla-assistant.io/):
+You sign it once, on a pull request:
 
-1. Open a pull request.
-2. CLA Assistant comments on it with a link. Review
-   [`docs/contributors/CLA.md`](docs/contributors/CLA.md), then follow the
-   link, sign in with GitHub, and accept the agreement. Later pull requests
-   reuse your signature until the agreement changes.
-3. Wait for the `license/cla` check to pass before requesting review or merge.
+1. Open a pull request. If you haven't signed, the `cla` check fails and a
+   comment names everyone who still has to.
+2. Read [`docs/contributors/CLA.md`](docs/contributors/CLA.md), then comment on
+   the pull request with exactly:
 
-Every author of a commit in the pull request signs. CLA Assistant matches a
-commit to a GitHub account by its author email, so author your commits with an
-address your account has verified.
+   ```
+   I have read the CLA Document and I hereby sign the CLA
+   ```
+
+3. The `cla` check passes once everyone named has signed. Your signature covers
+   your later pull requests too. Comment `recheck` to run the check again.
+
+Who signs: the person who opens the pull request, and every author or committer
+of its commits who has a GitHub account. Automation and AI assistants, such as
+Claude, don't sign: the person who submits their work is the one granting rights
+in it, and represents under the agreement that they can. GitHub matches a commit
+to an account by its author email, so author your commits with an address your
+account has verified; a commit whose author matches no account fails the check.
 
 If you are contributing on behalf of an employer or client, make sure you have
 permission to submit the work under the terms in [`docs/contributors/CLA.md`](docs/contributors/CLA.md).
