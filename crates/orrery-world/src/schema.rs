@@ -31,8 +31,13 @@ const MIGRATIONS: &[&str] = &[
     // 9: the timeline items a push records when it deletes or restores a
     // pull's branch. `ref_name` is the branch a deletion item names, set
     // exactly for those kinds. SQLite cannot alter a CHECK, so the table is
-    // rebuilt with every row and id it held; nothing references it.
-    "CREATE TABLE pull_timeline_next (
+    // rebuilt with every row and id it held; nothing references it. And
+    // `pulls.base_moved`: whether the base branch has moved since the pull's
+    // head or base was last pinned, which decides whether a closed pull whose
+    // head branch is gone still has a test merge to report.
+    "ALTER TABLE pulls ADD COLUMN base_moved INTEGER NOT NULL DEFAULT 0
+         CHECK (base_moved IN (0, 1));
+     CREATE TABLE pull_timeline_next (
         id          INTEGER PRIMARY KEY,
         pull_id     INTEGER NOT NULL REFERENCES pulls(id),
         kind        TEXT NOT NULL CHECK (kind IN ('labeled', 'unlabeled', 'ready_for_review',

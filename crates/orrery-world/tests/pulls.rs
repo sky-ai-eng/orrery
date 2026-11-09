@@ -325,6 +325,43 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
 }
 
 #[test]
+fn a_base_move_stands_until_the_head_or_base_is_pinned_again() {
+    let f = fixture();
+    let pull = open_pull(&f, "feature", SHA_B);
+    let moved = || f.w.pull_by_id(pull.id).unwrap().unwrap().base_moved;
+    let push = |name, old, new, repins| {
+        let change = RefChange::Moved;
+        let moves = [RefMove {
+            name,
+            old,
+            new,
+            repins,
+            change,
+        }];
+        f.w.record_push(f.repo, f.alice, &moves, None).unwrap();
+    };
+    assert!(!moved());
+
+    // A push to the base marks it, and a push to the head that re-pins it
+    // clears it.
+    push("refs/heads/main", SHA_A, SHA_C, vec![]);
+    assert!(moved());
+    push("refs/heads/feature", SHA_B, SHA_C, vec![pull.number]);
+    assert!(!moved());
+
+    // So do a retarget, and a reopen after a close that leaves it marked.
+    push("refs/heads/main", SHA_C, SHA_A, vec![]);
+    f.w.edit_pull(pull.id, f.alice, None, None, Some(("release", SHA_A)))
+        .unwrap();
+    assert!(!moved());
+    f.w.close_pull(pull.id, f.alice).unwrap();
+    push("refs/heads/release", SHA_A, SHA_B, vec![]);
+    assert!(moved());
+    f.w.reopen_pull(pull.id, f.alice, SHA_C).unwrap();
+    assert!(!moved());
+}
+
+#[test]
 fn a_merge_records_its_base_move_and_the_merge_together() {
     let f = fixture();
     let pull = open_pull(&f, "feature", SHA_B);

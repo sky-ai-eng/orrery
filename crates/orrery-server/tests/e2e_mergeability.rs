@@ -56,6 +56,7 @@ async fn a_pull_reports_its_mergeability_as_github_does() {
     commit("shut", "main", "shut.txt", "shut\n");
     commit("spike", "main", "spike.txt", "spike\n");
     commit("stale", "main", "stale.txt", "stale\n");
+    commit("fresh", "main", "fresh.txt", "fresh\n");
     commit("release", "main", "release.txt", "release\n");
     commit("docs", "release", "docs.txt", "docs\n");
     commit("main", "main", "README.md", "# webapp, again\n");
@@ -74,6 +75,7 @@ async fn a_pull_reports_its_mergeability_as_github_does() {
             "shut",
             "spike",
             "stale",
+            "fresh",
             "release",
             "docs",
         ],
@@ -175,6 +177,7 @@ async fn a_pull_reports_its_mergeability_as_github_does() {
     open("spike", "main", false);
     open("docs", "release", false);
     open("stale", "main", false);
+    open("fresh", "main", false);
     git(src, clock, &["push", "-q", &url, ":spike", ":release"]);
     check(6, &clean_closed, "MERGEABLE");
     check(7, &dirty, "CONFLICTING");
@@ -189,9 +192,17 @@ async fn a_pull_reports_its_mergeability_as_github_does() {
     check(1, &unknown, "UNKNOWN");
 
     // The merge moved main, so a head deleted now leaves a closed pull
-    // request with no test merge to report.
-    git(src, clock, &["push", "-q", &url, ":stale", ":feature"]);
+    // request with no test merge to report, unless its head was pushed after
+    // the move: that push made a test merge against the moved base.
+    commit("fresh", "fresh", "fresh-again.txt", "fresh again\n");
+    git(src, clock, &["push", "-q", &url, "fresh"]);
+    git(
+        src,
+        clock,
+        &["push", "-q", &url, ":stale", ":feature", ":fresh"],
+    );
     check(8, &unknown, "UNKNOWN");
+    check(9, &clean_closed, "MERGEABLE");
     check(1, &unknown, "UNKNOWN");
 
     // A list carries no test merge.

@@ -132,6 +132,11 @@ pub struct Pull {
     /// Slugs of the teams, in the repository's organization, whose review is
     /// pending, in request order.
     pub requested_teams: Vec<String>,
+    /// Whether the base branch has moved since the head or base was last
+    /// pinned: at creation, on a re-pin of the head, on a reopen, or on a
+    /// retarget. GitHub's last test merge was made at one of those, so once a
+    /// closed pull's head branch is gone it has nothing current to report.
+    pub base_moved: bool,
 }
 
 /// One item on a pull's timeline (see `pull_timeline` in the schema).

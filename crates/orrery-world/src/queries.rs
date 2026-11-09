@@ -30,7 +30,8 @@ pub(crate) const PULL_COLUMNS: &str = "id, repo_id, number, title, body,
         WHERE q.pull_id = pulls.id ORDER BY q.id)),
     (SELECT json_group_array(slug) FROM (
         SELECT t.slug FROM review_requests q JOIN teams t ON t.id = q.team_id
-        WHERE q.pull_id = pulls.id ORDER BY q.id))";
+        WHERE q.pull_id = pulls.id ORDER BY q.id)),
+    base_moved";
 
 pub(crate) const TEAM_COLUMNS: &str = "id, org_id,
     (SELECT login FROM actors WHERE actors.id = teams.org_id),
@@ -103,6 +104,7 @@ pub(crate) fn row_to_pull(r: &Row<'_>) -> rusqlite::Result<Pull> {
         labels: json_strings(r, 18)?,
         requested_reviewers: json_strings(r, 19)?,
         requested_teams: json_strings(r, 20)?,
+        base_moved: r.get(21)?,
     })
 }
 

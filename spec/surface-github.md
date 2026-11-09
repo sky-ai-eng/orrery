@@ -33,11 +33,11 @@ A single read and the create and edit answers add `mergeable_state` and `rebasea
 | --- | --- | --- | --- |
 | Merged | null | `unknown` | null |
 | Base branch gone | `false` | `dirty` | `false` |
-| Closed, with its head branch gone and its base branch's tip no longer `base.sha` | null | `unknown` | null |
+| Closed, with its head branch gone and its base branch moved since its last test merge | null | `unknown` | null |
 | The test merge conflicts | `false` | `dirty` | `false` |
 | The test merge is clean | `true` | `clean` | `true` while open, else `false` |
 
-A closed pull request whose head branch is gone has only the test merge GitHub made against `base.sha`, and GitHub cannot make another, so once the base branch moves there is nothing to report. A draft reads as any other pull request.
+GitHub makes a test merge when a pull request is opened, when its head moves (a push to its head branch, or a merge into that branch), when it is reopened, and when its base is changed. A move of the base branch, by a push or a merge, makes the last one stale. A closed pull request whose head branch is gone gets no new one, so once its base branch has moved since its last test merge there is nothing to report. A draft reads as any other pull request.
 
 A list carries no test merge: `mergeable` stays null and the other two are absent, so the list's `ETag` does not change when a base branch moves.
 
@@ -194,7 +194,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `DELETE …/teams/{team_slug}/memberships/{username}` for a user not on the team is `204`; GitHub documents only `204` and `403`.
 - Team slugs keep ASCII letters and digits only, so "Équipe" becomes `quipe` and "日本" has no slug (`422 invalid` on `name`), where GitHub may transliterate. Two names with one slug ("Café" and "Caf") collide as `already_exists` on `name`. No length limit is applied.
 - An id `node` or `nodes` can't resolve is `null` with no entry in `errors`.
-- Pushing a deleted head branch back moves the `updated_at` of each closed pull request it restores.
+- A reopen, a base change, and a merge into a pull request's head branch make a test merge, as a push to its head does.
 - A closed pull request whose test merge conflicts reads as an open one does. Every closed pull request observed had a clean test merge.
 - A closed pull request whose head branch is deleted before its base branch moves has no mergeability once the base moves. It was observed only with the base moving first, or in the same push.
 - One push that deletes several branches, or a branch that is the head of some pull requests and the base of others, handles the branches in ref-name order, and each branch's head pull requests before its base pull requests.
@@ -210,6 +210,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `GET …/commits/{ref}/check-runs` lists every run on the commit; GitHub's default `filter=latest` keeps the newest run per name.
 - Only a bot creates or updates a check run, and a check run's `head_sha` and a review's `commit_id` are not checked against the repository.
 - `mergeable` is computed on read rather than eventually.
+- A read never makes a test merge. On GitHub, a REST read after a pull request's base branch moves starts one, so a closed pull request whose head branch was deleted after such a read reports that test merge, where Orrery reports `unknown`.
 - REST `mergeable_state` reads no check runs and no branch protection, so it is never `unstable`, `blocked`, or `behind`. `rebaseable` is the test merge's answer, not a replay of the head's commits one at a time, so a head whose merge is clean but whose rebase would stop on a conflict reads `true`.
 - A read of a repository's refs waits for a write under way (a push, a merge, opening a pull request, or an edit of one that sets its `state` or `base`), and sees the refs before it or after its record (`surface-git.md`, "What a fetch sees"). Two fields of one GraphQL query can still see two states.
 - Labels belong to a pull request, not to a repository.

@@ -203,7 +203,7 @@ impl World {
                 && base_ref != before.base_ref
             {
                 tx.execute(
-                    "UPDATE pulls SET base_ref = ?1, base_sha = ?2 WHERE id = ?3",
+                    "UPDATE pulls SET base_ref = ?1, base_sha = ?2, base_moved = 0 WHERE id = ?3",
                     params![base_ref, base_sha, pull_id],
                 )?;
                 fields.push("base");
@@ -929,7 +929,7 @@ pub(crate) fn repin_open_pull(
     sha: &str,
 ) -> Result<()> {
     let n = conn.execute(
-        "UPDATE pulls SET head_sha = ?1,
+        "UPDATE pulls SET head_sha = ?1, base_moved = 0,
          updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
          WHERE repo_id = ?2 AND number = ?3 AND state = 'open'",
         params![sha, repo_id, number],
@@ -959,6 +959,18 @@ fn touch_pull(conn: &Connection, pull_id: i64) -> Result<Pull> {
     )
     .optional()?
     .ok_or(WorldError::NoSuchPull(pull_id))
+}
+
+/// Mark the unmerged pulls whose base is `branch` as having had their base
+/// move. It moves no `updated_at`: GitHub's does not move on a push to the
+/// base.
+pub(crate) fn mark_base_moved(conn: &Connection, repo_id: i64, branch: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE pulls SET base_moved = 1
+         WHERE repo_id = ?1 AND base_ref = ?2 AND merged = 0 AND base_moved = 0",
+        params![repo_id, branch],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn repo_full_name(conn: &Connection, repo_id: i64) -> Result<String> {

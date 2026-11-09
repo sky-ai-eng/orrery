@@ -189,9 +189,9 @@ impl MergeRefs {
 
 /// The mergeability GitHub reports for a pull request, from the tips read
 /// with it. A merged one has none. A closed one whose head branch is gone
-/// keeps the test merge GitHub made against `base_sha` and cannot make
-/// another, so it has none once its base branch has moved. The test merge
-/// reads only objects, so it needs no lock.
+/// keeps the test merge GitHub made when its head or base was last pinned
+/// and cannot make another, so it has none once its base branch has moved
+/// since. The test merge reads only objects, so it needs no lock.
 pub(crate) fn mergeability(
     bare: &Path,
     pull: &Pull,
@@ -203,7 +203,7 @@ pub(crate) fn mergeability(
     let Some(base_tip) = &refs.base_tip else {
         return Ok(Mergeability::Conflicting);
     };
-    if pull.state != PullState::Open && *base_tip != pull.base_sha && refs.head_tip.is_none() {
+    if pull.state != PullState::Open && pull.base_moved && refs.head_tip.is_none() {
         return Ok(Mergeability::Unknown);
     }
     Ok(match store::merge_tree(bare, base_tip, &pull.head_sha)? {

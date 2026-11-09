@@ -476,7 +476,9 @@ impl World {
     /// Record a push the git side has taken: `pushed_at` moves to the current
     /// clock, `default_branch` (when given) becomes the repository's default
     /// branch, and each move in `moves`, in order, appends a `ref.update`
-    /// entry and re-pins the pulls it names. Then each branch a move deleted
+    /// entry and re-pins the pulls it names. Every unmerged pull whose base a
+    /// move creates or moves is marked [`Pull::base_moved`] first, so a pull
+    /// the same push re-pins ends unmarked. Then each branch a move deleted
     /// or created changes the pulls on it, in the same order, as GitHub
     /// changes them:
     ///
@@ -537,6 +539,16 @@ impl World {
             return Err(WorldError::NoSuchRepo(repo_id));
         }
         let repo = pulls::repo_full_name(tx, repo_id)?;
+        // Before any re-pin, so a pull whose head and base one push both move
+        // ends with its head pinned against the moved base. A deleted base
+        // needs no mark: a pull whose base is gone has no test merge at all.
+        for m in moves {
+            if let Some(branch) = m.name.strip_prefix("refs/heads/")
+                && m.change != RefChange::Deleted
+            {
+                pulls::mark_base_moved(tx, repo_id, branch)?;
+            }
+        }
         for m in moves {
             self.log_locked(
                 tx,
