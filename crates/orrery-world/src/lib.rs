@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -58,6 +58,25 @@ const REPOS_DIR: &str = "repos";
 pub struct World {
     root: PathBuf,
     conn: Mutex<Connection>,
+    listeners: RwLock<Vec<Listener>>,
+}
+
+type Listener = Box<dyn Fn(Signal) + Send + Sync>;
+
+/// What a [`World`] tells the listeners registered with [`World::listen`].
+/// A signal says only that something may have changed: the change itself is
+/// read through the `World`. Each is raised with the connection lock held,
+/// so any read that sees the change it announces begins after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// An entry was appended to the action log. It may be inside a
+    /// transaction that has not committed yet, and that may roll back, so a
+    /// read that follows sees the entry once it commits, or nothing.
+    LogMayHaveGrown,
+    /// The world's state was replaced by a snapshot's, and its action log
+    /// with it. `newest_seq` is the newest `seq` in the log the world holds
+    /// now, or 0 for an empty one.
+    StateReplaced { newest_seq: i64 },
 }
 
 impl World {
@@ -116,7 +135,32 @@ impl World {
         Ok(World {
             root: root.to_path_buf(),
             conn: Mutex::new(conn),
+            listeners: RwLock::new(Vec::new()),
         })
+    }
+
+    /// Call `listener` with every [`Signal`] this world raises from now on.
+    ///
+    /// A listener is called on the thread making the change, with the
+    /// connection lock held, so every query waits for it to return. It must
+    /// not block, and it must not call this `World` or register another
+    /// listener: either would deadlock.
+    pub fn listen(&self, listener: impl Fn(Signal) + Send + Sync + 'static) {
+        self.listeners
+            .write()
+            .expect("listener list poisoned")
+            .push(Box::new(listener));
+    }
+
+    fn signal(&self, signal: Signal) {
+        for listener in self
+            .listeners
+            .read()
+            .expect("listener list poisoned")
+            .iter()
+        {
+            listener(signal);
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -202,7 +246,7 @@ impl World {
             params![token, actor.id, credentials::TokenOrigin::Actor(0), clock],
         )?;
         identity::insert_email(&conn, actor.id, &identity::default_email(&actor.login))?;
-        log_locked(
+        self.log_locked(
             &conn,
             actor.id,
             "actor.create",
@@ -253,7 +297,7 @@ impl World {
             ],
             |r| r.get(0),
         )?;
-        log_locked(
+        self.log_locked(
             &tx,
             by,
             "actor.token.issue",
@@ -332,7 +376,7 @@ impl World {
                 queries::row_to_repo,
             )
             .map_err(WorldError::from)?;
-        log_locked(
+        self.log_locked(
             &tx,
             created_by,
             "repo.create",
@@ -418,30 +462,114 @@ impl World {
         details: &serde_json::Value,
     ) -> Result<LogEntry> {
         let conn = self.lock();
-        log_locked(&conn, actor_id, action, details)
+        self.log_locked(&conn, actor_id, action, details)
+    }
+
+    /// Append to the action log through an already-held connection (or an
+    /// open transaction — the clock subselect and the insert see the same
+    /// state), and signal [`Signal::LogMayHaveGrown`].
+    pub(crate) fn log_locked(
+        &self,
+        conn: &Connection,
+        actor_id: i64,
+        action: &str,
+        details: &serde_json::Value,
+    ) -> Result<LogEntry> {
+        let entry = conn.query_row(
+            "INSERT INTO action_log (clock_unix, wall_unix_ms, actor_id, action, details)
+             VALUES ((SELECT clock_unix FROM world WHERE id = 1), ?1, ?2, ?3, ?4)
+             RETURNING seq, clock_unix, wall_unix_ms, actor_id, action, details",
+            params![wall_unix_ms(), actor_id, action, details.to_string()],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            },
+        )?;
+        self.signal(Signal::LogMayHaveGrown);
+        let login: String = conn.query_row(
+            "SELECT login FROM actors WHERE id = ?1",
+            params![entry.3],
+            |r| r.get(0),
+        )?;
+        Ok(LogEntry {
+            seq: entry.0,
+            clock_unix: entry.1,
+            wall_unix_ms: entry.2,
+            actor_login: login,
+            action: entry.4,
+            details: serde_json::from_str(&entry.5).unwrap_or(serde_json::Value::Null),
+        })
     }
 
     /// Log entries with `seq > after_seq`, oldest first, at most `limit`.
-    /// `seq` is a total order by construction, so pagination is stable.
+    /// `seq` is a total order by construction, so pagination is stable. It is
+    /// not contiguous: a restore leaves a gap (see [`World::swap_state`]).
     pub fn log_after(&self, after_seq: i64, limit: usize) -> Result<Vec<LogEntry>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT l.seq, l.clock_unix, l.wall_unix_ms, a.login, l.action, l.details
-             FROM action_log l JOIN actors a ON a.id = l.actor_id
-             WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![after_seq, limit as i64], |r| {
-            Ok(LogEntry {
-                seq: r.get(0)?,
-                clock_unix: r.get(1)?,
-                wall_unix_ms: r.get(2)?,
-                actor_login: r.get(3)?,
-                action: r.get(4)?,
-                details: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(5)?)
-                    .unwrap_or(serde_json::Value::Null),
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![after_seq, limit as i64], log_entry)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// One page of the entries with `seq > after_seq`, in `order`, and how
+    /// many such entries there are. With `resume`, the `seq` of the previous
+    /// page's last entry, the page holds only entries past it in `order`, so a
+    /// walk neither repeats nor skips an entry while the log grows. The count
+    /// is read under the same lock as the page. Only `seq`'s order is relied
+    /// on, never that its values are contiguous.
+    pub fn log_page(
+        &self,
+        after_seq: i64,
+        order: LogOrder,
+        resume: Option<i64>,
+        limit: usize,
+    ) -> Result<(Vec<LogEntry>, i64)> {
+        let conn = self.lock();
+        let limit = limit as i64;
+        // Each bound is a plain comparison on `seq`, the rowid, so a page deep
+        // in the log reads only its own rows.
+        let entries = match order {
+            LogOrder::OldestFirst => conn
+                .prepare(&format!(
+                    "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2"
+                ))?
+                .query_map(
+                    params![resume.map_or(after_seq, |r| r.max(after_seq)), limit],
+                    log_entry,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            LogOrder::NewestFirst => conn
+                .prepare(&format!(
+                    "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 AND l.seq <= ?2
+                     ORDER BY l.seq DESC LIMIT ?3"
+                ))?
+                .query_map(
+                    params![
+                        after_seq,
+                        resume.map_or(i64::MAX, |r| r.saturating_sub(1)),
+                        limit
+                    ],
+                    log_entry,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        };
+        // TODO(ORR-59): this count reads every entry above `after_seq` while
+        // holding the world's connection, about 60 ms at a million entries;
+        // the whole-log total should come from a count kept with the log.
+        let total = conn.query_row(
+            "SELECT COUNT(*) FROM action_log WHERE seq > ?1",
+            params![after_seq],
+            |r| r.get(0),
+        )?;
+        Ok((entries, total))
     }
 
     // ---- snapshot support ----
@@ -460,17 +588,34 @@ impl World {
     /// held throughout, so no query can observe the closed state. If `f`
     /// fails, the reopen still runs against whatever `f` left behind; the
     /// reopen error (world unusable) outranks `f`'s.
+    ///
+    /// A `seq` is issued once per world, so a position a caller holds from
+    /// before the swap never names a different entry after it: the reopened
+    /// database's next `seq` is raised past every one this world issued
+    /// before. The log then has a gap where the discarded entries were.
+    ///
+    /// [`Signal::StateReplaced`] is raised once the reopen succeeds, before
+    /// the raise and whatever `f` returned: the state may have changed even
+    /// when a later step fails, and listeners must not go on reading it as
+    /// the log they had.
     pub fn swap_state(&self, f: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
         let mut guard = self.lock();
         checkpoint(&guard)?;
+        let issued = issued_seq(&guard)?;
         let old = std::mem::replace(&mut *guard, Connection::open_in_memory()?);
         drop(old);
         let swap_result = f();
         *guard = open_conn(&self.root)?;
+        self.signal(Signal::StateReplaced {
+            newest_seq: queries::last_seq(&guard)?,
+        });
+        raise_issued_seq(&guard, issued)?;
         swap_result?;
         Ok(())
     }
 
+    // TODO(ORR-60): reads take this lock too, so a slow read delays every
+    // write to the world; WAL would let reads run on a connection of their own.
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("world.db mutex poisoned")
     }
@@ -493,43 +638,51 @@ fn checkpoint(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Append to the action log through an already-held connection (or an open
-/// transaction — the clock subselect and the insert see the same state).
-pub(crate) fn log_locked(
-    conn: &Connection,
-    actor_id: i64,
-    action: &str,
-    details: &serde_json::Value,
-) -> Result<LogEntry> {
-    let entry = conn.query_row(
-        "INSERT INTO action_log (clock_unix, wall_unix_ms, actor_id, action, details)
-         VALUES ((SELECT clock_unix FROM world WHERE id = 1), ?1, ?2, ?3, ?4)
-         RETURNING seq, clock_unix, wall_unix_ms, actor_id, action, details",
-        params![wall_unix_ms(), actor_id, action, details.to_string()],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, Option<i64>>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-            ))
-        },
-    )?;
-    let login: String = conn.query_row(
-        "SELECT login FROM actors WHERE id = ?1",
-        params![entry.3],
-        |r| r.get(0),
-    )?;
+/// What every read of the action log selects, in the order `log_entry`
+/// reads it.
+const LOG_ENTRY_SELECT: &str =
+    "SELECT l.seq, l.clock_unix, l.wall_unix_ms, a.login, l.action, l.details
+     FROM action_log l JOIN actors a ON a.id = l.actor_id";
+
+fn log_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<LogEntry> {
     Ok(LogEntry {
-        seq: entry.0,
-        clock_unix: entry.1,
-        wall_unix_ms: entry.2,
-        actor_login: login,
-        action: entry.4,
-        details: serde_json::from_str(&entry.5).unwrap_or(serde_json::Value::Null),
+        seq: r.get(0)?,
+        clock_unix: r.get(1)?,
+        wall_unix_ms: r.get(2)?,
+        actor_login: r.get(3)?,
+        action: r.get(4)?,
+        details: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(5)?)
+            .unwrap_or(serde_json::Value::Null),
     })
+}
+
+/// The largest `seq` this database has issued, kept by SQLite for an
+/// `AUTOINCREMENT` key. It outlives the entries it numbered, which `MAX(seq)`
+/// does not.
+fn issued_seq(conn: &Connection) -> Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'action_log'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+/// Make the next `seq` this database issues greater than `issued`.
+fn raise_issued_seq(conn: &Connection, issued: i64) -> Result<()> {
+    let raised = conn.execute(
+        "UPDATE sqlite_sequence SET seq = MAX(seq, ?1) WHERE name = 'action_log'",
+        params![issued],
+    )?;
+    if raised == 0 {
+        conn.execute(
+            "INSERT INTO sqlite_sequence (name, seq) VALUES ('action_log', ?1)",
+            params![issued],
+        )?;
+    }
+    Ok(())
 }
 
 /// The real time, in Unix milliseconds, an action-log entry records as the

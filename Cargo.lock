@@ -1239,6 +1239,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "form_urlencoded",
+ "futures-util",
+ "hex",
  "jiff",
  "orrery-face-git",
  "orrery-face-github",
@@ -1246,6 +1249,7 @@ dependencies = [
  "orrery-world",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",

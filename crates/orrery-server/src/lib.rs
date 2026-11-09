@@ -31,6 +31,8 @@ use orrery_face_github::GithubFace;
 use orrery_world::World;
 
 mod control;
+mod list;
+mod log_stream;
 mod snapshots;
 
 /// Where the control plane is mounted, on its own listener or the faces'.
@@ -53,6 +55,8 @@ pub struct AppState {
     pub schema: orrery_face_github::graphql::GithubSchema,
     /// See [`Options::anonymous_git_reads`].
     pub anonymous_git_reads: bool,
+    /// What the action log's streams wait on.
+    log_changes: Arc<tokio::sync::watch::Sender<log_stream::LogChanges>>,
 }
 
 /// How a world process exposes its faces. The default is local `orrery serve`.
@@ -117,6 +121,7 @@ pub fn routers(
         snapshots_dir,
         schema: orrery_face_github::graphql::schema(github.clone()),
         anonymous_git_reads: options.anonymous_git_reads,
+        log_changes: log_stream::follow(&world),
     };
 
     // GraphQL mounts at the GHES address — `/api/graphql`, a sibling of

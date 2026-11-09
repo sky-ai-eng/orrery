@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::queries;
 use crate::types::*;
-use crate::{Result, World, WorldError, constraint_violation, log_locked};
+use crate::{Result, World, WorldError, constraint_violation};
 
 impl World {
     /// Add `login` to `org` with `role`, or change the role of a member,
@@ -41,7 +41,7 @@ impl World {
                 params![org_id, member_id, role.as_str(), clock],
                 queries::row_to_org_member,
             )?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 "org.membership.set",
@@ -110,7 +110,7 @@ impl World {
                     params![team.id, creator_id, clock],
                 )?;
             }
-            log_locked(
+            self.log_locked(
                 &tx,
                 creator_id,
                 "team.create",
@@ -146,7 +146,7 @@ impl World {
                 params![team.id],
             )?;
             tx.execute("DELETE FROM teams WHERE id = ?1", params![team.id])?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 "team.delete",
@@ -200,7 +200,7 @@ impl World {
                 params![team.id, member_id, role.as_str(), clock],
                 queries::row_to_team_member,
             )?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 "team.membership.set",
@@ -259,7 +259,7 @@ impl World {
             if removed == 0 {
                 return Ok(());
             }
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 "team.membership.remove",
