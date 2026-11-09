@@ -43,7 +43,27 @@ Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CO
 
 The entries and the state they describe land in one commit, after every ref the push moved is in place, so a reader that can see any of a push's entries sees the repository, its refs, and its pull requests as the push left them. Opening, closing, reopening, and merging a pull request take the same per-repository lock, so the pull requests a push re-pins are the ones open on its branch when it lands.
 
+A push whose record fails moves back every ref it moved, appends nothing, and answers `500`: each branch it moved, created, or deleted returns to where it was, `HEAD` to the default branch if the push set it, and each pull request ref it re-pinned to the head the pull request still has. A retry of the push then finds the refs the failed push found, and lands and is recorded as if the failed push had not happened. A ref that cannot be moved back is logged. So is a push whose refs cannot be read after `git-receive-pack` runs, which moves nothing back, because which refs it moved is unknown.
+
 A commit's author and committer dates come from the client that made it, not from Orrery. A script that commits sets them from the world clock first (`orrery env`, `usage.md`), or replaying it produces different commit ids.
+
+## What a fetch sees
+
+Every other git request, a fetch's ref advertisement and pack in particular, holds the same per-repository lock for read. A push, a merge, opening a pull request, and an edit of one that sets `state` to `open` or `closed`, or sets `base`, hold it for write, even when the edit leaves the state or base as it was. A fetch request therefore sees the repository as it was before a write or after the write's record commits, never in between: not a write's refs ahead of its entries, and not the refs that a push or merge whose record failed moves back. Any other edit of a pull request, such as one of only its title or body, reads and moves no ref and holds the lock for read, as a fetch request does: fetch requests and the edit don't wait on each other, but the edit waits for a write that runs or waits, so it never lands between a write's read of the pull request and that write's record. A merge's commit message therefore carries the title the pull request had when it merged.
+
+- Fetch requests to a repository don't wait on each other.
+- A write waits for the fetch requests already running, and a fetch request that arrives while a write runs or waits waits for it.
+- The lock is held while `git http-backend` runs, not while its answer is sent, since the face buffers the answer whole.
+- A push that has started runs to its end, holding the lock and recording what it moved, even when its client goes away.
+
+A fetch is several requests (the ref advertisement, then the pack, and with protocol v2, `ls-refs` and `fetch` as separate POSTs), and a write can land between two of them. `uploadpack.allowAnySHA1InWant` is on, so a fetch that asks for a commit a ref has since moved off still gets it.
+
+The GitHub face's reads of a repository's refs hold the same lock for read, and see the refs the same way. They are:
+
+- the REST reads of branches, a branch's ref, a compare, contents, check runs for a branch name, a pull request, and a pull request's files; and
+- the GraphQL fields `Repository.ref`, and a pull request's `mergeable`, `additions`, `deletions`, `changedFiles`, and `files`.
+
+A REST read and a GraphQL query also hold the world write gate for read for the whole request, as git traffic does, so a snapshot restore never replaces the repository under one. A read that also reads a pull request, as the REST pull request and its files and each of those pull request fields do, reads it under the same hold as its base and head branches' tips, so they come from one state. A GraphQL field holds the lock only for its own reads, so a write can land between two fields of one query, as between two requests of a fetch.
 
 ## Deleting and restoring a branch
 

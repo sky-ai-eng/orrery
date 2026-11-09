@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::credentials::{self, TokenOrigin};
 use crate::{
     Actor, ActorEmail, ActorKind, ListedActor, ListedOAuthApp, OAuthApp, OAuthToken, Result, World,
-    WorldError, constraint_violation, queries,
+    WorldError, queries, uniqueness_violation,
 };
 
 /// How long an authorization code stays exchangeable: GitHub's ten minutes,
@@ -17,8 +17,8 @@ pub const OAUTH_CODE_TTL_SECONDS: i64 = 600;
 
 const EMAIL_SELECT: &str = "SELECT email, is_primary, verified FROM actor_emails";
 const EMAIL_ORDER: &str = "ORDER BY is_primary DESC, email";
-const OAUTH_APP_SELECT: &str =
-    "SELECT id, name, client_id, client_secret, callback_url, created_clock_unix FROM oauth_apps";
+const OAUTH_APP_COLUMNS: &str =
+    "id, name, client_id, client_secret, callback_url, created_clock_unix";
 const LISTED_OAUTH_APP_SELECT: &str = "SELECT name, client_id, callback_url FROM oauth_apps";
 
 impl World {
@@ -36,8 +36,8 @@ impl World {
         let actor = conn
             .query_row(
                 &format!(
-                    "{} WHERE a.kind != 'system' AND a.login = ?1",
-                    queries::ACTOR_SELECT
+                    "SELECT {} FROM actors WHERE kind != 'system' AND login = ?1",
+                    queries::ACTOR_COLUMNS
                 ),
                 params![login],
                 queries::row_to_actor,
@@ -62,9 +62,9 @@ impl World {
     ) -> Result<(Vec<ListedActor>, i64)> {
         let conn = self.lock();
         let mut actors = conn.prepare(&format!(
-            "{} WHERE a.kind != 'system' AND a.login > ?1 COLLATE NOCASE
-             ORDER BY a.login COLLATE NOCASE LIMIT ?2",
-            queries::ACTOR_SELECT
+            "SELECT {} FROM actors WHERE kind != 'system' AND login > ?1 COLLATE NOCASE
+             ORDER BY login COLLATE NOCASE LIMIT ?2",
+            queries::ACTOR_COLUMNS
         ))?;
         // Every login is non-empty, so "" sorts before all of them.
         let rows = actors.query_map(
@@ -97,7 +97,10 @@ impl World {
         let tx = conn.unchecked_transaction()?;
         let actor = tx
             .query_row(
-                &format!("{} WHERE login = ?1", queries::ACTOR_SELECT),
+                &format!(
+                    "SELECT {} FROM actors WHERE login = ?1",
+                    queries::ACTOR_COLUMNS
+                ),
                 params![login],
                 queries::row_to_actor,
             )
@@ -138,10 +141,12 @@ impl World {
             r.get(0)
         })?;
         let app = tx.query_row(
-            "INSERT INTO oauth_apps (id, name, client_id, client_secret, callback_url,
-                                     created_clock_unix)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             RETURNING id, name, client_id, client_secret, callback_url, created_clock_unix",
+            &format!(
+                "INSERT INTO oauth_apps (id, name, client_id, client_secret, callback_url,
+                                         created_clock_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 RETURNING {OAUTH_APP_COLUMNS}"
+            ),
             params![
                 id,
                 name,
@@ -225,7 +230,7 @@ impl World {
         let conn = self.lock();
         Ok(conn
             .query_row(
-                &format!("{OAUTH_APP_SELECT} WHERE client_id = ?1"),
+                &format!("SELECT {OAUTH_APP_COLUMNS} FROM oauth_apps WHERE client_id = ?1"),
                 params![client_id],
                 row_to_oauth_app,
             )
@@ -318,7 +323,7 @@ impl World {
         let app = tx
             .query_row(
                 &format!(
-                    "{OAUTH_APP_SELECT} WHERE client_id = ?1
+                    "SELECT {OAUTH_APP_COLUMNS} FROM oauth_apps WHERE client_id = ?1
                      AND (client_secret = ?2 OR EXISTS (
                          SELECT 1 FROM oauth_app_secrets s
                          WHERE s.app_id = oauth_apps.id AND s.secret = ?2))"
@@ -363,7 +368,10 @@ impl World {
             params![token, actor_id, TokenOrigin::OAuthCode(code_id), clock],
         )?;
         let actor = tx.query_row(
-            &format!("{} WHERE id = ?1", queries::ACTOR_SELECT),
+            &format!(
+                "SELECT {} FROM actors WHERE id = ?1",
+                queries::ACTOR_COLUMNS
+            ),
             params![actor_id],
             queries::row_to_actor,
         )?;
@@ -400,7 +408,7 @@ pub(crate) fn insert_email(conn: &Connection, actor_id: i64, e: &ActorEmail) -> 
         params![actor_id, e.email, e.primary, e.verified],
         row_to_email,
     )
-    .map_err(|err| match constraint_violation(&err) {
+    .map_err(|err| match uniqueness_violation(&err) {
         true => WorldError::InvalidEmails(format!("{:?} is listed twice", e.email)),
         false => WorldError::from(err),
     })
@@ -432,7 +440,9 @@ fn row_to_email(r: &Row<'_>) -> rusqlite::Result<ActorEmail> {
 }
 
 pub(crate) fn list_oauth_apps(conn: &Connection) -> Result<Vec<OAuthApp>> {
-    let mut stmt = conn.prepare(&format!("{OAUTH_APP_SELECT} ORDER BY id"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {OAUTH_APP_COLUMNS} FROM oauth_apps ORDER BY id"
+    ))?;
     let rows = stmt.query_map([], row_to_oauth_app)?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }

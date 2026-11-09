@@ -1,5 +1,5 @@
 //! The one home for SELECT column lists and row mappers, shared by `World`
-//! (live) and `WorldReader` (snapshots). A write's RETURNING/read-back and the
+//! (live) and `WorldReader` (snapshots). A write's RETURNING clause and the
 //! point read must project through the same shapes here, so they cannot drift.
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -7,32 +7,30 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::types::*;
 use crate::{Result, WorldError};
 
-pub(crate) const ACTOR_SELECT: &str = "SELECT id, login, kind, created_clock_unix FROM actors a";
-
-pub(crate) const REPO_SELECT: &str = "SELECT r.id, a.login, r.name, r.description, r.private,
-    r.default_branch, r.created_clock_unix, r.pushed_at_clock_unix
-    FROM repos r JOIN actors a ON a.id = r.owner_id";
-
-pub(crate) const PULL_SELECT: &str = "SELECT p.id, p.repo_id, p.number, p.title, p.body,
-    au.login, p.state, p.draft, p.head_ref, p.head_sha, p.base_ref, p.base_sha,
-    p.merged, p.merge_commit_sha, mb.login, p.created_clock_unix, p.updated_clock_unix,
-    p.closed_clock_unix,
-    (SELECT json_group_array(name) FROM (
-        SELECT name FROM pull_labels WHERE pull_id = p.id ORDER BY name COLLATE NOCASE)),
-    (SELECT json_group_array(login) FROM (
-        SELECT a.login FROM review_requests q JOIN actors a ON a.id = q.reviewer_id
-        WHERE q.pull_id = p.id ORDER BY q.id)),
-    (SELECT json_group_array(slug) FROM (
-        SELECT t.slug FROM review_requests q JOIN teams t ON t.id = q.team_id
-        WHERE q.pull_id = p.id ORDER BY q.id))
-    FROM pulls p
-    JOIN actors au ON au.id = p.author_id
-    LEFT JOIN actors mb ON mb.id = p.merged_by_id";
-
 // The projections below name only their own table's columns, reaching other
 // tables through scalar subqueries, so the same text serves a point read
 // (`SELECT {cols} FROM <table>`) and the RETURNING clause of a write to that
 // table: the write returns exactly what the read would.
+
+pub(crate) const ACTOR_COLUMNS: &str = "id, login, kind, created_clock_unix";
+
+pub(crate) const REPO_COLUMNS: &str = "id,
+    (SELECT login FROM actors WHERE actors.id = repos.owner_id),
+    name, description, private, default_branch, created_clock_unix, pushed_at_clock_unix";
+
+pub(crate) const PULL_COLUMNS: &str = "id, repo_id, number, title, body,
+    (SELECT login FROM actors WHERE actors.id = pulls.author_id),
+    state, draft, head_ref, head_sha, base_ref, base_sha, merged, merge_commit_sha,
+    (SELECT login FROM actors WHERE actors.id = pulls.merged_by_id),
+    created_clock_unix, updated_clock_unix, closed_clock_unix,
+    (SELECT json_group_array(name) FROM (
+        SELECT name FROM pull_labels WHERE pull_id = pulls.id ORDER BY name COLLATE NOCASE)),
+    (SELECT json_group_array(login) FROM (
+        SELECT a.login FROM review_requests q JOIN actors a ON a.id = q.reviewer_id
+        WHERE q.pull_id = pulls.id ORDER BY q.id)),
+    (SELECT json_group_array(slug) FROM (
+        SELECT t.slug FROM review_requests q JOIN teams t ON t.id = q.team_id
+        WHERE q.pull_id = pulls.id ORDER BY q.id))";
 
 pub(crate) const TEAM_COLUMNS: &str = "id, org_id,
     (SELECT login FROM actors WHERE actors.id = teams.org_id),
@@ -47,18 +45,18 @@ pub(crate) const TEAM_MEMBER_COLUMNS: &str = "team_id,
     (SELECT login FROM actors WHERE actors.id = team_members.member_id),
     role, created_clock_unix";
 
-pub(crate) const REVIEW_SELECT: &str = "SELECT v.id, v.pull_id, a.login, v.state, v.body,
-    v.commit_sha, v.submitted_clock_unix
-    FROM reviews v JOIN actors a ON a.id = v.author_id";
+pub(crate) const REVIEW_COLUMNS: &str = "id, pull_id,
+    (SELECT login FROM actors WHERE actors.id = reviews.author_id),
+    state, body, commit_sha, submitted_clock_unix";
 
-pub(crate) const COMMENT_SELECT: &str = "SELECT c.id, c.pull_id, a.login, c.body,
-    c.created_clock_unix, c.updated_clock_unix
-    FROM issue_comments c JOIN actors a ON a.id = c.author_id";
+pub(crate) const COMMENT_COLUMNS: &str = "id, pull_id,
+    (SELECT login FROM actors WHERE actors.id = issue_comments.author_id),
+    body, created_clock_unix, updated_clock_unix";
 
-pub(crate) const CHECK_RUN_SELECT: &str = "SELECT k.id, k.repo_id, k.head_sha, k.name,
-    k.status, k.conclusion, k.details_url, k.external_id, k.output, a.login,
-    k.started_clock_unix, k.completed_clock_unix, k.created_clock_unix
-    FROM check_runs k JOIN actors a ON a.id = k.creator_id";
+pub(crate) const CHECK_RUN_COLUMNS: &str = "id, repo_id, head_sha, name, status, conclusion,
+    details_url, external_id, output,
+    (SELECT login FROM actors WHERE actors.id = check_runs.creator_id),
+    started_clock_unix, completed_clock_unix, created_clock_unix";
 
 pub(crate) fn row_to_actor(r: &Row<'_>) -> rusqlite::Result<Actor> {
     Ok(Actor {
@@ -230,21 +228,33 @@ pub(crate) fn log_seq_at_or_before(conn: &Connection, seq: i64) -> Result<i64> {
 }
 
 pub(crate) fn list_actors(conn: &Connection) -> Result<Vec<Actor>> {
-    list(conn, &format!("{ACTOR_SELECT} ORDER BY id"), row_to_actor)
+    list(
+        conn,
+        &format!("SELECT {ACTOR_COLUMNS} FROM actors ORDER BY id"),
+        row_to_actor,
+    )
 }
 
 pub(crate) fn list_repos(conn: &Connection) -> Result<Vec<Repo>> {
-    list(conn, &format!("{REPO_SELECT} ORDER BY r.id"), row_to_repo)
+    list(
+        conn,
+        &format!("SELECT {REPO_COLUMNS} FROM repos ORDER BY id"),
+        row_to_repo,
+    )
 }
 
 pub(crate) fn list_pulls(conn: &Connection) -> Result<Vec<Pull>> {
-    list(conn, &format!("{PULL_SELECT} ORDER BY p.id"), row_to_pull)
+    list(
+        conn,
+        &format!("SELECT {PULL_COLUMNS} FROM pulls ORDER BY id"),
+        row_to_pull,
+    )
 }
 
 pub(crate) fn list_reviews(conn: &Connection) -> Result<Vec<Review>> {
     list(
         conn,
-        &format!("{REVIEW_SELECT} ORDER BY v.id"),
+        &format!("SELECT {REVIEW_COLUMNS} FROM reviews ORDER BY id"),
         row_to_review,
     )
 }
@@ -252,7 +262,7 @@ pub(crate) fn list_reviews(conn: &Connection) -> Result<Vec<Review>> {
 pub(crate) fn list_issue_comments(conn: &Connection) -> Result<Vec<IssueComment>> {
     list(
         conn,
-        &format!("{COMMENT_SELECT} ORDER BY c.id"),
+        &format!("SELECT {COMMENT_COLUMNS} FROM issue_comments ORDER BY id"),
         row_to_comment,
     )
 }
@@ -260,7 +270,7 @@ pub(crate) fn list_issue_comments(conn: &Connection) -> Result<Vec<IssueComment>
 pub(crate) fn list_check_runs(conn: &Connection) -> Result<Vec<CheckRun>> {
     list(
         conn,
-        &format!("{CHECK_RUN_SELECT} ORDER BY k.id"),
+        &format!("SELECT {CHECK_RUN_COLUMNS} FROM check_runs ORDER BY id"),
         row_to_check_run,
     )
 }
@@ -274,11 +284,11 @@ pub(crate) fn list_pulls_for_repo(
     repo_id: i64,
     state: Option<&str>,
 ) -> Result<Vec<Pull>> {
-    let mut sql = format!("{PULL_SELECT} WHERE p.repo_id = ?1");
+    let mut sql = format!("SELECT {PULL_COLUMNS} FROM pulls WHERE repo_id = ?1");
     if state.is_some() {
-        sql.push_str(" AND p.state = ?2");
+        sql.push_str(" AND state = ?2");
     }
-    sql.push_str(" ORDER BY p.created_clock_unix DESC, p.id DESC");
+    sql.push_str(" ORDER BY created_clock_unix DESC, id DESC");
     let mut stmt = conn.prepare(&sql)?;
     let rows = match state {
         Some(s) => stmt.query_map(params![repo_id, s], row_to_pull)?,
@@ -289,7 +299,7 @@ pub(crate) fn list_pulls_for_repo(
 
 pub(crate) fn list_reviews_for_pull(conn: &Connection, pull_id: i64) -> Result<Vec<Review>> {
     let mut stmt = conn.prepare(&format!(
-        "{REVIEW_SELECT} WHERE v.pull_id = ?1 ORDER BY v.id"
+        "SELECT {REVIEW_COLUMNS} FROM reviews WHERE pull_id = ?1 ORDER BY id"
     ))?;
     let rows = stmt.query_map(params![pull_id], row_to_review)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -297,7 +307,7 @@ pub(crate) fn list_reviews_for_pull(conn: &Connection, pull_id: i64) -> Result<V
 
 pub(crate) fn list_comments_for_pull(conn: &Connection, pull_id: i64) -> Result<Vec<IssueComment>> {
     let mut stmt = conn.prepare(&format!(
-        "{COMMENT_SELECT} WHERE c.pull_id = ?1 ORDER BY c.id"
+        "SELECT {COMMENT_COLUMNS} FROM issue_comments WHERE pull_id = ?1 ORDER BY id"
     ))?;
     let rows = stmt.query_map(params![pull_id], row_to_comment)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -465,7 +475,8 @@ pub(crate) fn list_check_runs_for_sha(
     head_sha: &str,
 ) -> Result<Vec<CheckRun>> {
     let mut stmt = conn.prepare(&format!(
-        "{CHECK_RUN_SELECT} WHERE k.repo_id = ?1 AND k.head_sha = ?2 ORDER BY k.id"
+        "SELECT {CHECK_RUN_COLUMNS} FROM check_runs
+         WHERE repo_id = ?1 AND head_sha = ?2 ORDER BY id"
     ))?;
     let rows = stmt.query_map(params![repo_id, head_sha], row_to_check_run)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -476,8 +487,8 @@ pub(crate) fn list_check_runs_for_sha(
 /// tiebreaker.
 pub(crate) fn list_repos_for_owner(conn: &Connection, owner_id: i64) -> Result<Vec<Repo>> {
     let mut stmt = conn.prepare(&format!(
-        "{REPO_SELECT} WHERE r.owner_id = ?1
-         ORDER BY r.pushed_at_clock_unix DESC NULLS LAST, r.id DESC"
+        "SELECT {REPO_COLUMNS} FROM repos WHERE owner_id = ?1
+         ORDER BY pushed_at_clock_unix DESC NULLS LAST, id DESC"
     ))?;
     let rows = stmt.query_map(params![owner_id], row_to_repo)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -486,7 +497,7 @@ pub(crate) fn list_repos_for_owner(conn: &Connection, owner_id: i64) -> Result<V
 pub(crate) fn pull_by_id(conn: &Connection, id: i64) -> Result<Option<Pull>> {
     Ok(conn
         .query_row(
-            &format!("{PULL_SELECT} WHERE p.id = ?1"),
+            &format!("SELECT {PULL_COLUMNS} FROM pulls WHERE id = ?1"),
             params![id],
             row_to_pull,
         )
@@ -500,7 +511,7 @@ pub(crate) fn require_pull(conn: &Connection, id: i64) -> Result<Pull> {
 pub(crate) fn check_run_by_id(conn: &Connection, id: i64) -> Result<Option<CheckRun>> {
     Ok(conn
         .query_row(
-            &format!("{CHECK_RUN_SELECT} WHERE k.id = ?1"),
+            &format!("SELECT {CHECK_RUN_COLUMNS} FROM check_runs WHERE id = ?1"),
             params![id],
             row_to_check_run,
         )

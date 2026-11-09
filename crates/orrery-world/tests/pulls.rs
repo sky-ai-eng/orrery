@@ -132,6 +132,7 @@ fn close_reopen_merge_state_machine() {
     let pull = open_pull(&f, "feature", SHA_B);
 
     let closed = f.w.close_pull(pull.id, f.bob).unwrap();
+    assert_eq!(closed, f.w.pull_by_id(pull.id).unwrap().unwrap());
     assert_eq!(closed.state, PullState::Closed);
     assert!(closed.closed_clock_unix.is_some());
     assert!(!closed.merged);
@@ -528,12 +529,17 @@ fn review_and_comment_return_stored_rows_and_bump_the_pull() {
     let review =
         f.w.create_review(pull.id, f.bob, ReviewState::Approved, Some("lgtm"), None)
             .unwrap();
+    assert_eq!(review, f.w.review_by_id(review.id).unwrap().unwrap());
     assert_eq!(review.author_login, "bob");
     assert_eq!(review.state, ReviewState::Approved);
     assert_eq!(review.commit_sha, SHA_B, "pinned to the pull's head");
     assert_eq!(review.submitted_clock_unix, DEFAULT_T0_UNIX + 60);
 
     let comment = f.w.create_issue_comment(pull.id, f.bob, "ship it").unwrap();
+    assert_eq!(
+        f.w.list_issue_comments_for_pull(pull.id).unwrap(),
+        std::slice::from_ref(&comment)
+    );
     assert_eq!(comment.author_login, "bob");
     assert_eq!(comment.body, "ship it");
 
@@ -740,8 +746,12 @@ fn ready_for_review_lands_on_the_timeline_and_convert_to_draft_does_not() {
             draft: true,
         })
         .unwrap();
-    f.w.set_pull_draft(draft.id, f.alice, false).unwrap();
-    f.w.set_pull_draft(draft.id, f.alice, true).unwrap();
+    let ready = f.w.set_pull_draft(draft.id, f.alice, false).unwrap();
+    assert_eq!(ready, f.w.pull_by_id(draft.id).unwrap().unwrap());
+    assert!(!ready.draft);
+    let redrafted = f.w.set_pull_draft(draft.id, f.alice, true).unwrap();
+    assert_eq!(redrafted, f.w.pull_by_id(draft.id).unwrap().unwrap());
+    assert!(redrafted.draft);
     assert!(f.w.set_pull_draft(draft.id, f.alice, true).is_err());
     assert_eq!(
         timeline_kinds(&f, draft.id),

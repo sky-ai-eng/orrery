@@ -20,7 +20,7 @@ use orrery_world as world;
 
 use crate::GithubFace;
 use crate::nodeid::{self, NodeRef};
-use crate::render::{Mergeability, mergeability, rfc3339};
+use crate::render::{MergeRefs, Mergeability, mergeability, rfc3339};
 
 use super::search;
 
@@ -454,7 +454,10 @@ impl Repository {
             &self.repo.owner_login,
             &self.repo.name,
         );
-        let oid = store::rev_parse(&bare, &qualified_name).map_err(internal)?;
+        let oid = {
+            let _refs = face.git.read_lock(self.repo.id).await;
+            store::rev_parse(&bare, &qualified_name).map_err(internal)?
+        };
         Ok(oid.map(|_| Ref {
             id: ID(format!("O_ref_{}_{}", self.repo.id, qualified_name)),
         }))
@@ -858,33 +861,49 @@ impl PullRequest {
         )
     }
 
-    /// The comparison base for diff stats and changed files: the base
-    /// branch's current tip while the pull is open (GitHub recomputes
-    /// against the moving base), the pinned base sha once it is terminal
-    /// (GitHub freezes the numbers).
-    fn diff_base(&self, face: &GithubFace) -> Result<String, Error> {
-        if self.pull.state == world::PullState::Open {
-            let tip = store::rev_parse(
-                &self.bare(face),
-                &format!("refs/heads/{}", self.pull.base_ref),
-            )
-            .map_err(internal)?;
-            if let Some(tip) = tip {
-                return Ok(tip);
-            }
-        }
-        Ok(self.pull.base_sha.clone())
+    /// The pull as it is now, and the branch tips its diff and mergeability
+    /// are computed from, read together under the repository's lock. The row
+    /// this object was built from can be older than the refs: an open row
+    /// read before a merge, with the base's tip read after it, would compare
+    /// the head against the commit that merged it.
+    async fn current(&self, face: &GithubFace) -> Result<(world::Pull, MergeRefs), Error> {
+        let _refs = face.git.read_lock(self.repo.id).await;
+        let pull = face
+            .world
+            .pull_by_number(self.repo.id, self.pull.number)
+            .map_err(internal)?
+            .ok_or_else(|| internal(format!("pull request {} is gone", self.pull.id)))?;
+        let refs = MergeRefs::read(&self.bare(face), &pull).map_err(internal)?;
+        Ok((pull, refs))
     }
 
-    fn diff_stats(&self, face: &GithubFace) -> Result<store::DiffStats, Error> {
-        self.diff
-            .get_or_init(|| {
-                let base = self.diff_base(face).map_err(|e| e.message.clone())?;
-                store::diff_stats(&self.bare(face), &base, &self.pull.head_sha)
-                    .map_err(|e| e.to_string())
-            })
-            .clone()
-            .map_err(Error::new)
+    /// The comparison base for diff stats and files: the base branch's tip
+    /// from [`Self::current`] while the pull is open (GitHub recomputes
+    /// against the moving base), else the pinned base sha, so a terminal
+    /// pull's numbers stay frozen, as GitHub's do.
+    fn diff_base(pull: &world::Pull, refs: MergeRefs) -> String {
+        match refs.base_tip {
+            Some(tip) if pull.state == world::PullState::Open => tip,
+            _ => pull.base_sha.clone(),
+        }
+    }
+
+    async fn diff_stats(&self, face: &GithubFace) -> Result<store::DiffStats, Error> {
+        let stats = match self.diff.get() {
+            Some(stats) => stats,
+            None => {
+                let ends = self.current(face).await;
+                // A sibling field that waited for the lock beside this one may
+                // have filled it already, and then this computes nothing.
+                self.diff.get_or_init(|| {
+                    let (pull, refs) = ends.map_err(|e| e.message)?;
+                    let base = Self::diff_base(&pull, refs);
+                    store::diff_stats(&self.bare(face), &base, &pull.head_sha)
+                        .map_err(|e| e.to_string())
+                })
+            }
+        };
+        stats.clone().map_err(Error::new)
     }
 
     fn load_reviews(&self, face: &GithubFace) -> Result<Vec<world::Review>, Error> {
@@ -942,8 +961,10 @@ impl PullRequest {
     }
 
     async fn mergeable(&self, ctx: &Context<'_>) -> Result<MergeableState, Error> {
+        let face = face(ctx);
+        let (pull, refs) = self.current(face).await?;
         Ok(
-            match mergeability(face(ctx), &self.repo, &self.pull).map_err(internal)? {
+            match mergeability(&self.bare(face), &pull, &refs).map_err(internal)? {
                 Mergeability::Clean => MergeableState::Mergeable,
                 Mergeability::Conflicting => MergeableState::Conflicting,
                 Mergeability::Unknown => MergeableState::Unknown,
@@ -987,15 +1008,15 @@ impl PullRequest {
     }
 
     async fn additions(&self, ctx: &Context<'_>) -> Result<i64, Error> {
-        Ok(self.diff_stats(face(ctx))?.additions)
+        Ok(self.diff_stats(face(ctx)).await?.additions)
     }
 
     async fn deletions(&self, ctx: &Context<'_>) -> Result<i64, Error> {
-        Ok(self.diff_stats(face(ctx))?.deletions)
+        Ok(self.diff_stats(face(ctx)).await?.deletions)
     }
 
     async fn changed_files(&self, ctx: &Context<'_>) -> Result<i64, Error> {
-        Ok(self.diff_stats(face(ctx))?.changed_files)
+        Ok(self.diff_stats(face(ctx)).await?.changed_files)
     }
 
     /// The files the pull changes, in path order, paged by `first`/`after`.
@@ -1015,9 +1036,10 @@ impl PullRequest {
             })?;
             skip = consumed.max(0) as usize;
         }
-        let base = self.diff_base(face)?;
+        let (pull, refs) = self.current(face).await?;
+        let base = Self::diff_base(&pull, refs);
         let files =
-            store::changed_files(&self.bare(face), &base, &self.pull.head_sha).map_err(internal)?;
+            store::changed_files(&self.bare(face), &base, &pull.head_sha).map_err(internal)?;
         let rest: Vec<PullRequestChangedFile> = files
             .into_iter()
             .skip(skip)

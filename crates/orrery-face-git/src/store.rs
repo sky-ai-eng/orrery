@@ -356,6 +356,8 @@ pub fn update_ref(bare: &Path, refname: &str, new: &str) -> Result<(), GitFaceEr
 
 /// Move a ref with compare-and-swap on its old value, so a concurrent push
 /// between mergeability check and ref move fails loudly instead of clobbering.
+/// [`ZERO_OID`] spells an absent ref on either side: as `old`, the ref must
+/// not exist; as `new`, the ref is deleted.
 pub fn update_ref_cas(
     bare: &Path,
     refname: &str,

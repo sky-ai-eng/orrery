@@ -7,6 +7,7 @@ members = [
     "crates/orrery-snapshot",
     "crates/orrery-server",
     "crates/orrery",
+    "crates/orrery-bench",
 ]
 
 [workspace.package]

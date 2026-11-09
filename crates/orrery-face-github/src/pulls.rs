@@ -13,7 +13,9 @@ use orrery_world::{
     Actor, NewPull, Pull, PullState, RefChange, RefMove, Repo, ReviewState, WorldError,
 };
 
-use crate::render::{comment_json, full_pull_json, label_json, pull_json, review_json};
+use crate::render::{
+    comment_json, full_pull_json, label_json, landed_mergeability, pull_json, review_json,
+};
 use crate::{
     GithubFace, github_error, internal, json_response, media, orrery_unsupported_field,
     resolve_repo, validation_custom, validation_custom_field, validation_invalid,
@@ -86,7 +88,7 @@ pub(crate) async fn create_pull(
     // tip the PR actually proposes.
     let _gate = face.git.gate().read_owned().await;
     let lock = face.git.repo_lock(repo.id);
-    let _guard = lock.lock().await;
+    let _guard = lock.write().await;
 
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
     let base_sha = match store::rev_parse(&bare, &format!("refs/heads/{base_ref}")) {
@@ -125,7 +127,13 @@ pub(crate) async fn create_pull(
         Ok(pull) => match face.git.pin_pull_ref(&repo, pull.number, &pull.head_sha) {
             Ok(()) => json_response(
                 StatusCode::CREATED,
-                full_pull_json(&face, &repo, &owner_actor, &pull),
+                full_pull_json(
+                    &face,
+                    &repo,
+                    &owner_actor,
+                    &pull,
+                    landed_mergeability(&face, &repo, &pull),
+                ),
             ),
             Err(e) => internal(e),
         },
@@ -205,18 +213,29 @@ pub(crate) async fn patch_pull(
     // The world write gate keeps a snapshot from copying, or a restore from
     // replacing, the world between the re-read below and the writes after
     // it, a reopen's ref move among them, so the pull row and the shas read
-    // from the bare repository belong to the world the edit writes into. The
-    // repo write lock keeps a push from interleaving with the edit: a push
-    // moves the refs of the pulls open on its branch before it records them,
-    // so a close or reopen must not land in between, and a new base's sha
-    // and a reopened pull's head must still be their branches' tips when the
-    // edit lands. Opening a pull takes the lock too, so none opens on a
-    // reopened pull's head and base between the check and the reopen. The
-    // pull is read again once both are held, so the state checks below see
-    // current truth.
+    // from the bare repository belong to the world the edit writes into.
     let _gate = face.git.gate().read_owned().await;
+    // An edit that sets `state` or `base` holds the repo write lock, so a
+    // push cannot interleave with it: a push moves the refs of the pulls open
+    // on its branch before it records them, so a close or reopen must not
+    // land in between, and a new base's sha and a reopened pull's head must
+    // still be their branches' tips when the edit lands. Opening a pull takes
+    // the lock too, so none opens on a reopened pull's head and base between
+    // the check and the reopen. A `state` naming the state the pull is in
+    // takes the write side as well, since another request can change that
+    // state before the re-read. An edit that sets neither reads and moves no
+    // ref, so it holds the read side, which fetches share. Holding a side at
+    // all keeps it from landing between a write's read of the pull and that
+    // write's record.
     let lock = face.git.repo_lock(repo.id);
-    let _guard = lock.lock().await;
+    let (_write, _read) = if state.is_some() || parsed.base.is_some() {
+        (Some(lock.write_owned().await), None)
+    } else {
+        (None, Some(lock.read_owned().await))
+    };
+    // Read again under the gate and the lock, so what follows works from the
+    // pull as it is now, not as it was before a restore, or a close, that
+    // landed while this edit waited.
     let mut pull = match face.world.pull_by_number(repo.id, pull.number) {
         Ok(Some(p)) => p,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
@@ -325,7 +344,13 @@ pub(crate) async fn patch_pull(
 
     json_response(
         StatusCode::OK,
-        full_pull_json(&face, &repo, &owner_actor, &pull),
+        full_pull_json(
+            &face,
+            &repo,
+            &owner_actor,
+            &pull,
+            landed_mergeability(&face, &repo, &pull),
+        ),
     )
 }
 
@@ -496,11 +521,12 @@ pub(crate) async fn merge_pull(
         }
     }
 
-    // Serialize against pushes and other merges, then re-read the pull so
-    // the state checks below see current truth.
+    // Serialize against pushes and other merges, and keep fetches out until
+    // the merge is recorded or unwound, then re-read the pull so the state
+    // checks below see current truth.
     let _gate = face.git.gate().read_owned().await;
     let lock = face.git.repo_lock(repo.id);
-    let _guard = lock.lock().await;
+    let _guard = lock.write().await;
     let pull = match face.world.pull_by_number(repo.id, pull.number) {
         Ok(Some(p)) => p,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
@@ -611,7 +637,11 @@ pub(crate) async fn merge_pull(
         Ok(())
     };
     if let Err(e) = record() {
-        unwind_merge(&face, &repo, &bare, &base, &base.repins[..pinned]);
+        face.git.move_back(
+            &repo,
+            &[(base.name, base.old, base.new)],
+            &base.repins[..pinned],
+        );
         return internal(e);
     }
 
@@ -623,33 +653,6 @@ pub(crate) async fn merge_pull(
             "message": "Pull Request successfully merged",
         }),
     )
-}
-
-/// Put back the refs a merge moved when recording it failed, so the
-/// repository agrees with the world, which holds no trace of the merge: the
-/// base branch returns to `base.old` by compare-and-swap, and the ref of each
-/// pull request in `pinned`, the ones the merge moved, to the head the world
-/// still pins it at. A retry then starts from the state the failed merge
-/// started from. The route answers 500 either way, so a ref that cannot be
-/// put back is logged, not answered.
-fn unwind_merge(face: &GithubFace, repo: &Repo, bare: &Path, base: &RefMove<'_>, pinned: &[i64]) {
-    if let Err(e) = store::update_ref_cas(bare, base.name, base.old, base.new) {
-        tracing::error!(error = %e, git_ref = base.name, "merge unwind left a ref moved");
-    }
-    for &number in pinned {
-        let restored = match face.world.pull_by_number(repo.id, number) {
-            Ok(Some(p)) => face.git.pin_pull_ref(repo, number, &p.head_sha),
-            Ok(None) => Ok(()),
-            Err(e) => Err(e.into()),
-        };
-        if let Err(e) = restored {
-            tracing::error!(
-                error = %e,
-                git_ref = store::pull_head_ref(number),
-                "merge unwind left a ref moved"
-            );
-        }
-    }
 }
 
 #[derive(serde::Deserialize)]

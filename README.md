@@ -5,7 +5,7 @@
   </picture>
 </h1>
 
-<p align="center"><em>(ORR-uh-ree — a clockwork model of a world: turn the crank and everything advances deterministically, in lockstep, while observers watch.)</em></p>
+<p align="center"><em>(ORR-uh-ree — a clockwork model of the solar system.)</em></p>
 
 <p align="center">A local GitHub for testing software that acts on GitHub.</p>
 
