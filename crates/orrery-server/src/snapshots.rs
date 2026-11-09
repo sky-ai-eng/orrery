@@ -308,7 +308,9 @@ fn snapshot_error(e: SnapshotError, field: Option<&str>) -> Response<Body> {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
     use orrery_world::{DEFAULT_T0_UNIX, World, WorldSecret};
@@ -371,26 +373,30 @@ mod tests {
     }
 
     /// The test holds the gate exclusively, as a push does. A create with a
-    /// bad name is refused meanwhile, and one with a good name waits.
+    /// bad name is refused on its first poll, so it never reached the gate,
+    /// and one with a good name waits.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_bad_snapshot_name_does_not_wait_on_the_gate() {
         let dir = tempfile::tempdir().unwrap();
         let state = state(dir.path());
 
         let held = state.git.gate().write_owned().await;
-        let bad = tokio::spawn(create(
+        let bad = std::pin::pin!(create(
             State(state.clone()),
             Bytes::from_static(br#"{"name": "../x"}"#),
-        ));
+        ))
+        .poll(&mut Context::from_waker(Waker::noop()));
+        match bad {
+            Poll::Ready(resp) => assert_eq!(resp.status(), StatusCode::BAD_REQUEST),
+            Poll::Pending => panic!("the bad name waited on the gate"),
+        }
+
         let good = tokio::spawn(create(
             State(state.clone()),
             Bytes::from_static(br#"{"name": "before"}"#),
         ));
         settle().await;
-        assert!(bad.is_finished(), "the bad name waited on the gate");
         assert!(!good.is_finished(), "the good name did not wait");
-        assert_eq!(bad.await.unwrap().status(), StatusCode::BAD_REQUEST);
-
         drop(held);
         assert_eq!(good.await.unwrap().status(), StatusCode::CREATED);
     }
