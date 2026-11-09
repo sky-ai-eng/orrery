@@ -256,17 +256,25 @@ async fn a_push_moves_its_refs_before_its_entries_can_be_read() {
 
     // A listener runs as each entry is appended, before any reader can see
     // it, so what it reads from the repository is the earliest view a reader
-    // woken by the entry could have.
+    // woken by the entry could have. It runs git with the world's lock held,
+    // which only slows this test, and it records what git answered rather
+    // than panicking there, which would poison the world's lock and hide the
+    // cause.
     // At each entry: where HEAD resolves, and where `refs/pull/1/head` points.
-    type Refs = (Option<String>, Option<String>);
+    type Refs = (
+        Result<Option<String>, String>,
+        Result<Option<String>, String>,
+    );
     let seen: Arc<Mutex<Vec<Refs>>> = Arc::default();
     let sink = Arc::clone(&seen);
     let watched = bare.clone();
     inst.world.listen(move |signal| {
         if signal == Signal::LogMayHaveGrown {
-            let head = store::rev_parse(&watched, "HEAD").unwrap();
-            let pull = store::rev_parse(&watched, &store::pull_head_ref(1)).unwrap();
-            sink.lock().unwrap().push((head, pull));
+            let read = |rev: &str| store::rev_parse(&watched, rev).map_err(|e| e.to_string());
+            let refs = (read("HEAD"), read(&store::pull_head_ref(1)));
+            if let Ok(mut seen) = sink.lock() {
+                seen.push(refs);
+            }
         }
     });
     let during = |push: &dyn Fn()| {
@@ -288,7 +296,7 @@ async fn a_push_moves_its_refs_before_its_entries_can_be_read() {
     });
     assert!(!first.is_empty());
     for (head, _) in &first {
-        assert_eq!(head.as_deref(), Some(trunk.as_str()), "{first:?}");
+        assert_eq!(head, &Ok(Some(trunk.clone())), "{first:?}");
     }
 
     // A push to an open pull request's head branch: its ref has moved.
@@ -307,6 +315,6 @@ async fn a_push_moves_its_refs_before_its_entries_can_be_read() {
     });
     assert!(!sync.is_empty());
     for (_, pull) in &sync {
-        assert_eq!(pull.as_deref(), Some(feature_v2.as_str()), "{sync:?}");
+        assert_eq!(pull, &Ok(Some(feature_v2.clone())), "{sync:?}");
     }
 }
