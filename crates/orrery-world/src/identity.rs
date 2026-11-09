@@ -120,18 +120,8 @@ impl World {
     /// id (rule 5), so a replayed world issues the same ones; the secret is
     /// keyed by the world secret, the public client id is not.
     pub fn create_oauth_app(&self, name: &str, callback_url: &str, by: i64) -> Result<OAuthApp> {
-        if name.trim().is_empty() || name.len() > 100 {
-            return Err(WorldError::InvalidOAuthApp {
-                field: "name",
-                message: "must be 1-100 characters and not blank".to_string(),
-            });
-        }
-        if !is_absolute_http_url(callback_url) {
-            return Err(WorldError::InvalidOAuthApp {
-                field: "callback_url",
-                message: "must be an absolute http or https URL".to_string(),
-            });
-        }
+        validate_oauth_app_name(name)?;
+        validate_oauth_app_callback_url(callback_url)?;
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
         let clock = queries::clock(&tx)?;
@@ -476,6 +466,31 @@ fn validate_emails(emails: &[ActorEmail]) -> Result<()> {
                 e.email
             )));
         }
+    }
+    Ok(())
+}
+
+/// The name an OAuth app is registered under. Each of an app's values has a
+/// check of its own, so a caller holding only some of them can check those.
+pub fn validate_oauth_app_name(name: &str) -> Result<()> {
+    // TODO(ORR-51): the limit counts bytes, not the characters its message
+    // names, so a name in a multi-byte script is refused below 100.
+    if name.trim().is_empty() || name.len() > 100 {
+        return Err(WorldError::InvalidOAuthApp {
+            field: "name",
+            message: "must be 1-100 characters and not blank".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The URL an OAuth app's authorizations redirect to.
+pub fn validate_oauth_app_callback_url(callback_url: &str) -> Result<()> {
+    if !is_absolute_http_url(callback_url) {
+        return Err(WorldError::InvalidOAuthApp {
+            field: "callback_url",
+            message: "must be an absolute http or https URL".to_string(),
+        });
     }
     Ok(())
 }

@@ -2,7 +2,8 @@
 name = "orrery-server"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
+publish.workspace = true
 repository.workspace = true
 description = "The HTTP host: mounts faces, the /_orrery/ control plane, auth middleware, and the NOT-MOCKED fallback"
 

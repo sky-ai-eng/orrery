@@ -29,7 +29,7 @@ async fn author_push_clone_observe() {
     let clone_url = repo["clone_url"].as_str().expect("clone_url");
 
     // Author a commit with clock-driven dates and push it, authenticated the
-    // way TF's managed path does: token as the Basic password.
+    // way a token-holding client does: token as the Basic password.
     let clock = inst.world.clock().unwrap();
     let work = tempfile::tempdir().unwrap();
     let src = work.path().join("src");
@@ -234,7 +234,7 @@ async fn anonymous_git_reads_follow_github_rules() {
     }
 
     // A public repo clones with no credentials at all — GitHub's rule, and
-    // what TF relies on (it never sends tokens over plain http).
+    // what a client that never sends tokens over plain http relies on.
     let dst = work.path().join("anon-clone");
     git(
         work.path(),

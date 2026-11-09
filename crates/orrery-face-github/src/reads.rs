@@ -1,13 +1,14 @@
-//! The poller read surface (spec/surface-github.md §1): what TF's Go client
-//! reads on every poll cycle, plus the immediate PR-detail reads. Pagination
-//! is GitHub's hand-rolled regime — `?per_page&page`, no Link headers, which
-//! the main TF client never parses (spec/grammar.md) — and the pulls list
-//! carries the one ETag in the poll path: `If-None-Match` answers 304 with
-//! the body elided, exactly the fast path `repositories.pulls_etag` drives.
+//! The poller read surface (spec/surface-github.md §1): what a polling
+//! consumer reads on every cycle, plus the immediate PR-detail reads.
+//! Pagination is GitHub's hand-rolled regime — `?per_page&page`, no Link
+//! headers, so a client pages until a short page (spec/grammar.md) — and the
+//! pulls list and a branch's ref carry an ETag: `If-None-Match` answers 304
+//! with the body elided, the fast path a consumer takes by keeping the last
+//! tag it saw.
 //!
-//! Rate-limit headers are deliberately absent everywhere: TF treats missing
-//! `X-RateLimit-*` as "rate limiting off" (a real GHES shape) and leaves its
-//! budget state untouched.
+//! Rate-limit headers are deliberately absent everywhere: a client reads
+//! missing `X-RateLimit-*` as "rate limiting off" (a real GHES shape) and
+//! leaves its budget state untouched.
 
 use axum::body::Body;
 use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
@@ -99,7 +100,7 @@ pub(crate) async fn list_pulls(
         .collect();
     let body = serde_json::Value::Array(items).to_string();
 
-    // The one conditional read in TF's poll path. The tag is derived from
+    // A poller's conditional read of a repo's pulls. The tag is derived from
     // the exact body, so it changes iff the answer changes — and an
     // unchanged page 1 costs a 304 with no body, which is what lets a quiet
     // repo skip discovery entirely.
@@ -240,7 +241,7 @@ pub(crate) async fn list_check_runs_for_ref(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    // GitHub accepts a sha or a ref name here; TF sends the PR head sha.
+    // GitHub accepts a sha or a ref name here; a poller sends the PR head sha.
     let sha = if is_full_sha(&git_ref) {
         git_ref.clone()
     } else {
@@ -291,8 +292,8 @@ pub(crate) async fn get_contents(
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
     let spec = format!("{rev}:{path}");
     // A directory answers 404 here where GitHub would return a listing —
-    // accepted divergence: TF's only consumer fetches files and treats
-    // exactly 404 as absent.
+    // accepted divergence, because a consumer reading contents fetches a file
+    // and treats exactly 404 as absent.
     let blob_sha = match store::rev_parse(&bare, &spec) {
         Ok(Some(sha)) => sha,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
@@ -730,7 +731,7 @@ pub(crate) async fn list_user_repos(
         return refused;
     }
     let query = query.unwrap_or_default();
-    // Only the ordering TF requests is built; a different sort would be
+    // Only `sort=pushed` is built; a different sort would be
     // silently wrong, so it refuses loudly instead.
     match query_param(&query, "sort").as_deref() {
         None | Some("pushed") => {}

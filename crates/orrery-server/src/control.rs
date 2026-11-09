@@ -17,7 +17,7 @@ use axum::http::{Method, Response, StatusCode};
 use axum::routing::{get, post, put};
 use orrery_world::{
     Actor, ActorEmail, ActorKind, OAUTH_CLIENT_ID_PREFIX, SYSTEM_ACTOR_LOGIN, WorldError,
-    validate_login,
+    validate_actor_kind, validate_login, validate_oauth_app_callback_url, validate_oauth_app_name,
 };
 use serde_json::value::RawValue;
 
@@ -126,30 +126,26 @@ async fn advance_clock(State(state): State<AppState>, body: Bytes) -> Response<B
     }
 }
 
-// TODO(ORR-38): login and kind are checked only at write time, so any other
-// fault in the body hides them, and an invalid login hides an invalid kind.
 async fn create_actor(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let login: Option<String> = fields.required("login");
+    if let Some(login) = &login
+        && let Err(e) = validate_login(login)
+    {
+        fields.fault(Fault::invalid(e.to_string(), "login"));
+    }
     let kind: Option<ActorKind> = fields.required("kind");
+    if let Some(kind) = kind
+        && let Err(e) = validate_actor_kind(kind)
+    {
+        fields.fault(Fault::invalid(e.to_string(), "kind"));
+    }
     let (login, kind) = match fields.finish(login.zip(kind)) {
         Ok(p) => p,
         Err(resp) => return *resp,
     };
     match state.world.create_actor(&login, kind) {
         Ok((actor, token)) => actor_token_created(&actor, &token),
-        Err(e @ WorldError::InvalidLogin(_)) => errors(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            &e.to_string(),
-            Some("login"),
-        ),
-        Err(e @ WorldError::InvalidActorKind) => errors(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            &e.to_string(),
-            Some("kind"),
-        ),
         Err(e @ WorldError::ActorExists(_)) => errors(
             StatusCode::CONFLICT,
             "ALREADY_EXISTS",
@@ -234,13 +230,20 @@ async fn set_actor_emails(
 
 /// Register an OAuth app. GitHub offers this only in its web settings, so it
 /// is reality's to do, and the control plane's.
-// TODO(ORR-38): name and callback_url are checked only at write time, so any
-// other fault in the body hides them, and an invalid name hides an invalid
-// callback_url.
 async fn create_oauth_app(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let name: Option<String> = fields.required("name");
+    if let Some(name) = &name
+        && let Err(e) = validate_oauth_app_name(name)
+    {
+        fields.fault(oauth_app_fault(e, "name"));
+    }
     let callback_url: Option<String> = fields.required("callback_url");
+    if let Some(callback_url) = &callback_url
+        && let Err(e) = validate_oauth_app_callback_url(callback_url)
+    {
+        fields.fault(oauth_app_fault(e, "callback_url"));
+    }
     let (name, callback_url) = match fields.finish(name.zip(callback_url)) {
         Ok(p) => p,
         Err(resp) => return *resp,
@@ -254,14 +257,19 @@ async fn create_oauth_app(State(state): State<AppState>, body: Bytes) -> Respons
         .create_oauth_app(&name, &callback_url, system.id)
     {
         Ok(app) => json(StatusCode::CREATED, serde_json::json!(app)),
-        Err(WorldError::InvalidOAuthApp { field, message }) => errors(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ARGUMENT",
-            &message,
-            Some(field),
-        ),
         Err(e) => internal(e),
     }
+}
+
+/// The fault an OAuth app value's check found, under the field the route
+/// read the value from. The check's own message is written to follow the
+/// field's name.
+fn oauth_app_fault(e: WorldError, field: &'static str) -> Fault {
+    let message = match e {
+        WorldError::InvalidOAuthApp { message, .. } => message,
+        other => other.to_string(),
+    };
+    Fault::invalid(message, field)
 }
 
 /// Issue another client secret for a registered app, as GitHub's settings

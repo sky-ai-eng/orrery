@@ -306,6 +306,66 @@ async fn a_refused_kind_is_named_as_kind() {
     assert_eq!(faults(&answer), [fault("INVALID_ARGUMENT", Some("kind"))]);
 }
 
+/// A create route checks its values while it reads the body, so a bad value
+/// is named beside every other fault, and one bad value hides no other.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_route_names_every_bad_value_with_the_rest_of_the_body() {
+    let inst = boot().await;
+    let base = &inst.base;
+    let before = log(base);
+
+    for (path, body, expected) in [
+        (
+            "/actors",
+            r#"{"login": "-x", "kind": "system"}"#,
+            &["login", "kind"][..],
+        ),
+        (
+            "/actors",
+            r#"{"login": "-x", "kind": "user", "bogus": 1}"#,
+            &["login", "bogus"],
+        ),
+        (
+            "/actors",
+            r#"{"login": "-x", "kind": 5}"#,
+            &["login", "kind"],
+        ),
+        (
+            "/oauth-apps",
+            r#"{"name": "", "callback_url": "nope"}"#,
+            &["name", "callback_url"],
+        ),
+        (
+            "/oauth-apps",
+            r#"{"callback_url": "nope"}"#,
+            &["name", "callback_url"],
+        ),
+        (
+            "/oauth-apps",
+            r#"{"name": "Sign-in", "callback_url": "nope", "bogus": 1}"#,
+            &["callback_url", "bogus"],
+        ),
+        (
+            "/snapshots",
+            r#"{"name": "../x", "bogus": 1}"#,
+            &["name", "bogus"],
+        ),
+    ] {
+        let (status, answer) = call(base, "POST", path, body.as_bytes());
+        assert_eq!(status, 400, "{path} {body}: {answer}");
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|field| fault("INVALID_ARGUMENT", Some(field)))
+            .collect();
+        assert_eq!(faults(&answer), expected, "{path} {body}");
+    }
+
+    // Nothing a refused body asked for happened.
+    assert_eq!(log(base), before);
+    let (_, snapshots) = call(base, "POST", "/snapshots/list", b"{}");
+    assert_eq!(snapshots["items"], json!([]));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_diff_names_the_snapshot_it_could_not_open() {
     let inst = boot().await;

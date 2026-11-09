@@ -2,7 +2,8 @@
 name = "orrery-face-github"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
+publish.workspace = true
 repository.workspace = true
 description = "The GitHub REST face, grown strictly on demand per spec/surface-github.md"
 

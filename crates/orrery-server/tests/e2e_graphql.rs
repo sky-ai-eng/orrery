@@ -1,6 +1,6 @@
-//! End-to-end GraphQL: TF's seven query families (spec/surface-github.md §3)
-//! against a served world, using the *verbatim* query and fragment texts from
-//! triage-factory's `internal/github` — rule 2 applied to the wire's exact
+//! End-to-end GraphQL: a consumer's queries and mutations
+//! (spec/surface-github.md §3) against a served world, using the consumer's
+//! *verbatim* query and fragment texts — rule 2 applied to the wire's exact
 //! spelling, comments and all. Plus the GraphQL translation of the
 //! NOT-MOCKED contract: an unimplemented field is a validation error carrying
 //! the self-describing orrery envelope, never a bare GitHub-plausible error.
@@ -9,7 +9,7 @@ mod common;
 
 use common::{boot, control_post, face, face_ok, git, mint_actor};
 
-/// TF's `prBaseFields` (internal/github/graphql.go), verbatim.
+/// The pull request fields a consumer's fragments share, verbatim.
 const PR_BASE_FIELDS: &str = r#"
 	id
 	number
@@ -58,7 +58,8 @@ const PR_BASE_FIELDS: &str = r#"
 	}
 "#;
 
-/// TF's `prDiscoveryFragment`, verbatim (base fields spliced the same way).
+/// The consumer's `PRDiscoveryFields` fragment, verbatim (base fields spliced
+/// the same way).
 fn pr_discovery_fragment() -> String {
     format!(
         r#"
@@ -83,8 +84,8 @@ fragment PRDiscoveryFields on PullRequest {{
     )
 }
 
-/// TF's `prFullFragment`, verbatim — including its `#` comment lines, which
-/// must parse as GraphQL comments.
+/// The consumer's `PRFullFields` fragment, verbatim — including its `#`
+/// comment lines, which must parse as GraphQL comments.
 fn pr_full_fragment() -> String {
     format!(
         r#"
@@ -230,11 +231,12 @@ fn open_pr(s: &Seeded) -> serde_json::Value {
     )
 }
 
-/// TF's Phase-2 refresh: `nodes(ids:)` with the full fragment, exactly as
-/// `refreshPRsBatch` composes it. One live PR with reviews, CI, and a
-/// comment; one deleted id and one junk id resolving to null entries.
+/// The consumer's batch refresh, `RefreshPRsWithChecks`: `nodes(ids:)`
+/// selecting the full fragment, with `rateLimit` beside it. One live PR with
+/// reviews, CI, and a comment; one deleted id and one junk id resolving to
+/// null entries.
 #[tokio::test(flavor = "multi_thread")]
-async fn tf_refresh_full_fragment_round_trip() {
+async fn refresh_full_fragment_round_trip() {
     let s = seed().await;
     let pull = open_pr(&s);
 
@@ -370,7 +372,7 @@ async fn tf_refresh_full_fragment_round_trip() {
     assert_eq!(pr["timelineItems"]["nodes"].as_array().unwrap().len(), 0);
 
     // A commit with no check runs at all reports a null rollup — the shape
-    // TF reads as "no CI here".
+    // a consumer reads as "no CI here".
     let discovery = format!(
         "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ...PRFullFields }} }}\n{}",
         pr_full_fragment()
@@ -378,8 +380,7 @@ async fn tf_refresh_full_fragment_round_trip() {
     let _ = discovery; // same query text; rollup nullability is covered below.
 }
 
-/// TF's `prCommentsQuery` (internal/github/pr_comments.go), verbatim.
-/// TF's mergeability probe (`prMergeabilityQuery`), verbatim.
+/// The consumer's `PRMergeability` probe, verbatim.
 const PR_MERGEABILITY_QUERY: &str = r#"
 	query PRMergeability($ids: [ID!]!) {
 		nodes(ids: $ids) { ... on PullRequest { id mergeable headRefOid } }
@@ -387,10 +388,10 @@ const PR_MERGEABILITY_QUERY: &str = r#"
 	}
 "#;
 
-/// TF's probe worker reads a batch of pulls' mergeability and the head each
-/// answer was read at, and skips an id with no node.
+/// A mergeability probe reads a batch of pulls' mergeability and the head
+/// each answer was read at, and skips an id with no node.
 #[tokio::test(flavor = "multi_thread")]
-async fn tf_mergeability_probe() {
+async fn mergeability_probe() {
     let s = seed().await;
     open_pr(&s);
 
@@ -409,6 +410,7 @@ async fn tf_mergeability_probe() {
     assert!(nodes[1].is_null(), "missing pull resolves to null");
 }
 
+/// The consumer's `PRComments` query, verbatim.
 const PR_COMMENTS_QUERY: &str = r#"
 	query PRComments($id: ID!, $before: String) {
 		node(id: $id) {
@@ -429,7 +431,7 @@ const PR_COMMENTS_QUERY: &str = r#"
 	}
 "#;
 
-/// TF's `prReviewsQuery` (internal/github/pr_reviews.go), verbatim.
+/// The consumer's `PRReviews` query, verbatim.
 const PR_REVIEWS_QUERY: &str = r#"
 	query PRReviews($id: ID!, $before: String) {
 		node(id: $id) {
@@ -459,7 +461,7 @@ const PR_REVIEWS_QUERY: &str = r#"
 /// newest item with `last:` and `before:`, so a world with more than a page
 /// is walked to its start through `startCursor`.
 #[tokio::test(flavor = "multi_thread")]
-async fn tf_comment_and_review_paging() {
+async fn comment_and_review_paging() {
     let s = seed().await;
     open_pr(&s);
     for i in 0..52 {
@@ -573,11 +575,11 @@ async fn tf_comment_and_review_paging() {
     );
 }
 
-/// TF's discovery/backfill search, all four template shapes plus `repo:`
-/// scoping, with the discovery fragment verbatim — and the loud refusal for
-/// a qualifier outside the mocked subset.
+/// The consumer's discovery and backfill search, all four template shapes
+/// plus `repo:` scoping, with the discovery fragment verbatim — and the loud
+/// refusal for a qualifier outside the mocked subset.
 #[tokio::test(flavor = "multi_thread")]
-async fn tf_discovery_search_and_refusals() {
+async fn discovery_search_and_refusals() {
     let s = seed().await;
     open_pr(&s);
     face_ok(
@@ -637,7 +639,7 @@ async fn tf_discovery_search_and_refusals() {
         resp["data"]["search"]["nodes"].as_array().unwrap().clone()
     };
 
-    // TF's four dashboard-backfill templates (dashboard_backfill.go).
+    // The consumer's four dashboard-backfill templates.
     let merged = run("is:pr is:merged author:alice merged:>=2020-01-01 repo:alice/webapp");
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0]["number"], 1);
@@ -703,10 +705,10 @@ async fn tf_discovery_search_and_refusals() {
     assert_eq!(err["extensions"]["orrery"]["not_mocked"], true);
 }
 
-/// TF's aliased branch-existence batch (branches.go): variables per alias,
-/// null ref = confidently gone, null repository = unknown.
+/// The consumer's aliased branch-existence batch: variables per alias, null
+/// ref = confidently gone, null repository = unknown.
 #[tokio::test(flavor = "multi_thread")]
-async fn tf_branch_existence_aliases() {
+async fn branch_existence_aliases() {
     let s = seed().await;
     let query = "query($o0: String!, $n0: String!, $q0: String!, $o1: String!, $n1: String!, $q1: String!, $o2: String!, $n2: String!, $q2: String!) {
   r0: repository(owner: $o0, name: $n0) { ref(qualifiedName: $q0) { id } }
@@ -729,11 +731,11 @@ async fn tf_branch_existence_aliases() {
     assert!(resp["data"]["r2"].is_null());
 }
 
-/// TF's review read by node id (pending_reviews.go GetReview): any state,
-/// truthfully-empty inline comments, and the non-review-node shape TF reads
-/// as "no review here".
+/// The consumer's review read by node id: any state, truthfully-empty inline
+/// comments, and the non-review-node shape the consumer reads as "no review
+/// here".
 #[tokio::test(flavor = "multi_thread")]
-async fn tf_review_node_lookup() {
+async fn review_node_lookup() {
     let s = seed().await;
     open_pr(&s);
     face_ok(
@@ -789,10 +791,10 @@ async fn tf_review_node_lookup() {
     assert!(resp["data"]["node"].is_null());
 }
 
-/// TF's two mutations (status.go): draft flips both ways, wrong-state
-/// refusals, and the action-log trail.
+/// The consumer's two mutations: draft flips both ways, wrong-state refusals,
+/// and the action-log trail.
 #[tokio::test(flavor = "multi_thread")]
-async fn tf_draft_mutations() {
+async fn draft_mutations() {
     let s = seed().await;
     face_ok(
         "POST",
@@ -846,12 +848,12 @@ async fn tf_draft_mutations() {
     assert!(actions.contains(&"pull.convert_to_draft"));
 }
 
-/// TF's organization.teams query (teams.go): an org that never made a team
+/// The consumer's organization.teams query: an org that never made a team
 /// answers with an empty team set, and a user login answers null, exactly the
-/// shapes TF degrades on without erroring. `e2e_teams.rs` covers an org with
-/// teams.
+/// shapes the consumer degrades on without erroring. `e2e_teams.rs` covers an
+/// org with teams.
 #[tokio::test(flavor = "multi_thread")]
-async fn tf_organization_teams_query() {
+async fn organization_teams_query() {
     let s = seed().await;
     mint_actor(&s.inst.base, "acme", "org");
 
@@ -945,8 +947,8 @@ async fn unknown_field_marked_not_mocked() {
 /// A bot actor stands for a GitHub App: REST spells its login with the
 /// `[bot]` suffix and types it `Bot`, GraphQL types its author `Bot` with the
 /// bare slug, and the authenticated-user routes refuse its token, as GitHub
-/// refuses an installation token there. TF tells its own App's comments and
-/// reviews apart by exactly these spellings.
+/// refuses an installation token there. A consumer acting as an App tells its
+/// own comments and reviews apart by exactly these spellings.
 #[tokio::test(flavor = "multi_thread")]
 async fn bot_actors_render_as_github_apps() {
     let s = seed().await;
@@ -1031,10 +1033,10 @@ async fn bot_actors_render_as_github_apps() {
 }
 
 /// Labels written through REST and ready-for-review through GraphQL read back
-/// through TF's full fragment: the pull's current labels, and the timeline
-/// items TF dates those transitions by.
+/// through the consumer's full fragment: the pull's current labels, and the
+/// timeline items the consumer dates those transitions by.
 #[tokio::test(flavor = "multi_thread")]
-async fn tf_labels_and_timeline() {
+async fn labels_and_timeline() {
     let s = seed().await;
     face_ok(
         "POST",
@@ -1196,12 +1198,12 @@ async fn tf_labels_and_timeline() {
     assert_eq!(items["pageInfo"]["hasPreviousPage"], true);
 }
 
-/// Who merged and who closed a pull, read through TF's base fields: the
-/// merger is `mergedBy`, and the closer is the actor of the newest
+/// Who merged and who closed a pull, read through the consumer's base fields:
+/// the merger is `mergedBy`, and the closer is the actor of the newest
 /// `ClosedEvent`, typed by its kind like an author. A merge closes the pull
 /// too, so it lands as a `ClosedEvent` by the merger.
 #[tokio::test(flavor = "multi_thread")]
-async fn tf_merger_and_closer() {
+async fn merger_and_closer() {
     let s = seed().await;
     open_pr(&s);
     let users = format!("{}/api/v3/users", s.inst.base);

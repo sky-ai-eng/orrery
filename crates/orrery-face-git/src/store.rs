@@ -28,8 +28,9 @@ pub fn bare_dir(repos_dir: &Path, owner_login: &str, name: &str) -> PathBuf {
 
 /// Initialize a bare repo with the serving recipe from spec/surface-git.md:
 /// blobless clones need allowFilter, promisor by-OID fetches need
-/// allowAnySHA1InWant, pushes over http-backend need http.receivepack, and
-/// gc.auto=0 keeps object files append-only so snapshots can share them.
+/// allowAnySHA1InWant, pushes over http-backend need http.receivepack,
+/// receive.hideRefs refuses pushes to the pull request refs the engine moves,
+/// and gc.auto=0 keeps object files append-only so snapshots can share them.
 ///
 /// Idempotent: re-applying to an existing bare repo only re-asserts the
 /// recipe, so a crash between the kernel row insert and disk init heals on
@@ -49,6 +50,7 @@ pub fn init_bare(
         ("uploadpack.allowFilter", "true"),
         ("uploadpack.allowAnySHA1InWant", "true"),
         ("http.receivepack", "true"),
+        ("receive.hideRefs", "refs/pull"),
         ("gc.auto", "0"),
     ] {
         run(hermetic_git(&dir).args(["config", key, value]))?;
@@ -312,6 +314,18 @@ pub fn commit_tree(
         cmd.args(["-p", p]);
     }
     Ok(run(&mut cmd)?.trim().to_string())
+}
+
+/// The ref GitHub keeps at a pull request's head, through which a client
+/// fetches the pull request by number (`git fetch origin pull/7/head`).
+pub fn pull_head_ref(number: i64) -> String {
+    format!("refs/pull/{number}/head")
+}
+
+/// Point a ref at `new`, whatever it held, creating it if it is absent.
+pub fn update_ref(bare: &Path, refname: &str, new: &str) -> Result<(), GitFaceError> {
+    run(hermetic_git(bare).args(["update-ref", refname, new]))?;
+    Ok(())
 }
 
 /// Move a ref with compare-and-swap on its old value, so a concurrent push

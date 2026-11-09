@@ -27,8 +27,6 @@ struct CreatePullBody {
     rest: BTreeMap<String, serde_json::Value>,
 }
 
-// TODO(ORR-48): set `refs/pull/{n}/head` in the repository, and move it with
-// the head; a client fetching a pull request by number finds no ref.
 pub(crate) async fn create_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
@@ -77,9 +75,12 @@ pub(crate) async fn create_pull(
         }
     };
 
-    // Hold the repo write lock so a concurrent push can't move the head
-    // between sha resolution and the kernel insert — the pinned head_sha
-    // must be the tip the PR actually proposes.
+    // The world write gate keeps a snapshot from copying, or a restore from
+    // replacing, the world between the kernel insert and the ref write. The
+    // repo write lock keeps a concurrent push from moving the head between
+    // sha resolution and the kernel insert — the pinned head_sha must be the
+    // tip the PR actually proposes.
+    let _gate = face.git.gate().read_owned().await;
     let lock = face.git.repo_lock(repo.id);
     let _guard = lock.lock().await;
 
@@ -117,10 +118,13 @@ pub(crate) async fn create_pull(
         draft: parsed.draft.unwrap_or(false),
     });
     match created {
-        Ok(pull) => json_response(
-            StatusCode::CREATED,
-            pull_json(&face, &repo, &owner_actor, &pull),
-        ),
+        Ok(pull) => match face.git.pin_pull_ref(&repo, pull.number, &pull.head_sha) {
+            Ok(()) => json_response(
+                StatusCode::CREATED,
+                pull_json(&face, &repo, &owner_actor, &pull),
+            ),
+            Err(e) => internal(e),
+        },
         Err(WorldError::PullExists(head)) => validation_custom(
             "PullRequest",
             &format!(
@@ -379,9 +383,8 @@ pub(crate) async fn merge_pull(
 
     // Bookkeeping mirrors what a push of this ref would have recorded, plus
     // the merge itself; base-branch PRs (if any) re-pin like any head move.
-    let record = face
-        .world
-        .log_action(
+    let record = || -> Result<(), orrery_face_git::GitFaceError> {
+        face.world.log_action(
             actor.id,
             "ref.update",
             &serde_json::json!({
@@ -390,15 +393,14 @@ pub(crate) async fn merge_pull(
                 "old": base_tip,
                 "new": merge_sha,
             }),
-        )
-        .and_then(|_| face.world.touch_pushed(repo.id))
-        .and_then(|_| {
-            face.world
-                .sync_pull_heads(repo.id, &pull.base_ref, &merge_sha)
-                .map(|_| ())
-        })
-        .and_then(|_| face.world.record_merge(pull.id, actor.id, &merge_sha));
-    if let Err(e) = record {
+        )?;
+        face.world.touch_pushed(repo.id)?;
+        face.git
+            .sync_pull_heads(&repo, &pull.base_ref, &merge_sha)?;
+        face.world.record_merge(pull.id, actor.id, &merge_sha)?;
+        Ok(())
+    };
+    if let Err(e) = record() {
         return internal(e);
     }
 

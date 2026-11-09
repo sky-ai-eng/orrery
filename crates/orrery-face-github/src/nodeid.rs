@@ -1,9 +1,8 @@
 //! Node ids, shared by the REST face's `node_id` fields and the GraphQL
 //! face's `id` fields / `nodes(ids:)` lookups. One scheme across both faces
-//! is load-bearing: consumers store an id from a REST listing and feed it
-//! back to GraphQL (TF's tracker does exactly this), so the two must agree
-//! byte-for-byte. The ids are opaque to consumers but self-describing to a
-//! human reading a log.
+//! is load-bearing: a consumer stores an id from a REST listing and feeds it
+//! back to GraphQL, so the two must agree byte-for-byte. The ids are opaque
+//! to consumers but self-describing to a human reading a log.
 
 pub fn actor(id: i64) -> String {
     format!("O_actor_{id}")

@@ -2,7 +2,8 @@
 name = "orrery-face-git"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
+publish.workspace = true
 repository.workspace = true
 description = "The git face: bare-repo store, smart-HTTP via CGI to real `git http-backend`, and push observation into the action log"
 

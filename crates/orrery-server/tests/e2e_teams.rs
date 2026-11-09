@@ -1,8 +1,8 @@
 //! End-to-end for organization membership, teams and review requests:
-//! the authoring writes a scenario uses to build them, the REST reads TF's
-//! poller and settings make (spec/surface-github.md §1.1 and §1.2), and TF's GraphQL
-//! selections over teams, pending requests and request timeline items, using
-//! the query texts from triage-factory's `internal/github`.
+//! the authoring writes a scenario uses to build them, the REST reads a
+//! consumer's poller and settings make (spec/surface-github.md §1.1 and
+//! §1.2), and a consumer's GraphQL selections over teams, pending requests,
+//! and request timeline items, using the consumer's query texts verbatim.
 
 mod common;
 
@@ -78,7 +78,7 @@ fn gql_raw(
     resp
 }
 
-/// TF's `ListUserTeamsInOrg` query (internal/github/teams.go), verbatim.
+/// A consumer's `UserTeamsInOrg` query, verbatim.
 const USER_TEAMS_IN_ORG: &str = r#"
 		query UserTeamsInOrg($org: String!, $login: String!, $cursor: String) {
 			organization(login: $org) {
@@ -97,7 +97,7 @@ const USER_TEAMS_IN_ORG: &str = r#"
 		}
 	"#;
 
-/// TF's `ListOrgTeamsDetailed` query (internal/github/teams.go), verbatim.
+/// A consumer's `OrgTeams` query, verbatim.
 const ORG_TEAMS: &str = r#"
 		query OrgTeams($org: String!, $cursor: String) {
 			organization(login: $org) {
@@ -116,8 +116,8 @@ const ORG_TEAMS: &str = r#"
 		}
 	"#;
 
-/// The review-request selections of TF's `prBaseFields` and `prFullFragment`
-/// (internal/github/graphql.go), verbatim.
+/// The review-request selections of the consumer's pull request base fields
+/// and `PRFullFields` fragment (`e2e_graphql.rs`), verbatim.
 const PR_REQUESTS: &str = r#"
 	query($id: ID!) { node(id: $id) { ... on PullRequest {
 	reviewRequests(first: 100) {
@@ -524,7 +524,7 @@ async fn org_teams_page_by_cursor() {
     assert_eq!(msg, "`not-a-cursor` does not appear to be a valid cursor.");
 }
 
-/// GitHub's page-size bounds on the connections TF pages: one of
+/// GitHub's page-size bounds on the connections a consumer pages: one of
 /// `first`/`last` required, never negative, at most 100.
 #[tokio::test(flavor = "multi_thread")]
 async fn connections_bound_their_page_size() {
@@ -688,7 +688,7 @@ async fn review_requests_round_trip() {
     );
 
     // bob's review clears his request; withdrawing carol's lands on the
-    // timeline as a removal, which TF's itemTypes filter leaves out.
+    // timeline as a removal, which the consumer's itemTypes filter leaves out.
     face_ok(
         "POST",
         &s.api("/repos/acme/webapp/pulls/1/reviews"),

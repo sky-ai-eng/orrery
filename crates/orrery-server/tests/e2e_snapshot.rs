@@ -205,6 +205,10 @@ async fn snapshot_diff_restore_over_http() {
         refs_touched.contains(&"refs/heads/main"),
         "merge moved main"
     );
+    assert!(
+        refs_touched.contains(&"refs/pull/1/head"),
+        "opening the pull request set its ref"
+    );
     assert!(d["log"]["appended"].as_i64().unwrap() > 0);
 
     // Omitting `to` diffs against the live world, which currently equals
