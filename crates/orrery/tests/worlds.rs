@@ -56,6 +56,16 @@ fn contents(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
+/// The world's log, leaving out the real time each entry was appended at:
+/// two worlds made by the same calls differ in that alone.
+fn log_without_wall_times(socket: &str) -> serde_json::Value {
+    let mut log = call(socket, "POST", "/_orrery/log/list", None, "{}", 200);
+    for entry in log["items"].as_array_mut().unwrap() {
+        entry.as_object_mut().unwrap().remove("wall_unix_ms");
+    }
+    log
+}
+
 #[test]
 fn a_created_world_serves_from_t0_as_one_serve_created() {
     let created = tempfile::tempdir().unwrap();
@@ -87,16 +97,13 @@ fn a_created_world_serves_from_t0_as_one_serve_created() {
     let health = call(&socket, "GET", "/_orrery/healthz", None, "", 200);
     assert_eq!(health["clock_unix"], T0, "{health}");
     let token = mint(&socket, "alice");
-    let log = call(&socket, "POST", "/_orrery/log/list", None, "{}", 200);
+    let log = log_without_wall_times(&socket);
 
     // `serve` creating the same world on first run makes the same one.
     let first_run = tempfile::tempdir().unwrap();
     let (socket, _served) = serve_instance(first_run.path(), "t0 = \"2026-03-04T05:06:07Z\"\n");
     assert_eq!(mint(&socket, "alice"), token);
-    assert_eq!(
-        call(&socket, "POST", "/_orrery/log/list", None, "{}", 200),
-        log
-    );
+    assert_eq!(log_without_wall_times(&socket), log);
 }
 
 #[test]

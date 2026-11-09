@@ -156,3 +156,5 @@ A malformed command line (an unknown flag, a missing source, or a `--secret` tha
   ```
 
   A script runs `eval "$(orrery env)"` before each commit, and again after advancing the clock.
+
+- **A log entry records the real time it was appended at.** Beside `clock_unix`, the world's time, each action-log entry carries `wall_unix_ms`: the real time, in Unix milliseconds, at which it was appended, so a caller showing a world's activity can say when something happened. Nothing in the world reads it, so it is not an input to replay (rule 5): a replay records the real time it re-executes each entry at, and the diff does not compare it. An entry appended before a world recorded this time reads `null`. Snapshots, restores, and forks copy the log whole, so an entry a world inherits keeps the time it was first appended at.

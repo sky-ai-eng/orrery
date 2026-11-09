@@ -45,7 +45,8 @@ pub type Result<T> = std::result::Result<T, WorldError>;
 
 /// Fallback T0 when a new world's config doesn't name one: 2020-01-01T00:00:00Z.
 /// A fixed constant rather than "now" so that two worlds created from the same
-/// config are byte-identical (rule 5).
+/// config are the same world (rule 5), apart from the real time each of their
+/// log entries records.
 pub const DEFAULT_T0_UNIX: i64 = 1_577_836_800;
 
 /// The reserved actor that attributes control-plane and engine-internal
@@ -476,32 +477,34 @@ impl World {
         details: &serde_json::Value,
     ) -> Result<LogEntry> {
         let entry = conn.query_row(
-            "INSERT INTO action_log (clock_unix, actor_id, action, details)
-             VALUES ((SELECT clock_unix FROM world WHERE id = 1), ?1, ?2, ?3)
-             RETURNING seq, clock_unix, actor_id, action, details",
-            params![actor_id, action, details.to_string()],
+            "INSERT INTO action_log (clock_unix, wall_unix_ms, actor_id, action, details)
+             VALUES ((SELECT clock_unix FROM world WHERE id = 1), ?1, ?2, ?3, ?4)
+             RETURNING seq, clock_unix, wall_unix_ms, actor_id, action, details",
+            params![wall_unix_ms(), actor_id, action, details.to_string()],
             |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, i64>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             },
         )?;
         self.signal(Signal::LogMayHaveGrown);
         let login: String = conn.query_row(
             "SELECT login FROM actors WHERE id = ?1",
-            params![entry.2],
+            params![entry.3],
             |r| r.get(0),
         )?;
         Ok(LogEntry {
             seq: entry.0,
             clock_unix: entry.1,
+            wall_unix_ms: entry.2,
             actor_login: login,
-            action: entry.3,
-            details: serde_json::from_str(&entry.4).unwrap_or(serde_json::Value::Null),
+            action: entry.4,
+            details: serde_json::from_str(&entry.5).unwrap_or(serde_json::Value::Null),
         })
     }
 
@@ -638,16 +641,18 @@ fn checkpoint(conn: &Connection) -> Result<()> {
 
 /// What every read of the action log selects, in the order `log_entry`
 /// reads it.
-const LOG_ENTRY_SELECT: &str = "SELECT l.seq, l.clock_unix, a.login, l.action, l.details
+const LOG_ENTRY_SELECT: &str =
+    "SELECT l.seq, l.clock_unix, l.wall_unix_ms, a.login, l.action, l.details
      FROM action_log l JOIN actors a ON a.id = l.actor_id";
 
 fn log_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<LogEntry> {
     Ok(LogEntry {
         seq: r.get(0)?,
         clock_unix: r.get(1)?,
-        actor_login: r.get(2)?,
-        action: r.get(3)?,
-        details: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(4)?)
+        wall_unix_ms: r.get(2)?,
+        actor_login: r.get(3)?,
+        action: r.get(4)?,
+        details: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(5)?)
             .unwrap_or(serde_json::Value::Null),
     })
 }
@@ -679,6 +684,20 @@ fn raise_issued_seq(conn: &Connection, issued: i64) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// The real time, in Unix milliseconds, an action-log entry records as the
+/// moment it was appended.
+fn wall_unix_ms() -> i64 {
+    // The world's one wall-clock read. It is recorded for callers showing
+    // when something happened, and nothing in the world reads it, so it is
+    // not an input to replay (rule 5).
+    #[allow(clippy::disallowed_methods)]
+    let now = std::time::SystemTime::now();
+    match now.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => since.as_millis() as i64,
+        Err(before) => -(before.duration().as_millis() as i64),
+    }
 }
 
 pub(crate) fn constraint_violation(e: &rusqlite::Error) -> bool {
@@ -729,5 +748,36 @@ fn validate_repo_name(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(WorldError::InvalidRepoName(name.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActorKind, DEFAULT_T0_UNIX, World, WorldSecret, wall_unix_ms};
+
+    // The bounds are read through the function the append reads, so the
+    // world's one wall-clock read stays its only one.
+    #[test]
+    fn an_entry_records_the_real_time_it_was_appended_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = World::create(
+            &dir.path().join("world"),
+            DEFAULT_T0_UNIX,
+            &WorldSecret::LOCAL,
+        )
+        .unwrap();
+
+        let before = wall_unix_ms();
+        w.create_actor("alice", ActorKind::User).unwrap();
+        let after = wall_unix_ms();
+
+        let log = w.log_after(0, 100).unwrap();
+        let created = log.last().unwrap();
+        assert_eq!(created.action, "actor.create");
+        let at = created.wall_unix_ms.expect("the entry records a real time");
+        assert!(
+            (before..=after).contains(&at),
+            "appended at {at}, outside {before}..={after}"
+        );
     }
 }

@@ -17,7 +17,12 @@ pub const BASELINE_VERSION: i64 = 6;
 
 /// Forward migrations, oldest first, each one SQL batch. `MIGRATIONS[i]`
 /// takes a database from version `BASELINE_VERSION + i` to the next.
-const MIGRATIONS: &[&str] = &[];
+const MIGRATIONS: &[&str] = &[
+    // 7: the real time each action-log entry was appended at, in Unix
+    // milliseconds. Entries appended before this version never recorded one,
+    // so they hold NULL.
+    "ALTER TABLE action_log ADD COLUMN wall_unix_ms INTEGER;",
+];
 
 /// The version this binary reads and writes.
 pub const SCHEMA_VERSION: i64 = BASELINE_VERSION + MIGRATIONS.len() as i64;
