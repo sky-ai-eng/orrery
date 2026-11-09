@@ -237,6 +237,9 @@ pub(crate) async fn list_check_runs_for_ref(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -245,6 +248,7 @@ pub(crate) async fn list_check_runs_for_ref(
     let sha = if is_full_sha(&git_ref) {
         git_ref.clone()
     } else {
+        let _refs = face.git.read_lock(repo.id).await;
         let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
         match store::rev_parse(&bare, &format!("refs/heads/{git_ref}")) {
             Ok(Some(sha)) => sha,
@@ -283,6 +287,9 @@ pub(crate) async fn get_contents(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -291,6 +298,7 @@ pub(crate) async fn get_contents(
     let rev = query_param(&query, "ref").unwrap_or_else(|| "HEAD".to_string());
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
     let spec = format!("{rev}:{path}");
+    let refs = face.git.read_lock(repo.id).await;
     // A directory answers 404 here where GitHub would return a listing —
     // accepted divergence, because a consumer reading contents fetches a file
     // and treats exactly 404 as absent.
@@ -299,7 +307,10 @@ pub(crate) async fn get_contents(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(e) => return internal(e),
     };
-    let bytes = match store::cat_file_blob(&bare, &spec) {
+    drop(refs);
+    // Read by its id, the blob is the one `rev` named above, whatever the
+    // refs have done since.
+    let bytes = match store::cat_file_blob(&bare, &blob_sha) {
         Ok(Some(b)) => b,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(e) => return internal(e),
@@ -336,6 +347,9 @@ pub(crate) async fn list_branches(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -344,9 +358,12 @@ pub(crate) async fn list_branches(
         return refused;
     }
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    let refs = match store::list_refs(&bare) {
-        Ok(r) => r,
-        Err(e) => return internal(e),
+    let refs = {
+        let _refs = face.git.read_lock(repo.id).await;
+        match store::list_refs(&bare) {
+            Ok(r) => r,
+            Err(e) => return internal(e),
+        }
     };
     let branches: Vec<serde_json::Value> = refs
         .iter()
@@ -388,15 +405,21 @@ pub(crate) async fn get_branch_ref(
     UrlPath((owner, repo_name, branch)): UrlPath<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
     };
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    let sha = match store::rev_parse(&bare, &format!("refs/heads/{branch}")) {
-        Ok(Some(sha)) => sha,
-        Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(e) => return internal(e),
+    let sha = {
+        let _refs = face.git.read_lock(repo.id).await;
+        match store::rev_parse(&bare, &format!("refs/heads/{branch}")) {
+            Ok(Some(sha)) => sha,
+            Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+            Err(e) => return internal(e),
+        }
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "Ref") {
         return refused;
@@ -490,6 +513,9 @@ pub(crate) async fn compare(
     UrlPath((owner, repo_name, basehead)): UrlPath<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -498,6 +524,9 @@ pub(crate) async fn compare(
         return github_error(StatusCode::NOT_FOUND, "Not Found");
     };
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    // Both ends resolve against one state of the refs; the comparison after
+    // reads only the commits they name.
+    let refs = face.git.read_lock(repo.id).await;
     let mut ends = [String::new(), String::new()];
     for (end, rev) in ends.iter_mut().zip([base_rev, head_rev]) {
         match resolve_commit(&bare, rev) {
@@ -506,6 +535,7 @@ pub(crate) async fn compare(
             Err(e) => return internal(e),
         }
     }
+    drop(refs);
     if let Some(refused) = media::refuse_unrendered(&headers, "Comparison") {
         return refused;
     }
@@ -524,10 +554,16 @@ pub(crate) async fn list_pull_files(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its files holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
     };
+    // The pull and its base branch's tip are read under one hold, so a merge
+    // or a push to the base lands before both or after both.
+    let refs = face.git.read_lock(repo.id).await;
     let pull = match pull_by_path_number(&face, &repo, &number) {
         Ok(Some(p)) => p,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
@@ -546,6 +582,7 @@ pub(crate) async fn list_pull_files(
     } else {
         pull.base_sha.clone()
     };
+    drop(refs);
     let files = match store::changed_files(&bare, &base, &pull.head_sha) {
         Ok(f) => f,
         Err(e) => return internal(e),

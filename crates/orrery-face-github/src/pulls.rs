@@ -84,7 +84,7 @@ pub(crate) async fn create_pull(
     // tip the PR actually proposes.
     let _gate = face.git.gate().read_owned().await;
     let lock = face.git.repo_lock(repo.id);
-    let _guard = lock.lock().await;
+    let _guard = lock.write().await;
 
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
     let base_sha = match store::rev_parse(&bare, &format!("refs/heads/{base_ref}")) {
@@ -213,8 +213,11 @@ pub(crate) async fn patch_pull(
     // pull is read again once both are held, so the state checks below see
     // current truth.
     let _gate = face.git.gate().read_owned().await;
+    // TODO(ORR-71): an edit of only the title or body takes the write side
+    // too, and so waits for every fetch in progress; only an edit that sets
+    // `state` or `base` needs it.
     let lock = face.git.repo_lock(repo.id);
-    let _guard = lock.lock().await;
+    let _guard = lock.write().await;
     let mut pull = match face.world.pull_by_number(repo.id, pull.number) {
         Ok(Some(p)) => p,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
@@ -491,11 +494,12 @@ pub(crate) async fn merge_pull(
         }
     }
 
-    // Serialize against pushes and other merges, then re-read the pull so
-    // the state checks below see current truth.
+    // Serialize against pushes and other merges, and keep fetches out until
+    // the merge is recorded or unwound, then re-read the pull so the state
+    // checks below see current truth.
     let _gate = face.git.gate().read_owned().await;
     let lock = face.git.repo_lock(repo.id);
-    let _guard = lock.lock().await;
+    let _guard = lock.write().await;
     let pull = match face.world.pull_by_number(repo.id, pull.number) {
         Ok(Some(p)) => p,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
