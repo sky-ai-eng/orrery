@@ -243,7 +243,8 @@ pub(crate) fn list_check_runs(conn: &Connection) -> Result<Vec<CheckRun>> {
 
 /// A repo's pulls in GitHub's default listing order — created descending —
 /// with an id tiebreaker for a deterministic total order. That order is
-/// load-bearing: TF's ETag fast path hashes page 1 of exactly this listing.
+/// load-bearing: the pulls list's ETag hashes page 1 of exactly this listing,
+/// and a poller skips discovery while the tag still matches.
 pub(crate) fn list_pulls_for_repo(
     conn: &Connection,
     repo_id: i64,
@@ -442,8 +443,9 @@ pub(crate) fn list_check_runs_for_sha(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// An owner's repos in `sort=pushed&direction=desc` order — what TF's
-/// reachable-mirror walk requests — never-pushed repos last, id tiebreaker.
+/// An owner's repos in `sort=pushed&direction=desc` order — what a consumer
+/// walking the repos it can reach requests — never-pushed repos last, id
+/// tiebreaker.
 pub(crate) fn list_repos_for_owner(conn: &Connection, owner_id: i64) -> Result<Vec<Repo>> {
     let mut stmt = conn.prepare(&format!(
         "{REPO_SELECT} WHERE r.owner_id = ?1

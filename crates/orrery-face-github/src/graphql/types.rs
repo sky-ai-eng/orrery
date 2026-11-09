@@ -1298,7 +1298,7 @@ pub struct QueryRoot;
 #[Object]
 impl QueryRoot {
     /// Batch node lookup. An id that doesn't resolve yields a null entry —
-    /// GitHub's shape, which consumers skip (TF's refresh drops null nodes).
+    /// GitHub's shape, which a consumer refreshing a batch of ids skips.
     async fn nodes(&self, ctx: &Context<'_>, ids: Vec<ID>) -> Result<Vec<Option<Node>>, Error> {
         let face = face(ctx);
         ids.iter().map(|id| resolve_node(face, id)).collect()

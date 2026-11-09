@@ -188,8 +188,8 @@ async fn graphql_handler(
 /// convention — username ignored), `Bearer <tok>`, and `token <tok>`.
 ///
 /// Git *read* traffic may pass anonymously — real GitHub serves public-repo
-/// clones without credentials, and consumers rely on it (TF deliberately
-/// clones public repos with no token). The request proceeds with no actor
+/// clones without credentials, and a consumer may clone a public repo with no
+/// token on purpose. The request proceeds with no actor
 /// attached; the git face itself refuses anonymous access to private repos.
 /// Pushes and the REST face always require a token, and so do git reads when
 /// [`Options::anonymous_git_reads`] is off.
