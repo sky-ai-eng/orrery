@@ -219,13 +219,11 @@ pub struct ReviewRequestChange {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LogSpan {
-    pub from_seq: i64,
-    pub to_seq: i64,
     /// The newest `seq` both sides' logs hold, or 0 when they share no
     /// entry. The two logs are the same up to it and differ after it: it is
-    /// `from_seq` when `to` carries on from `from`, `to_seq` when `from`
-    /// carries on from `to`, and older than both when a restore between them
-    /// discarded `from`'s newest entries.
+    /// `from`'s `last_seq` when `to` carries on from `from`, `to`'s when
+    /// `from` carries on from `to`, and older than both when a restore
+    /// between them discarded `from`'s newest entries.
     pub shared_seq: i64,
     /// How many of `to`'s entries follow `shared_seq`, counted rather than
     /// subtracted because `seq` has a gap wherever a restore discarded
@@ -839,8 +837,6 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         log: {
             let shared_seq = shared_seq(from.view, from_meta.last_seq, to.view, to_meta.last_seq)?;
             LogSpan {
-                from_seq: from_meta.last_seq,
-                to_seq: to_meta.last_seq,
                 shared_seq,
                 appended: to.view.log_count_after(shared_seq)?,
             }

@@ -84,7 +84,7 @@ curl -X POST $C/diff -d '{"from":"before","to":"after"}'   # → branch pushed, 
 | Review | `review_requests_added`, `review_requests_removed` (each naming `{"user": login}` or `{"team": "org/slug"}`), `reviews_added`, `comments_added` |
 | Checks | `check_runs_added`, `check_runs_updated` |
 | Organizations | `org_memberships_added`, `org_memberships_removed`, `org_roles_changed`, `teams_created`, `teams_deleted`, `team_memberships_added`, `team_memberships_removed`, `team_roles_changed` |
-| Log | `log` — each side's newest action-log sequence number (`from_seq`, `to_seq`), the newest one both sides' logs hold (`shared_seq`), and how many of `to`'s entries follow `shared_seq` (`appended`), counted, since `seq` has gaps |
+| Log | `log` — the newest action-log sequence number both sides' logs hold (`shared_seq`), and how many of `to`'s entries follow it (`appended`), counted, since `seq` has gaps. Each side's own newest is its `last_seq`, beside its name and `clock_unix` in `from` and `to` |
 
 A few rules follow from reading states rather than events:
 
@@ -93,7 +93,7 @@ A few rules follow from reading states rather than events:
 - A team deleted and a new one created under its slug is a deletion and a creation, not an unchanged team.
 - `pulls_ready_for_review` comes from the pull's timeline, so it shows a pull marked ready and converted back within the interval. The world keeps no timeline item for a conversion, so `pulls_converted_to_draft` compares the two states, and that round trip does not appear there.
 - Credentials never appear: no client secret, authorization code or token.
-- The two sides' logs are the same up to `shared_seq` and differ after it, since a `seq` is issued once per world. When `to` carries on from `from`, `shared_seq` is `from_seq`. When `from` carries on from `to`, as in a diff back to an earlier snapshot, it is `to_seq`, and `appended` is 0. When a restore between the two sides discarded `from`'s newest entries, it is older than both, and `appended` counts only the entries of `to`'s that followed it. On a world whose log is `to`'s, as the live world's is when `to` is absent, `POST /_orrery/log/list` with `after_seq: shared_seq` reads exactly the `appended` entries.
+- The two sides' logs are the same up to `shared_seq` and differ after it, since a `seq` is issued once per world. When `to` carries on from `from`, `shared_seq` is `from`'s `last_seq`. When `from` carries on from `to`, as in a diff back to an earlier snapshot, it is `to`'s, and `appended` is 0. When a restore between the two sides discarded `from`'s newest entries, it is older than both, and `appended` counts only the entries of `to`'s that followed it. On a world whose log is `to`'s, as the live world's is when `to` is absent, `POST /_orrery/log/list` with `after_seq: shared_seq` reads exactly the `appended` entries.
 
 ## Time: the clock is an input, not a history mechanism
 

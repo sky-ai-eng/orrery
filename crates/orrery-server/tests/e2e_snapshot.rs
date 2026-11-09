@@ -454,9 +454,8 @@ fn restore(base: &str, name: &str) {
     );
 }
 
-/// The `log` section of the diff `body` asks for.
-fn diff_log(base: &str, body: serde_json::Value) -> serde_json::Value {
-    control_post(base, "/_orrery/diff", body)["log"].clone()
+fn diff(base: &str, body: serde_json::Value) -> serde_json::Value {
+    control_post(base, "/_orrery/diff", body)
 }
 
 /// A harness's two trials from one starting point: snapshot `before`, run
@@ -485,15 +484,14 @@ async fn a_diff_across_a_restore_counts_from_the_newest_entry_both_logs_hold() {
     let (before, after) = two_trials(base);
     let second = snapshot(base, "second");
 
-    let log = diff_log(base, json!({ "from": "after", "to": "second" }));
-    assert_eq!(log["from_seq"], after);
-    assert_eq!(log["to_seq"], second);
-    assert_eq!(log["shared_seq"], before);
-    assert_eq!(log["appended"], 3, "{log}");
+    let d = diff(base, json!({ "from": "after", "to": "second" }));
+    assert_eq!(d["from"]["last_seq"], after);
+    assert_eq!(d["to"]["last_seq"], second);
+    assert_eq!(d["log"], json!({ "shared_seq": before, "appended": 3 }));
 }
 
 /// On the live world, the log read from a diff's `shared_seq` is exactly the
-/// entries the diff counts as appended. Its `from_seq` names an entry the
+/// entries the diff counts as appended. `from`'s newest entry is one the
 /// restore discarded, so the same read from there is refused.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_log_read_from_a_diffs_shared_seq_is_its_appended_entries() {
@@ -501,13 +499,13 @@ async fn the_log_read_from_a_diffs_shared_seq_is_its_appended_entries() {
     let base = &inst.base;
     two_trials(base);
 
-    let log = diff_log(base, json!({ "from": "after" }));
+    let d = diff(base, json!({ "from": "after" }));
     let read = control_post(
         base,
         "/_orrery/log/list",
-        json!({ "after_seq": log["shared_seq"] }),
+        json!({ "after_seq": d["log"]["shared_seq"] }),
     );
-    assert_eq!(read["total_count"], log["appended"]);
+    assert_eq!(read["total_count"], d["log"]["appended"]);
     let created: Vec<&str> = read["items"]
         .as_array()
         .unwrap()
@@ -520,7 +518,7 @@ async fn the_log_read_from_a_diffs_shared_seq_is_its_appended_entries() {
             "POST",
             base,
             "/_orrery/log/list",
-            Some(json!({ "after_seq": log["from_seq"] })),
+            Some(json!({ "after_seq": d["from"]["last_seq"] })),
         ),
         Err(404)
     );
@@ -537,28 +535,29 @@ async fn a_diff_along_one_history_shares_the_older_sides_newest_entry() {
     let one = snapshot(base, "one");
     mint_actor(base, "bob", "user");
     mint_actor(base, "carol", "user");
-    let two = snapshot(base, "two");
+    snapshot(base, "two");
 
-    let forward = diff_log(base, json!({ "from": "one", "to": "two" }));
-    assert_eq!(forward["from_seq"], one);
-    assert_eq!(forward["shared_seq"], one);
-    assert_eq!(forward["appended"], 2, "{forward}");
+    let forward = diff(base, json!({ "from": "one", "to": "two" }));
+    assert_eq!(forward["from"]["last_seq"], one);
+    assert_eq!(forward["log"], json!({ "shared_seq": one, "appended": 2 }));
 
-    let back = diff_log(base, json!({ "from": "two", "to": "one" }));
-    assert_eq!(back["from_seq"], two);
-    assert_eq!(back["to_seq"], one);
-    assert_eq!(back["shared_seq"], one);
-    assert_eq!(back["appended"], 0, "{back}");
+    let back = diff(base, json!({ "from": "two", "to": "one" }));
+    assert_eq!(back["to"]["last_seq"], one);
+    assert_eq!(back["log"], json!({ "shared_seq": one, "appended": 0 }));
 
     // The live world restored to "one" is "one" again, and carries on from
     // it once it takes a write.
     restore(base, "one");
-    let back_live = diff_log(base, json!({ "from": "two" }));
-    assert_eq!(back_live["to_seq"], one);
-    assert_eq!(back_live["shared_seq"], one);
-    assert_eq!(back_live["appended"], 0, "{back_live}");
+    let back_live = diff(base, json!({ "from": "two" }));
+    assert_eq!(back_live["to"]["last_seq"], one);
+    assert_eq!(
+        back_live["log"],
+        json!({ "shared_seq": one, "appended": 0 })
+    );
     mint_actor(base, "dave", "user");
-    let carried_on = diff_log(base, json!({ "from": "one" }));
-    assert_eq!(carried_on["shared_seq"], carried_on["from_seq"]);
-    assert_eq!(carried_on["appended"], 1, "{carried_on}");
+    let carried_on = diff(base, json!({ "from": "one" }));
+    assert_eq!(
+        carried_on["log"],
+        json!({ "shared_seq": one, "appended": 1 })
+    );
 }

@@ -193,8 +193,8 @@ fn restore_rewinds_and_the_world_keeps_working() {
     // Carol's entry is numbered past the two the restore discarded, and the
     // diff counts the one entry rather than the span of numbers.
     let since = inst.diff("before", Some("again"));
-    assert_eq!(since.log.to_seq - since.log.from_seq, 3);
-    assert_eq!(since.log.shared_seq, since.log.from_seq);
+    assert_eq!(since.to.last_seq - since.from.last_seq, 3);
+    assert_eq!(since.log.shared_seq, since.from.last_seq);
     assert_eq!(since.log.appended, 1);
 
     assert!(matches!(
@@ -560,7 +560,7 @@ fn diff_reports_the_interval_between_states() {
     assert_eq!(d.reviews_added[0].reviewer, "bob");
     assert_eq!(d.reviews_added[0].state, "approved");
     assert!(d.log.appended > 0);
-    assert_eq!(d.log.to_seq - d.log.from_seq, d.log.appended);
+    assert_eq!(d.to.last_seq - d.from.last_seq, d.log.appended);
 
     // The live world equals the "after" snapshot: same diff against "before",
     // and an empty diff against "after".
