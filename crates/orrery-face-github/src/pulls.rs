@@ -221,73 +221,50 @@ pub(crate) async fn patch_pull(
         Err(e) => return internal(e),
     };
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    let base = match parsed.base.as_deref() {
-        None => None,
-        // GitHub refuses any base on a pull that is closed, or that the
-        // request closes, before it looks at the branch named or at a reopen.
-        Some(_) if pull.state == PullState::Closed || state == Some("closed") => {
-            return validation_invalid_message(
-                "PullRequest",
-                "base",
-                "Cannot change the base branch of a closed pull request.",
-            );
-        }
-        // A pull request's base is never its own head: merging it would
-        // merge the branch into itself.
-        Some(b) if b == pull.head_ref => return validation_invalid("PullRequest", "base"),
-        Some(b) => match store::rev_parse(&bare, &format!("refs/heads/{b}")) {
-            Ok(Some(sha)) => Some((b.to_string(), sha)),
-            Ok(None) => return validation_invalid("PullRequest", "base"),
-            Err(e) => return internal(e),
-        },
-    };
-    // Resolved before the edit, so a refused reopen writes nothing.
+    let body = parsed.body.as_ref().map(|b| b.as_deref());
+    // GitHub writes a request in this order, refusals included: the body;
+    // then, unless it refuses a reopen, the title and the state change; then
+    // the base, judged against the state the pull is left in. So a refusal
+    // keeps every write that comes before it.
     let reopen_at = match state {
         Some("open") if pull.state == PullState::Closed => {
+            // What GitHub does with a base beside a reopen has not been
+            // observed, so it is refused rather than guessed.
+            if parsed.base.is_some() {
+                return orrery_unsupported_field("PullRequest", "base (beside a reopen)");
+            }
             match reopen_head(&face, &repo, &bare, &pull) {
                 Ok(head) => Some(head),
-                Err(resp) => return *resp,
+                Err(refused) => {
+                    if body.is_some()
+                        && let Err(e) = face.world.edit_pull(pull.id, actor.id, None, body, None)
+                    {
+                        return internal(e);
+                    }
+                    return *refused;
+                }
             }
         }
         _ => None,
     };
+    let ends_closed = match state {
+        Some(s) => s == "closed",
+        None => pull.state == PullState::Closed,
+    };
+    let (base, base_refused) = match parsed.base.as_deref() {
+        None => (None, None),
+        Some(b) => match resolve_base(&face, &repo, &bare, &pull, b, ends_closed) {
+            Ok(resolved) => (Some(resolved), None),
+            Err(resp) => (None, Some(resp)),
+        },
+    };
 
-    // A base another open pull from the same head already holds: GitHub
-    // refuses the base and still writes the title and body sent beside it.
-    if let Some((new_base, _)) = &base
-        && *new_base != pull.base_ref
-    {
-        match face
-            .world
-            .open_pull_between(repo.id, &pull.head_ref, new_base)
-        {
-            Ok(None) => {}
-            Ok(Some(_)) => {
-                if title.is_some() || parsed.body.is_some() {
-                    let body = parsed.body.as_ref().map(|b| b.as_deref());
-                    if let Err(e) = face.world.edit_pull(pull.id, actor.id, title, body, None) {
-                        return internal(e);
-                    }
-                }
-                return validation_invalid_message(
-                    "PullRequest",
-                    "base",
-                    &format!(
-                        "A pull request already exists for base branch '{new_base}' and head branch '{}'",
-                        pull.head_ref
-                    ),
-                );
-            }
-            Err(e) => return internal(e),
-        }
-    }
-
-    if title.is_some() || parsed.body.is_some() || base.is_some() {
+    if title.is_some() || body.is_some() || base.is_some() {
         let edited = face.world.edit_pull(
             pull.id,
             actor.id,
             title,
-            parsed.body.as_ref().map(|b| b.as_deref()),
+            body,
             base.as_ref().map(|(r, s)| (r.as_str(), s.as_str())),
         );
         pull = match edited {
@@ -322,8 +299,58 @@ pub(crate) async fn patch_pull(
         };
     }
     // Same-state writes are GitHub no-ops: the PR is returned unchanged.
+    if let Some(refused) = base_refused {
+        return *refused;
+    }
 
     json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull))
+}
+
+/// The branch and sha a `base` edit moves the pull to, or GitHub's refusal
+/// of it. `ends_closed` is whether the pull is closed once the request's
+/// state change lands, since GitHub judges the base after that change.
+fn resolve_base(
+    face: &GithubFace,
+    repo: &Repo,
+    bare: &Path,
+    pull: &Pull,
+    base: &str,
+    ends_closed: bool,
+) -> Result<(String, String), Box<Response<Body>>> {
+    if ends_closed {
+        return Err(Box::new(validation_invalid_message(
+            "PullRequest",
+            "base",
+            "Cannot change the base branch of a closed pull request.",
+        )));
+    }
+    // A pull request's base is never its own head: merging it would merge
+    // the branch into itself.
+    if base == pull.head_ref {
+        return Err(Box::new(validation_invalid("PullRequest", "base")));
+    }
+    let sha = match store::rev_parse(bare, &format!("refs/heads/{base}")) {
+        Ok(Some(sha)) => sha,
+        Ok(None) => return Err(Box::new(validation_invalid("PullRequest", "base"))),
+        Err(e) => return Err(Box::new(internal(e))),
+    };
+    if base != pull.base_ref {
+        match face.world.open_pull_between(repo.id, &pull.head_ref, base) {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                return Err(Box::new(validation_invalid_message(
+                    "PullRequest",
+                    "base",
+                    &format!(
+                        "A pull request already exists for base branch '{base}' and head branch '{}'",
+                        pull.head_ref
+                    ),
+                )));
+            }
+            Err(e) => return Err(Box::new(internal(e))),
+        }
+    }
+    Ok((base.to_string(), sha))
 }
 
 /// The head a closed pull reopens at: its head branch's tip. GitHub refuses

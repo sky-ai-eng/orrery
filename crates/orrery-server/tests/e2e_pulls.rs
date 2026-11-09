@@ -553,79 +553,107 @@ async fn a_closed_pull_refuses_the_edits_github_refuses() {
     };
     let bare = store::bare_dir(&s.inst.world.repos_dir(), "alice", "webapp");
     let pull_ref = |n: i64| store::rev_parse(&bare, &store::pull_head_ref(n)).unwrap();
-    // The pull entries in the log: a refusal adds none, while the pushes
-    // between the refusals add entries of their own.
+    // The pull entries in the log, which the pushes between the requests do
+    // not add to.
     let entries = || {
         let log = s.inst.world.log_after(0, 10_000).unwrap();
         log.iter().filter(|e| e.action.starts_with("pull.")).count()
     };
-    open("dev");
-
-    // GitHub refuses a base on a closed pull, and on a pull the same request
-    // closes, whichever branch it names and before it looks at a reopen.
-    let base_refused = (
-        422,
-        serde_json::json!({
-            "message": "Validation Failed",
-            "errors": [{
-                "resource": "PullRequest",
-                "code": "invalid",
-                "field": "base",
-                "message": "Cannot change the base branch of a closed pull request.",
-            }],
-        }),
-    );
-    let before = entries();
-    assert_eq!(
-        patch(
-            1,
-            serde_json::json!({ "state": "closed", "base": "release" })
-        ),
-        base_refused
-    );
-    assert_eq!(get(1)["state"], "open");
-    assert_eq!(entries(), before);
-    let (status, _) = patch(1, serde_json::json!({ "state": "closed" }));
-    assert_eq!(status, 200);
-    let before = entries();
-    for body in [
-        serde_json::json!({ "base": "release" }),
-        serde_json::json!({ "base": "dev" }),
-        serde_json::json!({ "base": "release", "title": "Retitled" }),
-        serde_json::json!({ "base": "release", "state": "open" }),
-    ] {
-        assert_eq!(patch(1, body.clone()), base_refused, "{body}");
-    }
-    let kept = get(1);
-    assert_eq!(kept["state"], "closed");
-    assert_eq!(kept["base"]["ref"], "dev");
-    assert_eq!(kept["title"], "Add feature");
-    assert_eq!(entries(), before);
-
-    // A reopen is refused while its base branch is gone, and names both
-    // branches, base first, when its head branch is gone too. The refusal
-    // writes nothing, the title beside it included.
-    let state_refused = |why: &str| {
+    let refused = |field: &str, code: &str, message: &str| {
         (
             422,
             serde_json::json!({
                 "message": "Validation Failed",
                 "errors": [{
                     "resource": "PullRequest",
-                    "code": "custom",
-                    "field": "state",
-                    "message": format!("state cannot be changed. {why}"),
+                    "code": code,
+                    "field": field,
+                    "message": message,
                 }],
             }),
         )
     };
-    let reopen_and_retitle = serde_json::json!({ "state": "open", "title": "Retitled" });
-    git(&s.src, clock, &["push", &s.authed_url, ":dev"]);
+    let base_refused = refused(
+        "base",
+        "invalid",
+        "Cannot change the base branch of a closed pull request.",
+    );
+    let state_refused = |why: &str| {
+        refused(
+            "state",
+            "custom",
+            &format!("state cannot be changed. {why}"),
+        )
+    };
+    open("dev");
+
+    // GitHub judges a base after the request's other writes land, a close
+    // among them, so a base beside a close is refused on a pull that is
+    // closed by then, and the close, title, and body stay written.
+    let before = entries();
     assert_eq!(
-        patch(1, reopen_and_retitle.clone()),
+        patch(
+            1,
+            serde_json::json!({ "state": "closed", "base": "release", "title": "T1", "body": "B1" })
+        ),
+        base_refused
+    );
+    let kept = get(1);
+    assert_eq!(
+        (
+            &kept["state"],
+            &kept["base"]["ref"],
+            &kept["title"],
+            &kept["body"]
+        ),
+        (&"closed".into(), &"dev".into(), &"T1".into(), &"B1".into())
+    );
+    assert_eq!(entries(), before + 2, "the edit and the close");
+
+    // On a closed pull, any base is refused, its own included.
+    let before = entries();
+    assert_eq!(
+        patch(
+            1,
+            serde_json::json!({ "base": "dev", "title": "T2", "body": "B2" })
+        ),
+        base_refused
+    );
+    assert_eq!(
+        patch(1, serde_json::json!({ "base": "release" })),
+        base_refused
+    );
+    let kept = get(1);
+    assert_eq!(
+        (&kept["base"]["ref"], &kept["title"], &kept["body"]),
+        (&"dev".into(), &"T2".into(), &"B2".into())
+    );
+    assert_eq!(entries(), before + 1);
+
+    // What GitHub does with a base beside a reopen is not mocked.
+    let (status, not_mocked) = patch(
+        1,
+        serde_json::json!({ "base": "release", "state": "open", "title": "T3" }),
+    );
+    assert_eq!(status, 422);
+    assert_eq!(not_mocked["orrery"]["field"], "base (beside a reopen)");
+    assert_eq!(get(1)["state"], "closed");
+    assert_eq!(entries(), before + 1);
+
+    // A refused reopen keeps only the body: GitHub writes it first and drops
+    // the title. A reopen is refused while its base branch is gone, naming
+    // both branches, base first, when its head branch is gone too.
+    git(&s.src, clock, &["push", &s.authed_url, ":dev"]);
+    let before = entries();
+    assert_eq!(
+        patch(
+            1,
+            serde_json::json!({ "state": "open", "title": "T4", "body": "B4" })
+        ),
         state_refused("The dev branch has been deleted.")
     );
     git(&s.src, clock, &["push", &s.authed_url, ":feature"]);
+    let reopen_and_retitle = serde_json::json!({ "state": "open", "title": "T5" });
     assert_eq!(
         patch(1, reopen_and_retitle.clone()),
         state_refused("The dev and feature branches have been deleted.")
@@ -633,19 +661,24 @@ async fn a_closed_pull_refuses_the_edits_github_refuses() {
     let feature_back = format!("{}:refs/heads/feature", s.feature_sha);
     git(&s.src, clock, &["push", &s.authed_url, &feature_back]);
     assert_eq!(
-        patch(1, reopen_and_retitle.clone()),
+        patch(1, reopen_and_retitle),
         state_refused("The dev branch has been deleted.")
     );
     let kept = get(1);
-    assert_eq!(kept["state"], "closed");
-    assert_eq!(kept["title"], "Add feature");
+    assert_eq!(
+        (&kept["state"], &kept["title"], &kept["body"]),
+        (&"closed".into(), &"T2".into(), &"B4".into())
+    );
     assert_eq!(pull_ref(1).as_deref(), Some(s.feature_sha.as_str()));
-    assert_eq!(entries(), before);
+    assert_eq!(entries(), before + 1, "the body edit");
 
     // Restoring the base branch lets it reopen.
     let dev_back = format!("{}:refs/heads/dev", s.main_sha);
     git(&s.src, clock, &["push", &s.authed_url, &dev_back]);
-    let (status, reopened) = patch(1, reopen_and_retitle);
+    let (status, reopened) = patch(
+        1,
+        serde_json::json!({ "state": "open", "title": "Retitled" }),
+    );
     assert_eq!(status, 200, "{reopened}");
     assert_eq!(reopened["state"], "open");
     assert_eq!(reopened["title"], "Retitled");
@@ -656,20 +689,23 @@ async fn a_closed_pull_refuses_the_edits_github_refuses() {
     let (status, _) = patch(1, serde_json::json!({ "state": "closed" }));
     assert_eq!(status, 200);
     assert_eq!(open("dev")["number"], 2);
-    let before = entries();
     assert_eq!(
-        patch(1, serde_json::json!({ "state": "open", "title": "Twice" })),
+        patch(
+            1,
+            serde_json::json!({ "state": "open", "title": "T6", "body": "B6" })
+        ),
         state_refused("There is already an open pull request from feature to dev.")
     );
     let kept = get(1);
-    assert_eq!(kept["state"], "closed");
-    assert_eq!(kept["title"], "Retitled");
+    assert_eq!(
+        (&kept["state"], &kept["title"], &kept["body"]),
+        (&"closed".into(), &"Retitled".into(), &"B6".into())
+    );
     assert_eq!(get(2)["state"], "open");
-    assert_eq!(entries(), before);
 
     // Retargeting an open pull onto a pair another open pull holds is
-    // refused, and, as on GitHub, the title and body sent beside it still
-    // land. A pull's own base is not another pull's.
+    // refused, and the title and body beside it land. A pull's own base is
+    // not another pull's.
     assert_eq!(open("release")["number"], 3);
     let before = entries();
     assert_eq!(
@@ -677,38 +713,31 @@ async fn a_closed_pull_refuses_the_edits_github_refuses() {
             3,
             serde_json::json!({ "base": "dev", "title": "Moved", "body": "Moved too" })
         ),
-        (
-            422,
-            serde_json::json!({
-                "message": "Validation Failed",
-                "errors": [{
-                    "resource": "PullRequest",
-                    "code": "invalid",
-                    "field": "base",
-                    "message": "A pull request already exists for base branch 'dev' and head branch 'feature'",
-                }],
-            })
+        refused(
+            "base",
+            "invalid",
+            "A pull request already exists for base branch 'dev' and head branch 'feature'"
         )
     );
     let kept = get(3);
-    assert_eq!(kept["base"]["ref"], "release");
-    assert_eq!(kept["title"], "Moved");
-    assert_eq!(kept["body"], "Moved too");
+    assert_eq!(
+        (&kept["base"]["ref"], &kept["title"], &kept["body"]),
+        (&"release".into(), &"Moved".into(), &"Moved too".into())
+    );
     assert_eq!(entries(), before + 1, "the title and body edit");
     let (status, _) = patch(3, serde_json::json!({ "base": "release" }));
     assert_eq!(status, 200);
 
     // Force-pushed as well as held, the first pull is refused for the
-    // duplicate, as GitHub refuses it; with the duplicate closed, for the
-    // force-push. The pull open from the same head into release blocks
-    // neither.
+    // duplicate; with the duplicate closed, for the force-push. The pull open
+    // from the same head into release blocks neither.
     git(&s.src, clock, &["commit", "--amend", "-m", "rewritten"]);
     git(
         &s.src,
         clock,
         &["push", "--force", &s.authed_url, "feature"],
     );
-    let reopen = serde_json::json!({ "state": "open" });
+    let reopen = serde_json::json!({ "state": "open", "body": "B7" });
     assert_eq!(
         patch(1, reopen.clone()),
         state_refused("There is already an open pull request from feature to dev.")
@@ -719,7 +748,11 @@ async fn a_closed_pull_refuses_the_edits_github_refuses() {
         patch(1, reopen),
         state_refused("The feature branch was force-pushed or recreated.")
     );
-    assert_eq!(get(1)["state"], "closed");
+    let kept = get(1);
+    assert_eq!(
+        (&kept["state"], &kept["body"]),
+        (&"closed".into(), &"B7".into())
+    );
 }
 
 /// The fields of a not-mocked refusal: its status, the `field` it names, and
