@@ -3,6 +3,8 @@
 //! isolation, and the semantic diff — all at the crate API level; the HTTP
 //! routes over these are exercised in orrery-server's E2E suite.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use orrery_snapshot::{DiffSide, SnapshotError, diff};
 use orrery_world::{
     ActorEmail, ActorKind, DEFAULT_T0_UNIX, NewPull, OrgRole, Pull, ReviewState, TeamRole, World,
@@ -192,12 +194,78 @@ fn restore_rewinds_and_the_world_keeps_working() {
     // diff counts the one entry rather than the span of numbers.
     let since = inst.diff("before", Some("again"));
     assert_eq!(since.log.to_seq - since.log.from_seq, 3);
+    assert_eq!(since.log.shared_seq, since.log.from_seq);
     assert_eq!(since.log.appended, 1);
 
     assert!(matches!(
         orrery_snapshot::restore(&inst.world, &inst.snapshots(), "ghost"),
         Err(SnapshotError::NotFound(_))
     ));
+}
+
+/// Restores make a world's history a tree, and each state's log the path to
+/// it. For every pair of states, a diff's `shared_seq` is the newest entry
+/// both logs hold and `appended` counts `to`'s entries above it, including
+/// between branches whose numbers interleave.
+#[test]
+fn a_diffs_shared_seq_is_the_newest_entry_both_logs_hold() {
+    let inst = Instance::new();
+    let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
+    let log = |world: &World| -> BTreeSet<i64> {
+        world
+            .log_after(0, 10_000)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.seq)
+            .collect()
+    };
+    let grow = |entries: usize| {
+        for _ in 0..entries {
+            inst.world.advance_clock(1, alice.id).unwrap();
+        }
+    };
+    let restore = |name: &str| {
+        orrery_snapshot::restore(&inst.world, &inst.snapshots(), name).unwrap();
+    };
+    let mut logs: BTreeMap<&str, BTreeSet<i64>> = BTreeMap::new();
+    let mut snapshot = |name: &'static str| {
+        inst.snapshot(name);
+        logs.insert(name, log(&inst.world));
+    };
+
+    grow(3);
+    snapshot("root");
+    grow(20);
+    snapshot("left");
+    restore("root");
+    grow(5);
+    snapshot("right");
+    // Back on "left"'s branch, numbered above all of "right"'s entries.
+    restore("left");
+    grow(7);
+    snapshot("left-on");
+    restore("right");
+    grow(1);
+    snapshot("right-on");
+    restore("root");
+    snapshot("root-again");
+    restore("left-on");
+    grow(2);
+    let live = log(&inst.world);
+
+    for (from, from_log) in &logs {
+        let tos = logs.iter().map(|(name, l)| (Some(*name), l));
+        for (to, to_log) in tos.chain([(None, &live)]) {
+            let shared = from_log.intersection(to_log).max().copied().unwrap_or(0);
+            let d = inst.diff(from, to);
+            assert_eq!(d.log.shared_seq, shared, "{from} to {to:?}");
+            assert_eq!(
+                d.log.appended,
+                to_log.range(shared + 1..).count() as i64,
+                "{from} to {to:?}"
+            );
+        }
+    }
 }
 
 #[test]

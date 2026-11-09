@@ -253,7 +253,7 @@ fn every_fixture_migrates_opens_and_diffs() {
             "fixture v{version}"
         );
         let since: Vec<String> = world
-            .log_after(unchanged.log.from_seq, 10)
+            .log_after(unchanged.log.shared_seq, 10)
             .unwrap()
             .into_iter()
             .map(|e| e.action)

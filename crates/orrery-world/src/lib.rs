@@ -619,7 +619,7 @@ impl World {
         let conn = self.lock();
         check_log_position(&conn, after_seq)?;
         if let Some(resume) = resume
-            && !log_holds(&conn, resume)?
+            && !queries::log_holds(&conn, resume)?
         {
             return Err(WorldError::ResumeNotInLog(resume));
         }
@@ -724,21 +724,13 @@ fn open_conn(root: &Path) -> Result<Connection> {
 }
 
 fn check_log_position(conn: &Connection, seq: i64) -> Result<()> {
-    if seq == 0 || log_holds(conn, seq)? {
+    if seq == 0 || queries::log_holds(conn, seq)? {
         return Ok(());
     }
     Err(WorldError::NoSuchLogPosition {
         seq,
         newest_seq: queries::last_seq(conn)?,
     })
-}
-
-fn log_holds(conn: &Connection, seq: i64) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM action_log WHERE seq = ?1)",
-        params![seq],
-        |r| r.get(0),
-    )?)
 }
 
 fn checkpoint(conn: &Connection) -> Result<()> {

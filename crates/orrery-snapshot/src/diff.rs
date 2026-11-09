@@ -221,10 +221,17 @@ pub struct ReviewRequestChange {
 pub struct LogSpan {
     pub from_seq: i64,
     pub to_seq: i64,
-    /// How many of `to`'s entries follow `from_seq`, counted rather than
+    /// The newest `seq` both sides' logs hold, or 0 when they share no
+    /// entry. The two logs are the same up to it and differ after it: it is
+    /// `from_seq` when `to` carries on from `from`, `to_seq` when `from`
+    /// carries on from `to`, and older than both when a restore between them
+    /// discarded `from`'s newest entries.
+    pub shared_seq: i64,
+    /// How many of `to`'s entries follow `shared_seq`, counted rather than
     /// subtracted because `seq` has a gap wherever a restore discarded
-    /// entries. The entries themselves are served by the log list read,
-    /// keyed from `from_seq`, not duplicated here.
+    /// entries. The entries themselves are served by the log list read on a
+    /// world whose log is `to`'s, from `after_seq: shared_seq`, not
+    /// duplicated here.
     pub appended: i64,
 }
 
@@ -829,12 +836,50 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         team_memberships_added,
         team_memberships_removed,
         team_roles_changed,
-        log: LogSpan {
-            from_seq: from_meta.last_seq,
-            to_seq: to_meta.last_seq,
-            appended: to.view.log_count_after(from_meta.last_seq)?,
+        log: {
+            let shared_seq = shared_seq(from.view, from_meta.last_seq, to.view, to_meta.last_seq)?;
+            LogSpan {
+                from_seq: from_meta.last_seq,
+                to_seq: to_meta.last_seq,
+                shared_seq,
+                appended: to.view.log_count_after(shared_seq)?,
+            }
         },
     })
+}
+
+/// The newest `seq` both logs hold, given each one's newest.
+///
+/// A `seq` is issued once per world, above every `seq` issued before it, so
+/// every log that holds an entry holds the same entries below it. Two logs
+/// of one world are therefore the same up to the newest entry they share,
+/// and share none after it: the entries of `from`'s that `to` holds are its
+/// oldest ones, and the boundary between them is found by bisecting on
+/// `seq`, reading neither log whole.
+fn shared_seq(from: &dyn WorldView, from_seq: i64, to: &dyn WorldView, to_seq: i64) -> Result<i64> {
+    if from_seq == 0 || to.log_holds(from_seq)? {
+        return Ok(from_seq);
+    }
+    if to_seq == 0 || from.log_holds(to_seq)? {
+        return Ok(to_seq);
+    }
+    // Whether `to` holds `from`'s newest entry at or below `m`: true at 0,
+    // and false from the oldest entry of `from`'s that `to` lacks onwards,
+    // which is at or below `from_seq`.
+    let shared_at = |m: i64| -> Result<bool> {
+        let seq = from.log_seq_at_or_before(m)?;
+        Ok(seq == 0 || to.log_holds(seq)?)
+    };
+    let (mut shared, mut unshared) = (0, from_seq);
+    while unshared - shared > 1 {
+        let mid = shared + (unshared - shared) / 2;
+        if shared_at(mid)? {
+            shared = mid;
+        } else {
+            unshared = mid;
+        }
+    }
+    Ok(from.log_seq_at_or_before(shared)?)
 }
 
 /// A review request's subject. A user is keyed by login, since a request's

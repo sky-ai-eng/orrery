@@ -308,9 +308,9 @@ fn system_actor(state: &AppState) -> Result<Actor, Box<Response<Body>>> {
 
 /// The action log, oldest first unless the body orders it newest first.
 /// `after_seq` narrows it to what followed a position another call reported,
-/// such as a diff's `log.from_seq` or a snapshot's `last_seq`. A position the
-/// log does not hold is refused: what follows it in this log did not follow
-/// it.
+/// such as a diff's `log.shared_seq` or a snapshot's `last_seq`. A position
+/// the log does not hold is refused: what follows it in this log did not
+/// follow it.
 async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let after_seq: i64 = fields.optional("after_seq").unwrap_or(0);
