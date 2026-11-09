@@ -3,7 +3,7 @@
 //! object carries are listed in spec/surface-github.md §1.0.
 
 use orrery_face_git::{GitFaceError, store};
-use orrery_world::{Actor, ActorKind, CheckRun, IssueComment, Pull, Repo, Review, Team};
+use orrery_world::{Actor, ActorKind, CheckRun, IssueComment, Pull, PullState, Repo, Review, Team};
 
 use crate::GithubFace;
 
@@ -146,46 +146,59 @@ pub(crate) fn full_pull_json(
     let mut json = pull_json(face, repo, owner, pull);
     // A git failure answers GitHub's "not computed yet" rather than failing
     // a response whose write has already landed.
-    let (mergeable, state, rebaseable) = mergeability(face, repo, pull).unwrap_or_else(|e| {
+    let verdict = mergeability(face, repo, pull).unwrap_or_else(|e| {
         tracing::error!(error = %e, number = pull.number, "computing mergeability failed");
-        (None, "unknown", None)
+        Mergeability::Unknown
     });
+    let (mergeable, state, rebaseable) = match verdict {
+        Mergeability::Unknown => (None, "unknown", None),
+        Mergeability::Conflicting => (Some(false), "dirty", Some(false)),
+        Mergeability::Clean => (Some(true), "clean", Some(pull.state == PullState::Open)),
+    };
     json["mergeable"] = mergeable.into();
     json["mergeable_state"] = state.into();
     json["rebaseable"] = rebaseable.into();
     json
 }
 
-/// `(mergeable, mergeable_state, rebaseable)`, as GitHub reports them.
-fn mergeability(
+/// A pull request's mergeability, which REST renders as `mergeable`,
+/// `mergeable_state`, and `rebaseable`, and GraphQL as `mergeable`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mergeability {
+    /// There is no test merge to report.
+    Unknown,
+    /// The base branch is gone, or the test merge conflicts.
+    Conflicting,
+    /// The test merge of the head onto the base branch's tip is clean.
+    Clean,
+}
+
+/// The mergeability GitHub reports for a pull request. A merged one has
+/// none. A closed one whose head branch is gone keeps the test merge GitHub
+/// made against `base_sha` and cannot make another, so it has none once its
+/// base branch has moved.
+pub(crate) fn mergeability(
     face: &GithubFace,
     repo: &Repo,
     pull: &Pull,
-) -> Result<(Option<bool>, &'static str, Option<bool>), GitFaceError> {
+) -> Result<Mergeability, GitFaceError> {
     if pull.merged {
-        return Ok((None, "unknown", None));
+        return Ok(Mergeability::Unknown);
     }
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    if !test_merge(&bare, pull)?.unwrap_or(false) {
-        return Ok((Some(false), "dirty", Some(false)));
-    }
-    let state = if pull.draft { "draft" } else { "clean" };
-    let head = store::rev_parse(&bare, &format!("refs/heads/{}", pull.head_ref))?;
-    Ok((Some(true), state, Some(head.is_some())))
-}
-
-/// Whether the pull's head merges cleanly onto its base branch's tip, or
-/// `None` when the base branch is gone.
-pub(crate) fn test_merge(
-    bare: &std::path::Path,
-    pull: &Pull,
-) -> Result<Option<bool>, GitFaceError> {
-    let Some(base_tip) = store::rev_parse(bare, &format!("refs/heads/{}", pull.base_ref))? else {
-        return Ok(None);
+    let Some(base_tip) = store::rev_parse(&bare, &format!("refs/heads/{}", pull.base_ref))? else {
+        return Ok(Mergeability::Conflicting);
     };
-    Ok(Some(
-        store::merge_tree(bare, &base_tip, &pull.head_sha)?.is_some(),
-    ))
+    if pull.state != PullState::Open
+        && base_tip != pull.base_sha
+        && store::rev_parse(&bare, &format!("refs/heads/{}", pull.head_ref))?.is_none()
+    {
+        return Ok(Mergeability::Unknown);
+    }
+    Ok(match store::merge_tree(&bare, &base_tip, &pull.head_sha)? {
+        Some(_) => Mergeability::Clean,
+        None => Mergeability::Conflicting,
+    })
 }
 
 /// The GitHub review object. Wire state is the neutral store state in

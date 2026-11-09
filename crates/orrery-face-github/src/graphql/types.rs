@@ -20,7 +20,7 @@ use orrery_world as world;
 
 use crate::GithubFace;
 use crate::nodeid::{self, NodeRef};
-use crate::render::{rfc3339, test_merge};
+use crate::render::{Mergeability, mergeability, rfc3339};
 
 use super::search;
 
@@ -858,7 +858,7 @@ impl PullRequest {
         )
     }
 
-    /// The comparison base for diff stats and mergeability: the base
+    /// The comparison base for diff stats and changed files: the base
     /// branch's current tip while the pull is open (GitHub recomputes
     /// against the moving base), the pinned base sha once it is terminal
     /// (GitHub freezes the numbers).
@@ -942,15 +942,13 @@ impl PullRequest {
     }
 
     async fn mergeable(&self, ctx: &Context<'_>) -> Result<MergeableState, Error> {
-        if self.pull.state != world::PullState::Open {
-            return Ok(MergeableState::Unknown);
-        }
-        let bare = self.bare(face(ctx));
-        Ok(match test_merge(&bare, &self.pull).map_err(internal)? {
-            Some(true) => MergeableState::Mergeable,
-            Some(false) => MergeableState::Conflicting,
-            None => MergeableState::Unknown,
-        })
+        Ok(
+            match mergeability(face(ctx), &self.repo, &self.pull).map_err(internal)? {
+                Mergeability::Clean => MergeableState::Mergeable,
+                Mergeability::Conflicting => MergeableState::Conflicting,
+                Mergeability::Unknown => MergeableState::Unknown,
+            },
+        )
     }
 
     async fn head_ref_name(&self) -> &str {
