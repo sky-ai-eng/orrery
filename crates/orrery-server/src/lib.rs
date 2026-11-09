@@ -20,8 +20,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Request, State};
-use axum::http::{HeaderMap, Response, StatusCode};
+use axum::extract::{OriginalUri, Request, State};
+use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::middleware::Next;
 use axum::{Router, middleware};
 use base64::Engine as _;
@@ -248,23 +248,23 @@ fn bad_credentials() -> Response<Body> {
 /// The fallback for a path no route serves, on a listener that serves the
 /// control plane. A path under `/_orrery` is a control path, answered in the
 /// control plane's error shape; any other is face surface.
-async fn no_route(req: Request) -> Response<Body> {
-    let path = req.uri().path();
+async fn no_route(method: Method, OriginalUri(uri): OriginalUri) -> Response<Body> {
+    let path = uri.path();
     if path == "/_orrery" || path.starts_with("/_orrery/") {
-        control::no_such_route(req.method(), path)
+        control::no_such_route(&method, path)
     } else {
-        not_mocked(req).await
+        not_mocked(method, OriginalUri(uri)).await
     }
 }
 
 /// The loud refusal for surface Orrery does not implement. 501 with a
 /// self-describing envelope — deliberately unlike any real GitHub response,
-/// so it can never be mistaken for "the thing doesn't exist".
-// TODO(ORR-46): report the path as sent; under `/api/v3` this sees the nested
-// router's path, with the prefix stripped.
-async fn not_mocked(req: Request) -> Response<Body> {
-    let method = req.method().to_string();
-    let path = req.uri().path().to_string();
+/// so it can never be mistaken for "the thing doesn't exist". The path is the
+/// one the request arrived with, never a nested router's remainder, so a
+/// caller finds it in its own logs.
+async fn not_mocked(method: Method, OriginalUri(uri): OriginalUri) -> Response<Body> {
+    let method = method.to_string();
+    let path = uri.path().to_string();
     tracing::warn!(%method, %path, "NOT MOCKED: unimplemented surface was called");
     json(
         StatusCode::NOT_IMPLEMENTED,

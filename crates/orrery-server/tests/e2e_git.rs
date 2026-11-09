@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{boot, boot_with, control_post, git, git_output, mint_actor};
+use common::{boot, boot_with, control_post, face_answer, git, git_output, mint_actor};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn author_push_clone_observe() {
@@ -120,15 +120,22 @@ async fn auth_and_not_mocked_contracts() {
         other => panic!("expected status error, got {other:?}"),
     }
 
-    // Unknown surface → loud 501 NOT-MOCKED, never a plausible 404...
-    let err = ureq::get(format!("{base}/api/v3/rate_limit"))
-        .header("authorization", &format!("token {token}"))
-        .call()
-        .expect_err("unmocked endpoint refuses");
-    match err {
-        ureq::Error::StatusCode(code) => assert_eq!(code, 501, "NOT MOCKED is 501"),
-        other => panic!("expected status error, got {other:?}"),
-    }
+    // Unknown surface → loud 501 NOT-MOCKED, never a plausible 404, naming
+    // the path as sent rather than what is left of it under `/api/v3`...
+    let (status, body) = face_answer(
+        "GET",
+        &format!("{base}/api/v3/rate_limit"),
+        &token,
+        &[],
+        None,
+    );
+    assert_eq!(status, 501, "NOT MOCKED is 501: {body}");
+    assert_eq!(
+        body["message"], "orrery: GET /api/v3/rate_limit is not mocked",
+        "{body}"
+    );
+    assert_eq!(body["orrery"]["path"], "/api/v3/rate_limit", "{body}");
+    assert_eq!(body["orrery"]["method"], "GET", "{body}");
 
     // ...while a matched route with missing data is a faithful 404.
     let err = ureq::post(format!("{base}/api/v3/orgs/ghost/repos"))

@@ -10,8 +10,8 @@ use orrery_world::{Actor, OrgRole, TeamRole, WorldError};
 
 use crate::render::{actor_json, org_json, team_full_json};
 use crate::{
-    GithubFace, github_error, internal, json_response, orrery_unsupported_field_on,
-    validation_custom, validation_invalid, validation_missing,
+    GithubFace, github_error, internal, json_response, orrery_unsupported_field, validation_custom,
+    validation_invalid, validation_missing,
 };
 
 /// Decode a body GitHub treats as optional: an empty one is `{}`.
@@ -114,12 +114,12 @@ pub(crate) async fn create_team(
     };
     for field in UNSUPPORTED_TEAM_FIELDS {
         if parsed.rest.contains_key(*field) {
-            return orrery_unsupported_field_on("Team", field);
+            return orrery_unsupported_field("Team", field);
         }
     }
     match parsed.privacy.as_deref() {
         None | Some("closed") => {}
-        Some("secret") => return orrery_unsupported_field_on("Team", "privacy=secret"),
+        Some("secret") => return orrery_unsupported_field("Team", "privacy=secret"),
         Some(_) => return validation_invalid("Team", "privacy"),
     }
     let name = match &parsed.name {
