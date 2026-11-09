@@ -456,6 +456,27 @@ async fn patch_edits_close_and_reopen() {
     assert_eq!(reopened["state"], "open");
     assert_eq!(reopened["closed_at"], serde_json::Value::Null);
 
+    // A base that is the head branch is refused as a base that does not
+    // exist is, and the pull keeps the base it had.
+    let (status, own_head) = answer(
+        "PATCH",
+        &url,
+        &s.token,
+        serde_json::json!({ "base": "feature" }),
+    );
+    assert_eq!(status, 422);
+    assert_eq!(own_head["errors"][0]["field"], "base");
+    assert_eq!(own_head["errors"][0]["code"], "invalid");
+    let missing = answer(
+        "PATCH",
+        &url,
+        &s.token,
+        serde_json::json!({ "base": "ghost" }),
+    );
+    assert_eq!(missing, (422, own_head));
+    let kept = face_ok("GET", &url, &s.token, serde_json::json!(null));
+    assert_eq!(kept["base"]["ref"], "main");
+
     // Bad values are named rejections, and unknown pulls are faithful 404s.
     assert_eq!(
         face(

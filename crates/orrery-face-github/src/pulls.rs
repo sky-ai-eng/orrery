@@ -214,6 +214,9 @@ pub(crate) async fn patch_pull(
     };
     let base = match parsed.base.as_deref() {
         None => None,
+        // A pull request's base is never its own head: merging it would
+        // merge the branch into itself.
+        Some(b) if b == pull.head_ref => return validation_invalid("PullRequest", "base"),
         Some(b) => {
             let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
             match store::rev_parse(&bare, &format!("refs/heads/{b}")) {
