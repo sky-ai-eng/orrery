@@ -559,6 +559,9 @@ impl World {
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?,
         };
+        // TODO(ORR-59): this count reads every entry above `after_seq` while
+        // holding the world's connection, about 60 ms at a million entries;
+        // the whole-log total should come from a count kept with the log.
         let total = conn.query_row(
             "SELECT COUNT(*) FROM action_log WHERE seq > ?1",
             params![after_seq],
@@ -609,6 +612,8 @@ impl World {
         Ok(())
     }
 
+    // TODO(ORR-60): reads take this lock too, so a slow read delays every
+    // write to the world; WAL would let reads run on a connection of their own.
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("world.db mutex poisoned")
     }
