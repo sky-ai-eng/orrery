@@ -24,9 +24,6 @@ use serde_json::value::RawValue;
 use crate::list::{self, SortDir};
 use crate::{AppState, json};
 
-pub(crate) const LIST_PAGE_MAX: usize = 500;
-pub(crate) const LIST_PAGE_DEFAULT: usize = 100;
-
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -434,20 +431,6 @@ fn read_oauth_app(state: &AppState, client_id: String) -> Response<Body> {
         ),
         Err(e) => internal(e),
     }
-}
-
-/// Cut `rows`, read with one row past the page, to the page and the key of
-/// its last item when another page follows. The extra row is how the last
-/// page is known to be last, so a page that ends on the final row has none.
-pub(crate) fn keyset_page<T, K>(
-    mut rows: Vec<T>,
-    page_size: usize,
-    key: impl Fn(&T) -> K,
-) -> (Vec<T>, Option<K>) {
-    let more = rows.len() > page_size;
-    rows.truncate(page_size);
-    let next = more.then(|| rows.last().map(key)).flatten();
-    (rows, next)
 }
 
 fn clock_body(clock: i64) -> serde_json::Value {

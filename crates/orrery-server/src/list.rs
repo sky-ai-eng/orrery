@@ -16,8 +16,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::control::{Fault, Fields, LIST_PAGE_DEFAULT, LIST_PAGE_MAX, keyset_page};
+use crate::control::{Fault, Fields};
 use crate::json;
+
+const LIST_PAGE_MAX: usize = 500;
+const LIST_PAGE_DEFAULT: usize = 100;
 
 /// What a list body's `page_size` and `page_token` ask for.
 pub(crate) struct Window<K> {
@@ -187,6 +190,20 @@ pub(crate) fn answer<T: Serialize, K: Serialize>(
         body["next_page_token"] = serde_json::Value::String(encode(k, &window.fingerprint));
     }
     json(StatusCode::OK, body)
+}
+
+/// Cut `rows`, read with one row past the page, to the page and the key of
+/// its last item when another page follows. The extra row is how the last
+/// page is known to be last, so a page that ends on the final row has none.
+fn keyset_page<T, K>(
+    mut rows: Vec<T>,
+    page_size: usize,
+    key: impl Fn(&T) -> K,
+) -> (Vec<T>, Option<K>) {
+    let more = rows.len() > page_size;
+    rows.truncate(page_size);
+    let next = more.then(|| rows.last().map(key)).flatten();
+    (rows, next)
 }
 
 /// A short hash of a list and its query. It detects a token reused on

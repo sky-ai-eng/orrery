@@ -58,7 +58,7 @@ async fn create(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     })
     .await;
     match flatten(result) {
-        Ok(info) => json(StatusCode::CREATED, to_value(&info)),
+        Ok(info) => json(StatusCode::CREATED, serde_json::json!(info)),
         Err(e) => snapshot_error(e, Some("name")),
     }
 }
@@ -84,7 +84,7 @@ async fn read_one(state: &AppState, name: String) -> Response<Body> {
     })
     .await;
     match flatten(result) {
-        Ok(Some(info)) => json(StatusCode::OK, to_value(&info)),
+        Ok(Some(info)) => json(StatusCode::OK, serde_json::json!(info)),
         Ok(None) => not_found(&name),
         Err(e) => snapshot_error(e, Some("name")),
     }
@@ -247,14 +247,6 @@ fn flatten<T>(
         Ok(r) => r,
         Err(e) => Err(SnapshotError::Copy(format!("blocking task failed: {e}"))),
     }
-}
-
-fn to_value(info: &orrery_snapshot::SnapshotInfo) -> serde_json::Value {
-    serde_json::json!({
-        "name": info.name,
-        "clock_unix": info.clock_unix,
-        "last_seq": info.last_seq,
-    })
 }
 
 fn not_found(name: &str) -> Response<Body> {
