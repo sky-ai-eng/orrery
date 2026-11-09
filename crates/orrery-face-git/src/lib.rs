@@ -95,6 +95,15 @@ impl GitFace {
         locks.entry(repo_id).or_default().clone()
     }
 
+    /// The repository's lock, held for read, for a read of its refs outside
+    /// git traffic. A caller holds it only while it reads, never across an
+    /// await for another repository's lock: a waiting write lets no new read
+    /// in, so two reads each holding one repository and waiting on the other
+    /// could each wait on the other's writer forever.
+    pub async fn read_lock(&self, repo_id: i64) -> tokio::sync::OwnedRwLockReadGuard<()> {
+        self.repo_lock(repo_id).read_owned().await
+    }
+
     pub fn gate(&self) -> Arc<tokio::sync::RwLock<()>> {
         self.gate.clone()
     }

@@ -54,6 +54,13 @@ Every other git request, a fetch's ref advertisement and pack in particular, hol
 
 A fetch is several requests (the ref advertisement, then the pack, and with protocol v2, `ls-refs` and `fetch` as separate POSTs), and a write can land between two of them. `uploadpack.allowAnySHA1InWant` is on, so a fetch that asks for a commit a ref has since moved off still gets it.
 
+The GitHub face's reads of a repository's refs hold the same lock for read, and see the refs the same way. They are:
+
+- the REST reads of branches, a branch's ref, a compare, contents, check runs for a branch name, and a pull request's files; and
+- the GraphQL fields `Repository.ref`, and a pull request's `mergeable`, `additions`, `deletions`, `changedFiles`, and `files`.
+
+A REST read that also reads a pull request, as a pull request's files do, reads it under the same hold, so the pull request and its base branch's tip come from one state. A GraphQL field holds the lock only for its own reads, so a write can land between two fields of one query, as between two requests of a fetch.
+
 ## Pull request refs
 
 Every pull request has a ref, `refs/pull/{n}/head`, at its head, as on GitHub, so a client fetches a pull request by number without knowing its head branch (`git fetch origin pull/7/head`). It always names the pull request's pinned head commit:

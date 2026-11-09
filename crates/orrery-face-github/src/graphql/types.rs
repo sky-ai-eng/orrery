@@ -451,7 +451,10 @@ impl Repository {
             &self.repo.owner_login,
             &self.repo.name,
         );
-        let oid = store::rev_parse(&bare, &qualified_name).map_err(internal)?;
+        let oid = {
+            let _refs = face.git.read_lock(self.repo.id).await;
+            store::rev_parse(&bare, &qualified_name).map_err(internal)?
+        };
         Ok(oid.map(|_| Ref {
             id: ID(format!("O_ref_{}_{}", self.repo.id, qualified_name)),
         }))
@@ -838,7 +841,8 @@ impl PullRequest {
     /// The comparison base for diff stats and mergeability: the base
     /// branch's current tip while the pull is open (GitHub recomputes
     /// against the moving base), the pinned base sha once it is terminal
-    /// (GitHub freezes the numbers).
+    /// (GitHub freezes the numbers). The caller holds the repository's lock
+    /// for read.
     fn diff_base(&self, face: &GithubFace) -> Result<String, Error> {
         if self.pull.state == world::PullState::Open {
             let tip = store::rev_parse(
@@ -853,15 +857,21 @@ impl PullRequest {
         Ok(self.pull.base_sha.clone())
     }
 
-    fn diff_stats(&self, face: &GithubFace) -> Result<store::DiffStats, Error> {
-        self.diff
-            .get_or_init(|| {
-                let base = self.diff_base(face).map_err(|e| e.message.clone())?;
-                store::diff_stats(&self.bare(face), &base, &self.pull.head_sha)
-                    .map_err(|e| e.to_string())
-            })
-            .clone()
-            .map_err(Error::new)
+    async fn diff_stats(&self, face: &GithubFace) -> Result<store::DiffStats, Error> {
+        let stats = match self.diff.get() {
+            Some(stats) => stats,
+            None => {
+                let _refs = face.git.read_lock(self.repo.id).await;
+                // A sibling field that waited for the lock beside this one may
+                // have filled it already, and then this computes nothing.
+                self.diff.get_or_init(|| {
+                    let base = self.diff_base(face).map_err(|e| e.message.clone())?;
+                    store::diff_stats(&self.bare(face), &base, &self.pull.head_sha)
+                        .map_err(|e| e.to_string())
+                })
+            }
+        };
+        stats.clone().map_err(Error::new)
     }
 
     fn load_reviews(&self, face: &GithubFace) -> Result<Vec<world::Review>, Error> {
@@ -924,6 +934,7 @@ impl PullRequest {
         }
         let face = face(ctx);
         let bare = self.bare(face);
+        let _refs = face.git.read_lock(self.repo.id).await;
         let Some(base_tip) = store::rev_parse(&bare, &format!("refs/heads/{}", self.pull.base_ref))
             .map_err(internal)?
         else {
@@ -972,15 +983,15 @@ impl PullRequest {
     }
 
     async fn additions(&self, ctx: &Context<'_>) -> Result<i64, Error> {
-        Ok(self.diff_stats(face(ctx))?.additions)
+        Ok(self.diff_stats(face(ctx)).await?.additions)
     }
 
     async fn deletions(&self, ctx: &Context<'_>) -> Result<i64, Error> {
-        Ok(self.diff_stats(face(ctx))?.deletions)
+        Ok(self.diff_stats(face(ctx)).await?.deletions)
     }
 
     async fn changed_files(&self, ctx: &Context<'_>) -> Result<i64, Error> {
-        Ok(self.diff_stats(face(ctx))?.changed_files)
+        Ok(self.diff_stats(face(ctx)).await?.changed_files)
     }
 
     /// The files the pull changes, in path order, paged by `first`/`after`.
@@ -1000,7 +1011,10 @@ impl PullRequest {
             })?;
             skip = consumed.max(0) as usize;
         }
-        let base = self.diff_base(face)?;
+        let base = {
+            let _refs = face.git.read_lock(self.repo.id).await;
+            self.diff_base(face)?
+        };
         let files =
             store::changed_files(&self.bare(face), &base, &self.pull.head_sha).map_err(internal)?;
         let rest: Vec<PullRequestChangedFile> = files

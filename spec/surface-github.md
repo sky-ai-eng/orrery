@@ -192,6 +192,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `GET …/commits/{ref}/check-runs` lists every run on the commit; GitHub's default `filter=latest` keeps the newest run per name.
 - Only a bot creates or updates a check run, and a check run's `head_sha` and a review's `commit_id` are not checked against the repository.
 - `mergeable` is computed on read rather than eventually.
+- A read of a repository's refs waits for a push, a merge, or a pull request's open, close, or reopen that is under way, and sees the refs before it or after its record (`surface-git.md`, "What a fetch sees"). Two fields of one GraphQL query can still see two states.
 - Labels belong to a pull request, not to a repository.
 - A merge commit's author and committer address is `<login>@orrery.invalid`, not the actor's stored primary address.
 
