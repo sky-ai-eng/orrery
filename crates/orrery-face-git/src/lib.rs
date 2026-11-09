@@ -337,6 +337,8 @@ async fn receive_pack(
     match push.await {
         Ok(resp) => resp,
         Err(e) => {
+            // TODO(ORR-74): a push that panics after receive-pack moved refs
+            // leaves them moved, ahead of the log.
             tracing::error!(error = %e, "push task failed");
             plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
         }
@@ -415,6 +417,9 @@ async fn serve(
     let cgi_resp = match cgi::run_http_backend(&face.world.repos_dir(), req).await {
         Ok(r) => r,
         Err(e) => {
+            // TODO(ORR-74): receive-pack may have moved refs before http-backend
+            // failed, and they stay moved, ahead of the log; this arm and a
+            // push answered with a status other than 200 move nothing back.
             tracing::error!(error = %e, "git http-backend failed");
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
         }
