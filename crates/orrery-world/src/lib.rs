@@ -568,14 +568,17 @@ impl World {
             params![repo_id, default_branch],
         )?;
         let changes = events::RepoChanges::between(&before, &objects::repo_object(w.tx, repo_id)?);
+        // A push is its operation however little it changed in the
+        // repository's row; a merge's move is a consequence only if it did.
+        let changed = !changes.is_empty();
         let pushed = EventBody::RepoPushed(events::RepoChanged {
             subject: objects::repo_subject(w.tx, repo_id)?,
             changes,
         });
-        match pushed {
-            pushed if operation => w.operation(pushed),
-            EventBody::RepoPushed(ref c) if c.changes.is_empty() => {}
-            pushed => w.emit(pushed),
+        if operation {
+            w.operation(pushed);
+        } else if changed {
+            w.emit(pushed);
         }
         for m in moves {
             let event = ref_event(w.tx, repo_id, m)?;

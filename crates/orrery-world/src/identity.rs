@@ -86,7 +86,8 @@ impl World {
 
     /// Replace an actor's addresses. This is what reality does when a person
     /// verifies an address or picks a new primary, which no public API can
-    /// express. A list the actor already holds writes nothing.
+    /// express. Setting the list an actor already holds changes nothing, and
+    /// appends nothing.
     pub fn set_actor_emails(
         &self,
         login: &str,

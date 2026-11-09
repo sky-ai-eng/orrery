@@ -20,6 +20,8 @@ tar xzf orrery_*_linux_amd64.tar.gz orrery
 
 `orrery --version` prints the version and the full commit the binary was built from.
 
+Each archive also holds `spec/event.schema.json`, the JSON Schema of the events a world's log records, for validating what `log/list` and `log/stream` serve without a world running. A served world answers the same document at `GET /_orrery/log/schema`.
+
 ## Verifying a download
 
 `checksums.txt` holds the sha256 of every archive. It is signed keylessly with [cosign](https://docs.sigstore.dev/) through GitHub Actions' OIDC identity, so there is no key to fetch first. With the archive, `checksums.txt`, `checksums.txt.sig`, and `checksums.txt.pem` in one directory:
