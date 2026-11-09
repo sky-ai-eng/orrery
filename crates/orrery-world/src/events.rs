@@ -87,7 +87,7 @@ impl Attribution {
 #[schemars(title = "Orrery event")]
 pub struct Event {
     /// The event's position in the log. Positions only grow, and a restore
-    /// leaves a gap where the entries it discarded were.
+    /// leaves a gap where the events it discarded were.
     pub seq: i64,
     /// The write the event belongs to.
     pub write: WriteSpan,
@@ -773,4 +773,12 @@ event_types! {
 /// and `spec/event.schema.json` holds it.
 pub fn schema() -> serde_json::Value {
     serde_json::to_value(schemars::schema_for!(Event)).expect("a schema serializes")
+}
+
+/// [`schema`] as `spec/event.schema.json` holds it: pretty-printed, with a
+/// final newline.
+pub fn schema_file() -> String {
+    let mut text = serde_json::to_string_pretty(&schema()).expect("a schema serializes");
+    text.push('\n');
+    text
 }

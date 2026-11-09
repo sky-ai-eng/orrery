@@ -8,12 +8,13 @@ repository.workspace = true
 description = "Orrery's world kernel: world-root layout, SQLite state, the virtual clock, actors, and the append-only action log"
 
 [features]
-# For tests: runs the completeness audit on every write, which fails a write
-# that stores a value none of its events carries (src/audit.rs), and exposes
-# `test_support`, which lets another crate's tests append migrations.
-test-support = []
+# For tests: checks every write (src/audit.rs), failing one that stores a
+# value none of its events carries or makes an event its schema refuses, and
+# exposes `test_support`, which lets another crate's tests append migrations.
+test-support = ["dep:boon"]
 
 [dependencies]
+boon = { workspace = true, optional = true }
 hex.workspace = true
 hmac.workspace = true
 jiff.workspace = true

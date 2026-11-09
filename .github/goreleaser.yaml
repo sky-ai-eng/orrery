@@ -42,6 +42,8 @@ archives:
     files:
       - README.md
       - LICENSE
+      # The JSON Schema of the log's events, for a reader to validate against.
+      - spec/event.schema.json
 
 checksum:
   name_template: "checksums.txt"

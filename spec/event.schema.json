@@ -1,0 +1,3677 @@
+{
+  "$defs": {
+    "ActorChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/ActorChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/ActorSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "ActorChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "emails": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "items": {
+                "$ref": "#/$defs/ActorEmail"
+              },
+              "type": "array"
+            },
+            "to": {
+              "items": {
+                "$ref": "#/$defs/ActorEmail"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorKind"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorKind"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "login": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ActorCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ActorObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/ActorSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "ActorEmail": {
+      "additionalProperties": false,
+      "description": "One of an actor's email addresses. Every actor but the system actor holds\nexactly one primary address.",
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "primary": {
+          "type": "boolean"
+        },
+        "verified": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "email",
+        "primary",
+        "verified"
+      ],
+      "type": "object"
+    },
+    "ActorKind": {
+      "enum": [
+        "user",
+        "bot",
+        "org",
+        "system"
+      ],
+      "type": "string"
+    },
+    "ActorObject": {
+      "properties": {
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "emails": {
+          "description": "Primary first, then by address.",
+          "items": {
+            "$ref": "#/$defs/ActorEmail"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/ActorKind"
+        },
+        "login": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "login",
+        "kind",
+        "created_unix",
+        "emails"
+      ],
+      "type": "object"
+    },
+    "ActorRef": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "login": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "login"
+      ],
+      "type": "object"
+    },
+    "ActorSubject": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/ActorKind"
+        },
+        "login": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/ActorType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "login",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ActorTokenIssued": {
+      "description": "A token issued for an actor, numbered from 1 per actor. The token\nits creation minted is its 0th.",
+      "properties": {
+        "n": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "subject": {
+          "$ref": "#/$defs/ActorSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "n"
+      ],
+      "type": "object"
+    },
+    "ActorType": {
+      "enum": [
+        "actor"
+      ],
+      "type": "string"
+    },
+    "AppRef": {
+      "properties": {
+        "client_id": {
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "client_id"
+      ],
+      "type": "object"
+    },
+    "Branch": {
+      "description": "A pull's head or base: a branch, and the commit the pull holds for it.",
+      "properties": {
+        "ref": {
+          "type": "string"
+        },
+        "sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref",
+        "sha"
+      ],
+      "type": "object"
+    },
+    "CheckConclusion": {
+      "enum": [
+        "success",
+        "failure",
+        "neutral",
+        "cancelled",
+        "skipped",
+        "stale",
+        "timed_out",
+        "action_required"
+      ],
+      "type": "string"
+    },
+    "CheckRunChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/CheckRunChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/CheckRunSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "CheckRunChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "completed_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "conclusion": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckConclusion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckConclusion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "creator": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "details_url": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "external_id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "head_sha": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "output": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": true,
+            "to": true
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "started_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/CheckStatus"
+            },
+            "to": {
+              "$ref": "#/$defs/CheckStatus"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CheckRunCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/CheckRunObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/CheckRunSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "CheckRunObject": {
+      "properties": {
+        "completed_unix": {
+          "description": "As its creator stated it, in Unix seconds.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conclusion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckConclusion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "creator": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "details_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "external_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_sha": {
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "output": {
+          "description": "Whatever JSON the creator sent."
+        },
+        "started_unix": {
+          "description": "As its creator stated it, in Unix seconds.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/CheckStatus"
+        }
+      },
+      "required": [
+        "id",
+        "head_sha",
+        "name",
+        "status",
+        "creator",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "CheckRunSubject": {
+      "properties": {
+        "head_sha": {
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "type": {
+          "$ref": "#/$defs/CheckRunType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "name",
+        "head_sha",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "CheckRunType": {
+      "enum": [
+        "check_run"
+      ],
+      "type": "string"
+    },
+    "CheckStatus": {
+      "enum": [
+        "queued",
+        "in_progress",
+        "completed"
+      ],
+      "type": "string"
+    },
+    "CommentCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/CommentObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/CommentSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "CommentObject": {
+      "properties": {
+        "author": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "body": {
+          "type": "string"
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "updated_unix": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "author",
+        "body",
+        "created_unix",
+        "updated_unix"
+      ],
+      "type": "object"
+    },
+    "CommentSubject": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "pull": {
+          "$ref": "#/$defs/PullRef"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "type": {
+          "$ref": "#/$defs/CommentType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "pull",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "CommentType": {
+      "enum": [
+        "comment"
+      ],
+      "type": "string"
+    },
+    "Door": {
+      "description": "How a write reached the world.",
+      "oneOf": [
+        {
+          "const": "rest",
+          "description": "The GitHub face's REST API.",
+          "type": "string"
+        },
+        {
+          "const": "graphql",
+          "description": "The GitHub face's GraphQL API.",
+          "type": "string"
+        },
+        {
+          "const": "git",
+          "description": "Git smart-HTTP: a push.",
+          "type": "string"
+        },
+        {
+          "const": "web",
+          "description": "GitHub's OAuth web flow.",
+          "type": "string"
+        },
+        {
+          "const": "control",
+          "description": "The `/_orrery/` control plane.",
+          "type": "string"
+        },
+        {
+          "const": "cli",
+          "description": "The `orrery` command, creating or forking a world.",
+          "type": "string"
+        }
+      ]
+    },
+    "OAuthAppCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/OAuthAppObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/OAuthAppSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "OAuthAppObject": {
+      "properties": {
+        "callback_url": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "client_id",
+        "callback_url",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "OAuthAppSecretIssued": {
+      "description": "A client secret issued for an app, numbered from 1 per app. The one\nits registration issued is its 0th.",
+      "properties": {
+        "n": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "subject": {
+          "$ref": "#/$defs/OAuthAppSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "n"
+      ],
+      "type": "object"
+    },
+    "OAuthAppSubject": {
+      "properties": {
+        "client_id": {
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/OAuthAppType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "client_id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "OAuthAppType": {
+      "enum": [
+        "oauth_app"
+      ],
+      "type": "string"
+    },
+    "OAuthAuthorizationChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/OAuthAuthorizationChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/OAuthAuthorizationSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "OAuthAuthorizationChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "actor": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "app": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/AppRef"
+            },
+            "to": {
+              "$ref": "#/$defs/AppRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "exchanged_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "redirect_uri": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "scope": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "OAuthAuthorizationCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/OAuthAuthorizationObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/OAuthAuthorizationSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "OAuthAuthorizationObject": {
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "app": {
+          "$ref": "#/$defs/AppRef"
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "exchanged_unix": {
+          "description": "When the app traded the code for a token, or null while it has\nnot.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "redirect_uri": {
+          "description": "The redirect URI the code was issued for.",
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "app",
+        "actor",
+        "redirect_uri",
+        "scope",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "OAuthAuthorizationSubject": {
+      "description": "An actor's grant of an OAuth app: issued when the actor authorizes the\napp, exchanged when the app trades it for a token.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "The actor who granted it."
+        },
+        "app": {
+          "$ref": "#/$defs/AppRef"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "type": {
+          "$ref": "#/$defs/OAuthAuthorizationType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "app",
+        "actor"
+      ],
+      "type": "object"
+    },
+    "OAuthAuthorizationType": {
+      "enum": [
+        "oauth_authorization"
+      ],
+      "type": "string"
+    },
+    "OrgMembershipChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/OrgMembershipChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/OrgMembershipSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "OrgMembershipChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "member": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "role": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/OrgRole"
+            },
+            "to": {
+              "$ref": "#/$defs/OrgRole"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "OrgMembershipCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/OrgMembershipObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/OrgMembershipSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "OrgMembershipObject": {
+      "properties": {
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "member": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "role": {
+          "$ref": "#/$defs/OrgRole"
+        }
+      },
+      "required": [
+        "member",
+        "role",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "OrgMembershipSubject": {
+      "properties": {
+        "member": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "The organization."
+        },
+        "type": {
+          "$ref": "#/$defs/OrgMembershipType"
+        }
+      },
+      "required": [
+        "type",
+        "member",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "OrgMembershipType": {
+      "enum": [
+        "org_membership"
+      ],
+      "type": "string"
+    },
+    "OrgRole": {
+      "enum": [
+        "admin",
+        "member"
+      ],
+      "type": "string"
+    },
+    "PullChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/PullChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/PullSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "PullChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "author": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "base": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/Branch"
+            },
+            "to": {
+              "$ref": "#/$defs/Branch"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "base_moved": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "boolean"
+            },
+            "to": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "body": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "closed_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "draft": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "boolean"
+            },
+            "to": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "head": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/Branch"
+            },
+            "to": {
+              "$ref": "#/$defs/Branch"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "labels": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "to": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "merge_commit_sha": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "merged": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "boolean"
+            },
+            "to": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "merged_by": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActorRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActorRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "number": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "requested_reviewers": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "items": {
+                "$ref": "#/$defs/ActorRef"
+              },
+              "type": "array"
+            },
+            "to": {
+              "items": {
+                "$ref": "#/$defs/ActorRef"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "requested_teams": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "items": {
+                "$ref": "#/$defs/TeamRef"
+              },
+              "type": "array"
+            },
+            "to": {
+              "items": {
+                "$ref": "#/$defs/TeamRef"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/PullState"
+            },
+            "to": {
+              "$ref": "#/$defs/PullState"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "updated_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "PullObject": {
+      "properties": {
+        "author": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "base": {
+          "$ref": "#/$defs/Branch",
+          "description": "The base branch, and the commit it was at when the pull was\nopened or retargeted."
+        },
+        "base_moved": {
+          "description": "Whether the base branch has moved since the head or base was last\npinned: at opening, on a move of the head, on a reopen, or on a\nretarget.",
+          "type": "boolean"
+        },
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "closed_unix": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "draft": {
+          "type": "boolean"
+        },
+        "head": {
+          "$ref": "#/$defs/Branch",
+          "description": "The head branch, and the commit the pull proposes: a push to the\nbranch moves it while the pull is open."
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "labels": {
+          "description": "Ordered by name without regard to case.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "merge_commit_sha": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "merged": {
+          "type": "boolean"
+        },
+        "merged_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "requested_reviewers": {
+          "description": "The users whose review is pending, in request order.",
+          "items": {
+            "$ref": "#/$defs/ActorRef"
+          },
+          "type": "array"
+        },
+        "requested_teams": {
+          "description": "The teams whose review is pending, in request order.",
+          "items": {
+            "$ref": "#/$defs/TeamRef"
+          },
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/PullState"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_unix": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "number",
+        "title",
+        "author",
+        "state",
+        "draft",
+        "head",
+        "base",
+        "merged",
+        "created_unix",
+        "updated_unix",
+        "labels",
+        "requested_reviewers",
+        "requested_teams",
+        "base_moved"
+      ],
+      "type": "object"
+    },
+    "PullOpened": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/PullObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/PullSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "PullRef": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "number": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "number"
+      ],
+      "type": "object"
+    },
+    "PullState": {
+      "enum": [
+        "open",
+        "closed"
+      ],
+      "type": "string"
+    },
+    "PullSubject": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "type": {
+          "$ref": "#/$defs/PullType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "number",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "PullType": {
+      "enum": [
+        "pull"
+      ],
+      "type": "string"
+    },
+    "RefChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "name": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "sha": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RefCreated": {
+      "properties": {
+        "commit_count": {
+          "description": "How many commits the ref brought in, all of them.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "commits": {
+          "description": "The commits the ref brought into the repository: those reachable\nfrom it that no ref reached before the write. Oldest first, and at\nmost 2048, the newest.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "object": {
+          "$ref": "#/$defs/RefObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/RefSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object",
+        "commits",
+        "commit_count"
+      ],
+      "type": "object"
+    },
+    "RefDeleted": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/RefObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/RefSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "RefObject": {
+      "properties": {
+        "name": {
+          "description": "The full name, such as `refs/heads/main`.",
+          "type": "string"
+        },
+        "sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "sha"
+      ],
+      "type": "object"
+    },
+    "RefSubject": {
+      "description": "A git ref. Refs have no id: a ref is its name in its repository.",
+      "properties": {
+        "name": {
+          "description": "The full name, such as `refs/heads/main`.",
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "type": {
+          "$ref": "#/$defs/RefType"
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "RefType": {
+      "enum": [
+        "ref"
+      ],
+      "type": "string"
+    },
+    "RefUpdated": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/RefChanges"
+        },
+        "commit_count": {
+          "description": "How many commits the move added, all of them.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "commits": {
+          "description": "The commits reachable from `sha.to` and not from `sha.from`.\nOldest first, and at most 2048, the newest.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "forced": {
+          "description": "Whether `sha.from` is not an ancestor of `sha.to`.",
+          "type": "boolean"
+        },
+        "subject": {
+          "$ref": "#/$defs/RefSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes",
+        "forced",
+        "commits",
+        "commit_count"
+      ],
+      "type": "object"
+    },
+    "Rekeyed": {
+      "description": "What `world:rekeyed` derived again under the world's new secret.",
+      "properties": {
+        "oauth_app_secrets": {
+          "description": "The client secrets issued for apps since they were registered.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "oauth_apps": {
+          "description": "The client secret each app was registered with.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "oauth_codes": {
+          "description": "The authorization codes not yet exchanged.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "tokens": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tokens",
+        "oauth_apps",
+        "oauth_app_secrets",
+        "oauth_codes"
+      ],
+      "type": "object"
+    },
+    "RepoChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/RepoChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/RepoSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "RepoChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "created_by": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "default_branch": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "owner": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "private": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "boolean"
+            },
+            "to": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "pushed_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RepoCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/RepoObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/RepoSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "RepoObject": {
+      "properties": {
+        "created_by": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "default_branch": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "private": {
+          "type": "boolean"
+        },
+        "pushed_unix": {
+          "description": "When a push or a merge last moved a ref, or null before the first.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "owner",
+        "private",
+        "default_branch",
+        "created_by",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "RepoRef": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "RepoSubject": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "type": {
+          "$ref": "#/$defs/RepoType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "name",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "RepoType": {
+      "enum": [
+        "repo"
+      ],
+      "type": "string"
+    },
+    "ReviewObject": {
+      "properties": {
+        "author": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commit_sha": {
+          "description": "The pull's head the review judged.",
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/ReviewState"
+        },
+        "submitted_unix": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "author",
+        "state",
+        "commit_sha",
+        "submitted_unix"
+      ],
+      "type": "object"
+    },
+    "ReviewState": {
+      "enum": [
+        "approved",
+        "changes_requested",
+        "commented"
+      ],
+      "type": "string"
+    },
+    "ReviewSubject": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "pull": {
+          "$ref": "#/$defs/PullRef"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "type": {
+          "$ref": "#/$defs/ReviewType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "pull",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "ReviewSubmitted": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ReviewObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/ReviewSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "ReviewType": {
+      "enum": [
+        "review"
+      ],
+      "type": "string"
+    },
+    "TeamCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/TeamObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/TeamSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "TeamDeleted": {
+      "description": "The team as it was.",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/TeamObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/TeamSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "TeamMembershipChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/TeamMembershipChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/TeamMembershipSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "TeamMembershipChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "member": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "role": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/TeamRole"
+            },
+            "to": {
+              "$ref": "#/$defs/TeamRole"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TeamMembershipCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/TeamMembershipObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/TeamMembershipSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "TeamMembershipDeleted": {
+      "description": "The membership as it was.",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/TeamMembershipObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/TeamMembershipSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "TeamMembershipObject": {
+      "properties": {
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "member": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "role": {
+          "$ref": "#/$defs/TeamRole"
+        }
+      },
+      "required": [
+        "member",
+        "role",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "TeamMembershipSubject": {
+      "properties": {
+        "member": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "The organization."
+        },
+        "team": {
+          "$ref": "#/$defs/TeamRef"
+        },
+        "type": {
+          "$ref": "#/$defs/TeamMembershipType"
+        }
+      },
+      "required": [
+        "type",
+        "member",
+        "team",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "TeamMembershipType": {
+      "enum": [
+        "team_membership"
+      ],
+      "type": "string"
+    },
+    "TeamObject": {
+      "properties": {
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "slug",
+        "name",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "TeamRef": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "slug": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "slug"
+      ],
+      "type": "object"
+    },
+    "TeamRole": {
+      "enum": [
+        "member",
+        "maintainer"
+      ],
+      "type": "string"
+    },
+    "TeamSubject": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "The organization."
+        },
+        "slug": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/TeamType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "slug",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "TeamType": {
+      "enum": [
+        "team"
+      ],
+      "type": "string"
+    },
+    "TimelineItemCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/TimelineItemObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/TimelineItemSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "TimelineItemKind": {
+      "description": "What a timeline item records.",
+      "oneOf": [
+        {
+          "enum": [
+            "labeled",
+            "unlabeled",
+            "ready_for_review",
+            "review_requested",
+            "review_request_removed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "closed",
+          "description": "A close, a merge's included.",
+          "type": "string"
+        },
+        {
+          "const": "head_ref_deleted",
+          "description": "A push deleted the pull's head branch.",
+          "type": "string"
+        },
+        {
+          "const": "base_ref_deleted",
+          "description": "A push deleted the pull's base branch while the pull was open.",
+          "type": "string"
+        },
+        {
+          "const": "head_ref_restored",
+          "description": "A push created the pull's head branch again after it was deleted.",
+          "type": "string"
+        }
+      ]
+    },
+    "TimelineItemObject": {
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/TimelineItemKind"
+        },
+        "label": {
+          "description": "The label, for the label kinds; otherwise null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref_name": {
+          "description": "The branch deleted, by the name it had, for the deletion kinds;\notherwise null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The user asked for or no longer asked for a review, for the\nreview-request kinds when they name a user; otherwise null."
+        },
+        "team": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TeamRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The team, with the slug it had, for the review-request kinds when\nthey name a team; otherwise null."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "actor",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "TimelineItemSubject": {
+      "description": "One item on a pull's timeline: what happened to it that its current\nstate no longer shows.",
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "pull": {
+          "$ref": "#/$defs/PullRef"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "type": {
+          "$ref": "#/$defs/TimelineItemType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "pull",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "TimelineItemType": {
+      "enum": [
+        "timeline_item"
+      ],
+      "type": "string"
+    },
+    "WorldChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/WorldChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/WorldSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "WorldChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "clock_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "WorldCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/WorldObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/WorldSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "WorldObject": {
+      "properties": {
+        "clock_unix": {
+          "description": "The world clock, in Unix seconds.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "clock_unix"
+      ],
+      "type": "object"
+    },
+    "WorldRekeyed": {
+      "properties": {
+        "rekeyed": {
+          "$ref": "#/$defs/Rekeyed"
+        },
+        "subject": {
+          "$ref": "#/$defs/WorldSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "rekeyed"
+      ],
+      "type": "object"
+    },
+    "WorldSubject": {
+      "description": "The world itself, which a world has one of.",
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/WorldType"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "WorldType": {
+      "enum": [
+        "world"
+      ],
+      "type": "string"
+    },
+    "WriteSpan": {
+      "description": "Where an event's write starts and how long it is. A write's events are\nappended together, so a reader holding `events` events from `seq` holds\nthe whole write.",
+      "properties": {
+        "events": {
+          "description": "How many events the write appended.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "seq": {
+          "description": "The `seq` of the write's first event, its operation's.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "events"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One entry of a world's log.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/WorldCreated",
+      "description": "A world was created, with its system actor.",
+      "properties": {
+        "type": {
+          "const": "world:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/WorldChanged",
+      "properties": {
+        "type": {
+          "const": "world:clock_advanced",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/WorldRekeyed",
+      "description": "A forked world took its own secret, and every credential it inherited\nwas derived again under it.",
+      "properties": {
+        "type": {
+          "const": "world:rekeyed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/ActorCreated",
+      "description": "An actor was created, with its token and its address.",
+      "properties": {
+        "type": {
+          "const": "actor:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/ActorChanged",
+      "properties": {
+        "type": {
+          "const": "actor:emails_set",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/ActorTokenIssued",
+      "properties": {
+        "type": {
+          "const": "actor:token_issued",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/OAuthAppCreated",
+      "description": "An OAuth app was registered, with its client secret.",
+      "properties": {
+        "type": {
+          "const": "oauth_app:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/OAuthAppSecretIssued",
+      "properties": {
+        "type": {
+          "const": "oauth_app:secret_issued",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/OAuthAuthorizationCreated",
+      "description": "An actor authorized an OAuth app, which issued an authorization code.",
+      "properties": {
+        "type": {
+          "const": "oauth_authorization:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/OAuthAuthorizationChanged",
+      "description": "The app traded the authorization's code for a token acting as the\nactor who granted it.",
+      "properties": {
+        "type": {
+          "const": "oauth_authorization:exchanged",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/RepoCreated",
+      "properties": {
+        "type": {
+          "const": "repo:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/RepoChanged",
+      "description": "A push, or a merge, moved refs in the repository. On a push it is the\noperation, and a ref event for each ref it moved follows.",
+      "properties": {
+        "type": {
+          "const": "repo:pushed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/RefCreated",
+      "properties": {
+        "type": {
+          "const": "ref:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/RefUpdated",
+      "properties": {
+        "type": {
+          "const": "ref:updated",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/RefDeleted",
+      "properties": {
+        "type": {
+          "const": "ref:deleted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullOpened",
+      "properties": {
+        "type": {
+          "const": "pull:opened",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "properties": {
+        "type": {
+          "const": "pull:edited",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "description": "A close, or a push's deletion of the pull's head or base branch.",
+      "properties": {
+        "type": {
+          "const": "pull:closed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "properties": {
+        "type": {
+          "const": "pull:reopened",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "properties": {
+        "type": {
+          "const": "pull:merged",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "properties": {
+        "type": {
+          "const": "pull:ready_for_review",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "properties": {
+        "type": {
+          "const": "pull:converted_to_draft",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "properties": {
+        "type": {
+          "const": "pull:labeled",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "properties": {
+        "type": {
+          "const": "pull:unlabeled",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "properties": {
+        "type": {
+          "const": "pull:review_requested",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "description": "A request withdrawn, a review by a user asked for one, or the\ndeletion of a team asked for one.",
+      "properties": {
+        "type": {
+          "const": "pull:review_request_removed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "description": "A push or a merge moved the pull's head branch, and the pull with it.",
+      "properties": {
+        "type": {
+          "const": "pull:head_moved",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "description": "Any other change a write makes to a pull it is not about.",
+      "properties": {
+        "type": {
+          "const": "pull:updated",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/TimelineItemCreated",
+      "properties": {
+        "type": {
+          "const": "timeline_item:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/ReviewSubmitted",
+      "properties": {
+        "type": {
+          "const": "review:submitted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CommentCreated",
+      "properties": {
+        "type": {
+          "const": "comment:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CheckRunCreated",
+      "properties": {
+        "type": {
+          "const": "check_run:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CheckRunChanged",
+      "properties": {
+        "type": {
+          "const": "check_run:updated",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/OrgMembershipCreated",
+      "properties": {
+        "type": {
+          "const": "org_membership:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/OrgMembershipChanged",
+      "properties": {
+        "type": {
+          "const": "org_membership:updated",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/TeamCreated",
+      "description": "A team was created. A creator who is a member of the organization\nbecomes its first maintainer.",
+      "properties": {
+        "type": {
+          "const": "team:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/TeamDeleted",
+      "description": "A team was deleted, with its memberships and pending review requests.",
+      "properties": {
+        "type": {
+          "const": "team:deleted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/TeamMembershipCreated",
+      "properties": {
+        "type": {
+          "const": "team_membership:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/TeamMembershipChanged",
+      "properties": {
+        "type": {
+          "const": "team_membership:updated",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/TeamMembershipDeleted",
+      "properties": {
+        "type": {
+          "const": "team_membership:deleted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    }
+  ],
+  "properties": {
+    "actor": {
+      "$ref": "#/$defs/ActorRef",
+      "description": "Who made the change."
+    },
+    "app": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AppRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The OAuth app the call came through, or null."
+    },
+    "clock_unix": {
+      "description": "The world clock when the write was made, in Unix seconds.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "door": {
+      "$ref": "#/$defs/Door",
+      "description": "How the change reached the world."
+    },
+    "seq": {
+      "description": "The event's position in the log. Positions only grow, and a restore\nleaves a gap where the events it discarded were.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "wall_unix_ms": {
+      "description": "The real time the write was appended at, in Unix milliseconds, for a\nreader showing when something happened. Nothing in the world reads it.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "write": {
+      "$ref": "#/$defs/WriteSpan",
+      "description": "The write the event belongs to."
+    }
+  },
+  "required": [
+    "seq",
+    "write",
+    "clock_unix",
+    "wall_unix_ms",
+    "actor",
+    "door"
+  ],
+  "title": "Orrery event",
+  "type": "object"
+}

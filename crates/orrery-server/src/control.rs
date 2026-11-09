@@ -45,6 +45,7 @@ pub fn router(state: AppState) -> Router {
             post(issue_oauth_client_secret),
         )
         .route("/log/list", post(log_list))
+        .route("/log/schema", get(log_schema))
         .route("/log/stream", get(crate::log_stream::stream))
         .merge(crate::snapshots::router())
         .method_not_allowed_fallback(method_not_allowed)
@@ -322,6 +323,12 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
         ),
         Err(e) => internal(e),
     }
+}
+
+/// The JSON Schema of the log's events, as this build writes them: what
+/// `log/list` and `log/stream` serve each event as.
+async fn log_schema() -> Response<Body> {
+    json(StatusCode::OK, orrery_world::events::schema())
 }
 
 /// Which actors a world holds, so a caller handed a world it did not build

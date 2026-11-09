@@ -148,7 +148,9 @@ impl World {
         let out = f(&mut w, read)?;
         let events = w.into_events();
         if !events.is_empty() {
-            append(&tx, by, &events)?;
+            let _first = append(&tx, by, &events)?;
+            #[cfg(any(test, feature = "test-support"))]
+            crate::audit::check_schema(&read_write(&tx, _first)?);
             self.signal(Signal::LogMayHaveGrown);
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -248,8 +250,9 @@ impl World {
 }
 
 /// Append a write's events, numbered from the next `seq` this database
-/// issues, each stamped with the current clock and the one real time.
-fn append(tx: &Connection, by: Attribution, events: &[EventBody]) -> Result<()> {
+/// issues, each stamped with the current clock and the one real time, and
+/// return the first event's `seq`.
+fn append(tx: &Connection, by: Attribution, events: &[EventBody]) -> Result<i64> {
     let first = issued_seq(tx)? + 1;
     let wall = wall_unix_ms();
     let mut insert = tx.prepare_cached(
@@ -275,7 +278,19 @@ fn append(tx: &Connection, by: Attribution, events: &[EventBody]) -> Result<()> 
             body.to_string(),
         ])?;
     }
-    Ok(())
+    Ok(first)
+}
+
+/// The events of the write whose first event is `seq`, as the log serves
+/// them.
+#[cfg(any(test, feature = "test-support"))]
+fn read_write(conn: &Connection, seq: i64) -> Result<Vec<Event>> {
+    Ok(conn
+        .prepare(&format!(
+            "SELECT {EVENT_COLUMNS} FROM action_log WHERE write_seq = ?1 ORDER BY seq"
+        ))?
+        .query_map(params![seq], row_to_event)?
+        .collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
 pub(crate) fn check_log_position(conn: &Connection, seq: i64) -> Result<()> {

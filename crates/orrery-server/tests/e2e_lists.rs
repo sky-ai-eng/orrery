@@ -707,6 +707,16 @@ async fn a_page_token_answers_only_the_query_it_was_issued_for() {
     );
 }
 
+/// The log's schema is served as this build writes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_log_schema_is_the_published_one() {
+    let inst = boot().await;
+    assert_eq!(
+        read(&inst.base, "/log/schema"),
+        orrery_world::events::schema()
+    );
+}
+
 /// A position a restore discarded, or one never issued, is refused: the
 /// entries numbered above it in this log did not follow it.
 #[tokio::test(flavor = "multi_thread")]

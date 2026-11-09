@@ -1,8 +1,9 @@
-//! The completeness check every write runs in a test build: each value the
-//! write stores is in one of its events (spec/events.md). [`World::write`]
-//! reads every table before and after the write, and the write fails the
-//! test if a row it added, removed, or changed belongs to no event's subject,
-//! or a value it changed is under no field the event names.
+//! The checks every write runs in a test build. Each value the write stores
+//! is in one of its events (spec/events.md): [`World::write`] reads every
+//! table before and after the write, and the write fails the test if a row
+//! it added, removed, or changed belongs to no event's subject, or a value it
+//! changed is under no field the event names. And each event, as the log
+//! serves it, matches the schema its types make ([`check_schema`]).
 //!
 //! Each table's columns are listed here with the event field that carries
 //! them, so a column the schema gains fails the check until it is listed,
@@ -17,7 +18,7 @@ use rusqlite::types::ValueRef;
 use serde_json::Value;
 
 use crate::Result;
-use crate::events::EventBody;
+use crate::events::{Event, EventBody};
 
 /// What a column of a table is to its row's subject.
 #[derive(Clone, Copy)]
@@ -240,6 +241,30 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
         ],
     ),
 ];
+
+/// Fail the test if an event, as the log serves it, does not match the
+/// schema `GET /_orrery/log/schema` serves.
+pub(crate) fn check_schema(events: &[Event]) {
+    static SCHEMA: std::sync::OnceLock<(boon::Schemas, boon::SchemaIndex)> =
+        std::sync::OnceLock::new();
+    let (schemas, index) = SCHEMA.get_or_init(|| {
+        let mut schemas = boon::Schemas::new();
+        let mut compiler = boon::Compiler::new();
+        compiler
+            .add_resource("orrery:event.schema.json", crate::events::schema())
+            .expect("the schema is a resource");
+        let index = compiler
+            .compile("orrery:event.schema.json", &mut schemas)
+            .expect("the schema compiles");
+        (schemas, index)
+    });
+    for event in events {
+        let served = serde_json::to_value(event).expect("an event serializes");
+        if let Err(e) = schemas.validate(&served, *index) {
+            panic!("an event does not match its schema: {e:#}\n{served:#}");
+        }
+    }
+}
 
 type Row = BTreeMap<String, Value>;
 /// A table's rows by primary key.
