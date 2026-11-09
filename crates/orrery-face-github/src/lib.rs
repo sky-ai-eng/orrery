@@ -336,6 +336,20 @@ pub(crate) fn validation_custom(resource: &str, message: &str) -> Response<Body>
     json_response(StatusCode::UNPROCESSABLE_ENTITY, body)
 }
 
+/// GitHub's 422 with a prose `custom` error naming `field` — the shape of a
+/// refused reopen ("state cannot be changed. …").
+pub(crate) fn validation_custom_field(
+    resource: &str,
+    field: &str,
+    message: &str,
+) -> Response<Body> {
+    let body = serde_json::json!({
+        "message": "Validation Failed",
+        "errors": [{ "resource": resource, "code": "custom", "field": field, "message": message }],
+    });
+    json_response(StatusCode::UNPROCESSABLE_ENTITY, body)
+}
+
 /// Loud refusal for a real-GitHub field Orrery chooses not to fake, on the
 /// `resource` the request is about. Shaped like a GitHub 422 so strict
 /// clients parse it, but self-describing so a human reads exactly what to do
