@@ -53,6 +53,7 @@ async fn a_face_path_called_with_a_method_it_does_not_serve_is_not_mocked() {
             assert_eq!(status, 501, "{layout} {method} {path}: {answer}");
             assert_eq!(answer["orrery"]["not_mocked"], true, "{layout} {path}");
             assert_eq!(answer["orrery"]["method"], method, "{layout} {path}");
+            assert_eq!(answer["orrery"]["path"], path, "{layout} {method}");
         }
 
         // Face auth comes first, as it does for an unmatched path under
@@ -91,7 +92,14 @@ async fn an_unknown_control_path_is_404() {
         for (method, path) in [
             ("POST", "/_orrery/bogus"),
             ("GET", "/_orrery"),
+            ("GET", "/_orrery/"),
             ("GET", "/_orrery/actors/alice/bogus"),
+            // Shaped like git face routes, which take any first segment.
+            ("GET", "/_orrery/x/info/refs"),
+            ("GET", "/_orrery/actors/info/refs?service=git-upload-pack"),
+            ("DELETE", "/_orrery/x/info/refs"),
+            ("POST", "/_orrery/x/git-upload-pack"),
+            ("POST", "/_orrery/x/git-receive-pack"),
         ] {
             let url = format!("{}{path}", inst.control);
             let (status, _, answer) = call(&url, method, None);

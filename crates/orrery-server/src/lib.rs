@@ -23,6 +23,7 @@ use axum::body::Body;
 use axum::extract::{OriginalUri, Request, State};
 use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::middleware::Next;
+use axum::routing::any;
 use axum::{Router, middleware};
 use base64::Engine as _;
 use orrery_face_git::GitFace;
@@ -31,6 +32,9 @@ use orrery_world::World;
 
 mod control;
 mod snapshots;
+
+/// Where the control plane is mounted, on its own listener or the faces'.
+const CONTROL_PREFIX: &str = "/_orrery";
 
 /// The full SHA of the commit this binary was built from, or `unknown` when
 /// the build named none and was not run in a git checkout. See `build.rs`.
@@ -78,7 +82,7 @@ pub struct Routers {
 impl Routers {
     /// Both on one listener, the control plane at `/_orrery`.
     pub fn combined(self) -> Router {
-        self.control.merge(self.faces).fallback(no_route)
+        self.control.merge(self.faces).fallback(not_mocked)
     }
 
     /// `(faces, control)` for two listeners. The faces router has no
@@ -88,7 +92,7 @@ impl Routers {
     pub fn split(self) -> (Router, Router) {
         (
             self.faces.fallback(not_mocked),
-            self.control.fallback(no_route),
+            self.control.fallback(not_mocked),
         )
     }
 }
@@ -140,7 +144,18 @@ pub fn routers(
 
     Routers {
         faces: Router::new().merge(oauth).merge(faces),
-        control: Router::new().nest("/_orrery", control::router(state)),
+        // Every path under the prefix is the control plane's. One that no
+        // control route names answers 404 in the control plane's error shape,
+        // and on a listener the faces share, a face route whose first segment
+        // is a parameter (git's `/{owner}/{repo}/info/refs`) can't take it.
+        control: Router::new()
+            .nest(CONTROL_PREFIX, control::router(state))
+            .route(CONTROL_PREFIX, any(control::no_such_route))
+            .route(&format!("{CONTROL_PREFIX}/"), any(control::no_such_route))
+            .route(
+                &format!("{CONTROL_PREFIX}/{{*rest}}"),
+                any(control::no_such_route),
+            ),
     }
 }
 
@@ -243,18 +258,6 @@ fn bad_credentials() -> Response<Body> {
             serde_json::json!({ "message": "Bad credentials" }).to_string(),
         ))
         .expect("static response parts are valid")
-}
-
-/// The fallback for a path no route serves, on a listener that serves the
-/// control plane. A path under `/_orrery` is a control path, answered in the
-/// control plane's error shape; any other is face surface.
-async fn no_route(method: Method, OriginalUri(uri): OriginalUri) -> Response<Body> {
-    let path = uri.path();
-    if path == "/_orrery" || path.starts_with("/_orrery/") {
-        control::no_such_route(&method, path)
-    } else {
-        not_mocked(method, OriginalUri(uri)).await
-    }
 }
 
 /// The loud refusal for surface Orrery does not implement. 501 with a

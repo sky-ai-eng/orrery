@@ -53,11 +53,11 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// A path under `/_orrery` that names no route.
-pub(crate) fn no_such_route(method: &Method, path: &str) -> Response<Body> {
+pub(crate) async fn no_such_route(method: Method, OriginalUri(uri): OriginalUri) -> Response<Body> {
     errors(
         StatusCode::NOT_FOUND,
         "NOT_FOUND",
-        &format!("{method} {path} is not a control-plane route"),
+        &format!("{method} {} is not a control-plane route", uri.path()),
         None,
     )
 }
