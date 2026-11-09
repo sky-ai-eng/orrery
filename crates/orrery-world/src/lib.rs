@@ -45,7 +45,8 @@ pub type Result<T> = std::result::Result<T, WorldError>;
 
 /// Fallback T0 when a new world's config doesn't name one: 2020-01-01T00:00:00Z.
 /// A fixed constant rather than "now" so that two worlds created from the same
-/// config are byte-identical (rule 5).
+/// config are the same world (rule 5), apart from the real time each of their
+/// log entries records.
 pub const DEFAULT_T0_UNIX: i64 = 1_577_836_800;
 
 /// The reserved actor that attributes control-plane and engine-internal
