@@ -70,6 +70,35 @@ impl GitFace {
         Ok(())
     }
 
+    /// Point a pull request's `refs/pull/{n}/head` at `head_sha`. The move
+    /// has no log entry of its own: it follows from the pull's `pull.open` and
+    /// from the `ref.update` that moved its head branch, so replaying those
+    /// entries rebuilds it. The caller holds the repository's lock.
+    pub fn pin_pull_ref(
+        &self,
+        repo: &Repo,
+        number: i64,
+        head_sha: &str,
+    ) -> Result<(), GitFaceError> {
+        let bare = store::bare_dir(&self.world.repos_dir(), &repo.owner_login, &repo.name);
+        store::update_ref(&bare, &store::pull_head_ref(number), head_sha)
+    }
+
+    /// GitHub's "synchronize": every open pull request whose head is `branch`
+    /// takes `new_sha` as its head, and its `refs/pull/{n}/head` moves with
+    /// it. A closed or merged pull request keeps both where they are.
+    pub fn sync_pull_heads(
+        &self,
+        repo: &Repo,
+        branch: &str,
+        new_sha: &str,
+    ) -> Result<(), GitFaceError> {
+        for number in self.world.sync_pull_heads(repo.id, branch, new_sha)? {
+            self.pin_pull_ref(repo, number, new_sha)?;
+        }
+        Ok(())
+    }
+
     pub fn repo_lock(&self, repo_id: i64) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.repo_locks.lock().expect("repo_locks mutex poisoned");
         locks.entry(repo_id).or_default().clone()
@@ -116,13 +145,12 @@ impl GitFace {
                     "new": new,
                 }),
             )?;
-            // GitHub's "synchronize": open PRs whose head branch just moved
-            // re-pin to the new tip. A deleted branch leaves its PRs pinned
-            // to the last sha, as GitHub does.
+            // A deleted branch leaves its pull requests pinned to the last
+            // sha, as GitHub does.
             if let Some(branch) = name.strip_prefix("refs/heads/")
                 && new != store::ZERO_OID
             {
-                self.world.sync_pull_heads(repo.id, branch, new)?;
+                self.sync_pull_heads(repo, branch, new)?;
             }
         }
         if !changed {
