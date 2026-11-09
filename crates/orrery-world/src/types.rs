@@ -66,6 +66,13 @@ pub struct LogEntry {
     pub details: serde_json::Value,
 }
 
+/// The order a read of the action log returns its entries in, by `seq`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogOrder {
+    OldestFirst,
+    NewestFirst,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PullState {

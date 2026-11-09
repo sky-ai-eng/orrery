@@ -510,22 +510,64 @@ impl World {
     /// not contiguous: a restore leaves a gap (see [`World::swap_state`]).
     pub fn log_after(&self, after_seq: i64, limit: usize) -> Result<Vec<LogEntry>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT l.seq, l.clock_unix, a.login, l.action, l.details
-             FROM action_log l JOIN actors a ON a.id = l.actor_id
-             WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![after_seq, limit as i64], |r| {
-            Ok(LogEntry {
-                seq: r.get(0)?,
-                clock_unix: r.get(1)?,
-                actor_login: r.get(2)?,
-                action: r.get(3)?,
-                details: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(4)?)
-                    .unwrap_or(serde_json::Value::Null),
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![after_seq, limit as i64], log_entry)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// One page of the entries with `seq > after_seq`, in `order`, and how
+    /// many such entries there are. With `resume`, the `seq` of the previous
+    /// page's last entry, the page holds only entries past it in `order`, so a
+    /// walk neither repeats nor skips an entry while the log grows. The count
+    /// is read under the same lock as the page. Only `seq`'s order is relied
+    /// on, never that its values are contiguous.
+    pub fn log_page(
+        &self,
+        after_seq: i64,
+        order: LogOrder,
+        resume: Option<i64>,
+        limit: usize,
+    ) -> Result<(Vec<LogEntry>, i64)> {
+        let conn = self.lock();
+        let limit = limit as i64;
+        // Each bound is a plain comparison on `seq`, the rowid, so a page deep
+        // in the log reads only its own rows.
+        let entries = match order {
+            LogOrder::OldestFirst => conn
+                .prepare(&format!(
+                    "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2"
+                ))?
+                .query_map(
+                    params![resume.map_or(after_seq, |r| r.max(after_seq)), limit],
+                    log_entry,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            LogOrder::NewestFirst => conn
+                .prepare(&format!(
+                    "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 AND l.seq <= ?2
+                     ORDER BY l.seq DESC LIMIT ?3"
+                ))?
+                .query_map(
+                    params![
+                        after_seq,
+                        resume.map_or(i64::MAX, |r| r.saturating_sub(1)),
+                        limit
+                    ],
+                    log_entry,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        };
+        // TODO(ORR-59): this count reads every entry above `after_seq` while
+        // holding the world's connection, about 60 ms at a million entries;
+        // the whole-log total should come from a count kept with the log.
+        let total = conn.query_row(
+            "SELECT COUNT(*) FROM action_log WHERE seq > ?1",
+            params![after_seq],
+            |r| r.get(0),
+        )?;
+        Ok((entries, total))
     }
 
     // ---- snapshot support ----
@@ -570,6 +612,8 @@ impl World {
         Ok(())
     }
 
+    // TODO(ORR-60): reads take this lock too, so a slow read delays every
+    // write to the world; WAL would let reads run on a connection of their own.
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("world.db mutex poisoned")
     }
@@ -590,6 +634,22 @@ fn open_conn(root: &Path) -> Result<Connection> {
 fn checkpoint(conn: &Connection) -> Result<()> {
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     Ok(())
+}
+
+/// What every read of the action log selects, in the order `log_entry`
+/// reads it.
+const LOG_ENTRY_SELECT: &str = "SELECT l.seq, l.clock_unix, a.login, l.action, l.details
+     FROM action_log l JOIN actors a ON a.id = l.actor_id";
+
+fn log_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<LogEntry> {
+    Ok(LogEntry {
+        seq: r.get(0)?,
+        clock_unix: r.get(1)?,
+        actor_login: r.get(2)?,
+        action: r.get(3)?,
+        details: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(4)?)
+            .unwrap_or(serde_json::Value::Null),
+    })
 }
 
 /// The largest `seq` this database has issued, kept by SQLite for an

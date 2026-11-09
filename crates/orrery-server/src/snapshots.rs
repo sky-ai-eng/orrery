@@ -90,6 +90,8 @@ async fn read_one(state: &AppState, name: String) -> Response<Body> {
 }
 
 async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    // TODO(ORR-58): pages by the visible `after_name` cursor with no
+    // `total_count`; moves to `list::read_window` and `list::answer`.
     let mut fields = Fields::parse(&body);
     let page_size = page_size(&mut fields);
     let after_name: Option<String> = fields.optional("after_name");

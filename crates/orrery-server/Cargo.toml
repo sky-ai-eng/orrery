@@ -12,6 +12,7 @@ axum.workspace = true
 base64.workspace = true
 form_urlencoded.workspace = true
 futures-util.workspace = true
+hex.workspace = true
 jiff.workspace = true
 orrery-face-git.workspace = true
 orrery-face-github.workspace = true
@@ -19,6 +20,7 @@ orrery-snapshot.workspace = true
 orrery-world.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
+sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

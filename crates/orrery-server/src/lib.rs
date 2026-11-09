@@ -31,6 +31,7 @@ use orrery_face_github::GithubFace;
 use orrery_world::World;
 
 mod control;
+mod list;
 mod log_stream;
 mod snapshots;
 
