@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::queries;
 use crate::types::*;
-use crate::{Result, World, WorldError, constraint_violation};
+use crate::{Result, World, WorldError, uniqueness_violation};
 
 impl World {
     /// Add `login` to `org` with `role`, or change the role of a member,
@@ -99,7 +99,7 @@ impl World {
                     params![org_id, slug, name, description, clock],
                     queries::row_to_team,
                 )
-                .map_err(|e| match constraint_violation(&e) {
+                .map_err(|e| match uniqueness_violation(&e) {
                     true => WorldError::TeamExists(name.to_string()),
                     false => WorldError::from(e),
                 })?;

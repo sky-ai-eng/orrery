@@ -297,6 +297,23 @@ fn create_repo_returns_the_stored_row() {
     ));
 }
 
+#[test]
+fn create_repo_with_an_unknown_actor_is_no_such_actor() {
+    let (_dir, w) = fresh();
+    let (acme, _) = w.create_actor("acme", ActorKind::Org).unwrap();
+    let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+    let unknown = alice.id + 1000;
+    assert!(matches!(
+        w.create_repo(unknown, "webapp", None, false, "main", alice.id),
+        Err(WorldError::NoSuchActorId(id)) if id == unknown
+    ));
+    assert!(matches!(
+        w.create_repo(acme.id, "webapp", None, false, "main", unknown),
+        Err(WorldError::NoSuchActorId(id)) if id == unknown
+    ));
+    assert!(w.repo_by_owner_name("acme", "webapp").unwrap().is_none());
+}
+
 const ABSENT: &str = "0000000000000000000000000000000000000000";
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

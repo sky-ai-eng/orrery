@@ -251,7 +251,7 @@ impl World {
                 params![login, kind.as_str(), clock],
                 queries::row_to_actor,
             )
-            .map_err(|e| match constraint_violation(&e) {
+            .map_err(|e| match uniqueness_violation(&e) {
                 true => WorldError::ActorExists(login.to_string()),
                 false => WorldError::from(e),
             })?;
@@ -376,6 +376,18 @@ impl World {
         validate_repo_name(name)?;
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
+        // The insert's foreign keys refuse an unknown actor too, but as an
+        // untyped SQLite error that does not say which id it was.
+        for id in [owner_id, created_by] {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM actors WHERE id = ?1)",
+                params![id],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(WorldError::NoSuchActorId(id));
+            }
+        }
         let clock = queries::clock(&tx)?;
         let repo = tx
             .query_row(
@@ -397,7 +409,7 @@ impl World {
                 ],
                 queries::row_to_repo,
             )
-            .map_err(|e| match constraint_violation(&e) {
+            .map_err(|e| match uniqueness_violation(&e) {
                 true => WorldError::RepoExists(name.to_string()),
                 false => WorldError::from(e),
             })?;
@@ -780,11 +792,15 @@ fn wall_unix_ms() -> i64 {
     }
 }
 
-pub(crate) fn constraint_violation(e: &rusqlite::Error) -> bool {
+/// Whether a write failed because a row with the same key already exists: a
+/// UNIQUE constraint or index, or a PRIMARY KEY. A foreign-key, CHECK, or NOT
+/// NULL failure is a different fault, and its caller reports it as itself.
+pub(crate) fn uniqueness_violation(e: &rusqlite::Error) -> bool {
     matches!(
         e,
         rusqlite::Error::SqliteFailure(f, _)
-            if f.code == rusqlite::ErrorCode::ConstraintViolation
+            if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                || f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
     )
 }
 
@@ -833,7 +849,54 @@ fn validate_repo_name(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActorKind, DEFAULT_T0_UNIX, World, WorldSecret, wall_unix_ms};
+    use super::{
+        ActorKind, DEFAULT_T0_UNIX, World, WorldSecret, uniqueness_violation, wall_unix_ms,
+    };
+
+    // No kernel write reaches a foreign-key, CHECK, or NOT NULL failure, so
+    // the predicate is checked against each kind of failure directly.
+    #[test]
+    fn only_a_repeated_key_is_a_uniqueness_violation() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE t (
+                 a         INTEGER NOT NULL,
+                 b         INTEGER NOT NULL,
+                 u         INTEGER UNIQUE,
+                 c         INTEGER CHECK (c > 0),
+                 parent_id INTEGER REFERENCES parent(id),
+                 PRIMARY KEY (a, b)
+             );
+             INSERT INTO t (a, b, u) VALUES (1, 1, 1);",
+        )
+        .unwrap();
+        let fails = |sql: &str| {
+            let e = conn.execute(sql, []).unwrap_err();
+            assert!(
+                matches!(&e, rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::ConstraintViolation),
+                "{sql}: {e}"
+            );
+            e
+        };
+        assert!(uniqueness_violation(&fails(
+            "INSERT INTO t (a, b) VALUES (1, 1)"
+        )));
+        assert!(uniqueness_violation(&fails(
+            "INSERT INTO t (a, b, u) VALUES (2, 2, 1)"
+        )));
+        assert!(!uniqueness_violation(&fails(
+            "INSERT INTO t (a, b, parent_id) VALUES (3, 3, 9)"
+        )));
+        assert!(!uniqueness_violation(&fails(
+            "INSERT INTO t (a, b, c) VALUES (4, 4, 0)"
+        )));
+        assert!(!uniqueness_violation(&fails(
+            "INSERT INTO t (a) VALUES (5)"
+        )));
+    }
 
     // The bounds are read through the function the append reads, so the
     // world's one wall-clock read stays its only one.
