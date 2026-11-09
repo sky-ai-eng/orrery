@@ -396,6 +396,10 @@ pub(crate) async fn merge_pull(
 
     // Bookkeeping mirrors what a push of this ref would have recorded, plus
     // the merge itself; base-branch PRs (if any) re-pin like any head move.
+    // TODO(ORR-64): these are four separate commits, so a failure partway
+    // leaves the base moved with the pull still open, and a reader with its
+    // own connection can see the merge partway; record it in one commit,
+    // after its refs move, as a push is.
     let record = || -> Result<(), orrery_face_git::GitFaceError> {
         face.world.log_action(
             actor.id,
