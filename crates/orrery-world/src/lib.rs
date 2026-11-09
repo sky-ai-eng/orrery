@@ -432,27 +432,54 @@ impl World {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Log entries with `seq < before_seq`, newest first, at most `limit`;
-    /// with no `before_seq`, the newest `limit` entries. Only `seq`'s order
-    /// is relied on, never that its values are contiguous.
-    pub fn log_before(&self, before_seq: Option<i64>, limit: usize) -> Result<Vec<LogEntry>> {
+    /// One page of the entries with `seq > after_seq`, in `order`, and how
+    /// many such entries there are. With `resume`, the `seq` of the previous
+    /// page's last entry, the page holds only entries past it in `order`, so a
+    /// walk neither repeats nor skips an entry while the log grows. The count
+    /// is read under the same lock as the page. Only `seq`'s order is relied
+    /// on, never that its values are contiguous.
+    pub fn log_page(
+        &self,
+        after_seq: i64,
+        order: LogOrder,
+        resume: Option<i64>,
+        limit: usize,
+    ) -> Result<(Vec<LogEntry>, i64)> {
         let conn = self.lock();
         let limit = limit as i64;
-        // Two statements rather than `?1 IS NULL OR …`, so the cursor stays a
-        // range on the rowid and a page deep in the log reads only its rows.
-        let rows = match before_seq {
-            Some(before_seq) => conn
+        // Each bound is a plain comparison on `seq`, the rowid, so a page deep
+        // in the log reads only its own rows.
+        let entries = match order {
+            LogOrder::OldestFirst => conn
                 .prepare(&format!(
-                    "{LOG_ENTRY_SELECT} WHERE l.seq < ?1 ORDER BY l.seq DESC LIMIT ?2"
+                    "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2"
                 ))?
-                .query_map(params![before_seq, limit], log_entry)?
+                .query_map(
+                    params![resume.map_or(after_seq, |r| r.max(after_seq)), limit],
+                    log_entry,
+                )?
                 .collect::<std::result::Result<Vec<_>, _>>()?,
-            None => conn
-                .prepare(&format!("{LOG_ENTRY_SELECT} ORDER BY l.seq DESC LIMIT ?1"))?
-                .query_map(params![limit], log_entry)?
+            LogOrder::NewestFirst => conn
+                .prepare(&format!(
+                    "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 AND l.seq <= ?2
+                     ORDER BY l.seq DESC LIMIT ?3"
+                ))?
+                .query_map(
+                    params![
+                        after_seq,
+                        resume.map_or(i64::MAX, |r| r.saturating_sub(1)),
+                        limit
+                    ],
+                    log_entry,
+                )?
                 .collect::<std::result::Result<Vec<_>, _>>()?,
         };
-        Ok(rows)
+        let total = conn.query_row(
+            "SELECT COUNT(*) FROM action_log WHERE seq > ?1",
+            params![after_seq],
+            |r| r.get(0),
+        )?;
+        Ok((entries, total))
     }
 
     // ---- snapshot support ----

@@ -16,15 +16,16 @@ use axum::extract::{OriginalUri, Path as UrlPath, State};
 use axum::http::{Method, Response, StatusCode};
 use axum::routing::{get, post, put};
 use orrery_world::{
-    Actor, ActorEmail, ActorKind, OAUTH_CLIENT_ID_PREFIX, SYSTEM_ACTOR_LOGIN, WorldError,
+    Actor, ActorEmail, ActorKind, LogOrder, OAUTH_CLIENT_ID_PREFIX, SYSTEM_ACTOR_LOGIN, WorldError,
     validate_actor_kind, validate_login, validate_oauth_app_callback_url, validate_oauth_app_name,
 };
 use serde_json::value::RawValue;
 
+use crate::list::{self, SortDir, SortKey};
 use crate::{AppState, json};
 
-const LIST_PAGE_MAX: usize = 500;
-const LIST_PAGE_DEFAULT: usize = 100;
+pub(crate) const LIST_PAGE_MAX: usize = 500;
+pub(crate) const LIST_PAGE_DEFAULT: usize = 100;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -47,7 +48,6 @@ pub fn router(state: AppState) -> Router {
             post(issue_oauth_client_secret),
         )
         .route("/log/list", post(log_list))
-        .route("/log/recent", post(log_recent))
         .merge(crate::snapshots::router())
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
@@ -308,6 +308,9 @@ fn system_actor(state: &AppState) -> Result<Actor, Box<Response<Body>>> {
     }
 }
 
+/// The action log, oldest first unless the body orders it newest first.
+/// `after_seq` narrows it to what followed a position another call reported,
+/// such as a diff's `log.from_seq` or a snapshot's `last_seq`.
 async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let after_seq: i64 = fields.optional("after_seq").unwrap_or(0);
@@ -317,48 +320,26 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
             "after_seq",
         ));
     }
-    let page_size = page_size(&mut fields);
-    let page_size = match fields.finish(page_size) {
-        Ok(n) => n,
+    let seq = SortKey {
+        name: "seq",
+        default_dir: SortDir::Asc,
+    };
+    let dir = list::read_sort(&mut fields, &[seq]).map_or(SortDir::Asc, |(_, dir)| dir);
+    let query = serde_json::json!({ "after_seq": after_seq, "sort_dir": dir });
+    let window = list::read_window::<i64>(&mut fields, &query);
+    let window = match fields.finish(Some(window)) {
+        Ok(w) => w,
         Err(resp) => return *resp,
     };
-    match state.world.log_after(after_seq, page_size + 1) {
-        Ok(items) => {
-            let (items, next) = keyset_page(items, page_size, |e| e.seq);
-            json(
-                StatusCode::OK,
-                serde_json::json!({ "items": items, "next_after_seq": next }),
-            )
-        }
-        Err(e) => internal(e),
-    }
-}
-
-/// The log newest first, so a caller showing the latest entries reads only
-/// those. A cursor above the newest entry is a valid position and starts the
-/// page at the newest.
-async fn log_recent(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    let mut fields = Fields::parse(&body);
-    let before_seq: Option<i64> = fields.optional("before_seq");
-    if before_seq.is_some_and(|s| s < 1) {
-        fields.fault(Fault::out_of_range(
-            "before_seq must be 1 or more".to_string(),
-            "before_seq",
-        ));
-    }
-    let page_size = page_size(&mut fields);
-    let page_size = match fields.finish(page_size) {
-        Ok(n) => n,
-        Err(resp) => return *resp,
+    let order = match dir {
+        SortDir::Asc => LogOrder::OldestFirst,
+        SortDir::Desc => LogOrder::NewestFirst,
     };
-    match state.world.log_before(before_seq, page_size + 1) {
-        Ok(items) => {
-            let (items, next) = keyset_page(items, page_size, |e| e.seq);
-            json(
-                StatusCode::OK,
-                serde_json::json!({ "items": items, "next_before_seq": next }),
-            )
-        }
+    match state
+        .world
+        .log_page(after_seq, order, window.resume, window.fetch())
+    {
+        Ok((rows, total)) => list::answer(rows, &window, total, |e| e.seq),
         Err(e) => internal(e),
     }
 }
@@ -366,6 +347,8 @@ async fn log_recent(State(state): State<AppState>, body: Bytes) -> Response<Body
 /// Which actors a world holds, so a caller handed a world it did not build
 /// knows whom it may issue tokens for. Never a token.
 async fn list_actors(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    // TODO(ORR-58): pages by the visible `after_login` cursor with no
+    // `total_count`; moves to `list::read_window` and `list::answer`.
     let mut fields = Fields::parse(&body);
     let page_size = page_size(&mut fields);
     let after_login: Option<String> = fields.optional("after_login");
@@ -425,6 +408,8 @@ fn read_actor(state: &AppState, login: String) -> Response<Body> {
 /// Which OAuth apps a world holds, so a caller handed a world it did not
 /// build knows which it may issue secrets for. Never a secret.
 async fn list_oauth_apps(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    // TODO(ORR-58): pages by the visible `after_client_id` cursor with no
+    // `total_count`; moves to `list::read_window` and `list::answer`.
     let mut fields = Fields::parse(&body);
     let page_size = page_size(&mut fields);
     let after_client_id: Option<String> = fields.optional("after_client_id");
@@ -616,6 +601,11 @@ impl Fields {
         self.faults.push(fault);
     }
 
+    /// Whether any fault has been found in what was read so far.
+    pub(crate) fn has_faults(&self) -> bool {
+        self.not_an_object.is_some() || !self.faults.is_empty()
+    }
+
     /// What the route read, if the body has no fault. Otherwise the error
     /// shape with every fault, in the order found, then one for each field
     /// the route does not take.
@@ -722,7 +712,7 @@ impl Fault {
         }
     }
 
-    fn out_of_range(message: String, field: &'static str) -> Fault {
+    pub(crate) fn out_of_range(message: String, field: &'static str) -> Fault {
         Fault {
             reason: "OUT_OF_RANGE",
             message,

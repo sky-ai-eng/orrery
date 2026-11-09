@@ -294,10 +294,39 @@ async fn bad_list_bodies_name_every_fault() {
         [fault("OUT_OF_RANGE", Some("after_seq"))]
     );
     assert_eq!(
-        refused("/log/list", json!({ "after_seq": -1, "page_size": 0 })),
+        refused("/log/list", json!({ "after_seq": -1, "page_size": 501 })),
         [
             fault("OUT_OF_RANGE", Some("after_seq")),
             fault("OUT_OF_RANGE", Some("page_size")),
+        ]
+    );
+
+    // An order is a key from the list's own vocabulary and a direction, and
+    // a direction alone sets nothing.
+    assert_eq!(
+        refused("/log/list", json!({ "sort_key": "clock_unix" })),
+        [fault("INVALID_ARGUMENT", Some("sort_key"))]
+    );
+    assert_eq!(
+        refused(
+            "/log/list",
+            json!({ "sort_key": "seq", "sort_dir": "DESC" })
+        ),
+        [fault("INVALID_ARGUMENT", Some("sort_dir"))]
+    );
+    assert_eq!(
+        refused("/log/list", json!({ "sort_dir": "desc" })),
+        [fault("INVALID_ARGUMENT", Some("sort_dir"))]
+    );
+    assert_eq!(
+        refused(
+            "/log/list",
+            json!({ "sort_key": "time", "sort_dir": "down", "page_size": -1 })
+        ),
+        [
+            fault("INVALID_ARGUMENT", Some("sort_key")),
+            fault("INVALID_ARGUMENT", Some("sort_dir")),
+            fault("INVALID_ARGUMENT", Some("page_size")),
         ]
     );
 }
@@ -384,7 +413,7 @@ async fn reading_writes_nothing() {
     let before = log();
     list(base, "/actors/list", json!({}));
     list(base, "/oauth-apps/list", json!({}));
-    list(base, "/log/recent", json!({}));
+    list(base, "/log/list", newest_first());
     read(base, "/actors/alice");
     read(base, &format!("/oauth-apps/{client_id}"));
     get(base, "/actors/ghost");
@@ -392,98 +421,207 @@ async fn reading_writes_nothing() {
     assert_eq!(log(), before);
 }
 
-/// The log pages like the lists above: a page that ends on the last entry
-/// has a null cursor.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_logs_last_page_has_a_null_cursor() {
-    let inst = boot().await;
-    let base = &inst.base;
-    mint_actor(base, "alice", "user");
-    mint_actor(base, "bob", "user");
+fn newest_first() -> Value {
+    json!({ "sort_key": "seq", "sort_dir": "desc" })
+}
+
+/// The whole log, oldest first, in one read.
+fn whole_log(base: &str) -> Vec<Value> {
     let all = list(base, "/log/list", json!({ "page_size": 500 }));
-    let entries = all["items"].as_array().unwrap().len();
-    assert!(entries >= 2);
-    assert_eq!(all["next_after_seq"], Value::Null);
+    assert!(all.get("next_page_token").is_none(), "{all}");
+    all["items"].as_array().unwrap().clone()
+}
 
-    let exact = list(base, "/log/list", json!({ "page_size": entries }));
-    assert_eq!(exact["items"].as_array().unwrap().len(), entries);
-    assert_eq!(exact["next_after_seq"], Value::Null);
-
-    let short = list(base, "/log/list", json!({ "page_size": entries - 1 }));
-    let last = short["items"][entries - 2]["seq"].clone();
-    assert_eq!(short["next_after_seq"], last);
-    let rest = list(base, "/log/list", json!({ "after_seq": last }));
-    assert_eq!(rest["items"].as_array().unwrap().len(), 1);
-    assert_eq!(rest["next_after_seq"], Value::Null);
+/// Follow `next_page_token` from `body` to the last page, calling `between`
+/// after each page but the last. Every page but the last is full.
+fn walk(base: &str, mut body: Value, mut between: impl FnMut()) -> Vec<Value> {
+    let page_size = body["page_size"].as_u64().unwrap() as usize;
+    let mut walked = Vec::new();
+    loop {
+        let page = list(base, "/log/list", body.clone());
+        let items = page["items"].as_array().unwrap();
+        walked.extend(items.iter().cloned());
+        let Some(token) = page.get("next_page_token") else {
+            assert!(items.len() <= page_size, "{page}");
+            return walked;
+        };
+        assert_eq!(items.len(), page_size, "{page}");
+        assert!(walked.len() < 1000, "the walk does not end");
+        body["page_token"] = token.clone();
+        between();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_log_reads_newest_first_one_page_at_a_time() {
+async fn the_log_pages_by_token_in_either_order() {
     let inst = boot().await;
     let base = &inst.base;
     for login in ["alice", "bob", "carol", "dana", "erin"] {
         mint_actor(base, login, "user");
     }
-    // The log oldest first, reversed, is what the walk below must visit. It
-    // is compared entry by entry, since nothing promises `seq` values are
-    // contiguous.
-    let oldest_first = list(base, "/log/list", json!({ "page_size": 500 }));
-    assert_eq!(oldest_first["next_after_seq"], Value::Null);
-    let mut newest_first = oldest_first["items"].as_array().unwrap().clone();
-    newest_first.reverse();
-    let n = newest_first.len();
-    let newest_seq = newest_first[0]["seq"].clone();
-
-    let first = list(base, "/log/recent", json!({ "page_size": 1 }));
-    assert_eq!(first["items"], json!([newest_first[0]]));
-    assert_eq!(first["next_before_seq"], newest_seq);
-    // The cursor is a position, not a reference: one above the newest entry
-    // starts the page at the newest.
-    let above = newest_seq.as_i64().unwrap() + 1000;
-    assert_eq!(
-        list(
-            base,
-            "/log/recent",
-            json!({ "page_size": 1, "before_seq": above })
-        ),
-        first
-    );
-
+    let log = whole_log(base);
+    let n = log.len();
     // A page size that leaves the last page short.
     let page_size = (2..n).find(|k| !n.is_multiple_of(*k)).unwrap();
-    let mut walked = Vec::new();
-    let mut body = json!({ "page_size": page_size });
-    loop {
-        let page = list(base, "/log/recent", body.clone());
-        let items = page["items"].as_array().unwrap();
-        walked.extend(items.iter().cloned());
-        assert!(walked.len() <= n, "the walk passed the oldest entry");
-        let next = &page["next_before_seq"];
-        if next.is_null() {
-            assert_eq!(items.len(), n % page_size);
-            break;
-        }
-        assert_eq!(items.len(), page_size);
-        assert_eq!(next, &items[page_size - 1]["seq"]);
-        body["before_seq"] = next.clone();
+
+    let first = list(base, "/log/list", json!({ "page_size": 1 }));
+    assert_eq!(first["items"], json!([log[0]]));
+    assert_eq!(first["total_count"], n);
+    let mut body = newest_first();
+    body["page_size"] = json!(1);
+    let newest = list(base, "/log/list", body);
+    assert_eq!(newest["items"], json!([log[n - 1]]));
+    assert_eq!(newest["total_count"], n);
+
+    let mut body = newest_first();
+    body["page_size"] = json!(page_size);
+    let mut reversed = log.clone();
+    reversed.reverse();
+    assert_eq!(walk(base, body, || {}), reversed);
+    assert_eq!(walk(base, json!({ "page_size": page_size }), || {}), log);
+}
+
+/// A token holds the last entry served, so entries appended mid-walk shift
+/// nothing: newest first they land above the walk and are not visited, and
+/// oldest first they are reached at its end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_walk_is_exact_while_the_log_grows() {
+    let inst = boot().await;
+    let base = &inst.base;
+    for login in ["alice", "bob", "carol", "dana"] {
+        mint_actor(base, login, "user");
     }
-    assert_eq!(walked, newest_first);
+    let log = whole_log(base);
+    let mut reversed = log.clone();
+    reversed.reverse();
+    // Appends after the first two pages only, so an oldest-first walk ends.
+    let mut minted = 0;
+    let mut grow = |pages: &mut usize| {
+        *pages += 1;
+        if *pages <= 2 {
+            minted += 1;
+            mint_actor(base, &format!("late{minted}"), "user");
+        }
+    };
+
+    let mut body = newest_first();
+    body["page_size"] = json!(2);
+    let mut pages = 0;
+    assert_eq!(walk(base, body, || grow(&mut pages)), reversed);
+
+    let grown = whole_log(base).len();
+    assert!(grown > log.len());
+    let mut pages = 0;
+    let walked = walk(base, json!({ "page_size": 2 }), || grow(&mut pages));
+    assert!(walked.len() > grown, "the walk reached the late entries");
+    assert_eq!(walked, whole_log(base));
+}
+
+/// A position another call reported, such as a snapshot's `last_seq`, starts
+/// a read of what followed it, in either order.
+#[tokio::test(flavor = "multi_thread")]
+async fn after_seq_reads_what_followed_a_position() {
+    let inst = boot().await;
+    let base = &inst.base;
+    mint_actor(base, "alice", "user");
+    let seed = control_post(base, "/_orrery/snapshots", json!({ "name": "seed" }));
+    let last_seq = seed["last_seq"].clone();
+    mint_actor(base, "bob", "user");
+    mint_actor(base, "carol", "user");
+
+    let after: Vec<Value> = whole_log(base)
+        .into_iter()
+        .filter(|e| e["seq"].as_i64() > last_seq.as_i64())
+        .collect();
+    assert!(!after.is_empty());
+
+    let oldest = list(base, "/log/list", json!({ "after_seq": last_seq }));
+    assert_eq!(oldest["items"], json!(after));
+    assert_eq!(oldest["total_count"], after.len());
+
+    let mut body = newest_first();
+    body["after_seq"] = last_seq;
+    let newest = list(base, "/log/list", body);
+    let mut reversed = after.clone();
+    reversed.reverse();
+    assert_eq!(newest["items"], json!(reversed));
+    assert_eq!(newest["total_count"], after.len());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_newest_first_cursor_below_one_is_out_of_range() {
+async fn a_page_size_of_zero_counts_the_log() {
     let inst = boot().await;
-    for before_seq in [0, -1] {
-        let (status, answer) = post(
-            &inst.base,
-            "/log/recent",
-            json!({ "before_seq": before_seq }),
-        );
-        assert_eq!(status, 400, "{before_seq}: {answer}");
+    let base = &inst.base;
+    mint_actor(base, "alice", "user");
+    mint_actor(base, "bob", "user");
+    let n = whole_log(base).len();
+    assert_eq!(
+        list(base, "/log/list", json!({ "page_size": 0 })),
+        json!({ "items": [], "total_count": n })
+    );
+    let first_seq = whole_log(base)[0]["seq"].clone();
+    assert_eq!(
+        list(
+            base,
+            "/log/list",
+            json!({ "page_size": 0, "after_seq": first_seq })
+        ),
+        json!({ "items": [], "total_count": n - 1 })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_token_answers_only_the_query_it_was_issued_for() {
+    let inst = boot().await;
+    let base = &inst.base;
+    mint_actor(base, "alice", "user");
+    mint_actor(base, "bob", "user");
+    let token = list(base, "/log/list", json!({ "page_size": 1 }))["next_page_token"].clone();
+    assert!(token.is_string());
+
+    // The default order and the same order named are one query.
+    let named = list(
+        base,
+        "/log/list",
+        json!({ "page_size": 1, "sort_key": "seq", "page_token": token }),
+    );
+    let plain = list(
+        base,
+        "/log/list",
+        json!({ "page_size": 1, "page_token": token }),
+    );
+    assert_eq!(named, plain);
+    // So are an absent `after_seq` and one that narrows nothing.
+    let zero = list(
+        base,
+        "/log/list",
+        json!({ "page_size": 1, "after_seq": 0, "page_token": token }),
+    );
+    assert_eq!(zero, plain);
+
+    let refused = |body: Value| -> Vec<(String, Option<String>)> {
+        let (status, answer) = post(base, "/log/list", body);
+        assert_eq!(status, 400, "{answer}");
+        faults(&answer)
+    };
+    let mut other_order = newest_first();
+    other_order["page_token"] = token.clone();
+    let other_filter = json!({ "after_seq": 1, "page_token": token });
+    for body in [
+        other_order,
+        other_filter,
+        json!({ "page_token": "not-a-token" }),
+        json!({ "page_token": "" }),
+    ] {
         assert_eq!(
-            faults(&answer),
-            [fault("OUT_OF_RANGE", Some("before_seq"))],
-            "{before_seq}"
+            refused(body.clone()),
+            [fault("INVALID_ARGUMENT", Some("page_token"))],
+            "{body}"
         );
     }
+    // A token is checked against a query only once the query itself reads.
+    assert_eq!(
+        refused(json!({ "sort_dir": "up", "page_token": token })),
+        [fault("INVALID_ARGUMENT", Some("sort_dir"))]
+    );
 }

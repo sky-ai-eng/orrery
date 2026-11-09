@@ -31,6 +31,7 @@ use orrery_face_github::GithubFace;
 use orrery_world::World;
 
 mod control;
+mod list;
 mod snapshots;
 
 /// Where the control plane is mounted, on its own listener or the faces'.
