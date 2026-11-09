@@ -609,7 +609,11 @@ pub(crate) async fn merge_pull(
         Ok(())
     };
     if let Err(e) = record() {
-        unwind_merge(&face, &repo, &bare, &base, &base.repins[..pinned]);
+        face.git.move_back(
+            &repo,
+            &[(base.name, base.old, base.new)],
+            &base.repins[..pinned],
+        );
         return internal(e);
     }
 
@@ -621,28 +625,6 @@ pub(crate) async fn merge_pull(
             "message": "Pull Request successfully merged",
         }),
     )
-}
-
-/// Put back the refs a merge moved when recording it failed, so the
-/// repository agrees with the world, which holds no trace of the merge: the
-/// base branch returns to `base.old` by compare-and-swap, and the ref of each
-/// pull request in `pinned`, the ones the merge moved, to the head the world
-/// still pins it at. A retry then starts from the state the failed merge
-/// started from. The route answers 500 either way, so a ref that cannot be
-/// put back is logged, not answered.
-fn unwind_merge(face: &GithubFace, repo: &Repo, bare: &Path, base: &RefMove<'_>, pinned: &[i64]) {
-    if let Err(e) = store::update_ref_cas(bare, base.name, base.old, base.new) {
-        tracing::error!(error = %e, git_ref = base.name, "merge unwind left a ref moved");
-    }
-    for &number in pinned {
-        if let Err(e) = face.git.restore_pull_ref(repo, number) {
-            tracing::error!(
-                error = %e,
-                git_ref = store::pull_head_ref(number),
-                "merge unwind left a ref moved"
-            );
-        }
-    }
 }
 
 #[derive(serde::Deserialize)]

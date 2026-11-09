@@ -42,7 +42,7 @@ Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CO
 
 The entries and the state they describe land in one commit, after every ref the push moved is in place, so a reader that can see any of a push's entries sees the repository, its refs, and its pull requests as the push left them. Opening, closing, reopening, and merging a pull request take the same per-repository lock, so the pull requests a push re-pins are the ones open on its branch when it lands.
 
-A push whose record fails moves back every ref it moved, appends nothing, and answers `500`: each branch it moved, created, or deleted returns to where it was, `HEAD` to the default branch if the push set it, and each pull request ref it re-pinned to the head the pull request still has. A retry of the push then finds the refs the failed push found, and lands and is recorded as if the failed push had not happened. A ref that cannot be moved back is logged.
+A push whose record fails moves back every ref it moved, appends nothing, and answers `500`: each branch it moved, created, or deleted returns to where it was, `HEAD` to the default branch if the push set it, and each pull request ref it re-pinned to the head the pull request still has. A retry of the push then finds the refs the failed push found, and lands and is recorded as if the failed push had not happened. A ref that cannot be moved back is logged. So is a push whose refs cannot be read after `git-receive-pack` runs, which moves nothing back, because which refs it moved is unknown.
 
 A commit's author and committer dates come from the client that made it, not from Orrery. A script that commits sets them from the world clock first (`orrery env`, `usage.md`), or replaying it produces different commit ids.
 

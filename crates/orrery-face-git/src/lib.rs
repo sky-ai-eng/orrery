@@ -109,13 +109,35 @@ impl GitFace {
         self.gate.clone()
     }
 
-    /// Move a pull request's ref back to the head the world pins it at, for a
-    /// write that moved it and then failed to record. The caller holds the
-    /// repository's lock for write.
-    pub fn restore_pull_ref(&self, repo: &Repo, number: i64) -> Result<(), GitFaceError> {
-        match self.world.pull_by_number(repo.id, number)? {
-            Some(p) => self.pin_pull_ref(repo, number, &p.head_sha),
-            None => Ok(()),
+    /// Put back the refs a write moved when recording it failed, so the
+    /// repository agrees with the world, which holds no trace of the write.
+    /// Each ref in `refs`, as `(name, old, new)`, returns to `old` by
+    /// compare-and-swap, which deletes a ref the write created and recreates
+    /// one it deleted. The ref of each pull request in `pinned`, the ones the
+    /// write re-pinned, returns to the head the world still pins it at. A
+    /// retry of the write then starts from the refs the failed one found. It
+    /// is best effort: a ref that cannot be put back is logged, and the rest
+    /// are still put back. The caller holds the repository's lock for write.
+    pub fn move_back(&self, repo: &Repo, refs: &[(&str, &str, &str)], pinned: &[i64]) {
+        let bare = store::bare_dir(&self.world.repos_dir(), &repo.owner_login, &repo.name);
+        for &(name, old, new) in refs {
+            if let Err(e) = store::update_ref_cas(&bare, name, old, new) {
+                tracing::error!(error = %e, git_ref = name, "unwind left a ref moved");
+            }
+        }
+        for &number in pinned {
+            let restored = match self.world.pull_by_number(repo.id, number) {
+                Ok(Some(p)) => self.pin_pull_ref(repo, number, &p.head_sha),
+                Ok(None) => Ok(()),
+                Err(e) => Err(e.into()),
+            };
+            if let Err(e) = restored {
+                tracing::error!(
+                    error = %e,
+                    git_ref = store::pull_head_ref(number),
+                    "unwind left a ref moved"
+                );
+            }
         }
     }
 
@@ -124,9 +146,9 @@ impl GitFace {
     /// pull requests on each pushed branch, a `pushed_at` bump, and GitHub's
     /// first-push rule — the first branch pushed into an empty repo becomes
     /// the default branch. Receive-pack has already moved the pushed refs, so
-    /// a step that fails here moves them back ([`GitFace::unwind_push`])
-    /// before the error is returned. The caller holds the repository's lock
-    /// for write.
+    /// a step that fails here moves them back ([`GitFace::move_back`]), and
+    /// `HEAD` if the push set it, before the error is returned. The caller
+    /// holds the repository's lock for write.
     fn observe_push(
         &self,
         repo: &Repo,
@@ -200,47 +222,16 @@ impl GitFace {
             Ok(())
         };
         if let Err(e) = record() {
-            self.unwind_push(repo, &bare, &changed, head_set, &pinned);
+            self.move_back(repo, &changed, &pinned);
+            // Only the first-push rule moves `HEAD`, and its record moves the
+            // default branch with it, so `HEAD` was at the default branch the
+            // world still has.
+            if head_set && let Err(head) = store::set_head_symref(&bare, &repo.default_branch) {
+                tracing::error!(error = %head, git_ref = "HEAD", "unwind left a ref moved");
+            }
             return Err(e);
         }
         Ok(())
-    }
-
-    /// Put back the refs a push moved when recording it failed, so the
-    /// repository agrees with the world, which holds no trace of the push:
-    /// each ref in `changed`, as `(name, old, new)`, returns to `old` by
-    /// compare-and-swap, so a branch the push created is deleted and one it
-    /// deleted is recreated; `HEAD`, when the push set it, to the default
-    /// branch the world still has; and the ref of each pull request in
-    /// `pinned`, the ones the push moved, to the head the world still pins it
-    /// at. A retry then finds the refs the failed push found, and moves and
-    /// records them. The route answers 500 either way, so a ref that cannot be
-    /// put back is logged, not answered.
-    fn unwind_push(
-        &self,
-        repo: &Repo,
-        bare: &std::path::Path,
-        changed: &[(&str, &str, &str)],
-        head_set: bool,
-        pinned: &[i64],
-    ) {
-        for &number in pinned {
-            if let Err(e) = self.restore_pull_ref(repo, number) {
-                tracing::error!(
-                    error = %e,
-                    git_ref = store::pull_head_ref(number),
-                    "push unwind left a ref moved"
-                );
-            }
-        }
-        if head_set && let Err(e) = store::set_head_symref(bare, &repo.default_branch) {
-            tracing::error!(error = %e, git_ref = "HEAD", "push unwind left a ref moved");
-        }
-        for &(name, old, new) in changed {
-            if let Err(e) = store::update_ref_cas(bare, name, old, new) {
-                tracing::error!(error = %e, git_ref = name, "push unwind left a ref moved");
-            }
-        }
     }
 }
 
@@ -433,6 +424,8 @@ async fn serve(
         && cgi_resp.status == 200
     {
         let pusher = actor.expect("pushes are refused without an actor above");
+        // Refs that can't be listed after receive-pack can't be moved back
+        // either: which ones it moved is unknown.
         let observed = store::list_refs(&bare)
             .and_then(|after| face.observe_push(&repo, pusher, &before, &after));
         if let Err(e) = observed {
