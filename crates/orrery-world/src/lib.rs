@@ -434,7 +434,7 @@ impl World {
 
     /// Log entries with `seq < before_seq`, newest first, at most `limit`;
     /// with no `before_seq`, the newest `limit` entries. Only `seq`'s order
-    /// is relied on: its values can skip numbers.
+    /// is relied on, never that its values are contiguous.
     pub fn log_before(&self, before_seq: Option<i64>, limit: usize) -> Result<Vec<LogEntry>> {
         let conn = self.lock();
         let limit = limit as i64;

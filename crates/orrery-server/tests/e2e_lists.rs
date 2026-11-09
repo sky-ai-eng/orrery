@@ -425,7 +425,8 @@ async fn the_log_reads_newest_first_one_page_at_a_time() {
         mint_actor(base, login, "user");
     }
     // The log oldest first, reversed, is what the walk below must visit. It
-    // is compared entry by entry, since `seq` can skip numbers.
+    // is compared entry by entry, since nothing promises `seq` values are
+    // contiguous.
     let oldest_first = list(base, "/log/list", json!({ "page_size": 500 }));
     assert_eq!(oldest_first["next_after_seq"], Value::Null);
     let mut newest_first = oldest_first["items"].as_array().unwrap().clone();
