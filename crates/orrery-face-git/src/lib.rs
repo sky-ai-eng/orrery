@@ -36,12 +36,15 @@ pub enum GitFaceError {
 
 pub struct GitFace {
     world: Arc<World>,
-    /// Serializes git-side writes per repo — receive-pack's before/after ref
-    /// observation and the merge endpoint's check-then-move — so neither can
-    /// interleave with a concurrent write to the same repo. Opening, closing,
-    /// and reopening a pull request take it too: which pulls are open on a
-    /// branch decides which pull refs a push moves before it is recorded.
-    repo_locks: std::sync::Mutex<BTreeMap<i64, Arc<tokio::sync::Mutex<()>>>>,
+    /// One read-write lock per repo. A write holds it for write, from the
+    /// refs it reads before moving any until its record commits: a push
+    /// (receive-pack's before/after ref observation), a merge (its
+    /// check-then-move), and opening, closing, or reopening a pull request,
+    /// since which pulls are open on a branch decides which pull refs a push
+    /// moves before it is recorded. Every other git request, a fetch's in
+    /// particular, holds it for read, so it sees the repository before a write
+    /// or after its record, never partway.
+    repo_locks: std::sync::Mutex<BTreeMap<i64, Arc<tokio::sync::RwLock<()>>>>,
     /// World-wide write gate: every git-side operation holds it for read;
     /// snapshot create/restore hold it for write, so a copy of the world
     /// directory never races an in-flight push or merge.
@@ -75,7 +78,7 @@ impl GitFace {
     /// Point a pull request's `refs/pull/{n}/head` at `head_sha`. The move
     /// has no log entry of its own: it follows from the pull's `pull.open` and
     /// from the `ref.update` that moved its head branch, so replaying those
-    /// entries rebuilds it. The caller holds the repository's lock.
+    /// entries rebuilds it. The caller holds the repository's lock for write.
     pub fn pin_pull_ref(
         &self,
         repo: &Repo,
@@ -86,7 +89,7 @@ impl GitFace {
         store::update_ref(&bare, &store::pull_head_ref(number), head_sha)
     }
 
-    pub fn repo_lock(&self, repo_id: i64) -> Arc<tokio::sync::Mutex<()>> {
+    pub fn repo_lock(&self, repo_id: i64) -> Arc<tokio::sync::RwLock<()>> {
         let mut locks = self.repo_locks.lock().expect("repo_locks mutex poisoned");
         locks.entry(repo_id).or_default().clone()
     }
@@ -99,7 +102,7 @@ impl GitFace {
     /// ref (sorted, so replay order is stable), GitHub's "synchronize" for the
     /// pull requests on each pushed branch, a `pushed_at` bump, and GitHub's
     /// first-push rule — the first branch pushed into an empty repo becomes
-    /// the default branch. The caller holds the repository's lock.
+    /// the default branch. The caller holds the repository's lock for write.
     fn observe_push(
         &self,
         repo: &Repo,
@@ -303,10 +306,14 @@ async fn serve(
     if actor.is_none() && (repo.private || is_push) {
         return plain_unauthorized();
     }
-    let lock = is_push.then(|| face.repo_lock(repo.id));
-    let _guard = match &lock {
-        Some(l) => Some(l.lock().await),
-        None => None,
+    // Fetch requests share the lock, so they never wait on each other. A
+    // write waits for the ones already running, and new ones queue behind a
+    // waiting write, so a stream of fetches cannot hold a push off forever.
+    let lock = face.repo_lock(repo.id);
+    let (_write, _read) = if is_push {
+        (Some(lock.write().await), None)
+    } else {
+        (None, Some(lock.read().await))
     };
     let before = if is_push {
         match store::list_refs(&bare) {
@@ -383,4 +390,229 @@ fn plain(status: StatusCode, msg: &str) -> Response<Body> {
         .header("content-type", "text/plain; charset=utf-8")
         .body(Body::from(msg.to_string()))
         .expect("static response parts are valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::path::PathBuf;
+    use std::pin::{Pin, pin};
+    use std::task::{Context, Poll, Waker};
+
+    use orrery_world::{ActorKind, DEFAULT_T0_UNIX, WorldSecret};
+
+    use super::*;
+
+    type Request = Pin<Box<dyn Future<Output = Response<Body>> + Send>>;
+
+    /// A world with one public repository, `alice/webapp`, whose `main` holds
+    /// one commit.
+    struct Fixture {
+        face: Arc<GitFace>,
+        repo: Repo,
+        alice: Actor,
+        bare: PathBuf,
+        main: String,
+        _dir: tempfile::TempDir,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let world = Arc::new(
+            World::create(
+                &dir.path().join("world"),
+                DEFAULT_T0_UNIX,
+                &WorldSecret::LOCAL,
+            )
+            .unwrap(),
+        );
+        let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
+        let repo = world
+            .create_repo(alice.id, "webapp", None, false, "main", alice.id)
+            .unwrap();
+        let face = GitFace::new(world);
+        face.init_repo_dir(&repo).unwrap();
+        let bare = store::bare_dir(&face.world.repos_dir(), "alice", "webapp");
+        let main = commit(&bare, &[], "first");
+        store::update_ref(&bare, "refs/heads/main", &main).unwrap();
+        Fixture {
+            face,
+            repo,
+            alice,
+            bare,
+            main,
+            _dir: dir,
+        }
+    }
+
+    /// A commit of the empty tree on `parents`.
+    fn commit(bare: &std::path::Path, parents: &[&str], message: &str) -> String {
+        let tree = store::hermetic_git(bare).arg("mktree").output().unwrap();
+        let tree = String::from_utf8(tree.stdout).unwrap();
+        store::commit_tree(
+            bare,
+            tree.trim(),
+            parents,
+            message,
+            "alice",
+            DEFAULT_T0_UNIX,
+        )
+        .unwrap()
+    }
+
+    /// The two requests of a fetch that read the repository's refs: the ref
+    /// advertisement, and protocol v2's `ls-refs`, a POST to upload-pack.
+    fn ref_reads(face: &Arc<GitFace>) -> [(&'static str, Request); 2] {
+        let path = || UrlPath(("alice".to_string(), "webapp".to_string()));
+        let mut v2 = HeaderMap::new();
+        v2.insert("git-protocol", "version=2".parse().unwrap());
+        v2.insert(
+            "content-type",
+            "application/x-git-upload-pack-request".parse().unwrap(),
+        );
+        [
+            (
+                "ref advertisement",
+                Box::pin(info_refs(
+                    State(face.clone()),
+                    path(),
+                    None,
+                    RawQuery(Some("service=git-upload-pack".to_string())),
+                    HeaderMap::new(),
+                )),
+            ),
+            (
+                "ls-refs",
+                Box::pin(upload_pack(
+                    State(face.clone()),
+                    path(),
+                    None,
+                    RawQuery(None),
+                    v2,
+                    Bytes::from_static(b"0014command=ls-refs\n00010000"),
+                )),
+            ),
+        ]
+    }
+
+    /// Poll once, with a waker that does nothing: a request that is
+    /// waiting stays where it is until it is polled again.
+    fn poll_once<F: Future>(fut: Pin<&mut F>) -> Poll<F::Output> {
+        fut.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    async fn body_text(resp: Response<Body>) -> String {
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&body).into_owned()
+    }
+
+    /// The test holds the repository's lock for write, as a merge does, and
+    /// under it moves `main` to a merge commit and back, as a merge that fails
+    /// to record does. A fetch request sent meanwhile is still waiting for the
+    /// lock when the write ends, since it is handed the lock at that moment
+    /// and no other write can start; it then sees `main` where it was.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fetch_request_waits_out_a_write() {
+        let f = fixture();
+        let lock = f.face.repo_lock(f.repo.id);
+        let merge = commit(&f.bare, &[&f.main], "merge");
+        for (what, request) in ref_reads(&f.face) {
+            let write = lock.clone().write_owned().await;
+            let mut request = pin!(request);
+            assert!(
+                poll_once(request.as_mut()).is_pending(),
+                "{what}: answered during the write"
+            );
+            store::update_ref_cas(&f.bare, "refs/heads/main", &merge, &f.main).unwrap();
+            store::update_ref_cas(&f.bare, "refs/heads/main", &f.main, &merge).unwrap();
+            drop(write);
+            assert!(
+                lock.try_write().is_err(),
+                "{what}: was not waiting for the repository's lock"
+            );
+
+            let body = body_text(request.await).await;
+            assert!(
+                body.contains(&format!("{} refs/heads/main", f.main)),
+                "{what}: {body}"
+            );
+            assert!(!body.contains(&merge), "{what}: {body}");
+        }
+    }
+
+    /// The test holds the repository's lock for read, as a fetch request in
+    /// progress does. Another fetch request takes it too and is answered
+    /// meanwhile. One waiting for write would have stopped any new read from
+    /// starting, as a waiting write does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_requests_do_not_wait_on_each_other() {
+        let f = fixture();
+        let lock = f.face.repo_lock(f.repo.id);
+        for (what, request) in ref_reads(&f.face) {
+            let read = lock.clone().read_owned().await;
+            let mut request = pin!(request);
+            let _ = poll_once(request.as_mut());
+            assert!(
+                lock.try_read().is_ok(),
+                "{what}: waited for the read in progress"
+            );
+            let body = body_text(request.await).await;
+            assert!(
+                body.contains(&format!("{} refs/heads/main", f.main)),
+                "{what}: {body}"
+            );
+            drop(read);
+        }
+    }
+
+    /// The test holds the repository's lock for read, as a fetch request in
+    /// progress does. A push waits for it, and a fetch request sent after the
+    /// push waits for the push, so fetches arriving one after another cannot
+    /// hold a push off.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_push_waits_for_fetch_requests_in_progress_and_not_after() {
+        let f = fixture();
+        let lock = f.face.repo_lock(f.repo.id);
+        let read = lock.clone().read_owned().await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/x-git-receive-pack-request".parse().unwrap(),
+        );
+        // A push that moves nothing: a flush, with no commands before it.
+        let mut push = pin!(receive_pack(
+            State(f.face.clone()),
+            UrlPath(("alice".to_string(), "webapp".to_string())),
+            Some(Extension(f.alice.clone())),
+            RawQuery(None),
+            headers,
+            Bytes::from_static(b"0000"),
+        ));
+        assert!(
+            poll_once(push.as_mut()).is_pending(),
+            "the push ran during a read"
+        );
+        let [(_, later), _] = ref_reads(&f.face);
+        let mut later = pin!(later);
+        assert!(
+            poll_once(later.as_mut()).is_pending(),
+            "a later fetch request was answered ahead of the push"
+        );
+
+        drop(read);
+        assert!(
+            lock.try_read().is_err(),
+            "the push was not waiting for the repository's lock"
+        );
+        assert_eq!(push.await.status(), StatusCode::OK);
+        assert!(
+            lock.try_write().is_err(),
+            "the later fetch request was not waiting for the push"
+        );
+        body_text(later.await).await;
+    }
 }

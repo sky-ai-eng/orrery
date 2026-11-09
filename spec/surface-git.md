@@ -42,6 +42,16 @@ Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CO
 
 The entries and the state they describe land in one commit, after every ref the push moved is in place, so a reader that can see any of a push's entries sees the repository, its refs, and its pull requests as the push left them. Opening, closing, reopening, and merging a pull request take the same per-repository lock, so the pull requests a push re-pins are the ones open on its branch when it lands.
 
+## What a fetch sees
+
+Every other git request, a fetch's ref advertisement and pack in particular, holds the same per-repository lock for read, while a push, a merge, and opening, closing, or reopening a pull request hold it for write. A fetch request therefore sees the repository as it was before a write or after the write's record commits, never in between: not a write's refs ahead of its entries, and not a merge commit that a merge whose record failed moves back.
+
+- Fetch requests to a repository don't wait on each other.
+- A write waits for the fetch requests already running, and a fetch request that arrives while a write runs or waits waits for it.
+- The lock is held while `git http-backend` runs, not while its answer is sent, since the face buffers the answer whole.
+
+A fetch is several requests (the ref advertisement, then the pack, and with protocol v2, `ls-refs` and `fetch` as separate POSTs), and a write can land between two of them. `uploadpack.allowAnySHA1InWant` is on, so a fetch that asks for a commit a ref has since moved off still gets it.
+
 A commit's author and committer dates come from the client that made it, not from Orrery. A script that commits sets them from the world clock first (`orrery env`, `usage.md`), or replaying it produces different commit ids.
 
 ## Pull request refs
