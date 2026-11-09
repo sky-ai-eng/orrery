@@ -27,7 +27,7 @@ impl World {
         emails_of(&self.lock(), actor_id)
     }
 
-    /// The actor holding `login`, as [`World::actors_after`] lists it. The
+    /// The actor holding `login`, as [`World::actors_page`] lists it. The
     /// login compares under the column's `NOCASE` collation, so `"ALICE"`
     /// reads `alice`, and the answer carries the stored login. The system
     /// actor is not listed, so it is not found here either.
@@ -46,17 +46,20 @@ impl World {
         actor.map(|a| listed_actor(&conn, a)).transpose()
     }
 
-    /// Actors whose login sorts after `after_login`, in login order, at most
-    /// `limit`, each with its addresses in [`World::actor_emails`] order.
-    /// Logins compare under the column's `NOCASE` collation, under which
-    /// they are unique, so the order is total and `"BOB"` is the same
-    /// position as `"bob"`. The system actor is left out, since no token can
-    /// be issued for it.
-    pub fn actors_after(
+    /// One page of the actors in login order, and how many there are, each
+    /// with its addresses in [`World::actor_emails`] order. With
+    /// `resume`, the login of the previous page's last actor, the page holds
+    /// only actors past it, so a walk neither repeats nor skips an actor
+    /// while the list grows. Logins compare under the column's `NOCASE`
+    /// collation, under which they are unique, so the order is total and
+    /// `"BOB"` is the same position as `"bob"`. The system actor is left out,
+    /// since no token can be issued for it. The count is read under the same
+    /// lock as the page.
+    pub fn actors_page(
         &self,
-        after_login: Option<&str>,
+        resume: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<ListedActor>> {
+    ) -> Result<(Vec<ListedActor>, i64)> {
         let conn = self.lock();
         let mut actors = conn.prepare(&format!(
             "{} WHERE a.kind != 'system' AND a.login > ?1 COLLATE NOCASE
@@ -65,14 +68,19 @@ impl World {
         ))?;
         // Every login is non-empty, so "" sorts before all of them.
         let rows = actors.query_map(
-            params![after_login.unwrap_or(""), limit as i64],
+            params![resume.unwrap_or(""), limit as i64],
             queries::row_to_actor,
         )?;
         let mut listed = Vec::new();
         for row in rows {
             listed.push(listed_actor(&conn, row?)?);
         }
-        Ok(listed)
+        let total = conn.query_row(
+            "SELECT COUNT(*) FROM actors WHERE kind != 'system'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((listed, total))
     }
 
     /// Replace an actor's addresses. This is what reality does when a person
@@ -200,7 +208,7 @@ impl World {
         Ok(secret)
     }
 
-    /// The app holding `client_id`, as [`World::oauth_apps_after`] lists
+    /// The app holding `client_id`, as [`World::oauth_apps_page`] lists
     /// it. The query never reads a secret.
     pub fn listed_oauth_app_by_client_id(&self, client_id: &str) -> Result<Option<ListedOAuthApp>> {
         let conn = self.lock();
@@ -224,23 +232,29 @@ impl World {
             .optional()?)
     }
 
-    /// OAuth apps whose client id sorts after `after_client_id`, in client id
-    /// order, at most `limit`. The query never reads a secret.
-    pub fn oauth_apps_after(
+    /// One page of the OAuth apps in client id order, and how many there
+    /// are. With `resume`, the client id of the previous page's last app, the
+    /// page holds only apps past it, so a walk neither repeats nor skips an
+    /// app while the list grows. The count is read under the same lock as the
+    /// page. The query never reads a secret.
+    pub fn oauth_apps_page(
         &self,
-        after_client_id: Option<&str>,
+        resume: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<ListedOAuthApp>> {
+    ) -> Result<(Vec<ListedOAuthApp>, i64)> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(&format!(
-            "{LISTED_OAUTH_APP_SELECT} WHERE client_id > ?1 ORDER BY client_id LIMIT ?2"
-        ))?;
         // Every client id is non-empty, so "" sorts before all of them.
-        let rows = stmt.query_map(
-            params![after_client_id.unwrap_or(""), limit as i64],
-            row_to_listed_oauth_app,
-        )?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        let apps = conn
+            .prepare(&format!(
+                "{LISTED_OAUTH_APP_SELECT} WHERE client_id > ?1 ORDER BY client_id LIMIT ?2"
+            ))?
+            .query_map(
+                params![resume.unwrap_or(""), limit as i64],
+                row_to_listed_oauth_app,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let total = conn.query_row("SELECT COUNT(*) FROM oauth_apps", [], |r| r.get(0))?;
+        Ok((apps, total))
     }
 
     /// Record `actor` authorizing `app` and return the authorization code.

@@ -16,8 +16,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::control::{Fault, Fields, LIST_PAGE_DEFAULT, LIST_PAGE_MAX, keyset_page};
+use crate::control::{Fault, Fields};
 use crate::json;
+
+const LIST_PAGE_MAX: usize = 500;
+const LIST_PAGE_DEFAULT: usize = 100;
 
 /// What a list body's `page_size` and `page_token` ask for.
 pub(crate) struct Window<K> {
@@ -84,8 +87,8 @@ pub(crate) fn read_window<K: DeserializeOwned>(
         Some(Some(token)) if token.f != fingerprint => {
             if query_is_sound {
                 fields.fault(Fault::invalid(
-                    "page_token was issued for other filters or another order; \
-                     start again from the first page"
+                    "page_token was issued for another list, other filters, or \
+                     another order; start again from the first page"
                         .to_string(),
                     "page_token",
                 ));
@@ -151,6 +154,27 @@ pub(crate) fn read_sort(fields: &mut Fields, keys: &[SortKey]) -> Option<(&'stat
     }
 }
 
+/// Read the order of a list that sorts by one key, `key`: the direction a
+/// body names, and ascending when it names none.
+pub(crate) fn read_dir(fields: &mut Fields, key: &'static str) -> SortDir {
+    let key = SortKey {
+        name: key,
+        default_dir: SortDir::Asc,
+    };
+    read_sort(fields, std::slice::from_ref(&key)).map_or(key.default_dir, |(_, dir)| dir)
+}
+
+/// Read the order of a list that sorts by one key, `key`, ascending only.
+/// A body may name the key, and `asc` with it; `desc` is refused.
+pub(crate) fn read_ascending(fields: &mut Fields, key: &'static str) {
+    if read_dir(fields, key) == SortDir::Desc {
+        fields.fault(Fault::invalid(
+            format!("this list sorts by {key} ascending only"),
+            "sort_dir",
+        ));
+    }
+}
+
 /// The answer to a list read of `window.fetch()` rows: the page, the
 /// filtered total, and a token for the next page when there is one.
 /// `next_page_token` is absent on the last page.
@@ -166,6 +190,20 @@ pub(crate) fn answer<T: Serialize, K: Serialize>(
         body["next_page_token"] = serde_json::Value::String(encode(k, &window.fingerprint));
     }
     json(StatusCode::OK, body)
+}
+
+/// Cut `rows`, read with one row past the page, to the page and the key of
+/// its last item when another page follows. The extra row is how the last
+/// page is known to be last, so a page that ends on the final row has none.
+fn keyset_page<T, K>(
+    mut rows: Vec<T>,
+    page_size: usize,
+    key: impl Fn(&T) -> K,
+) -> (Vec<T>, Option<K>) {
+    let more = rows.len() > page_size;
+    rows.truncate(page_size);
+    let next = more.then(|| rows.last().map(key)).flatten();
+    (rows, next)
 }
 
 /// A short hash of a list and its query. It detects a token reused on

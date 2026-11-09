@@ -16,16 +16,13 @@ use axum::extract::{OriginalUri, Path as UrlPath, State};
 use axum::http::{Method, Response, StatusCode};
 use axum::routing::{get, post, put};
 use orrery_world::{
-    Actor, ActorEmail, ActorKind, LogOrder, OAUTH_CLIENT_ID_PREFIX, SYSTEM_ACTOR_LOGIN, WorldError,
-    validate_actor_kind, validate_login, validate_oauth_app_callback_url, validate_oauth_app_name,
+    Actor, ActorEmail, ActorKind, LogOrder, SYSTEM_ACTOR_LOGIN, WorldError, validate_actor_kind,
+    validate_login, validate_oauth_app_callback_url, validate_oauth_app_name,
 };
 use serde_json::value::RawValue;
 
-use crate::list::{self, SortDir, SortKey};
+use crate::list::{self, SortDir};
 use crate::{AppState, json};
-
-pub(crate) const LIST_PAGE_MAX: usize = 500;
-pub(crate) const LIST_PAGE_DEFAULT: usize = 100;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -323,11 +320,7 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
             "after_seq",
         ));
     }
-    let seq = SortKey {
-        name: "seq",
-        default_dir: SortDir::Asc,
-    };
-    let dir = list::read_sort(&mut fields, &[seq]).map_or(SortDir::Asc, |(_, dir)| dir);
+    let dir = list::read_dir(&mut fields, "seq");
     let query = serde_json::json!({ "after_seq": after_seq, "sort_dir": dir });
     let window = list::read_window::<i64>(&mut fields, "log", &query);
     let window = match fields.finish(Some(window)) {
@@ -361,31 +354,18 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
 /// Which actors a world holds, so a caller handed a world it did not build
 /// knows whom it may issue tokens for. Never a token.
 async fn list_actors(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    // TODO(ORR-58): pages by the visible `after_login` cursor with no
-    // `total_count`; moves to `list::read_window` and `list::answer`.
     let mut fields = Fields::parse(&body);
-    let page_size = page_size(&mut fields);
-    let after_login: Option<String> = fields.optional("after_login");
-    if let Some(after) = &after_login
-        && let Err(e) = validate_login(after)
-    {
-        fields.fault(Fault::invalid(e.to_string(), "after_login"));
-    }
-    let page_size = match fields.finish(page_size) {
-        Ok(n) => n,
+    list::read_ascending(&mut fields, "login");
+    let window = list::read_window::<String>(&mut fields, "actors", &serde_json::json!({}));
+    let window = match fields.finish(Some(window)) {
+        Ok(w) => w,
         Err(resp) => return *resp,
     };
     match state
         .world
-        .actors_after(after_login.as_deref(), page_size + 1)
+        .actors_page(window.resume.as_deref(), window.fetch())
     {
-        Ok(items) => {
-            let (items, next) = keyset_page(items, page_size, |a| a.login.clone());
-            json(
-                StatusCode::OK,
-                serde_json::json!({ "items": items, "next_after_login": next }),
-            )
-        }
+        Ok((rows, total)) => list::answer(rows, &window, total, |a| a.login.clone()),
         Err(e) => internal(e),
     }
 }
@@ -422,34 +402,18 @@ fn read_actor(state: &AppState, login: String) -> Response<Body> {
 /// Which OAuth apps a world holds, so a caller handed a world it did not
 /// build knows which it may issue secrets for. Never a secret.
 async fn list_oauth_apps(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    // TODO(ORR-58): pages by the visible `after_client_id` cursor with no
-    // `total_count`; moves to `list::read_window` and `list::answer`.
     let mut fields = Fields::parse(&body);
-    let page_size = page_size(&mut fields);
-    let after_client_id: Option<String> = fields.optional("after_client_id");
-    if let Some(after) = &after_client_id
-        && !after.starts_with(OAUTH_CLIENT_ID_PREFIX)
-    {
-        fields.fault(Fault::invalid(
-            format!("{after:?} is not a client id: every one starts with {OAUTH_CLIENT_ID_PREFIX}"),
-            "after_client_id",
-        ));
-    }
-    let page_size = match fields.finish(page_size) {
-        Ok(n) => n,
+    list::read_ascending(&mut fields, "client_id");
+    let window = list::read_window::<String>(&mut fields, "oauth_apps", &serde_json::json!({}));
+    let window = match fields.finish(Some(window)) {
+        Ok(w) => w,
         Err(resp) => return *resp,
     };
     match state
         .world
-        .oauth_apps_after(after_client_id.as_deref(), page_size + 1)
+        .oauth_apps_page(window.resume.as_deref(), window.fetch())
     {
-        Ok(items) => {
-            let (items, next) = keyset_page(items, page_size, |a| a.client_id.clone());
-            json(
-                StatusCode::OK,
-                serde_json::json!({ "items": items, "next_after_client_id": next }),
-            )
-        }
+        Ok((rows, total)) => list::answer(rows, &window, total, |a| a.client_id.clone()),
         Err(e) => internal(e),
     }
 }
@@ -480,36 +444,6 @@ fn read_oauth_app(state: &AppState, client_id: String) -> Response<Body> {
         ),
         Err(e) => internal(e),
     }
-}
-
-/// The page size a list body asks for, or `None` when it is out of range,
-/// which is recorded. One that fails to decode reads as the default here:
-/// its fault is already recorded, and a second one would report it twice.
-pub(crate) fn page_size(fields: &mut Fields) -> Option<usize> {
-    let page_size = fields.optional("page_size").unwrap_or(LIST_PAGE_DEFAULT);
-    if (1..=LIST_PAGE_MAX).contains(&page_size) {
-        Some(page_size)
-    } else {
-        fields.fault(Fault::out_of_range(
-            format!("page_size must be 1..={LIST_PAGE_MAX}"),
-            "page_size",
-        ));
-        None
-    }
-}
-
-/// Cut `rows`, read with one row past the page, to the page and the cursor
-/// that follows it. The extra row is how the last page is known to be last,
-/// so a page that ends on the final row has a null cursor.
-pub(crate) fn keyset_page<T, K>(
-    mut rows: Vec<T>,
-    page_size: usize,
-    key: impl Fn(&T) -> K,
-) -> (Vec<T>, Option<K>) {
-    let more = rows.len() > page_size;
-    rows.truncate(page_size);
-    let next = more.then(|| rows.last().map(key)).flatten();
-    (rows, next)
 }
 
 fn clock_body(clock: i64) -> serde_json::Value {

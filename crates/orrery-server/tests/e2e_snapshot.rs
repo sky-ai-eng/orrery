@@ -119,7 +119,7 @@ async fn snapshot_diff_restore_over_http() {
     assert_eq!(status, 201);
     assert_eq!(after["clock_unix"].as_i64().unwrap(), clock2);
 
-    // Snapshot read contracts: point read, keyset list, conflict, bad name.
+    // Snapshot read contracts: point read, paged list, conflict, bad name.
     let (_, got) = control("GET", &base, "/_orrery/snapshots/before", None).unwrap();
     assert_eq!(got, before);
     assert_eq!(
@@ -160,7 +160,8 @@ async fn snapshot_diff_restore_over_http() {
     )
     .unwrap();
     assert_eq!(names(&exact), ["after", "before"]);
-    assert_eq!(exact["next_after_name"], serde_json::Value::Null);
+    assert_eq!(exact["total_count"], 2);
+    assert!(exact.get("next_page_token").is_none(), "{exact}");
     let (_, page) = control(
         "POST",
         &base,
@@ -169,16 +170,16 @@ async fn snapshot_diff_restore_over_http() {
     )
     .unwrap();
     assert_eq!(names(&page), ["after"]);
-    assert_eq!(page["next_after_name"], "after");
     let (_, page2) = control(
         "POST",
         &base,
         "/_orrery/snapshots/list",
-        Some(serde_json::json!({ "page_size": 1, "after_name": "after" })),
+        Some(serde_json::json!({ "page_size": 1, "page_token": page["next_page_token"] })),
     )
     .unwrap();
     assert_eq!(names(&page2), ["before"]);
-    assert_eq!(page2["next_after_name"], serde_json::Value::Null);
+    assert_eq!(page2["total_count"], 2);
+    assert!(page2.get("next_page_token").is_none(), "{page2}");
 
     // The diff between the two moments is the engine's verdict on the hour.
     let (_, d) = control(

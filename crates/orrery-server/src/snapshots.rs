@@ -16,7 +16,8 @@ use axum::routing::{get, post};
 use orrery_snapshot::{DiffSide, SnapshotError};
 use orrery_world::{WorldError, WorldView};
 
-use crate::control::{Fault, Fields, errors, internal, keyset_page, page_size};
+use crate::control::{Fault, Fields, errors, internal};
+use crate::list;
 use crate::{AppState, json};
 
 pub(crate) fn router() -> Router<AppState> {
@@ -57,7 +58,7 @@ async fn create(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     })
     .await;
     match flatten(result) {
-        Ok(info) => json(StatusCode::CREATED, to_value(&info)),
+        Ok(info) => json(StatusCode::CREATED, serde_json::json!(info)),
         Err(e) => snapshot_error(e, Some("name")),
     }
 }
@@ -83,56 +84,45 @@ async fn read_one(state: &AppState, name: String) -> Response<Body> {
     })
     .await;
     match flatten(result) {
-        Ok(Some(info)) => json(StatusCode::OK, to_value(&info)),
+        Ok(Some(info)) => json(StatusCode::OK, serde_json::json!(info)),
         Ok(None) => not_found(&name),
         Err(e) => snapshot_error(e, Some("name")),
     }
 }
 
 async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    // TODO(ORR-58): pages by the visible `after_name` cursor with no
-    // `total_count`; moves to `list::read_window` and `list::answer`.
     let mut fields = Fields::parse(&body);
-    let page_size = page_size(&mut fields);
-    let after_name: Option<String> = fields.optional("after_name");
-    if let Some(after) = &after_name
-        && let Err(e) = orrery_snapshot::validate_name(after)
-    {
-        fields.fault(Fault::invalid(e.to_string(), "after_name"));
-    }
-    let page_size = match fields.finish(page_size) {
-        Ok(n) => n,
+    list::read_ascending(&mut fields, "name");
+    let window = list::read_window::<String>(&mut fields, "snapshots", &serde_json::json!({}));
+    let window = match fields.finish(Some(window)) {
+        Ok(w) => w,
         Err(resp) => return *resp,
     };
     let guard = state.git.gate().read_owned().await;
     let dir = state.snapshots_dir.clone();
+    let resume = window.resume.clone();
+    let fetch = window.fetch();
     let result = tokio::task::spawn_blocking(move || {
         let _hold = guard;
-        orrery_snapshot::list(&dir)
+        // The total and the position need only the names, so only the page's
+        // snapshots are opened: opening one may copy and migrate it. The gate
+        // keeps a listed snapshot from being deleted before it is opened.
+        let names = orrery_snapshot::names(&dir)?;
+        let page = names
+            .iter()
+            .filter(|n| resume.as_ref().is_none_or(|last| *n > last))
+            .take(fetch)
+            .filter_map(|n| orrery_snapshot::info(&dir, n).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((page, names.len()))
     })
     .await;
-    let all = match flatten(result) {
-        Ok(a) => a,
+    let (rows, total) = match flatten(result) {
+        Ok(r) => r,
         Err(e) => return snapshot_error(e, None),
     };
-    // Keyset over the listing's name order; the set is bounded by what an
-    // operator created, but the read contract is uniform anyway.
-    let rows: Vec<_> = all
-        .into_iter()
-        .filter(|s| match &after_name {
-            Some(after) => s.name.as_str() > after.as_str(),
-            None => true,
-        })
-        .take(page_size + 1)
-        .collect();
-    let (items, next_after_name) = keyset_page(rows, page_size, |s| s.name.clone());
-    json(
-        StatusCode::OK,
-        serde_json::json!({
-            "items": items.iter().map(to_value).collect::<Vec<_>>(),
-            "next_after_name": next_after_name,
-        }),
-    )
+    let total = i64::try_from(total).unwrap_or(i64::MAX);
+    list::answer(rows, &window, total, |s| s.name.clone())
 }
 
 async fn delete_one(
@@ -262,14 +252,6 @@ fn flatten<T>(
         Ok(r) => r,
         Err(e) => Err(SnapshotError::Copy(format!("blocking task failed: {e}"))),
     }
-}
-
-fn to_value(info: &orrery_snapshot::SnapshotInfo) -> serde_json::Value {
-    serde_json::json!({
-        "name": info.name,
-        "clock_unix": info.clock_unix,
-        "last_seq": info.last_seq,
-    })
 }
 
 fn not_found(name: &str) -> Response<Body> {

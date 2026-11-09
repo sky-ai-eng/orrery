@@ -89,6 +89,15 @@ pub fn info(snapshots_dir: &Path, name: &str) -> Result<Option<SnapshotInfo>> {
 
 /// All snapshots, sorted by name (the listing's total order).
 pub fn list(snapshots_dir: &Path) -> Result<Vec<SnapshotInfo>> {
+    names(snapshots_dir)?
+        .iter()
+        .map(|n| info_of(n, &snapshots_dir.join(n)))
+        .collect()
+}
+
+/// The name of every snapshot, sorted (the listing's total order), read
+/// without opening any of them, as opening one may copy and migrate it.
+pub fn names(snapshots_dir: &Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
     let entries = match std::fs::read_dir(snapshots_dir) {
         Ok(e) => e,
@@ -100,17 +109,14 @@ pub fn list(snapshots_dir: &Path) -> Result<Vec<SnapshotInfo>> {
         let name = entry.file_name().to_string_lossy().into_owned();
         // Only a directory a snapshot could be named is one: `.tmp-*` is an
         // in-flight or crashed copy, and no other operation accepts any
-        // other name, so a listed name is always a usable cursor.
+        // other name, so every listed name is one the others accept.
         if !entry.file_type()?.is_dir() || validate_name(&name).is_err() {
             continue;
         }
         names.push(name);
     }
     names.sort();
-    names
-        .iter()
-        .map(|n| info_of(n, &snapshots_dir.join(n)))
-        .collect()
+    Ok(names)
 }
 
 pub fn delete(snapshots_dir: &Path, name: &str) -> Result<()> {

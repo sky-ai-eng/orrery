@@ -1,6 +1,7 @@
-//! End-to-end: the control plane's lists of actors and OAuth apps, which are
-//! how a caller handed a world it did not build learns whom to issue
-//! credentials for, and the point reads of one actor or app by its key.
+//! End-to-end: the control plane's lists, which all page by token, and the
+//! point reads of one actor or app by its key. The lists of actors and OAuth
+//! apps are how a caller handed a world it did not build learns whom to issue
+//! credentials for.
 
 mod common;
 
@@ -40,6 +41,27 @@ fn read(base: &str, path: &str) -> Value {
     let (status, answer) = get(base, path);
     assert_eq!(status, 200, "{path}: {answer}");
     answer
+}
+
+/// The lists keyed by a name, and the field of an item that holds its key.
+const KEYED_LISTS: [(&str, &str); 3] = [
+    ("/actors/list", "login"),
+    ("/oauth-apps/list", "client_id"),
+    ("/snapshots/list", "name"),
+];
+
+/// Five items in each keyed list. The logins and snapshot names mix case, so
+/// a walk resumes in the order each list compares its keys in.
+fn populate(base: &str) {
+    for login in ["bob", "Alice", "carol", "Dave", "erin"] {
+        mint_actor(base, login, "user");
+    }
+    for name in ["Sign-in", "Deploys", "Reviews", "Builds", "Docs"] {
+        register_app(base, name);
+    }
+    for name in ["beta", "Alpha", "gamma", "Delta", "epsilon"] {
+        control_post(base, "/_orrery/snapshots", json!({ "name": name }));
+    }
 }
 
 fn register_app(base: &str, name: &str) -> String {
@@ -87,61 +109,78 @@ async fn actors_list_in_login_order_with_their_addresses() {
                     { "email": "carol@orrery.invalid", "primary": true, "verified": true },
                 ] },
             ],
-            "next_after_login": null,
+            "total_count": 3,
         })
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn actors_page_by_login() {
+async fn every_keyed_list_walks_by_token_in_key_order() {
     let inst = boot().await;
     let base = &inst.base;
-    for login in ["bob", "Alice", "carol"] {
+    populate(base);
+    for (path, key) in KEYED_LISTS {
+        let whole = list(base, path, json!({ "page_size": 500 }));
+        assert!(whole.get("next_page_token").is_none(), "{whole}");
+        let items = whole["items"].as_array().unwrap().clone();
+        assert_eq!(items.len(), 5, "{path}");
+        assert_eq!(whole["total_count"], 5, "{path}");
+        let keys: Vec<&str> = items.iter().map(|i| i[key].as_str().unwrap()).collect();
+        let mut sorted = keys.clone();
+        if key == "login" {
+            sorted.sort_by_key(|k| k.to_ascii_lowercase());
+        } else {
+            sorted.sort();
+        }
+        assert_eq!(keys, sorted, "{path}");
+
+        let pages = walk_pages(base, path, json!({ "page_size": 2 }), || {});
+        assert_eq!(pages.len(), 3, "{path}");
+        for page in &pages {
+            assert_eq!(page["total_count"], 5, "{path}: {page}");
+        }
+        assert_eq!(items_of(&pages), items, "{path}");
+    }
+}
+
+/// A token holds the key of the last item served, so an actor minted mid-walk
+/// shifts nothing: one that sorts before the walk's position is not visited,
+/// and one after it is reached in order. Both are capitalized, so a resume
+/// that compared logins with case would misplace them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_walk_is_exact_while_the_actors_grow() {
+    let inst = boot().await;
+    let base = &inst.base;
+    for login in ["bob", "carol", "dave", "erin"] {
         mint_actor(base, login, "user");
     }
-    let logins = |answer: &Value| -> Vec<String> {
-        answer["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|a| a["login"].as_str().unwrap().to_string())
-            .collect()
-    };
-
-    let first = list(base, "/actors/list", json!({ "page_size": 2 }));
-    assert_eq!(logins(&first), ["Alice", "bob"]);
-    assert_eq!(first["next_after_login"], "bob");
-
-    let second = list(base, "/actors/list", json!({ "after_login": "bob" }));
-    assert_eq!(logins(&second), ["carol"]);
-    assert_eq!(second["next_after_login"], Value::Null);
-    // The cursor compares as logins do, without case.
-    assert_eq!(
-        list(base, "/actors/list", json!({ "after_login": "BOB" })),
-        second
-    );
-
-    // A page that ends on the last actor knows it is the last.
-    let exact = list(base, "/actors/list", json!({ "page_size": 3 }));
-    assert_eq!(logins(&exact), ["Alice", "bob", "carol"]);
-    assert_eq!(exact["next_after_login"], Value::Null);
-
-    // The cursor is a position, not a reference: it need not name an actor.
-    let between = list(base, "/actors/list", json!({ "after_login": "b" }));
-    assert_eq!(logins(&between), ["bob", "carol"]);
+    let mut grown = false;
+    let pages = walk_pages(base, "/actors/list", json!({ "page_size": 2 }), || {
+        if !grown {
+            mint_actor(base, "Aaron", "user");
+            mint_actor(base, "Zed", "user");
+            grown = true;
+        }
+    });
+    let logins: Vec<Value> = items_of(&pages)
+        .iter()
+        .map(|a| a["login"].clone())
+        .collect();
+    assert_eq!(logins, ["bob", "carol", "dave", "erin", "Zed"]);
+    assert_eq!(pages[0]["total_count"], 4);
+    assert_eq!(pages[1]["total_count"], 6);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_empty_world_lists_nothing() {
     let inst = boot().await;
-    assert_eq!(
-        list(&inst.base, "/actors/list", json!({})),
-        json!({ "items": [], "next_after_login": null })
-    );
-    assert_eq!(
-        list(&inst.base, "/oauth-apps/list", json!({})),
-        json!({ "items": [], "next_after_client_id": null })
-    );
+    for (path, _) in KEYED_LISTS {
+        assert_eq!(
+            list(&inst.base, path, json!({})),
+            json!({ "items": [], "total_count": 0 }),
+            "{path}"
+        );
+    }
     // An empty body is all defaults.
     let mut resp = agent()
         .post(format!("{}/_orrery/actors/list", inst.base))
@@ -150,12 +189,12 @@ async fn an_empty_world_lists_nothing() {
     assert_eq!(resp.status(), 200);
     assert_eq!(
         resp.body_mut().read_json::<Value>().unwrap(),
-        json!({ "items": [], "next_after_login": null })
+        json!({ "items": [], "total_count": 0 })
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn oauth_apps_page_by_client_id_without_secrets() {
+async fn oauth_apps_list_in_client_id_order_without_secrets() {
     let inst = boot().await;
     let base = &inst.base;
     let mut apps: Vec<(String, String)> = ["Sign-in", "Deploys", "Reviews"]
@@ -164,9 +203,9 @@ async fn oauth_apps_page_by_client_id_without_secrets() {
         .collect();
     apps.sort();
 
-    let first = list(base, "/oauth-apps/list", json!({ "page_size": 2 }));
-    let items = first["items"].as_array().unwrap();
-    assert_eq!(items.len(), 2);
+    let pages = walk_pages(base, "/oauth-apps/list", json!({ "page_size": 2 }), || {});
+    let items = items_of(&pages);
+    assert_eq!(items.len(), 3);
     for (item, (client_id, name)) in items.iter().zip(&apps) {
         assert_eq!(
             item,
@@ -176,23 +215,73 @@ async fn oauth_apps_page_by_client_id_without_secrets() {
                 "callback_url": "http://auth.test/callback",
             })
         );
-        assert!(item.get("client_secret").is_none());
     }
-    assert_eq!(first["next_after_client_id"], apps[1].0);
 
-    let second = list(
-        base,
-        "/oauth-apps/list",
-        json!({ "after_client_id": apps[1].0 }),
-    );
-    assert_eq!(second["items"].as_array().unwrap().len(), 1);
-    assert_eq!(second["items"][0]["client_id"], apps[2].0);
-    assert!(second["items"][0].get("client_secret").is_none());
-    assert_eq!(second["next_after_client_id"], Value::Null);
-
+    // A page that ends on the last app knows it is the last.
     let exact = list(base, "/oauth-apps/list", json!({ "page_size": 3 }));
-    assert_eq!(exact["items"].as_array().unwrap().len(), 3);
-    assert_eq!(exact["next_after_client_id"], Value::Null);
+    assert_eq!(exact["items"], json!(items));
+    assert!(exact.get("next_page_token").is_none(), "{exact}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_size_of_zero_counts_every_keyed_list() {
+    let inst = boot().await;
+    let base = &inst.base;
+    populate(base);
+    for (path, _) in KEYED_LISTS {
+        assert_eq!(
+            list(base, path, json!({ "page_size": 0 })),
+            json!({ "items": [], "total_count": 5 }),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_token_answers_only_the_list_it_was_issued_for() {
+    let inst = boot().await;
+    let base = &inst.base;
+    populate(base);
+    let token_of = |path: &str| -> Value {
+        let token = list(base, path, json!({ "page_size": 1 }))["next_page_token"].clone();
+        assert!(token.is_string(), "{path}: {token}");
+        token
+    };
+    let refused = |path: &str, body: Value| -> Vec<(String, Option<String>)> {
+        let (status, answer) = post(base, path, body);
+        assert_eq!(status, 400, "{path}: {answer}");
+        faults(&answer)
+    };
+    let log_token = token_of("/log/list");
+
+    for (path, key) in KEYED_LISTS {
+        let token = token_of(path);
+        // The default order and the same order named are one query.
+        let plain = list(base, path, json!({ "page_size": 1, "page_token": token }));
+        for named in [
+            json!({ "page_size": 1, "sort_key": key, "page_token": token }),
+            json!({ "page_size": 1, "sort_key": key, "sort_dir": "asc", "page_token": token }),
+        ] {
+            assert_eq!(list(base, path, named), plain, "{path}");
+        }
+
+        let mut elsewhere: Vec<(&str, Value)> = vec![
+            (path, json!({ "page_token": log_token })),
+            ("/log/list", json!({ "page_token": token })),
+        ];
+        for (other, _) in KEYED_LISTS {
+            if other != path {
+                elsewhere.push((other, json!({ "page_token": token })));
+            }
+        }
+        for (at, body) in elsewhere {
+            assert_eq!(
+                refused(at, body.clone()),
+                [fault("INVALID_ARGUMENT", Some("page_token"))],
+                "{at}: {body}"
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -205,87 +294,69 @@ async fn bad_list_bodies_name_every_fault() {
         faults(&answer)
     };
 
-    for path in ["/actors/list", "/oauth-apps/list", "/snapshots/list"] {
-        for size in [0, 501] {
-            assert_eq!(
-                refused(path, json!({ "page_size": size })),
-                [fault("OUT_OF_RANGE", Some("page_size"))]
-            );
-        }
+    for path in [
+        "/actors/list",
+        "/oauth-apps/list",
+        "/snapshots/list",
+        "/log/list",
+    ] {
+        assert_eq!(
+            refused(path, json!({ "page_size": 501 })),
+            [fault("OUT_OF_RANGE", Some("page_size"))]
+        );
         assert_eq!(
             refused(path, json!({ "page_sise": 10 })),
             [fault("INVALID_ARGUMENT", Some("page_sise"))]
+        );
+        // An order is a key from the list's own vocabulary and a direction,
+        // and a direction alone sets nothing.
+        assert_eq!(
+            refused(path, json!({ "sort_key": "id" })),
+            [fault("INVALID_ARGUMENT", Some("sort_key"))]
+        );
+        assert_eq!(
+            refused(path, json!({ "sort_dir": "desc" })),
+            [fault("INVALID_ARGUMENT", Some("sort_dir"))]
+        );
+        assert_eq!(
+            refused(path, json!({ "sort_key": "id", "page_size": 501 })),
+            [
+                fault("INVALID_ARGUMENT", Some("sort_key")),
+                fault("OUT_OF_RANGE", Some("page_size")),
+            ]
+        );
+        // A field that fails to decode hides none of the others.
+        assert_eq!(
+            refused(path, json!({ "page_size": "10" })),
+            [fault("INVALID_ARGUMENT", Some("page_size"))]
+        );
+        assert_eq!(
+            refused(path, json!({ "page_size": -1, "sort_key": "id" })),
+            [
+                fault("INVALID_ARGUMENT", Some("sort_key")),
+                fault("INVALID_ARGUMENT", Some("page_size")),
+            ]
+        );
+        assert_eq!(
+            refused(path, json!({ "page_size": 501, "bogus": 1 })),
+            [
+                fault("OUT_OF_RANGE", Some("page_size")),
+                fault("INVALID_ARGUMENT", Some("bogus")),
+            ]
+        );
+    }
+    // Only the log reads newest first; the others sort by their key
+    // ascending, and say so.
+    for (path, key) in KEYED_LISTS {
+        assert_eq!(
+            refused(path, json!({ "sort_key": key, "sort_dir": "desc" })),
+            [fault("INVALID_ARGUMENT", Some("sort_dir"))],
+            "{path}"
         );
     }
     // The bounds are inclusive.
     list(base, "/actors/list", json!({ "page_size": 1 }));
     list(base, "/actors/list", json!({ "page_size": 500 }));
-
-    assert_eq!(
-        refused("/actors/list", json!({ "after_login": "-x" })),
-        [fault("INVALID_ARGUMENT", Some("after_login"))]
-    );
-    assert_eq!(
-        refused("/oauth-apps/list", json!({ "after_client_id": "abc" })),
-        [fault("INVALID_ARGUMENT", Some("after_client_id"))]
-    );
-    assert_eq!(
-        refused("/snapshots/list", json!({ "after_name": "no/slashes" })),
-        [fault("INVALID_ARGUMENT", Some("after_name"))]
-    );
-    assert_eq!(
-        refused(
-            "/actors/list",
-            json!({ "page_size": 0, "after_login": "-x" })
-        ),
-        [
-            fault("OUT_OF_RANGE", Some("page_size")),
-            fault("INVALID_ARGUMENT", Some("after_login")),
-        ]
-    );
-    assert_eq!(
-        refused(
-            "/oauth-apps/list",
-            json!({ "page_size": 501, "after_client_id": "abc" })
-        ),
-        [
-            fault("OUT_OF_RANGE", Some("page_size")),
-            fault("INVALID_ARGUMENT", Some("after_client_id")),
-        ]
-    );
-    assert_eq!(
-        refused(
-            "/snapshots/list",
-            json!({ "page_size": 0, "after_name": ".hidden" })
-        ),
-        [
-            fault("OUT_OF_RANGE", Some("page_size")),
-            fault("INVALID_ARGUMENT", Some("after_name")),
-        ]
-    );
-
-    // A field that fails to decode hides none of the others.
-    assert_eq!(
-        refused("/actors/list", json!({ "page_size": "10" })),
-        [fault("INVALID_ARGUMENT", Some("page_size"))]
-    );
-    assert_eq!(
-        refused(
-            "/actors/list",
-            json!({ "page_size": -1, "after_login": "-x" })
-        ),
-        [
-            fault("INVALID_ARGUMENT", Some("page_size")),
-            fault("INVALID_ARGUMENT", Some("after_login")),
-        ]
-    );
-    assert_eq!(
-        refused("/actors/list", json!({ "page_size": 0, "bogus": 1 })),
-        [
-            fault("OUT_OF_RANGE", Some("page_size")),
-            fault("INVALID_ARGUMENT", Some("bogus")),
-        ]
-    );
 
     // A log position is never negative, so a negative cursor is refused
     // rather than read as the start of the log.
@@ -301,21 +372,12 @@ async fn bad_list_bodies_name_every_fault() {
         ]
     );
 
-    // An order is a key from the list's own vocabulary and a direction, and
-    // a direction alone sets nothing.
-    assert_eq!(
-        refused("/log/list", json!({ "sort_key": "clock_unix" })),
-        [fault("INVALID_ARGUMENT", Some("sort_key"))]
-    );
+    // A direction is not case-folded.
     assert_eq!(
         refused(
             "/log/list",
             json!({ "sort_key": "seq", "sort_dir": "DESC" })
         ),
-        [fault("INVALID_ARGUMENT", Some("sort_dir"))]
-    );
-    assert_eq!(
-        refused("/log/list", json!({ "sort_dir": "desc" })),
         [fault("INVALID_ARGUMENT", Some("sort_dir"))]
     );
     assert_eq!(
@@ -432,24 +494,43 @@ fn whole_log(base: &str) -> Vec<Value> {
     all["items"].as_array().unwrap().clone()
 }
 
-/// Follow `next_page_token` from `body` to the last page, calling `between`
-/// after each page but the last. Every page but the last is full.
-fn walk(base: &str, mut body: Value, mut between: impl FnMut()) -> Vec<Value> {
+/// Follow `next_page_token` on the list at `path` from `body` to the last
+/// page, calling `between` after each page but the last, and answer the
+/// pages. Every page but the last is full.
+fn walk_pages(base: &str, path: &str, mut body: Value, mut between: impl FnMut()) -> Vec<Value> {
     let page_size = body["page_size"].as_u64().unwrap() as usize;
-    let mut walked = Vec::new();
+    let mut pages = Vec::new();
+    let mut walked = 0;
     loop {
-        let page = list(base, "/log/list", body.clone());
-        let items = page["items"].as_array().unwrap();
-        walked.extend(items.iter().cloned());
-        let Some(token) = page.get("next_page_token") else {
-            assert!(items.len() <= page_size, "{page}");
-            return walked;
+        let page = list(base, path, body.clone());
+        let items = page["items"].as_array().unwrap().len();
+        walked += items;
+        let token = page.get("next_page_token").cloned();
+        match token {
+            None => assert!(items <= page_size, "{page}"),
+            Some(_) => assert_eq!(items, page_size, "{page}"),
+        }
+        pages.push(page);
+        let Some(token) = token else {
+            return pages;
         };
-        assert_eq!(items.len(), page_size, "{page}");
-        assert!(walked.len() < 1000, "the walk does not end");
-        body["page_token"] = token.clone();
+        assert!(walked < 1000, "the walk does not end");
+        body["page_token"] = token;
         between();
     }
+}
+
+/// The items of `pages`, in the order they were served.
+fn items_of(pages: &[Value]) -> Vec<Value> {
+    pages
+        .iter()
+        .flat_map(|p| p["items"].as_array().unwrap().iter().cloned())
+        .collect()
+}
+
+/// The entries a walk of the log serves, as [`walk_pages`] walks it.
+fn walk(base: &str, body: Value, between: impl FnMut()) -> Vec<Value> {
+    items_of(&walk_pages(base, "/log/list", body, between))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -798,4 +879,43 @@ async fn a_walk_goes_on_across_a_restore_only_while_the_log_holds_its_last_entry
         }
         assert_eq!(walked, log, "walk {n}");
     }
+}
+
+/// A snapshot list opens only the snapshots it may serve: the page, and the
+/// one after it that says another page follows. The total and the position
+/// need only names. So a snapshot that cannot be opened is still counted, and
+/// fails only a read that reaches it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_list_opens_only_the_snapshots_it_may_serve() {
+    let inst = boot().await;
+    let base = &inst.base;
+    for name in ["a", "b", "c", "d"] {
+        control_post(base, "/_orrery/snapshots", json!({ "name": name }));
+    }
+    std::fs::write(
+        inst.dir.path().join("snapshots/d/world.db"),
+        b"not a database",
+    )
+    .unwrap();
+
+    assert_eq!(
+        list(base, "/snapshots/list", json!({ "page_size": 0 })),
+        json!({ "items": [], "total_count": 4 })
+    );
+    let first = list(base, "/snapshots/list", json!({ "page_size": 1 }));
+    assert_eq!(first["items"][0]["name"], "a");
+    assert_eq!(first["total_count"], 4);
+    let second = list(
+        base,
+        "/snapshots/list",
+        json!({ "page_size": 1, "page_token": first["next_page_token"] }),
+    );
+    assert_eq!(second["items"][0]["name"], "b");
+    // The page of `c` looks past it, to `d`.
+    let (status, answer) = post(
+        base,
+        "/snapshots/list",
+        json!({ "page_size": 1, "page_token": second["next_page_token"] }),
+    );
+    assert_eq!(status, 500, "{answer}");
 }

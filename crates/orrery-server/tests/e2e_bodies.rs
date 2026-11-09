@@ -55,14 +55,14 @@ fn routes() -> Vec<Route> {
             path: "/actors/list",
             accepted: json!({ "page_size": 10 }),
             required: &[],
-            mistyped: ("after_login", json!(5)),
+            mistyped: ("page_token", json!(5)),
         },
         Route {
             method: "POST",
             path: "/oauth-apps/list",
             accepted: json!({ "page_size": 10 }),
             required: &[],
-            mistyped: ("after_client_id", json!(5)),
+            mistyped: ("sort_key", json!(5)),
         },
         Route {
             method: "POST",
@@ -83,7 +83,7 @@ fn routes() -> Vec<Route> {
             path: "/snapshots/list",
             accepted: json!({ "page_size": 10 }),
             required: &[],
-            mistyped: ("after_name", json!(["before"])),
+            mistyped: ("sort_dir", json!(["desc"])),
         },
         Route {
             method: "POST",
