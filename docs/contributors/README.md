@@ -4,5 +4,6 @@ Start with [CONTRIBUTING.md](../../CONTRIBUTING.md) at the repository root: the 
 
 - [Contributor License Agreement](CLA.md): the agreement every contributor signs. `.github/workflows/cla.yml` checks for signatures, records them on the `cla-signatures` branch, and lists the identities that don't sign. Each signature records the version of this file it was made against.
 - [Releasing](releasing.md): how a pull request's title becomes a changelog entry and a version, and how a release is built and signed
+- [Repository lock benchmark](benchmarks/lock-bench.md): what the per-repository lock costs fetches and the writes behind them, measured with real `git`, run by hand
 
 Pull request titles are conventional commits, and they become the changelog: read [Releasing](releasing.md) before you title one.
