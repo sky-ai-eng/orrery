@@ -520,12 +520,17 @@ fn review_and_comment_return_stored_rows_and_bump_the_pull() {
     let review =
         f.w.create_review(pull.id, f.bob, ReviewState::Approved, Some("lgtm"), None)
             .unwrap();
+    assert_eq!(review, f.w.review_by_id(review.id).unwrap().unwrap());
     assert_eq!(review.author_login, "bob");
     assert_eq!(review.state, ReviewState::Approved);
     assert_eq!(review.commit_sha, SHA_B, "pinned to the pull's head");
     assert_eq!(review.submitted_clock_unix, DEFAULT_T0_UNIX + 60);
 
     let comment = f.w.create_issue_comment(pull.id, f.bob, "ship it").unwrap();
+    assert_eq!(
+        f.w.list_issue_comments_for_pull(pull.id).unwrap(),
+        std::slice::from_ref(&comment)
+    );
     assert_eq!(comment.author_login, "bob");
     assert_eq!(comment.body, "ship it");
 

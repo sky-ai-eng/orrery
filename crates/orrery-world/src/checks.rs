@@ -3,7 +3,7 @@
 //! reproduces them); the status/conclusion coupling GitHub enforces at the
 //! wire lives in the face, not here.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::queries;
 use crate::types::*;
@@ -40,13 +40,16 @@ impl World {
         self.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
             let clock = queries::clock(&tx)?;
-            let id: i64 = tx.query_row(
-                "INSERT INTO check_runs (repo_id, head_sha, name, status, conclusion,
-                                         details_url, external_id, output, creator_id,
-                                         started_clock_unix, completed_clock_unix,
-                                         created_clock_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                 RETURNING id",
+            let run = tx.query_row(
+                &format!(
+                    "INSERT INTO check_runs (repo_id, head_sha, name, status, conclusion,
+                                             details_url, external_id, output, creator_id,
+                                             started_clock_unix, completed_clock_unix,
+                                             created_clock_unix)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     RETURNING {}",
+                    queries::CHECK_RUN_COLUMNS
+                ),
                 params![
                     new.repo_id,
                     new.head_sha,
@@ -61,9 +64,8 @@ impl World {
                     new.completed_clock_unix,
                     clock
                 ],
-                |r| r.get(0),
+                queries::row_to_check_run,
             )?;
-            let run = require_check_run(&tx, id)?;
             self.log_locked(
                 &tx,
                 new.creator_id,
@@ -89,37 +91,43 @@ impl World {
     ) -> Result<CheckRun> {
         self.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
-            let before = require_check_run(&tx, id)?;
-            tx.execute(
-                "UPDATE check_runs SET
-                     name = COALESCE(?1, name),
-                     status = COALESCE(?2, status),
-                     conclusion = COALESCE(?3, conclusion),
-                     details_url = COALESCE(?4, details_url),
-                     external_id = COALESCE(?5, external_id),
-                     output = COALESCE(?6, output),
-                     started_clock_unix = COALESCE(?7, started_clock_unix),
-                     completed_clock_unix = COALESCE(?8, completed_clock_unix)
-                 WHERE id = ?9",
-                params![
-                    patch.name,
-                    patch.status.map(CheckStatus::as_str),
-                    patch.conclusion.map(CheckConclusion::as_str),
-                    patch.details_url,
-                    patch.external_id,
-                    patch.output.map(|v| v.to_string()),
-                    patch.started_clock_unix,
-                    patch.completed_clock_unix,
-                    id
-                ],
-            )?;
-            let run = require_check_run(&tx, id)?;
+            let run = tx
+                .query_row(
+                    &format!(
+                        "UPDATE check_runs SET
+                             name = COALESCE(?1, name),
+                             status = COALESCE(?2, status),
+                             conclusion = COALESCE(?3, conclusion),
+                             details_url = COALESCE(?4, details_url),
+                             external_id = COALESCE(?5, external_id),
+                             output = COALESCE(?6, output),
+                             started_clock_unix = COALESCE(?7, started_clock_unix),
+                             completed_clock_unix = COALESCE(?8, completed_clock_unix)
+                         WHERE id = ?9
+                         RETURNING {}",
+                        queries::CHECK_RUN_COLUMNS
+                    ),
+                    params![
+                        patch.name,
+                        patch.status.map(CheckStatus::as_str),
+                        patch.conclusion.map(CheckConclusion::as_str),
+                        patch.details_url,
+                        patch.external_id,
+                        patch.output.map(|v| v.to_string()),
+                        patch.started_clock_unix,
+                        patch.completed_clock_unix,
+                        id
+                    ],
+                    queries::row_to_check_run,
+                )
+                .optional()?
+                .ok_or(WorldError::NoSuchCheckRun(id))?;
             self.log_locked(
                 &tx,
                 actor_id,
                 "check_run.update",
                 &serde_json::json!({
-                    "repo": crate::pulls::repo_full_name(&tx, before.repo_id)?,
+                    "repo": crate::pulls::repo_full_name(&tx, run.repo_id)?,
                     "name": run.name,
                     "head_sha": run.head_sha,
                     "status": run.status.as_str(),
@@ -139,8 +147,4 @@ impl World {
     pub fn check_run_by_id(&self, id: i64) -> Result<Option<CheckRun>> {
         self.with_conn(|conn| queries::check_run_by_id(conn, id))
     }
-}
-
-fn require_check_run(conn: &rusqlite::Connection, id: i64) -> Result<CheckRun> {
-    queries::check_run_by_id(conn, id)?.ok_or(WorldError::NoSuchCheckRun(id))
 }
