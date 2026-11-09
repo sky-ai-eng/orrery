@@ -483,6 +483,8 @@ impl World {
                     p.number
                 )));
             }
+            // TODO(ORR-68): `create_pull`'s one-open-pull-per-(head, base)
+            // rule is not checked here, so a reopen can leave two open.
             Ok("UPDATE pulls SET state = 'open', closed_clock_unix = NULL WHERE id = ?1")
         })
     }
