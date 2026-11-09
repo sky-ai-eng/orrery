@@ -25,6 +25,7 @@ use orrery_world::{Actor, ActorKind, Repo, World, WorldError};
 
 mod checks;
 pub mod graphql;
+mod media;
 pub mod nodeid;
 pub mod oauth;
 mod orgs;
@@ -44,95 +45,141 @@ pub struct GithubFace {
 }
 
 pub fn router(face: GithubFace) -> Router {
+    // Each route names the resource it is about, which a refused media type
+    // reports, and any rendering it serves beside JSON (`media`).
     Router::new()
-        .route("/orgs/{org}", get(reads::get_org))
-        .route("/orgs/{org}/repos", post(create_org_repo))
+        .route(
+            "/orgs/{org}",
+            media::json("Organization", get(reads::get_org)),
+        )
+        .route(
+            "/orgs/{org}/repos",
+            media::json("Repository", post(create_org_repo)),
+        )
         .route(
             "/orgs/{org}/teams",
-            get(reads::list_org_teams).post(orgs::create_team),
+            media::json("Team", get(reads::list_org_teams).post(orgs::create_team)),
         )
-        .route("/orgs/{org}/teams/{team_slug}", delete(orgs::delete_team))
+        .route(
+            "/orgs/{org}/teams/{team_slug}",
+            media::json("Team", delete(orgs::delete_team)),
+        )
         .route(
             "/orgs/{org}/teams/{team_slug}/memberships/{username}",
-            put(orgs::set_team_membership).delete(orgs::remove_team_membership),
+            media::json(
+                "TeamMember",
+                put(orgs::set_team_membership).delete(orgs::remove_team_membership),
+            ),
         )
         .route(
             "/orgs/{org}/memberships/{username}",
-            put(orgs::set_org_membership),
+            media::json("Membership", put(orgs::set_org_membership)),
         )
-        .route("/users/{username}", get(reads::get_user_by_login))
-        .route("/user", get(reads::get_user))
-        .route("/user/emails", get(reads::get_user_emails))
-        .route("/user/teams", get(reads::list_user_teams))
+        .route(
+            "/users/{username}",
+            media::json("User", get(reads::get_user_by_login)),
+        )
+        .route("/user", media::json("User", get(reads::get_user)))
+        .route(
+            "/user/emails",
+            media::json("UserEmail", get(reads::get_user_emails)),
+        )
+        .route(
+            "/user/teams",
+            media::json("Team", get(reads::list_user_teams)),
+        )
         .route(
             "/user/repos",
-            get(reads::list_user_repos).post(create_user_repo),
+            media::json(
+                "Repository",
+                get(reads::list_user_repos).post(create_user_repo),
+            ),
         )
-        .route("/repos/{owner}/{repo}", get(reads::get_repo))
+        .route(
+            "/repos/{owner}/{repo}",
+            media::json("Repository", get(reads::get_repo)),
+        )
         .route(
             "/repos/{owner}/{repo}/pulls",
-            get(reads::list_pulls).post(pulls::create_pull),
+            media::json(
+                "PullRequest",
+                get(reads::list_pulls).post(pulls::create_pull),
+            ),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}",
-            get(reads::get_pull).patch(pulls::patch_pull),
+            media::json("PullRequest", get(reads::get_pull).patch(pulls::patch_pull)),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/merge",
-            put(pulls::merge_pull),
+            media::json("PullRequest", put(pulls::merge_pull)),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/files",
-            get(reads::list_pull_files),
+            media::json("PullRequest", get(reads::list_pull_files)),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/reviews",
-            get(reads::list_reviews).post(pulls::create_review),
+            media::json(
+                "PullRequestReview",
+                get(reads::list_reviews).post(pulls::create_review),
+            ),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/requested_reviewers",
-            post(pulls::request_reviewers).delete(pulls::remove_review_requests),
+            media::json(
+                "PullRequest",
+                post(pulls::request_reviewers).delete(pulls::remove_review_requests),
+            ),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/comments",
-            get(reads::list_review_comments),
+            media::json("PullRequestReviewComment", get(reads::list_review_comments)),
         )
         .route(
             "/repos/{owner}/{repo}/issues/{number}/comments",
-            get(reads::list_issue_comments).post(pulls::create_comment),
+            media::json(
+                "IssueComment",
+                get(reads::list_issue_comments).post(pulls::create_comment),
+            ),
         )
         .route(
             "/repos/{owner}/{repo}/issues/{number}/labels",
-            post(pulls::add_labels),
+            media::json("Label", post(pulls::add_labels)),
         )
         .route(
             "/repos/{owner}/{repo}/issues/{number}/labels/{name}",
-            delete(pulls::remove_label),
+            media::json("Label", delete(pulls::remove_label)),
         )
         .route(
             "/repos/{owner}/{repo}/commits/{sha}/check-runs",
-            get(reads::list_check_runs_for_ref),
+            media::json("CheckRun", get(reads::list_check_runs_for_ref)),
         )
+        // For a file, the object media type answers the object the JSON
+        // one does.
         .route(
             "/repos/{owner}/{repo}/contents/{*path}",
-            get(reads::get_contents),
+            media::rendering("Content", &["object"], get(reads::get_contents)),
         )
-        .route("/repos/{owner}/{repo}/branches", get(reads::list_branches))
+        .route(
+            "/repos/{owner}/{repo}/branches",
+            media::json("Branch", get(reads::list_branches)),
+        )
         .route(
             "/repos/{owner}/{repo}/git/ref/heads/{*branch}",
-            get(reads::get_branch_ref),
+            media::json("Ref", get(reads::get_branch_ref)),
         )
         .route(
             "/repos/{owner}/{repo}/compare/{basehead}",
-            get(reads::compare),
+            media::json("Comparison", get(reads::compare)),
         )
         .route(
             "/repos/{owner}/{repo}/check-runs",
-            post(checks::create_check_run),
+            media::json("CheckRun", post(checks::create_check_run)),
         )
         .route(
             "/repos/{owner}/{repo}/check-runs/{id}",
-            patch(checks::patch_check_run),
+            media::json("CheckRun", patch(checks::patch_check_run)),
         )
         .with_state(face)
 }

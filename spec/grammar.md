@@ -36,7 +36,9 @@ Every token is fake, prefixed `orrfake_`, and derived from the world's secret, s
    "errors": [{"resource": "…", "code": "custom", "field": "F", "message": "not mocked by orrery"}]}
   ```
 
-  `resource` names what the route is about: `Repository`, `PullRequest`, `PullRequestReview`, `Label`, `CheckRun`, `Team`, `Comparison`, or `OauthAccess` for the OAuth token exchange. A media type a route lists as not mocked (the diff and patch media types, and XML from the OAuth token exchange) is refused the same way, with `field` `Accept`.
+  `resource` names what the route is about: `Repository`, `PullRequest`, `PullRequestReview`, `PullRequestReviewComment`, `IssueComment`, `Label`, `CheckRun`, `Organization`, `Membership`, `Team`, `TeamMember`, `User`, `UserEmail`, `Branch`, `Ref`, `Content`, `Comparison`, or `OauthAccess` for the OAuth token exchange.
+
+- **REST answers JSON.** GitHub picks a rendering from its media type's parameter: `application/vnd.github.v3.full+json` adds `body_text` and `body_html` beside `body`, `.raw` answers a file's bytes, and `.diff` a diff. Every route answers JSON when `Accept` lists only `application/json`, `*/*`, `application/vnd.github+json`, `application/vnd.github.v3+json`, previews (`application/vnd.github.<name>-preview`, with or without `+json`), and media types that aren't GitHub's. Any other GitHub media type in `Accept`, even beside a JSON one, is refused with the not-mocked `422` above, with `field` `Accept`, unless the route lists it as served. The header is checked before the route reads its path, so such a request for something that doesn't exist is the `422`, not a `404`. The OAuth token exchange, which is not REST, refuses XML the same way.
 
 - A body that isn't valid JSON is `400` `{"message": "Problems parsing JSON"}`, and on most routes so is a known field of the wrong type. A body over 2 MiB is `413`.
 - Query values are decoded as a URL query is: `%XX`, and `+` as a space. A repeated parameter keeps its first value.
@@ -71,7 +73,3 @@ REST lists page with `?per_page=&page=`: `per_page` defaults to 30 and is limite
 ## Rate limits
 
 Orrery doesn't rate limit. It sends no `X-RateLimit-*` headers, GraphQL `rateLimit` is `null`, and `/rate_limit` is not served: the shape of a GitHub Enterprise Server with rate limiting turned off, which GitHub's clients handle.
-
-## Known gaps
-
-- A GitHub media type Orrery doesn't render, other than the diff and patch media types the routes that list them refuse, gets the plain JSON answer: `application/vnd.github.full+json` on a pull request has no `body_html`, and `application/vnd.github.raw+json` on contents answers the JSON object, not the file.

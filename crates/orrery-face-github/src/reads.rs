@@ -11,7 +11,7 @@
 
 use axum::body::Body;
 use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
-use axum::http::{HeaderMap, Response, StatusCode, header};
+use axum::http::{HeaderMap, Response, StatusCode};
 use base64::Engine as _;
 use orrery_face_git::store;
 use orrery_world::{Actor, ActorKind, PullState};
@@ -23,8 +23,8 @@ use crate::render::{
     team_json, user_full_json,
 };
 use crate::{
-    GithubFace, github_error, header_str, internal, json_response, orrery_unsupported_field,
-    parse_form, resolve_repo, validation_invalid,
+    GithubFace, github_error, internal, json_response, orrery_unsupported_field, parse_form,
+    resolve_repo, validation_invalid,
 };
 
 /// GitHub's listing defaults: 30 per page, cap 100, silently clamped —
@@ -118,21 +118,9 @@ pub(crate) async fn list_pulls(
         .expect("static response parts are valid")
 }
 
-/// The diff and patch media types, refused on `resource`: answering them
-/// with JSON would be a plausible wrong answer.
-// TODO(ORR-50): refuse every GitHub media type the face doesn't render, on
-// every REST route; the body renderings (`full+json` and the like) on pulls,
-// reviews, and comments, and raw contents, still get the plain JSON answer.
-fn refuse_diff_media(headers: &HeaderMap, resource: &str) -> Option<Response<Body>> {
-    let accept = header_str(headers, header::ACCEPT);
-    (accept.contains("diff") || accept.contains("patch"))
-        .then(|| orrery_unsupported_field(resource, "Accept"))
-}
-
 pub(crate) async fn get_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
-    headers: HeaderMap,
 ) -> Response<Body> {
     let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
@@ -143,9 +131,6 @@ pub(crate) async fn get_pull(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
-    if let Some(refused) = refuse_diff_media(&headers, "PullRequest") {
-        return refused;
-    }
     json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull))
 }
 
@@ -463,15 +448,11 @@ fn compare_json(
 pub(crate) async fn compare(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, basehead)): UrlPath<(String, String, String)>,
-    headers: HeaderMap,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    if let Some(refused) = refuse_diff_media(&headers, "Comparison") {
-        return refused;
-    }
     let Some((base_rev, head_rev)) = basehead.split_once("...") else {
         return github_error(StatusCode::NOT_FOUND, "Not Found");
     };
