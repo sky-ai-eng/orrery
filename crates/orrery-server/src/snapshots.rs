@@ -17,7 +17,7 @@ use orrery_snapshot::{DiffSide, SnapshotError};
 use orrery_world::{WorldError, WorldView};
 
 use crate::control::{Fault, Fields, errors, internal};
-use crate::list::{self, SortDir};
+use crate::list;
 use crate::{AppState, json};
 
 pub(crate) fn router() -> Router<AppState> {
@@ -92,9 +92,8 @@ async fn read_one(state: &AppState, name: String) -> Response<Body> {
 
 async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
-    let order = list::read_dir(&mut fields, "name");
-    let query = serde_json::json!({ "sort_dir": order });
-    let window = list::read_window::<String>(&mut fields, "snapshots", &query);
+    list::read_ascending(&mut fields, "name");
+    let window = list::read_window::<String>(&mut fields, "snapshots", &serde_json::json!({}));
     let window = match fields.finish(Some(window)) {
         Ok(w) => w,
         Err(resp) => return *resp,
@@ -106,23 +105,16 @@ async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
         orrery_snapshot::list(&dir)
     })
     .await;
-    let mut all = match flatten(result) {
+    let all = match flatten(result) {
         Ok(a) => a,
         Err(e) => return snapshot_error(e, None),
     };
     // The listing is read whole, in name order, under the gate's read side,
     // so its length is the total the page was cut from.
     let total = i64::try_from(all.len()).unwrap_or(i64::MAX);
-    if order == SortDir::Desc {
-        all.reverse();
-    }
     let rows: Vec<_> = all
         .into_iter()
-        .filter(|s| match (&window.resume, order) {
-            (None, _) => true,
-            (Some(last), SortDir::Asc) => s.name > *last,
-            (Some(last), SortDir::Desc) => s.name < *last,
-        })
+        .filter(|s| window.resume.as_ref().is_none_or(|last| s.name > *last))
         .take(window.fetch())
         .collect();
     list::answer(rows, &window, total, |s| s.name.clone())

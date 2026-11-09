@@ -161,6 +161,17 @@ pub(crate) fn read_dir(fields: &mut Fields, key: &'static str) -> SortDir {
     read_sort(fields, std::slice::from_ref(&key)).map_or(key.default_dir, |(_, dir)| dir)
 }
 
+/// Read the order of a list that sorts by one key, `key`, ascending only.
+/// A body may name the key, and `asc` with it; `desc` is refused.
+pub(crate) fn read_ascending(fields: &mut Fields, key: &'static str) {
+    if read_dir(fields, key) == SortDir::Desc {
+        fields.fault(Fault::invalid(
+            format!("this list sorts by {key} ascending only"),
+            "sort_dir",
+        ));
+    }
+}
+
 /// The answer to a list read of `window.fetch()` rows: the page, the
 /// filtered total, and a token for the next page when there is one.
 /// `next_page_token` is absent on the last page.

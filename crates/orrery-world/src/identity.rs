@@ -6,8 +6,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::credentials::{self, TokenOrigin};
 use crate::{
-    Actor, ActorEmail, ActorKind, KeyOrder, ListedActor, ListedOAuthApp, OAuthApp, OAuthToken,
-    Result, World, WorldError, constraint_violation, queries,
+    Actor, ActorEmail, ActorKind, ListedActor, ListedOAuthApp, OAuthApp, OAuthToken, Result, World,
+    WorldError, constraint_violation, queries,
 };
 
 /// How long an authorization code stays exchangeable: GitHub's ten minutes,
@@ -46,8 +46,8 @@ impl World {
         actor.map(|a| listed_actor(&conn, a)).transpose()
     }
 
-    /// One page of the actors in login `order`, and how many there are,
-    /// each with its addresses in [`World::actor_emails`] order. With
+    /// One page of the actors in login order, and how many there are, each
+    /// with its addresses in [`World::actor_emails`] order. With
     /// `resume`, the login of the previous page's last actor, the page holds
     /// only actors past it, so a walk neither repeats nor skips an actor
     /// while the list grows. Logins compare under the column's `NOCASE`
@@ -57,17 +57,20 @@ impl World {
     /// lock as the page.
     pub fn actors_page(
         &self,
-        order: KeyOrder,
         resume: Option<&str>,
         limit: usize,
     ) -> Result<(Vec<ListedActor>, i64)> {
         let conn = self.lock();
-        let (past, page) = keyset("a.login COLLATE NOCASE", order, resume.is_some());
         let mut actors = conn.prepare(&format!(
-            "{} WHERE a.kind != 'system' AND {past} {page}",
+            "{} WHERE a.kind != 'system' AND a.login > ?1 COLLATE NOCASE
+             ORDER BY a.login COLLATE NOCASE LIMIT ?2",
             queries::ACTOR_SELECT
         ))?;
-        let rows = actors.query_map(params![resume, limit as i64], queries::row_to_actor)?;
+        // Every login is non-empty, so "" sorts before all of them.
+        let rows = actors.query_map(
+            params![resume.unwrap_or(""), limit as i64],
+            queries::row_to_actor,
+        )?;
         let mut listed = Vec::new();
         for row in rows {
             listed.push(listed_actor(&conn, row?)?);
@@ -229,22 +232,26 @@ impl World {
             .optional()?)
     }
 
-    /// One page of the OAuth apps in client id `order`, and how many there
+    /// One page of the OAuth apps in client id order, and how many there
     /// are. With `resume`, the client id of the previous page's last app, the
     /// page holds only apps past it, so a walk neither repeats nor skips an
     /// app while the list grows. The count is read under the same lock as the
     /// page. The query never reads a secret.
     pub fn oauth_apps_page(
         &self,
-        order: KeyOrder,
         resume: Option<&str>,
         limit: usize,
     ) -> Result<(Vec<ListedOAuthApp>, i64)> {
         let conn = self.lock();
-        let (past, page) = keyset("client_id", order, resume.is_some());
+        // Every client id is non-empty, so "" sorts before all of them.
         let apps = conn
-            .prepare(&format!("{LISTED_OAUTH_APP_SELECT} WHERE {past} {page}"))?
-            .query_map(params![resume, limit as i64], row_to_listed_oauth_app)?
+            .prepare(&format!(
+                "{LISTED_OAUTH_APP_SELECT} WHERE client_id > ?1 ORDER BY client_id LIMIT ?2"
+            ))?
+            .query_map(
+                params![resume.unwrap_or(""), limit as i64],
+                row_to_listed_oauth_app,
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let total = conn.query_row("SELECT COUNT(*) FROM oauth_apps", [], |r| r.get(0))?;
         Ok((apps, total))
@@ -404,22 +411,6 @@ fn emails_of(conn: &Connection, actor_id: i64) -> Result<Vec<ActorEmail>> {
         conn.prepare_cached(&format!("{EMAIL_SELECT} WHERE actor_id = ?1 {EMAIL_ORDER}"))?;
     let rows = stmt.query_map(params![actor_id], row_to_email)?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-}
-
-/// The condition and the `ORDER BY` of one page of a list keyed by `key`
-/// in `order`: past `?1` when the read resumes, at most `?2` rows. Without a
-/// resume the condition holds for every row.
-fn keyset(key: &str, order: KeyOrder, resume: bool) -> (String, String) {
-    let (past, dir) = match order {
-        KeyOrder::Ascending => (">", "ASC"),
-        KeyOrder::Descending => ("<", "DESC"),
-    };
-    let condition = if resume {
-        format!("{key} {past} ?1")
-    } else {
-        "1".to_string()
-    };
-    (condition, format!("ORDER BY {key} {dir} LIMIT ?2"))
 }
 
 /// The one projection the list of actors and the point read share, so the

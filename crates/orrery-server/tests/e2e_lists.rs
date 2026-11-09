@@ -115,7 +115,7 @@ async fn actors_list_in_login_order_with_their_addresses() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn every_keyed_list_walks_by_token_in_either_order() {
+async fn every_keyed_list_walks_by_token_in_key_order() {
     let inst = boot().await;
     let base = &inst.base;
     populate(base);
@@ -134,17 +134,12 @@ async fn every_keyed_list_walks_by_token_in_either_order() {
         }
         assert_eq!(keys, sorted, "{path}");
 
-        let mut reversed = items.clone();
-        reversed.reverse();
-        let desc = json!({ "page_size": 2, "sort_key": key, "sort_dir": "desc" });
-        for (body, expected) in [(json!({ "page_size": 2 }), &items), (desc, &reversed)] {
-            let pages = walk_pages(base, path, body, || {});
-            assert_eq!(pages.len(), 3, "{path}");
-            for page in &pages {
-                assert_eq!(page["total_count"], 5, "{path}: {page}");
-            }
-            assert_eq!(&items_of(&pages), expected, "{path}");
+        let pages = walk_pages(base, path, json!({ "page_size": 2 }), || {});
+        assert_eq!(pages.len(), 3, "{path}");
+        for page in &pages {
+            assert_eq!(page["total_count"], 5, "{path}: {page}");
         }
+        assert_eq!(items_of(&pages), items, "{path}");
     }
 }
 
@@ -243,7 +238,7 @@ async fn a_page_size_of_zero_counts_every_keyed_list() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_page_token_answers_only_the_list_and_order_it_was_issued_for() {
+async fn a_page_token_answers_only_the_list_it_was_issued_for() {
     let inst = boot().await;
     let base = &inst.base;
     populate(base);
@@ -262,19 +257,15 @@ async fn a_page_token_answers_only_the_list_and_order_it_was_issued_for() {
     for (path, key) in KEYED_LISTS {
         let token = token_of(path);
         // The default order and the same order named are one query.
-        assert_eq!(
-            list(
-                base,
-                path,
-                json!({ "page_size": 1, "sort_key": key, "page_token": token })
-            ),
-            list(base, path, json!({ "page_size": 1, "page_token": token })),
-            "{path}"
-        );
+        let plain = list(base, path, json!({ "page_size": 1, "page_token": token }));
+        for named in [
+            json!({ "page_size": 1, "sort_key": key, "page_token": token }),
+            json!({ "page_size": 1, "sort_key": key, "sort_dir": "asc", "page_token": token }),
+        ] {
+            assert_eq!(list(base, path, named), plain, "{path}");
+        }
 
-        let other_order = json!({ "sort_key": key, "sort_dir": "desc", "page_token": token });
         let mut elsewhere: Vec<(&str, Value)> = vec![
-            (path, other_order),
             (path, json!({ "page_token": log_token })),
             ("/log/list", json!({ "page_token": token })),
         ];
@@ -352,6 +343,15 @@ async fn bad_list_bodies_name_every_fault() {
                 fault("OUT_OF_RANGE", Some("page_size")),
                 fault("INVALID_ARGUMENT", Some("bogus")),
             ]
+        );
+    }
+    // Only the log reads newest first; the others sort by their key
+    // ascending, and say so.
+    for (path, key) in KEYED_LISTS {
+        assert_eq!(
+            refused(path, json!({ "sort_key": key, "sort_dir": "desc" })),
+            [fault("INVALID_ARGUMENT", Some("sort_dir"))],
+            "{path}"
         );
     }
     // The bounds are inclusive.

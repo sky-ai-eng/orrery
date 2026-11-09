@@ -16,8 +16,8 @@ use axum::extract::{OriginalUri, Path as UrlPath, State};
 use axum::http::{Method, Response, StatusCode};
 use axum::routing::{get, post, put};
 use orrery_world::{
-    Actor, ActorEmail, ActorKind, KeyOrder, LogOrder, SYSTEM_ACTOR_LOGIN, WorldError,
-    validate_actor_kind, validate_login, validate_oauth_app_callback_url, validate_oauth_app_name,
+    Actor, ActorEmail, ActorKind, LogOrder, SYSTEM_ACTOR_LOGIN, WorldError, validate_actor_kind,
+    validate_login, validate_oauth_app_callback_url, validate_oauth_app_name,
 };
 use serde_json::value::RawValue;
 
@@ -345,16 +345,15 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
 /// knows whom it may issue tokens for. Never a token.
 async fn list_actors(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
-    let dir = list::read_dir(&mut fields, "login");
-    let query = serde_json::json!({ "sort_dir": dir });
-    let window = list::read_window::<String>(&mut fields, "actors", &query);
+    list::read_ascending(&mut fields, "login");
+    let window = list::read_window::<String>(&mut fields, "actors", &serde_json::json!({}));
     let window = match fields.finish(Some(window)) {
         Ok(w) => w,
         Err(resp) => return *resp,
     };
     match state
         .world
-        .actors_page(key_order(dir), window.resume.as_deref(), window.fetch())
+        .actors_page(window.resume.as_deref(), window.fetch())
     {
         Ok((rows, total)) => list::answer(rows, &window, total, |a| a.login.clone()),
         Err(e) => internal(e),
@@ -394,26 +393,18 @@ fn read_actor(state: &AppState, login: String) -> Response<Body> {
 /// build knows which it may issue secrets for. Never a secret.
 async fn list_oauth_apps(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
-    let dir = list::read_dir(&mut fields, "client_id");
-    let query = serde_json::json!({ "sort_dir": dir });
-    let window = list::read_window::<String>(&mut fields, "oauth_apps", &query);
+    list::read_ascending(&mut fields, "client_id");
+    let window = list::read_window::<String>(&mut fields, "oauth_apps", &serde_json::json!({}));
     let window = match fields.finish(Some(window)) {
         Ok(w) => w,
         Err(resp) => return *resp,
     };
     match state
         .world
-        .oauth_apps_page(key_order(dir), window.resume.as_deref(), window.fetch())
+        .oauth_apps_page(window.resume.as_deref(), window.fetch())
     {
         Ok((rows, total)) => list::answer(rows, &window, total, |a| a.client_id.clone()),
         Err(e) => internal(e),
-    }
-}
-
-fn key_order(dir: SortDir) -> KeyOrder {
-    match dir {
-        SortDir::Asc => KeyOrder::Ascending,
-        SortDir::Desc => KeyOrder::Descending,
     }
 }
 
