@@ -13,26 +13,24 @@ pub(crate) const REPO_SELECT: &str = "SELECT r.id, a.login, r.name, r.descriptio
     r.default_branch, r.created_clock_unix, r.pushed_at_clock_unix
     FROM repos r JOIN actors a ON a.id = r.owner_id";
 
-pub(crate) const PULL_SELECT: &str = "SELECT p.id, p.repo_id, p.number, p.title, p.body,
-    au.login, p.state, p.draft, p.head_ref, p.head_sha, p.base_ref, p.base_sha,
-    p.merged, p.merge_commit_sha, mb.login, p.created_clock_unix, p.updated_clock_unix,
-    p.closed_clock_unix,
-    (SELECT json_group_array(name) FROM (
-        SELECT name FROM pull_labels WHERE pull_id = p.id ORDER BY name COLLATE NOCASE)),
-    (SELECT json_group_array(login) FROM (
-        SELECT a.login FROM review_requests q JOIN actors a ON a.id = q.reviewer_id
-        WHERE q.pull_id = p.id ORDER BY q.id)),
-    (SELECT json_group_array(slug) FROM (
-        SELECT t.slug FROM review_requests q JOIN teams t ON t.id = q.team_id
-        WHERE q.pull_id = p.id ORDER BY q.id))
-    FROM pulls p
-    JOIN actors au ON au.id = p.author_id
-    LEFT JOIN actors mb ON mb.id = p.merged_by_id";
-
 // The projections below name only their own table's columns, reaching other
 // tables through scalar subqueries, so the same text serves a point read
 // (`SELECT {cols} FROM <table>`) and the RETURNING clause of a write to that
 // table: the write returns exactly what the read would.
+
+pub(crate) const PULL_COLUMNS: &str = "id, repo_id, number, title, body,
+    (SELECT login FROM actors WHERE actors.id = pulls.author_id),
+    state, draft, head_ref, head_sha, base_ref, base_sha, merged, merge_commit_sha,
+    (SELECT login FROM actors WHERE actors.id = pulls.merged_by_id),
+    created_clock_unix, updated_clock_unix, closed_clock_unix,
+    (SELECT json_group_array(name) FROM (
+        SELECT name FROM pull_labels WHERE pull_id = pulls.id ORDER BY name COLLATE NOCASE)),
+    (SELECT json_group_array(login) FROM (
+        SELECT a.login FROM review_requests q JOIN actors a ON a.id = q.reviewer_id
+        WHERE q.pull_id = pulls.id ORDER BY q.id)),
+    (SELECT json_group_array(slug) FROM (
+        SELECT t.slug FROM review_requests q JOIN teams t ON t.id = q.team_id
+        WHERE q.pull_id = pulls.id ORDER BY q.id))";
 
 pub(crate) const TEAM_COLUMNS: &str = "id, org_id,
     (SELECT login FROM actors WHERE actors.id = teams.org_id),
@@ -238,7 +236,11 @@ pub(crate) fn list_repos(conn: &Connection) -> Result<Vec<Repo>> {
 }
 
 pub(crate) fn list_pulls(conn: &Connection) -> Result<Vec<Pull>> {
-    list(conn, &format!("{PULL_SELECT} ORDER BY p.id"), row_to_pull)
+    list(
+        conn,
+        &format!("SELECT {PULL_COLUMNS} FROM pulls ORDER BY id"),
+        row_to_pull,
+    )
 }
 
 pub(crate) fn list_reviews(conn: &Connection) -> Result<Vec<Review>> {
@@ -274,11 +276,11 @@ pub(crate) fn list_pulls_for_repo(
     repo_id: i64,
     state: Option<&str>,
 ) -> Result<Vec<Pull>> {
-    let mut sql = format!("{PULL_SELECT} WHERE p.repo_id = ?1");
+    let mut sql = format!("SELECT {PULL_COLUMNS} FROM pulls WHERE repo_id = ?1");
     if state.is_some() {
-        sql.push_str(" AND p.state = ?2");
+        sql.push_str(" AND state = ?2");
     }
-    sql.push_str(" ORDER BY p.created_clock_unix DESC, p.id DESC");
+    sql.push_str(" ORDER BY created_clock_unix DESC, id DESC");
     let mut stmt = conn.prepare(&sql)?;
     let rows = match state {
         Some(s) => stmt.query_map(params![repo_id, s], row_to_pull)?,
@@ -482,7 +484,7 @@ pub(crate) fn list_repos_for_owner(conn: &Connection, owner_id: i64) -> Result<V
 pub(crate) fn pull_by_id(conn: &Connection, id: i64) -> Result<Option<Pull>> {
     Ok(conn
         .query_row(
-            &format!("{PULL_SELECT} WHERE p.id = ?1"),
+            &format!("SELECT {PULL_COLUMNS} FROM pulls WHERE id = ?1"),
             params![id],
             row_to_pull,
         )

@@ -36,12 +36,15 @@ impl World {
                 params![new.repo_id],
                 |r| r.get(0),
             )?;
-            let id: i64 = tx.query_row(
-                "INSERT INTO pulls (repo_id, number, title, body, author_id, state, draft,
-                                    head_ref, head_sha, base_ref, base_sha,
-                                    created_clock_unix, updated_clock_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?7, ?8, ?9, ?10, ?11, ?11)
-                 RETURNING id",
+            let pull = tx.query_row(
+                &format!(
+                    "INSERT INTO pulls (repo_id, number, title, body, author_id, state, draft,
+                                        head_ref, head_sha, base_ref, base_sha,
+                                        created_clock_unix, updated_clock_unix)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+                     RETURNING {}",
+                    queries::PULL_COLUMNS
+                ),
                 params![
                     new.repo_id,
                     number,
@@ -55,9 +58,8 @@ impl World {
                     new.base_sha,
                     clock
                 ],
-                |r| r.get(0),
+                queries::row_to_pull,
             )?;
-            let pull = queries::require_pull(&tx, id)?;
             self.log_locked(
                 &tx,
                 new.author_id,
@@ -81,8 +83,8 @@ impl World {
             Ok(conn
                 .query_row(
                     &format!(
-                        "{} WHERE p.repo_id = ?1 AND p.number = ?2",
-                        queries::PULL_SELECT
+                        "SELECT {} FROM pulls WHERE repo_id = ?1 AND number = ?2",
+                        queries::PULL_COLUMNS
                     ),
                     params![repo_id, number],
                     queries::row_to_pull,
@@ -206,8 +208,7 @@ impl World {
             if fields.is_empty() {
                 return Ok(before);
             }
-            touch_pull(&tx, pull_id)?;
-            let pull = queries::require_pull(&tx, pull_id)?;
+            let pull = touch_pull(&tx, pull_id)?;
             self.log_locked(
                 &tx,
                 actor_id,
@@ -254,8 +255,7 @@ impl World {
             if added.is_empty() {
                 return Ok(before);
             }
-            touch_pull(&tx, pull_id)?;
-            let pull = queries::require_pull(&tx, pull_id)?;
+            let pull = touch_pull(&tx, pull_id)?;
             self.log_locked(
                 &tx,
                 actor_id,
@@ -293,8 +293,7 @@ impl World {
                 actor_id,
                 &TimelineKind::Unlabeled(removed.clone()),
             )?;
-            touch_pull(&tx, pull_id)?;
-            let pull = queries::require_pull(&tx, pull_id)?;
+            let pull = touch_pull(&tx, pull_id)?;
             self.log_locked(
                 &tx,
                 actor_id,
@@ -315,10 +314,6 @@ impl World {
     /// person other than the pull's author, and a team must belong to the
     /// organization that owns the repository. A reviewer already pending is
     /// skipped, so only a new request is logged and lands on the timeline.
-    ///
-    /// The returned pull is read back inside the write's transaction, as every
-    /// pull write's is: its labels and requests are aggregates over other
-    /// tables, which a RETURNING clause on `pulls` cannot project.
     pub fn request_reviewers(
         &self,
         pull_id: i64,
@@ -368,8 +363,7 @@ impl World {
                     &TimelineKind::ReviewRequested(rv.clone()),
                 )?;
             }
-            touch_pull(&tx, pull_id)?;
-            let pull = queries::require_pull(&tx, pull_id)?;
+            let pull = touch_pull(&tx, pull_id)?;
             self.log_locked(
                 &tx,
                 actor_id,
@@ -388,8 +382,7 @@ impl World {
     /// Withdraw review requests, GitHub's `DELETE
     /// …/pulls/{n}/requested_reviewers`. A name with no pending request is
     /// skipped, as GitHub skips it; each request withdrawn is logged and lands
-    /// on the timeline. The returned pull is read back inside the
-    /// transaction, for the reason `request_reviewers` gives.
+    /// on the timeline.
     pub fn remove_review_requests(
         &self,
         pull_id: i64,
@@ -439,8 +432,7 @@ impl World {
                     &TimelineKind::ReviewRequestRemoved(rv.clone()),
                 )?;
             }
-            touch_pull(&tx, pull_id)?;
-            let pull = queries::require_pull(&tx, pull_id)?;
+            let pull = touch_pull(&tx, pull_id)?;
             self.log_locked(
                 &tx,
                 actor_id,
@@ -551,8 +543,7 @@ impl World {
                 params![base.new, actor_id, pull_id],
             )?;
             record_timeline(&tx, pull_id, actor_id, &TimelineKind::Closed)?;
-            touch_pull(&tx, pull_id)?;
-            let pull = queries::require_pull(&tx, pull_id)?;
+            let pull = touch_pull(&tx, pull_id)?;
             self.log_locked(
                 &tx,
                 actor_id,
@@ -715,8 +706,7 @@ impl World {
             if let Some(kind) = &timeline {
                 record_timeline(&tx, pull_id, actor_id, kind)?;
             }
-            touch_pull(&tx, pull_id)?;
-            let pull = queries::require_pull(&tx, pull_id)?;
+            let pull = touch_pull(&tx, pull_id)?;
             self.log_locked(
                 &tx,
                 actor_id,
@@ -866,13 +856,23 @@ pub(crate) fn repin_open_pull(
     Ok(())
 }
 
-fn touch_pull(conn: &Connection, pull_id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE pulls SET updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
-         WHERE id = ?1",
+/// Bump the pull's `updated` clock and return the row as stored. The
+/// projection's subqueries read the labels and review requests as they stand
+/// when this runs, so it must be the last write a transaction makes to the
+/// pull or its child tables.
+fn touch_pull(conn: &Connection, pull_id: i64) -> Result<Pull> {
+    conn.query_row(
+        &format!(
+            "UPDATE pulls SET updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+             WHERE id = ?1
+             RETURNING {}",
+            queries::PULL_COLUMNS
+        ),
         params![pull_id],
-    )?;
-    Ok(())
+        queries::row_to_pull,
+    )
+    .optional()?
+    .ok_or(WorldError::NoSuchPull(pull_id))
 }
 
 pub(crate) fn repo_full_name(conn: &Connection, repo_id: i64) -> Result<String> {
