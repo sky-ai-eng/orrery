@@ -534,8 +534,9 @@ impl World {
     /// is read under the same lock as the page. Only `seq`'s order is relied
     /// on, never that its values are contiguous.
     ///
-    /// `after_seq` is checked as [`World::check_log_position`] checks it. A
-    /// `resume` the log no longer holds is [`WorldError::ResumeNotInLog`]:
+    /// An `after_seq` that is not a position in the log is
+    /// [`WorldError::NoSuchLogPosition`]. A `resume` the log no longer holds
+    /// is [`WorldError::ResumeNotInLog`]:
     /// the walk's earlier pages came from a log a restore replaced. A `seq`
     /// is issued once, so while the log holds `resume` it holds the same
     /// entries up to it, and a walk in either order goes on exactly. Both are
