@@ -56,15 +56,16 @@ pub const SYSTEM_ACTOR_LOGIN: &str = "orrery";
 const DB_FILE: &str = "world.db";
 const REPOS_DIR: &str = "repos";
 
-/// A ref a push moved, as the git side observed it, for [`World::record_push`].
+/// A ref a push or a merge moved, as the git side moved it, for
+/// [`World::record_push`] and [`World::record_merge`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefMove<'a> {
     /// The ref's full name, as its `ref.update` entry records it.
     pub name: &'a str,
-    /// The object id before the push, in the caller's spelling for a ref
+    /// The object id before the move, in the caller's spelling for a ref
     /// that did not exist.
     pub old: &'a str,
-    /// The object id after the push, in the caller's spelling for a ref the
+    /// The object id after the move, in the caller's spelling for a ref the
     /// push deleted.
     pub new: &'a str,
     /// The pulls, by number, that take `new` as their head: for a branch,
@@ -441,21 +442,6 @@ impl World {
         self.with_conn(|conn| queries::list_repos_for_owner(conn, owner_id))
     }
 
-    /// Record that a push landed: bump `pushed_at` to the current clock.
-    pub fn touch_pushed(&self, repo_id: i64) -> Result<()> {
-        let conn = self.lock();
-        let n = conn.execute(
-            "UPDATE repos
-             SET pushed_at_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
-             WHERE id = ?1",
-            params![repo_id],
-        )?;
-        if n == 0 {
-            return Err(WorldError::NoSuchRepo(repo_id));
-        }
-        Ok(())
-    }
-
     /// Record a push the git side has taken: `pushed_at` moves to the current
     /// clock, `default_branch` (when given) becomes the repository's default
     /// branch, and each move in `moves`, in order, appends a `ref.update`
@@ -478,6 +464,22 @@ impl World {
         }
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
+        self.record_moves(&tx, repo_id, actor_id, moves, default_branch)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The writes a push and a merge share, inside the caller's transaction:
+    /// `pushed_at` and `default_branch` as [`World::record_push`] describes,
+    /// and for each move, in order, its `ref.update` entry and its re-pins.
+    pub(crate) fn record_moves(
+        &self,
+        tx: &Connection,
+        repo_id: i64,
+        actor_id: i64,
+        moves: &[RefMove<'_>],
+        default_branch: Option<&str>,
+    ) -> Result<()> {
         let n = tx.execute(
             "UPDATE repos
              SET pushed_at_clock_unix = (SELECT clock_unix FROM world WHERE id = 1),
@@ -488,10 +490,10 @@ impl World {
         if n == 0 {
             return Err(WorldError::NoSuchRepo(repo_id));
         }
-        let repo = pulls::repo_full_name(&tx, repo_id)?;
+        let repo = pulls::repo_full_name(tx, repo_id)?;
         for m in moves {
             self.log_locked(
-                &tx,
+                tx,
                 actor_id,
                 "ref.update",
                 &serde_json::json!({
@@ -502,10 +504,9 @@ impl World {
                 }),
             )?;
             for &number in &m.repins {
-                pulls::repin_open_pull(&tx, repo_id, number, m.new)?;
+                pulls::repin_open_pull(tx, repo_id, number, m.new)?;
             }
         }
-        tx.commit()?;
         Ok(())
     }
 

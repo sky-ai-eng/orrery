@@ -8,10 +8,10 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use common::{boot, face_answer, face_ok, git, git_output, mint_actor};
+use common::{Instance, boot, face, face_answer, face_ok, git, git_output, mint_actor};
 use orrery_face_git::store;
 use orrery_world::{LogEntry, Signal};
 
@@ -322,6 +322,182 @@ async fn a_push_moves_its_refs_before_its_entries_can_be_read() {
     assert!(!sync.is_empty());
     for (_, pull) in &sync {
         assert_eq!(pull, &Ok(Some(feature_v2.clone())), "{sync:?}");
+    }
+}
+
+/// A repository where merging pull request #1 (`feature` into `main`) moves
+/// the head of #2 (`main` into `release`) and of #3 (`main` into `staging`).
+struct BaseOfOthers {
+    inst: Instance,
+    token: String,
+    api: String,
+    bare: PathBuf,
+    /// `main`'s tip before the merge.
+    main: String,
+    _work: tempfile::TempDir,
+}
+
+async fn base_of_others() -> BaseOfOthers {
+    let inst = boot().await;
+    let base = inst.base.clone();
+    let token = mint_actor(&base, "alice", "user");
+    let repo = face_ok(
+        "POST",
+        &format!("{base}/api/v3/user/repos"),
+        &token,
+        serde_json::json!({ "name": "webapp" }),
+    );
+    let authed_url = repo["clone_url"]
+        .as_str()
+        .unwrap()
+        .replace("http://", &format!("http://x-access-token:{token}@"));
+    let api = format!("{base}/api/v3/repos/alice/webapp");
+    let bare = store::bare_dir(&inst.world.repos_dir(), "alice", "webapp");
+
+    let clock = inst.world.clock().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    git(&src, clock, &["init", "-b", "main", "."]);
+    commit(&src, clock, "README.md", "# webapp\n");
+    git(&src, clock, &["branch", "release"]);
+    git(&src, clock, &["branch", "staging"]);
+    git(&src, clock, &["checkout", "-b", "feature"]);
+    commit(&src, clock, "feature.txt", "v1\n");
+    git(&src, clock, &["checkout", "main"]);
+    let main = commit(&src, clock, "main.txt", "v2\n");
+    git(
+        &src,
+        clock,
+        &["push", &authed_url, "main", "release", "staging", "feature"],
+    );
+    for (head, base) in [
+        ("feature", "main"),
+        ("main", "release"),
+        ("main", "staging"),
+    ] {
+        face_ok(
+            "POST",
+            &format!("{api}/pulls"),
+            &token,
+            serde_json::json!({ "title": format!("{head} into {base}"), "head": head, "base": base }),
+        );
+    }
+    BaseOfOthers {
+        inst,
+        token,
+        api,
+        bare,
+        main,
+        _work: work,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_moves_its_refs_before_its_entries_can_be_read() {
+    let s = base_of_others().await;
+
+    // As in the push test above: a listener reads the repository as each
+    // entry is appended, which is the earliest view any reader gets.
+    type Refs = Vec<Result<Option<String>, String>>;
+    let seen: Arc<Mutex<Vec<Refs>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let watched = s.bare.clone();
+    s.inst.world.listen(move |signal| {
+        if signal == Signal::LogMayHaveGrown {
+            let refs = [
+                "refs/heads/main".to_string(),
+                store::pull_head_ref(2),
+                store::pull_head_ref(3),
+            ]
+            .iter()
+            .map(|r| store::rev_parse(&watched, r).map_err(|e| e.to_string()))
+            .collect();
+            if let Ok(mut seen) = sink.lock() {
+                seen.push(refs);
+            }
+        }
+    });
+
+    let merged = face_ok(
+        "PUT",
+        &format!("{}/pulls/1/merge", s.api),
+        &s.token,
+        serde_json::json!({}),
+    );
+    let merge_sha = merged["sha"].as_str().unwrap().to_string();
+    let seen = std::mem::take(&mut *seen.lock().unwrap());
+    assert_eq!(seen.len(), 2, "a ref.update and a pull.merge: {seen:?}");
+    for refs in &seen {
+        assert!(
+            refs.iter().all(|r| r == &Ok(Some(merge_sha.clone()))),
+            "{seen:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_that_fails_puts_its_refs_back() {
+    let s = base_of_others().await;
+    let rev = |r: &str| store::rev_parse(&s.bare, r).unwrap();
+    let pull = |n: i64| {
+        face_ok(
+            "GET",
+            &format!("{}/pulls/{n}", s.api),
+            &s.token,
+            serde_json::json!({}),
+        )
+    };
+
+    // A stale lock on #3's ref makes git refuse to move it, once the merge
+    // has moved `main` and #2's ref.
+    let lock = s.bare.join(format!("{}.lock", store::pull_head_ref(3)));
+    std::fs::write(&lock, "").unwrap();
+    let mark = s
+        .inst
+        .world
+        .log_after(0, 10_000)
+        .unwrap()
+        .last()
+        .unwrap()
+        .seq;
+    assert_eq!(
+        face(
+            "PUT",
+            &format!("{}/pulls/1/merge", s.api),
+            &s.token,
+            serde_json::json!({}),
+        ),
+        Err(500)
+    );
+
+    // No entry, and every ref back where the world still has it.
+    assert!(s.inst.world.log_after(mark, 10_000).unwrap().is_empty());
+    assert_eq!(rev("refs/heads/main"), Some(s.main.clone()));
+    assert_eq!(rev(&store::pull_head_ref(2)), Some(s.main.clone()));
+    assert_eq!(rev(&store::pull_head_ref(3)), Some(s.main.clone()));
+    let unmerged = pull(1);
+    assert_eq!(unmerged["state"], "open");
+    assert_eq!(unmerged["merged"], false);
+    assert_eq!(pull(2)["head"]["sha"], s.main.as_str());
+
+    // A retry merges from the same base: the merge commit's first parent is
+    // the tip `main` had before either attempt.
+    std::fs::remove_file(&lock).unwrap();
+    let merged = face_ok(
+        "PUT",
+        &format!("{}/pulls/1/merge", s.api),
+        &s.token,
+        serde_json::json!({}),
+    );
+    let merge_sha = merged["sha"].as_str().unwrap();
+    assert_eq!(rev(&format!("{merge_sha}^1")), Some(s.main.clone()));
+    for r in [
+        "refs/heads/main".to_string(),
+        store::pull_head_ref(2),
+        store::pull_head_ref(3),
+    ] {
+        assert_eq!(rev(&r).as_deref(), Some(merge_sha), "{r}");
     }
 }
 

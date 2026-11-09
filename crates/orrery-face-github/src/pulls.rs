@@ -3,12 +3,13 @@
 //! those routes live under `/issues/`, exactly as on GitHub).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use orrery_face_git::store;
-use orrery_world::{Actor, NewPull, Pull, PullState, Repo, ReviewState, WorldError};
+use orrery_world::{Actor, NewPull, Pull, PullState, RefMove, Repo, ReviewState, WorldError};
 
 use crate::render::{comment_json, label_json, pull_json, review_json};
 use crate::{
@@ -200,12 +201,14 @@ pub(crate) async fn patch_pull(
         Err(resp) => return *resp,
     };
     // The world write gate keeps a snapshot from copying, or a restore from
-    // replacing, the world while a reopen moves the pull's ref. The repo
-    // write lock keeps a push from interleaving with the edit: a push moves
-    // the refs of the pulls open on its branch before it records them, so a
-    // close or reopen must not land in between, and a new base's sha and a
-    // reopened pull's head must still be their branches' tips when the edit
-    // lands. The pull is read again once the lock is held, so the state
+    // replacing, the world between the re-read below and the writes after
+    // it, a reopen's ref move among them, so the pull row and the shas read
+    // from the bare repository belong to the world the edit writes into. The
+    // repo write lock keeps a push from interleaving with the edit: a push
+    // moves the refs of the pulls open on its branch before it records them,
+    // so a close or reopen must not land in between, and a new base's sha
+    // and a reopened pull's head must still be their branches' tips when the
+    // edit lands. The pull is read again once both are held, so the state
     // checks below see current truth.
     let _gate = face.git.gate().read_owned().await;
     let lock = face.git.repo_lock(repo.id);
@@ -220,6 +223,9 @@ pub(crate) async fn patch_pull(
     // change the base branch of a closed pull request."); this applies it.
     let base = match parsed.base.as_deref() {
         None => None,
+        // A pull request's base is never its own head: merging it would
+        // merge the branch into itself.
+        Some(b) if b == pull.head_ref => return validation_invalid("PullRequest", "base"),
         Some(b) => match store::rev_parse(&bare, &format!("refs/heads/{b}")) {
             Ok(Some(sha)) => Some((b.to_string(), sha)),
             Ok(None) => return validation_invalid("PullRequest", "base"),
@@ -434,35 +440,40 @@ pub(crate) async fn merge_pull(
         Ok(s) => s,
         Err(e) => return internal(e),
     };
+    // The open pull requests whose head is the base branch take the merge
+    // commit as their head, as on a push of it. They are read before the base
+    // moves, so a failed read moves nothing.
     let base_refname = format!("refs/heads/{}", pull.base_ref);
+    let repins = match face
+        .world
+        .pulls_to_sync(repo.id, &pull.base_ref, &merge_sha)
+    {
+        Ok(r) => r,
+        Err(e) => return internal(e),
+    };
     if let Err(e) = store::update_ref_cas(&bare, &base_refname, &merge_sha, &base_tip) {
         return internal(e);
     }
+    let base = RefMove {
+        name: &base_refname,
+        old: &base_tip,
+        new: &merge_sha,
+        repins,
+    };
 
-    // Bookkeeping mirrors what a push of this ref would have recorded, plus
-    // the merge itself; base-branch PRs (if any) re-pin like any head move.
-    // TODO(ORR-64): these are four separate commits, so a failure partway
-    // leaves the base moved with the pull still open, and a reader with its
-    // own connection can see the merge partway; record it in one commit,
-    // after its refs move, as a push is.
-    let record = || -> Result<(), orrery_face_git::GitFaceError> {
-        face.world.log_action(
-            actor.id,
-            "ref.update",
-            &serde_json::json!({
-                "repo": repo.full_name(),
-                "ref": base_refname,
-                "old": base_tip,
-                "new": merge_sha,
-            }),
-        )?;
-        face.world.touch_pushed(repo.id)?;
-        face.git
-            .sync_pull_heads(&repo, &pull.base_ref, &merge_sha)?;
-        face.world.record_merge(pull.id, actor.id, &merge_sha)?;
+    // Every ref the merge moves is in place before its record commits, so a
+    // reader that can see the merge's entries also sees its refs.
+    let mut pinned = 0;
+    let mut record = || -> Result<(), orrery_face_git::GitFaceError> {
+        for &number in &base.repins {
+            face.git.pin_pull_ref(&repo, number, &merge_sha)?;
+            pinned += 1;
+        }
+        face.world.record_merge(pull.id, actor.id, &base)?;
         Ok(())
     };
     if let Err(e) = record() {
+        unwind_merge(&face, &repo, &bare, &base, &base.repins[..pinned]);
         return internal(e);
     }
 
@@ -474,6 +485,33 @@ pub(crate) async fn merge_pull(
             "message": "Pull Request successfully merged",
         }),
     )
+}
+
+/// Put back the refs a merge moved when recording it failed, so the
+/// repository agrees with the world, which holds no trace of the merge: the
+/// base branch returns to `base.old` by compare-and-swap, and the ref of each
+/// pull request in `pinned`, the ones the merge moved, to the head the world
+/// still pins it at. A retry then starts from the state the failed merge
+/// started from. The route answers 500 either way, so a ref that cannot be
+/// put back is logged, not answered.
+fn unwind_merge(face: &GithubFace, repo: &Repo, bare: &Path, base: &RefMove<'_>, pinned: &[i64]) {
+    if let Err(e) = store::update_ref_cas(bare, base.name, base.old, base.new) {
+        tracing::error!(error = %e, git_ref = base.name, "merge unwind left a ref moved");
+    }
+    for &number in pinned {
+        let restored = match face.world.pull_by_number(repo.id, number) {
+            Ok(Some(p)) => face.git.pin_pull_ref(repo, number, &p.head_sha),
+            Ok(None) => Ok(()),
+            Err(e) => Err(e.into()),
+        };
+        if let Err(e) = restored {
+            tracing::error!(
+                error = %e,
+                git_ref = store::pull_head_ref(number),
+                "merge unwind left a ref moved"
+            );
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -821,4 +859,93 @@ pub(crate) fn pull_by_path_number(
 
 fn is_full_sha(s: &str) -> bool {
     s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::{Context, Waker};
+
+    use orrery_world::{ActorKind, DEFAULT_T0_UNIX, World, WorldSecret};
+
+    use super::*;
+
+    /// The test holds the gate exclusively, as a restore does. Nothing else
+    /// holds the repo lock, so an edit that did not take the gate would
+    /// finish on its first poll; this one waits, and lands once the gate is
+    /// released.
+    #[tokio::test]
+    async fn a_pull_edit_waits_on_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let world = Arc::new(
+            World::create(
+                &dir.path().join("world"),
+                DEFAULT_T0_UNIX,
+                &WorldSecret::LOCAL,
+            )
+            .unwrap(),
+        );
+        let face = GithubFace {
+            world: world.clone(),
+            git: orrery_face_git::GitFace::new(world.clone()),
+            base_url: "http://world.test".to_string(),
+        };
+        let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
+        let repo = world
+            .create_repo(alice.id, "widgets", None, false, "main", alice.id)
+            .unwrap();
+        let sha = "a".repeat(40);
+        let pull = world
+            .create_pull(NewPull {
+                repo_id: repo.id,
+                author_id: alice.id,
+                title: "before",
+                body: None,
+                head_ref: "feature",
+                head_sha: &sha,
+                base_ref: "main",
+                base_sha: &sha,
+                draft: false,
+            })
+            .unwrap();
+
+        let held = face.git.gate().write_owned().await;
+        let mut edit = std::pin::pin!(patch_pull(
+            State(face.clone()),
+            UrlPath((
+                "alice".to_string(),
+                "widgets".to_string(),
+                pull.number.to_string(),
+            )),
+            Extension(alice),
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"title": "after"}"#),
+        ));
+        assert!(
+            edit.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending(),
+            "the edit did not wait"
+        );
+        assert_eq!(
+            world
+                .pull_by_number(repo.id, pull.number)
+                .unwrap()
+                .unwrap()
+                .title,
+            "before"
+        );
+
+        drop(held);
+        assert_eq!(edit.await.status(), StatusCode::OK);
+        assert_eq!(
+            world
+                .pull_by_number(repo.id, pull.number)
+                .unwrap()
+                .unwrap()
+                .title,
+            "after"
+        );
+    }
 }
