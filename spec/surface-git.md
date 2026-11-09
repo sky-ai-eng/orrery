@@ -49,12 +49,12 @@ A commit's author and committer dates come from the client that made it, not fro
 Every pull request has a ref, `refs/pull/{n}/head`, at its head, as on GitHub, so a client fetches a pull request by number without knowing its head branch (`git fetch origin pull/7/head`). It always names the pull request's pinned head commit:
 
 - creating the pull request sets it;
-- it moves whenever the head does: on a push to the head branch, and on the merge of another pull request into it; and
+- it moves whenever the head does: on a push to the head branch, on the merge of another pull request into it, and on reopening the pull request, which takes the head branch's tip as its head (`surface-github.md`); and
 - closing or merging the pull request, or deleting its head branch, leaves it where it is.
 
 The ref is advertised to fetches, so `git ls-remote` lists it, and hidden from pushes. A push that creates or moves any ref under `refs/pull/` is refused, as GitHub refuses it: `git` reports `deny updating a hidden ref`, and nothing moves.
 
-Orrery moves these refs itself, so they have no `ref.update` entries in the action log. Each one follows from the pull request's `pull.open` entry and from the `ref.update` entries of its head branch, so replaying the log rebuilds it. A diff reads refs from the repositories themselves, so its `ref_changes` lists them with the rest.
+Orrery moves these refs itself, so they have no `ref.update` entries in the action log. Each one follows from the pull request's `pull.open` and `pull.reopen` entries and from the `ref.update` entries of its head branch, so replaying the log rebuilds it. A diff reads refs from the repositories themselves, so its `ref_changes` lists them with the rest.
 
 ## Not served
 

@@ -121,6 +121,21 @@ pub fn rev_list_count(bare: &Path, from: &str, to: &str) -> Result<u64, GitFaceE
         .map_err(|_| GitFaceError::Cgi(format!("rev-list --count returned {out:?}")))
 }
 
+/// Whether `ancestor` is reachable from `descendant`, a commit counting as its
+/// own ancestor: `git merge-base --is-ancestor`, whose exit code 1 is "no".
+pub fn is_ancestor(bare: &Path, ancestor: &str, descendant: &str) -> Result<bool, GitFaceError> {
+    let (status, _, stderr) =
+        run_raw(hermetic_git(bare).args(["merge-base", "--is-ancestor", ancestor, descendant]))?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(GitFaceError::Git {
+            args: format!("merge-base --is-ancestor {ancestor} {descendant}"),
+            stderr,
+        }),
+    }
+}
+
 /// Totals of `git diff --numstat -M base...head` — GitHub's additions /
 /// deletions / changed-files triple, three-dot so the comparison base is the
 /// merge base, and a rename counted once, as `changed_files` lists it. Binary

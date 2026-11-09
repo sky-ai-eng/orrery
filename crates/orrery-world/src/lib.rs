@@ -502,17 +502,7 @@ impl World {
                 }),
             )?;
             for &number in &m.repins {
-                let n = tx.execute(
-                    "UPDATE pulls SET head_sha = ?1,
-                     updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
-                     WHERE repo_id = ?2 AND number = ?3 AND state = 'open'",
-                    params![m.new, repo_id, number],
-                )?;
-                if n == 0 {
-                    return Err(WorldError::InvalidTransition(format!(
-                        "pull #{number} is not open"
-                    )));
-                }
+                pulls::repin_open_pull(&tx, repo_id, number, m.new)?;
             }
         }
         tx.commit()?;
