@@ -466,8 +466,9 @@ impl World {
                 touch_pull(tx, pull_id)
             })?;
             record_timeline(w, pull_id, &TimelineKind::Closed)?;
-            // The base move re-pins only open pulls and marks only unmerged
-            // ones, so it leaves the merged pull as `touch_pull` returned it.
+            // A merged pull is closed and needs no test merge, so moving its
+            // base changes nothing on it: the row `touch_pull` returned is
+            // the one this write stores.
             self.record_moves(w, before.repo_id, std::slice::from_ref(base), None, false)?;
             Ok(pull)
         })
@@ -675,11 +676,13 @@ impl World {
 /// item, by the pusher, as a `pull:closed` consequence of the push.
 fn close_for_deleted_branch(w: &mut Write<'_>, pull_id: i64) -> Result<()> {
     w.pull(pull_id, EventBody::PullClosed, |tx| {
-        tx.execute(
+        tx.query_row(
             "UPDATE pulls SET state = 'closed',
              closed_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
-             WHERE id = ?1 AND state = 'open'",
+             WHERE id = ?1 AND state = 'open'
+             RETURNING id",
             params![pull_id],
+            |r| r.get::<_, i64>(0),
         )?;
         touch_pull(tx, pull_id)
     })?;

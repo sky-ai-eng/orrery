@@ -147,10 +147,11 @@ impl World {
                 subject: objects::team_subject(w.tx, team.id)?,
                 object: objects::team_object(w.tx, team.id)?,
             }));
-            let pulls = ids(
+            let pulls = objects::list_by(
                 w.tx,
                 "SELECT pull_id FROM review_requests WHERE team_id = ?1 ORDER BY id",
                 team.id,
+                |r| r.get::<_, i64>(0),
             )?;
             for pull_id in pulls {
                 w.pull(pull_id, EventBody::PullReviewRequestRemoved, |tx| {
@@ -161,10 +162,11 @@ impl World {
                     Ok(())
                 })?;
             }
-            let members = ids(
+            let members = objects::list_by(
                 w.tx,
                 "SELECT member_id FROM team_members WHERE team_id = ?1 ORDER BY member_id",
                 team.id,
+                |r| r.get::<_, i64>(0),
             )?;
             for member_id in members {
                 remove_member(w, team.id, member_id)?;
@@ -360,14 +362,6 @@ fn remove_member(w: &mut crate::log::Write<'_>, team_id: i64, member_id: i64) ->
         false => w.operation(removed),
     }
     Ok(())
-}
-
-/// The ids `sql` selects with `id` as its one parameter.
-fn ids(conn: &Connection, sql: &str, id: i64) -> Result<Vec<i64>> {
-    Ok(conn
-        .prepare(sql)?
-        .query_map(params![id], |r| r.get(0))?
-        .collect::<rusqlite::Result<Vec<i64>>>()?)
 }
 
 /// GitHub's slug for a team name: lower-cased, with every run of characters

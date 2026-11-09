@@ -12,7 +12,7 @@ use crate::types::{
 use crate::{Result, WorldError, queries};
 
 /// The rows `sql` selects with `id` as its one parameter.
-fn list_by<T>(
+pub(crate) fn list_by<T>(
     conn: &Connection,
     sql: &str,
     id: i64,
