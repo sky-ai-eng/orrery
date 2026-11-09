@@ -10,6 +10,8 @@ description = "The HTTP host: mounts faces, the /_orrery/ control plane, auth mi
 [dependencies]
 axum.workspace = true
 base64.workspace = true
+form_urlencoded.workspace = true
+futures-util.workspace = true
 hex.workspace = true
 jiff.workspace = true
 orrery-face-git.workspace = true

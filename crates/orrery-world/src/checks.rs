@@ -7,7 +7,7 @@ use rusqlite::params;
 
 use crate::queries;
 use crate::types::*;
-use crate::{Result, World, WorldError, log_locked};
+use crate::{Result, World, WorldError};
 
 pub struct NewCheckRun<'a> {
     pub repo_id: i64,
@@ -64,7 +64,7 @@ impl World {
                 |r| r.get(0),
             )?;
             let run = require_check_run(&tx, id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 new.creator_id,
                 "check_run.create",
@@ -114,7 +114,7 @@ impl World {
                 ],
             )?;
             let run = require_check_run(&tx, id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 "check_run.update",

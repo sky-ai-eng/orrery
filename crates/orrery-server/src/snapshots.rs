@@ -330,6 +330,7 @@ mod tests {
             base_url: "http://world.test".to_string(),
         };
         AppState {
+            log_changes: crate::log_stream::follow(&world),
             world,
             base_url: "http://world.test".to_string(),
             git,

@@ -221,7 +221,9 @@ pub struct ReviewRequestChange {
 pub struct LogSpan {
     pub from_seq: i64,
     pub to_seq: i64,
-    /// `to - from`; the entries themselves are served by the log list read,
+    /// How many of `to`'s entries follow `from_seq`, counted rather than
+    /// subtracted because `seq` has a gap wherever a restore discarded
+    /// entries. The entries themselves are served by the log list read,
     /// keyed from `from_seq`, not duplicated here.
     pub appended: i64,
 }
@@ -830,7 +832,7 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         log: LogSpan {
             from_seq: from_meta.last_seq,
             to_seq: to_meta.last_seq,
-            appended: to_meta.last_seq - from_meta.last_seq,
+            appended: to.view.log_count_after(from_meta.last_seq)?,
         },
     })
 }

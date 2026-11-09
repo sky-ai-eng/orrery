@@ -205,6 +205,14 @@ pub(crate) fn last_seq(conn: &Connection) -> Result<i64> {
     )
 }
 
+pub(crate) fn log_count_after(conn: &Connection, after_seq: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT count(*) FROM action_log WHERE seq > ?1",
+        [after_seq],
+        |r| r.get(0),
+    )?)
+}
+
 pub(crate) fn list_actors(conn: &Connection) -> Result<Vec<Actor>> {
     list(conn, &format!("{ACTOR_SELECT} ORDER BY id"), row_to_actor)
 }

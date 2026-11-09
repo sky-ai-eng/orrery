@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::queries;
 use crate::types::*;
-use crate::{Result, World, WorldError, log_locked};
+use crate::{Result, World, WorldError};
 
 pub struct NewPull<'a> {
     pub repo_id: i64,
@@ -67,7 +67,7 @@ impl World {
                 |r| r.get(0),
             )?;
             let pull = queries::require_pull(&tx, id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 new.author_id,
                 "pull.open",
@@ -197,7 +197,7 @@ impl World {
             }
             touch_pull(&tx, pull_id)?;
             let pull = queries::require_pull(&tx, pull_id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 "pull.edit",
@@ -245,7 +245,7 @@ impl World {
             }
             touch_pull(&tx, pull_id)?;
             let pull = queries::require_pull(&tx, pull_id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 "pull.label",
@@ -284,7 +284,7 @@ impl World {
             )?;
             touch_pull(&tx, pull_id)?;
             let pull = queries::require_pull(&tx, pull_id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 "pull.unlabel",
@@ -359,7 +359,7 @@ impl World {
             }
             touch_pull(&tx, pull_id)?;
             let pull = queries::require_pull(&tx, pull_id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 "pull.request_reviewers",
@@ -430,7 +430,7 @@ impl World {
             }
             touch_pull(&tx, pull_id)?;
             let pull = queries::require_pull(&tx, pull_id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 "pull.remove_review_requests",
@@ -512,7 +512,7 @@ impl World {
             record_timeline(&tx, pull_id, actor_id, &TimelineKind::Closed)?;
             touch_pull(&tx, pull_id)?;
             let pull = queries::require_pull(&tx, pull_id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 "pull.merge",
@@ -581,7 +581,7 @@ impl World {
                 params![pull_id, author_id],
             )?;
             touch_pull(&tx, pull_id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 author_id,
                 "review.submit",
@@ -620,7 +620,7 @@ impl World {
                 queries::row_to_comment,
             )?;
             touch_pull(&tx, pull_id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 author_id,
                 "comment.create",
@@ -671,7 +671,7 @@ impl World {
             }
             touch_pull(&tx, pull_id)?;
             let pull = queries::require_pull(&tx, pull_id)?;
-            log_locked(
+            self.log_locked(
                 &tx,
                 actor_id,
                 action,
