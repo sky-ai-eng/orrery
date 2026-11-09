@@ -405,10 +405,18 @@ pub struct CheckRun {
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = may_grow)]
 pub struct ActorEmail {
     pub email: String,
     pub primary: bool,
     pub verified: bool,
+}
+
+/// The control plane refuses an address with a field it does not know. An
+/// event's addresses may gain fields (spec/events.md, rule 7), so the events'
+/// schema does not refuse them.
+fn may_grow(schema: &mut schemars::Schema) {
+    schema.remove("additionalProperties");
 }
 
 /// An OAuth application actors can authorize. Its client secret is fake by

@@ -142,7 +142,6 @@
       "type": "object"
     },
     "ActorEmail": {
-      "additionalProperties": false,
       "description": "One of an actor's email addresses. Every actor but the system actor holds\nexactly one primary address.",
       "properties": {
         "email": {
