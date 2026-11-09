@@ -23,21 +23,12 @@ pub struct NewPull<'a> {
 
 impl World {
     /// Open a pull request. At most one *open* pull per (repo, head, base) —
-    /// GitHub's rule; a closed one does not block reopening the conversation
-    /// as a fresh PR.
+    /// GitHub's rule; a closed one does not block opening a fresh PR.
     pub fn create_pull(&self, new: NewPull<'_>) -> Result<Pull> {
         self.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
             let clock = queries::clock(&tx)?;
-            let dup: Option<i64> = tx
-                .query_row(
-                    "SELECT number FROM pulls
-                     WHERE repo_id = ?1 AND head_ref = ?2 AND base_ref = ?3 AND state = 'open'",
-                    params![new.repo_id, new.head_ref, new.base_ref],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if dup.is_some() {
+            if open_pull_between(&tx, new.repo_id, new.head_ref, new.base_ref)?.is_some() {
                 return Err(WorldError::PullExists(new.head_ref.to_string()));
             }
             let number: i64 = tx.query_row(
@@ -100,6 +91,17 @@ impl World {
         })
     }
 
+    /// The number of the open pull from `head_ref` into `base_ref`, if there
+    /// is one: the pull that refuses a create or a reopen on the same pair.
+    pub fn open_pull_between(
+        &self,
+        repo_id: i64,
+        head_ref: &str,
+        base_ref: &str,
+    ) -> Result<Option<i64>> {
+        self.with_conn(|conn| open_pull_between(conn, repo_id, head_ref, base_ref))
+    }
+
     pub fn pull_by_id(&self, id: i64) -> Result<Option<Pull>> {
         self.with_conn(|conn| queries::pull_by_id(conn, id))
     }
@@ -128,7 +130,7 @@ impl World {
         } else {
             ("pull.ready_for_review", Some(TimelineKind::ReadyForReview))
         };
-        self.transition(pull_id, actor_id, action, timeline, None, |p| {
+        self.transition(pull_id, actor_id, action, timeline, None, |_, p| {
             if p.state != PullState::Open {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} is not open",
@@ -152,7 +154,9 @@ impl World {
 
     /// Edit title/body/base. `body` distinguishes absent (keep) from explicit
     /// clear; `base` carries the retargeted ref together with its freshly
-    /// pinned sha, resolved by the caller who owns the git side.
+    /// pinned sha, resolved by the caller who owns the git side. A `base`
+    /// that would give an open pull the head and base of another open pull
+    /// refuses the whole edit, as `create_pull` and `reopen_pull` refuse.
     pub fn edit_pull(
         &self,
         pull_id: i64,
@@ -164,6 +168,13 @@ impl World {
         self.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
             let before = queries::require_pull(&tx, pull_id)?;
+            if let Some((base_ref, _)) = base
+                && base_ref != before.base_ref
+                && before.state == PullState::Open
+                && open_pull_between(&tx, before.repo_id, &before.head_ref, base_ref)?.is_some()
+            {
+                return Err(WorldError::PullExists(before.head_ref.clone()));
+            }
             let mut fields = Vec::new();
             if let Some(t) = title
                 && t != before.title
@@ -452,7 +463,7 @@ impl World {
 
     pub fn close_pull(&self, pull_id: i64, actor_id: i64) -> Result<Pull> {
         let timeline = Some(TimelineKind::Closed);
-        self.transition(pull_id, actor_id, "pull.close", timeline, None, |p| {
+        self.transition(pull_id, actor_id, "pull.close", timeline, None, |_, p| {
             if p.state != PullState::Open {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} is not open",
@@ -467,10 +478,11 @@ impl World {
 
     /// Reopen a closed pull with `head_sha` as its head: the reopen and the
     /// head move commit together. The caller resolves the head from its head
-    /// branch, since the kernel never touches git.
+    /// branch, since the kernel never touches git. Refused while another pull
+    /// is open from the same head into the same base, as `create_pull` is.
     pub fn reopen_pull(&self, pull_id: i64, actor_id: i64, head_sha: &str) -> Result<Pull> {
         let head = Some(head_sha);
-        self.transition(pull_id, actor_id, "pull.reopen", None, head, |p| {
+        self.transition(pull_id, actor_id, "pull.reopen", None, head, |conn, p| {
             if p.merged {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} has been merged",
@@ -483,8 +495,9 @@ impl World {
                     p.number
                 )));
             }
-            // TODO(ORR-68): `create_pull`'s one-open-pull-per-(head, base)
-            // rule is not checked here, so a reopen can leave two open.
+            if open_pull_between(conn, p.repo_id, &p.head_ref, &p.base_ref)?.is_some() {
+                return Err(WorldError::PullExists(p.head_ref.clone()));
+            }
             Ok("UPDATE pulls SET state = 'open', closed_clock_unix = NULL WHERE id = ?1")
         })
     }
@@ -678,7 +691,8 @@ impl World {
         self.with_conn(|conn| queries::list_comments_for_pull(conn, pull_id))
     }
 
-    /// Shared shape of close/reopen/draft: guard the current state, run one
+    /// Shared shape of close/reopen/draft: guard the current state, reading
+    /// inside the transaction where the rule needs other rows, run one
     /// UPDATE, move the head to `head` if given, record the timeline item if
     /// there is one, bump `updated`, log, return the stored row.
     fn transition(
@@ -688,12 +702,12 @@ impl World {
         action: &str,
         timeline: Option<TimelineKind>,
         head: Option<&str>,
-        guard: impl FnOnce(&Pull) -> Result<&'static str>,
+        guard: impl FnOnce(&Connection, &Pull) -> Result<&'static str>,
     ) -> Result<Pull> {
         self.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
             let before = queries::require_pull(&tx, pull_id)?;
-            let sql = guard(&before)?;
+            let sql = guard(&tx, &before)?;
             tx.execute(sql, params![pull_id])?;
             if let Some(sha) = head {
                 repin_open_pull(&tx, before.repo_id, before.number, sha)?;
@@ -716,6 +730,22 @@ impl World {
             Ok(pull)
         })
     }
+}
+
+fn open_pull_between(
+    conn: &Connection,
+    repo_id: i64,
+    head_ref: &str,
+    base_ref: &str,
+) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT number FROM pulls
+             WHERE repo_id = ?1 AND head_ref = ?2 AND base_ref = ?3 AND state = 'open'",
+            params![repo_id, head_ref, base_ref],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// GitHub's limit on a label name.

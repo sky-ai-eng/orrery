@@ -317,6 +317,20 @@ pub(crate) fn validation_invalid(resource: &str, field: &str) -> Response<Body> 
     json_response(StatusCode::UNPROCESSABLE_ENTITY, body)
 }
 
+/// GitHub's 422 for an invalid `field` on `resource`, with its prose — the
+/// shape of "Cannot change the base branch of a closed pull request."
+pub(crate) fn validation_invalid_message(
+    resource: &str,
+    field: &str,
+    message: &str,
+) -> Response<Body> {
+    let body = serde_json::json!({
+        "message": "Validation Failed",
+        "errors": [{ "resource": resource, "code": "invalid", "field": field, "message": message }],
+    });
+    json_response(StatusCode::UNPROCESSABLE_ENTITY, body)
+}
+
 /// GitHub's generic 422 for a required field absent on `resource`.
 pub(crate) fn validation_missing(resource: &str, field: &str) -> Response<Body> {
     let body = serde_json::json!({
