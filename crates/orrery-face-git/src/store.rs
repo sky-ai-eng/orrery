@@ -77,9 +77,9 @@ pub fn set_head_symref(bare: &Path, branch: &str) -> Result<(), GitFaceError> {
 /// Resolve a revision to an oid; `None` when it doesn't resolve. Any failure
 /// of `rev-parse --verify --quiet` reads as "doesn't resolve" — the command
 /// distinguishes nothing further on its exit code. Callers pass names from
-/// requests, and git would read one with a leading `-` as an option; no
-/// revision begins with `-`, so such a name resolves to nothing without
-/// running git.
+/// requests, and git reads a name with a leading `-` as an option, never as
+/// a revision, so such a name resolves to nothing without running git. A
+/// branch whose name starts with `-` still resolves by its `refs/heads/` name.
 pub fn rev_parse(bare: &Path, rev: &str) -> Result<Option<String>, GitFaceError> {
     if rev.starts_with('-') {
         return Ok(None);
