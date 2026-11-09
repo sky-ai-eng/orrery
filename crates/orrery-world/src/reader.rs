@@ -1,8 +1,8 @@
 //! Read-only views over a world's state, for the snapshot diff engine.
 //!
 //! `WorldView` is what a diff side is: full listings of every object table,
-//! the meta pair (clock, last log seq), and how many log entries follow a
-//! given `seq`. The live `World` implements it
+//! the meta pair (clock, last log seq), and the point reads of its log that
+//! relate it to another side's. The live `World` implements it
 //! through its own connection; `WorldReader` opens a quiesced copy — a
 //! snapshot — read-only, without migrating or otherwise touching it.
 
@@ -24,6 +24,11 @@ pub trait WorldView {
     /// How many log entries have `seq > after_seq`. A restore leaves a gap
     /// in `seq`, so this is not a difference of two of them.
     fn log_count_after(&self, after_seq: i64) -> Result<i64>;
+    /// Whether the log holds the entry numbered `seq`.
+    fn log_holds(&self, seq: i64) -> Result<bool>;
+    /// The newest `seq` the log holds at or below `seq`, or 0 when it holds
+    /// none.
+    fn log_seq_at_or_before(&self, seq: i64) -> Result<i64>;
     fn list_actors(&self) -> Result<Vec<Actor>>;
     fn list_repos(&self) -> Result<Vec<Repo>>;
     fn list_pulls(&self) -> Result<Vec<Pull>>;
@@ -52,6 +57,14 @@ impl WorldView for World {
 
     fn log_count_after(&self, after_seq: i64) -> Result<i64> {
         self.with_conn(|conn| queries::log_count_after(conn, after_seq))
+    }
+
+    fn log_holds(&self, seq: i64) -> Result<bool> {
+        self.with_conn(|conn| queries::log_holds(conn, seq))
+    }
+
+    fn log_seq_at_or_before(&self, seq: i64) -> Result<i64> {
+        self.with_conn(|conn| queries::log_seq_at_or_before(conn, seq))
     }
 
     fn list_actors(&self) -> Result<Vec<Actor>> {
@@ -167,6 +180,14 @@ impl WorldView for WorldReader {
 
     fn log_count_after(&self, after_seq: i64) -> Result<i64> {
         queries::log_count_after(&self.conn, after_seq)
+    }
+
+    fn log_holds(&self, seq: i64) -> Result<bool> {
+        queries::log_holds(&self.conn, seq)
+    }
+
+    fn log_seq_at_or_before(&self, seq: i64) -> Result<i64> {
+        queries::log_seq_at_or_before(&self.conn, seq)
     }
 
     fn list_actors(&self) -> Result<Vec<Actor>> {

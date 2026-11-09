@@ -5,8 +5,9 @@
 
 mod common;
 
-use common::{boot, boot_at, control_post, face, face_ok, git, mint_actor};
+use common::{boot, boot_at, control_post, face, face_ok, git, mint_actor, restore, snapshot};
 use orrery_world::WorldSecret;
+use serde_json::json;
 
 fn control(
     method: &str,
@@ -436,5 +437,113 @@ async fn fork_serves_an_independent_world() {
     assert!(
         !origin_clone.join("fork.txt").exists(),
         "the origin never saw the fork's push"
+    );
+}
+
+fn diff(base: &str, body: serde_json::Value) -> serde_json::Value {
+    control_post(base, "/_orrery/diff", body)
+}
+
+/// A harness's two trials from one starting point: snapshot `before`, run
+/// a trial and snapshot `after`, restore `before`, and run a second trial.
+/// Returns `before`'s and `after`'s newest `seq`.
+fn two_trials(base: &str) -> (i64, i64) {
+    mint_actor(base, "alice", "user");
+    let before = snapshot(base, "before");
+    mint_actor(base, "bob", "user");
+    mint_actor(base, "carol", "user");
+    let after = snapshot(base, "after");
+    restore(base, "before");
+    for login in ["dave", "erin", "frank"] {
+        mint_actor(base, login, "user");
+    }
+    (before, after)
+}
+
+/// Across a restore that discarded `from`'s newest entries, the logs share
+/// only what preceded them, and `to`'s entries above that are the second
+/// trial's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diff_across_a_restore_counts_from_the_newest_entry_both_logs_hold() {
+    let inst = boot().await;
+    let base = &inst.base;
+    let (before, after) = two_trials(base);
+    let second = snapshot(base, "second");
+
+    let d = diff(base, json!({ "from": "after", "to": "second" }));
+    assert_eq!(d["from"]["last_seq"], after);
+    assert_eq!(d["to"]["last_seq"], second);
+    assert_eq!(d["log"], json!({ "shared_seq": before, "appended": 3 }));
+}
+
+/// On the live world, the log read from a diff's `shared_seq` is exactly the
+/// entries the diff counts as appended. `from`'s newest entry is one the
+/// restore discarded, so the same read from there is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_log_read_from_a_diffs_shared_seq_is_its_appended_entries() {
+    let inst = boot().await;
+    let base = &inst.base;
+    two_trials(base);
+
+    let d = diff(base, json!({ "from": "after" }));
+    let read = control_post(
+        base,
+        "/_orrery/log/list",
+        json!({ "after_seq": d["log"]["shared_seq"] }),
+    );
+    assert_eq!(read["total_count"], d["log"]["appended"]);
+    let created: Vec<&str> = read["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["details"]["login"].as_str().unwrap())
+        .collect();
+    assert_eq!(created, ["dave", "erin", "frank"]);
+    assert_eq!(
+        control(
+            "POST",
+            base,
+            "/_orrery/log/list",
+            Some(json!({ "after_seq": d["from"]["last_seq"] })),
+        ),
+        Err(404)
+    );
+}
+
+/// Along one history, the logs share the older side's newest entry: a diff
+/// forward counts what followed it, across a restore that kept it too, and a
+/// diff back to an earlier snapshot counts nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diff_along_one_history_shares_the_older_sides_newest_entry() {
+    let inst = boot().await;
+    let base = &inst.base;
+    mint_actor(base, "alice", "user");
+    let one = snapshot(base, "one");
+    mint_actor(base, "bob", "user");
+    mint_actor(base, "carol", "user");
+    snapshot(base, "two");
+
+    let forward = diff(base, json!({ "from": "one", "to": "two" }));
+    assert_eq!(forward["from"]["last_seq"], one);
+    assert_eq!(forward["log"], json!({ "shared_seq": one, "appended": 2 }));
+
+    let back = diff(base, json!({ "from": "two", "to": "one" }));
+    assert_eq!(back["to"]["last_seq"], one);
+    assert_eq!(back["log"], json!({ "shared_seq": one, "appended": 0 }));
+
+    // The live world restored to "one" is "one" again, and carries on from
+    // it once it takes a write.
+    restore(base, "one");
+    let back_live = diff(base, json!({ "from": "two" }));
+    assert_eq!(back_live["to"]["last_seq"], one);
+    assert_eq!(
+        back_live["log"],
+        json!({ "shared_seq": one, "appended": 0 })
+    );
+    mint_actor(base, "dave", "user");
+    let carried_on = diff(base, json!({ "from": "one" }));
+    assert_eq!(
+        carried_on["log"],
+        json!({ "shared_seq": one, "appended": 1 })
     );
 }
