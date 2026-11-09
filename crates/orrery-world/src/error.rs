@@ -22,6 +22,14 @@ pub enum WorldError {
     NoSuchRepo(i64),
     #[error("the clock only moves forward; got advance of {0} seconds")]
     ClockRegression(i64),
+    #[error(
+        "an advance of {seconds} seconds would pass {latest:.0}, the latest time a world's clock holds; it can advance at most {remaining} more seconds"
+    )]
+    ClockOutOfRange {
+        seconds: i64,
+        remaining: i64,
+        latest: jiff::Timestamp,
+    },
     #[error("an open pull request already exists for head {0:?}")]
     PullExists(String),
     #[error("no pull with id {0}")]

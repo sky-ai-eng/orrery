@@ -133,17 +133,28 @@ impl World {
     }
 
     /// Advance the virtual clock. Forward-only: the clock never rewinds in a
-    /// live world (spec/usage.md — rollback is a snapshot operation).
+    /// live world (spec/usage.md — rollback is a snapshot operation). It
+    /// stops at the latest second `jiff` represents, so that every time the
+    /// world stamps can be rendered.
     pub fn advance_clock(&self, seconds: i64, actor_id: i64) -> Result<i64> {
         if seconds <= 0 {
             return Err(WorldError::ClockRegression(seconds));
         }
+        let latest = jiff::Timestamp::MAX.as_second();
         let (from, to) = {
             let conn = self.lock();
             let from = queries::clock(&conn)?;
+            let to = from
+                .checked_add(seconds)
+                .filter(|to| *to <= latest)
+                .ok_or_else(|| WorldError::ClockOutOfRange {
+                    seconds,
+                    remaining: latest.saturating_sub(from).max(0),
+                    latest: jiff::Timestamp::MAX,
+                })?;
             let to: i64 = conn.query_row(
-                "UPDATE world SET clock_unix = clock_unix + ?1 WHERE id = 1 RETURNING clock_unix",
-                params![seconds],
+                "UPDATE world SET clock_unix = ?1 WHERE id = 1 RETURNING clock_unix",
+                params![to],
                 |r| r.get(0),
             )?;
             (from, to)

@@ -7,10 +7,14 @@
 //!
 //! Route classes and their failure behavior (spec/README.md rule 1):
 //! - matched face route, missing data → vendor-faithful 404
-//! - unmatched path anywhere → loud 501 NOT-MOCKED envelope naming the path
+//! - unmatched face path, or a face path called with a method it doesn't
+//!   serve → loud 501 NOT-MOCKED envelope naming the path
+//! - unmatched control path → 404, and a control path called with a method it
+//!   doesn't take → 405, both in the control plane's error shape
 //!
-//! Those two must never blur: a plausible 404 for unimplemented surface is
-//! how consumers silently break.
+//! The first two must never blur: a plausible 404 for unimplemented surface
+//! is how consumers silently break. The control plane is Orrery's own API, so
+//! it has no vendor surface to leave unmocked.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +23,7 @@ use axum::body::Body;
 use axum::extract::{OriginalUri, Request, State};
 use axum::http::{HeaderMap, Method, Response, StatusCode};
 use axum::middleware::Next;
+use axum::routing::any;
 use axum::{Router, middleware};
 use base64::Engine as _;
 use orrery_face_git::GitFace;
@@ -27,6 +32,9 @@ use orrery_world::World;
 
 mod control;
 mod snapshots;
+
+/// Where the control plane is mounted, on its own listener or the faces'.
+const CONTROL_PREFIX: &str = "/_orrery";
 
 /// The full SHA of the commit this binary was built from, or `unknown` when
 /// the build named none and was not run in a git checkout. See `build.rs`.
@@ -119,22 +127,35 @@ pub fn routers(
 
     // The OAuth web flow lives on the web host and authenticates with client
     // credentials or a signed-in actor, never an API token.
-    let oauth = orrery_face_github::oauth::web_router(github.clone());
+    let oauth = orrery_face_github::oauth::web_router(github.clone())
+        .method_not_allowed_fallback(not_mocked);
 
+    // The method fallback is set before the auth layer so that it is behind
+    // face auth, as the unmatched-path fallback under `/api/v3` is.
     let faces = Router::new()
         .merge(orrery_face_git::router(git))
         .nest(
             "/api/v3",
-            // TODO(ORR-41): a served path called with another method answers
-            // axum's bare 405, not this fallback's 501.
             orrery_face_github::router(github).fallback(not_mocked),
         )
         .merge(graphql)
+        .method_not_allowed_fallback(not_mocked)
         .layer(middleware::from_fn_with_state(state.clone(), face_auth));
 
     Routers {
         faces: Router::new().merge(oauth).merge(faces),
-        control: Router::new().nest("/_orrery", control::router(state)),
+        // Every path under the prefix is the control plane's. One that no
+        // control route names answers 404 in the control plane's error shape,
+        // and on a listener the faces share, a face route whose first segment
+        // is a parameter (git's `/{owner}/{repo}/info/refs`) can't take it.
+        control: Router::new()
+            .nest(CONTROL_PREFIX, control::router(state))
+            .route(CONTROL_PREFIX, any(control::no_such_route))
+            .route(&format!("{CONTROL_PREFIX}/"), any(control::no_such_route))
+            .route(
+                &format!("{CONTROL_PREFIX}/{{*rest}}"),
+                any(control::no_such_route),
+            ),
     }
 }
 

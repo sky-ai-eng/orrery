@@ -74,5 +74,4 @@ Orrery doesn't rate limit. It sends no `X-RateLimit-*` headers, GraphQL `rateLim
 
 ## Known gaps
 
-- A path Orrery routes, called with a method it doesn't serve (`GET /api/graphql`, `PATCH /repos/{o}/{r}`), answers a bare `405` rather than the `501` above.
 - A GitHub media type Orrery doesn't render, other than the diff and patch media types the routes that list them refuse, gets the plain JSON answer: `application/vnd.github.full+json` on a pull request has no `body_html`, and `application/vnd.github.raw+json` on contents answers the JSON object, not the file.

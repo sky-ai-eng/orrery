@@ -60,6 +60,45 @@ fn clock_is_forward_only_and_logged() {
     assert_eq!(advance.details["to_unix"], DEFAULT_T0_UNIX + 3600);
 }
 
+#[test]
+fn the_clock_stops_at_the_latest_time_it_can_render() {
+    let (_dir, w) = fresh();
+    let sys = w.actor_by_login("orrery").unwrap().unwrap();
+    let latest = jiff::Timestamp::MAX.as_second();
+    let log_len = w.log_after(0, 100).unwrap().len();
+
+    for seconds in [latest - DEFAULT_T0_UNIX + 1, i64::MAX] {
+        match w.advance_clock(seconds, sys.id) {
+            Err(WorldError::ClockOutOfRange {
+                seconds: refused,
+                remaining,
+                ..
+            }) => {
+                assert_eq!(refused, seconds);
+                assert_eq!(remaining, latest - DEFAULT_T0_UNIX);
+            }
+            other => panic!("advance of {seconds}: {other:?}"),
+        }
+    }
+    assert_eq!(w.clock().unwrap(), DEFAULT_T0_UNIX);
+    assert_eq!(w.log_after(0, 100).unwrap().len(), log_len);
+
+    assert_eq!(
+        w.advance_clock(latest - DEFAULT_T0_UNIX, sys.id).unwrap(),
+        latest
+    );
+    let refused = w.advance_clock(1, sys.id).unwrap_err();
+    assert!(
+        matches!(refused, WorldError::ClockOutOfRange { remaining: 0, .. }),
+        "{refused:?}"
+    );
+    assert!(
+        refused.to_string().contains(" 9999-12-30T22:00:00Z, "),
+        "{refused}"
+    );
+    assert_eq!(w.clock().unwrap(), latest);
+}
+
 // The single-row-write rule (CLAUDE.md): the row a write returns must equal the
 // row a point read sees, with no follow-up read to "correct" it.
 #[test]

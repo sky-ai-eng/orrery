@@ -106,13 +106,21 @@ fn call(base: &str, method: &str, path: &str, body: &[u8]) -> (u16, Value) {
     let request = match method {
         "POST" => agent.post(&url),
         "PUT" => agent.put(&url),
+        "DELETE" => agent.delete(&url).force_send_body(),
         other => panic!("unsupported method {other}"),
     };
     let mut resp = request
         .header("content-type", "application/json")
         .send(body)
         .unwrap();
-    (resp.status().as_u16(), resp.body_mut().read_json().unwrap())
+    let status = resp.status().as_u16();
+    let text = resp.body_mut().read_to_string().unwrap();
+    let answer = if text.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&text).unwrap()
+    };
+    (status, answer)
 }
 
 /// The faults a refused body answers, asserting it was refused.
@@ -325,4 +333,127 @@ async fn a_diff_names_the_snapshot_it_could_not_open() {
         assert_eq!(got, status, "{body}: {answer}");
         assert_eq!(faults(&answer), [fault(reason, Some(field))], "{body}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diff_checks_both_snapshot_names_with_the_rest_of_the_body() {
+    let inst = boot().await;
+    let base = &inst.base;
+    for (body, expected) in [
+        (
+            r#"{"from": "../x", "to": "../y"}"#,
+            [
+                fault("INVALID_ARGUMENT", Some("from")),
+                fault("INVALID_ARGUMENT", Some("to")),
+            ],
+        ),
+        (
+            r#"{"from": "../x", "bogus": 1}"#,
+            [
+                fault("INVALID_ARGUMENT", Some("from")),
+                fault("INVALID_ARGUMENT", Some("bogus")),
+            ],
+        ),
+    ] {
+        let (status, answer) = call(base, "POST", "/diff", body.as_bytes());
+        assert_eq!(status, 400, "{body}: {answer}");
+        assert_eq!(faults(&answer), expected, "{body}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_fields_are_named_in_the_order_first_repeated() {
+    let inst = boot().await;
+    let body = br#"{"page_size": 1, "after_seq": 0, "page_size": 2, "after_seq": 1, "page_size": 3, "bogus": 1}"#;
+    let (status, answer) = call(&inst.base, "POST", "/log/list", body);
+    assert_eq!(status, 400, "{answer}");
+    assert_eq!(
+        faults(&answer),
+        [
+            fault("INVALID_ARGUMENT", Some("page_size")),
+            fault("INVALID_ARGUMENT", Some("after_seq")),
+            fault("INVALID_ARGUMENT", Some("bogus")),
+        ]
+    );
+}
+
+/// Routes that act on the thing their path names take no body fields, and
+/// refuse one rather than ignore it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_route_that_takes_no_fields_refuses_one() {
+    let inst = boot().await;
+    let base = &inst.base;
+    common::mint_actor(base, "alice", "user");
+    let (status, app) = call(
+        base,
+        "POST",
+        "/oauth-apps",
+        br#"{"name": "Sign-in", "callback_url": "http://auth.test/callback"}"#,
+    );
+    assert_eq!(status, 201, "{app}");
+    let client_id = app["client_id"].as_str().unwrap();
+    let (status, _) = call(base, "POST", "/snapshots", br#"{"name": "before"}"#);
+    assert_eq!(status, 201);
+
+    let secrets = format!("/oauth-apps/{client_id}/secrets");
+    let routes = [
+        ("POST", "/actors/alice/tokens", 201),
+        ("POST", secrets.as_str(), 201),
+        ("POST", "/snapshots/before/restore", 200),
+        ("DELETE", "/snapshots/before", 204),
+    ];
+    let before = log(base);
+    for (method, path, _) in routes {
+        let (status, answer) = call(base, method, path, br#"{"bogus": 1}"#);
+        assert_eq!(status, 400, "{method} {path}: {answer}");
+        assert_eq!(faults(&answer), [fault("INVALID_ARGUMENT", Some("bogus"))]);
+    }
+    // Nothing the refused calls asked for happened: no credential was
+    // issued, no restore ran, and the snapshot is still there.
+    assert_eq!(log(base), before);
+    let (_, snapshots) = call(base, "POST", "/snapshots/list", b"{}");
+    assert_eq!(snapshots["items"][0]["name"], "before");
+
+    for body in [&b""[..], b"{}"] {
+        for (method, path, ok) in routes {
+            let (status, answer) = call(base, method, path, body);
+            assert_eq!(status, ok, "{method} {path}: {answer}");
+        }
+        let (status, _) = call(base, "POST", "/snapshots", br#"{"name": "before"}"#);
+        assert_eq!(status, 201);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clock_advance_past_the_latest_time_is_out_of_range() {
+    let inst = boot().await;
+    let base = &inst.base;
+    let latest = jiff::Timestamp::MAX.as_second();
+    let clock = inst.world.clock().unwrap();
+    let advance = |seconds: i64| {
+        let body = serde_json::to_vec(&json!({ "seconds": seconds })).unwrap();
+        call(base, "POST", "/clock/advance", &body)
+    };
+
+    let before = log(base);
+    for seconds in [latest - clock + 1, i64::MAX] {
+        let (status, answer) = advance(seconds);
+        assert_eq!(status, 400, "{seconds}: {answer}");
+        assert_eq!(
+            faults(&answer),
+            [fault("OUT_OF_RANGE", Some("seconds"))],
+            "{seconds}"
+        );
+    }
+    assert_eq!(inst.world.clock().unwrap(), clock);
+    assert_eq!(log(base), before);
+
+    let (status, answer) = advance(latest - clock);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["clock_unix"], latest);
+    assert_eq!(answer["rfc3339"], "9999-12-30T22:00:00Z");
+    let (status, answer) = advance(1);
+    assert_eq!(status, 400, "{answer}");
+    assert_eq!(faults(&answer), [fault("OUT_OF_RANGE", Some("seconds"))]);
+    assert_eq!(inst.world.clock().unwrap(), latest);
 }

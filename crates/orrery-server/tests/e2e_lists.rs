@@ -286,6 +286,20 @@ async fn bad_list_bodies_name_every_fault() {
             fault("INVALID_ARGUMENT", Some("bogus")),
         ]
     );
+
+    // A log position is never negative, so a negative cursor is refused
+    // rather than read as the start of the log.
+    assert_eq!(
+        refused("/log/list", json!({ "after_seq": -1 })),
+        [fault("OUT_OF_RANGE", Some("after_seq"))]
+    );
+    assert_eq!(
+        refused("/log/list", json!({ "after_seq": -1, "page_size": 0 })),
+        [
+            fault("OUT_OF_RANGE", Some("after_seq")),
+            fault("OUT_OF_RANGE", Some("page_size")),
+        ]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

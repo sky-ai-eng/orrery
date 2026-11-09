@@ -207,7 +207,3 @@ Every route here answers `501` until a consumer needs it:
 - Actions: workflow runs, jobs, and logs;
 - GitHub Apps and installations (`/app`, `/app/installations`, installation tokens), and webhook delivery;
 - REST search, organization member listings, and `/rate_limit`.
-
-**Known gaps against the rules above:**
-
-- A matched path called with a method Orrery doesn't serve answers a bare `405` rather than the `501` (`grammar.md`).
