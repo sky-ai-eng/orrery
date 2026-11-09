@@ -326,7 +326,7 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
     };
     let dir = list::read_sort(&mut fields, &[seq]).map_or(SortDir::Asc, |(_, dir)| dir);
     let query = serde_json::json!({ "after_seq": after_seq, "sort_dir": dir });
-    let window = list::read_window::<i64>(&mut fields, &query);
+    let window = list::read_window::<i64>(&mut fields, "log", &query);
     let window = match fields.finish(Some(window)) {
         Ok(w) => w,
         Err(resp) => return *resp,

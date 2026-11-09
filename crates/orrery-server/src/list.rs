@@ -52,11 +52,13 @@ struct Token<K> {
 /// Read `page_size` and `page_token`, after the route has read the filters
 /// and order that make up `query`. `query` is canonical, so two bodies asking
 /// the same question give the same value, and a token is refused for any
-/// query but the one it was issued for: its position would name different
-/// items in another.
+/// list or query but the one it was issued for: its position would name
+/// different items in another. `list` names the list, since two lists can
+/// ask the same query of keys that look alike.
 pub(crate) fn read_window<K: DeserializeOwned>(
     fields: &mut Fields,
-    query: &impl Serialize,
+    list: &'static str,
+    query: &serde_json::Value,
 ) -> Window<K> {
     // A token checked against a query that failed to read would be refused
     // for a fault the caller is already being told about.
@@ -68,7 +70,7 @@ pub(crate) fn read_window<K: DeserializeOwned>(
             "page_size",
         ));
     }
-    let fingerprint = fingerprint(query);
+    let fingerprint = fingerprint(list, query);
     let token: Option<String> = fields.optional("page_token");
     let resume = match token.map(|t| decode::<K>(&t)) {
         None => None,
@@ -166,10 +168,11 @@ pub(crate) fn answer<T: Serialize, K: Serialize>(
     json(StatusCode::OK, body)
 }
 
-/// A short hash of a query. It detects a token reused on another query; it
-/// is not a secret, and a collision costs a page of the wrong query.
-fn fingerprint(query: &impl Serialize) -> String {
-    let canonical = serde_json::to_vec(query).unwrap_or_default();
+/// A short hash of a list and its query. It detects a token reused on
+/// another; it is not a secret, and a collision costs a page of the wrong
+/// query.
+fn fingerprint(list: &str, query: &serde_json::Value) -> String {
+    let canonical = serde_json::json!([list, query]).to_string();
     hex::encode(&Sha256::digest(canonical)[..6])
 }
 
