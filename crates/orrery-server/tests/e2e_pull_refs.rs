@@ -8,12 +8,13 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use common::{Instance, boot, face, face_answer, face_ok, git, git_output, mint_actor};
 use orrery_face_git::store;
-use orrery_world::{LogEntry, Signal};
+use orrery_world::{LogEntry, Signal, World};
 
 /// Commit `file` with `contents` on the current branch and return the sha.
 fn commit(src: &Path, clock: i64, file: &str, contents: &str) -> String {
@@ -501,8 +502,25 @@ async fn a_merge_that_fails_puts_its_refs_back() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_push_that_fails_puts_its_refs_back() {
+/// A repository whose `main`, `release`, and `stale` are at one commit and
+/// whose `feature` is one commit ahead of them, with a pull request from
+/// `feature` into `main` (#1) and one into `release` (#2), and a push, not
+/// yet sent, that moves `feature`, creates `topic`, and deletes `stale`. The
+/// push moves #1's and #2's refs once it is recorded.
+struct PushThatFails {
+    inst: Instance,
+    token: String,
+    api: String,
+    bare: PathBuf,
+    src: PathBuf,
+    clock: i64,
+    push: Vec<String>,
+    feature_v1: String,
+    feature_v2: String,
+    _work: tempfile::TempDir,
+}
+
+async fn push_that_fails() -> PushThatFails {
     let inst = boot().await;
     let base = inst.base.clone();
     let token = mint_actor(&base, "alice", "user");
@@ -518,20 +536,7 @@ async fn a_push_that_fails_puts_its_refs_back() {
         .replace("http://", &format!("http://x-access-token:{token}@"));
     let api = format!("{base}/api/v3/repos/alice/webapp");
     let bare = store::bare_dir(&inst.world.repos_dir(), "alice", "webapp");
-    let head_sha = |n: i64| {
-        face_ok(
-            "GET",
-            &format!("{api}/pulls/{n}"),
-            &token,
-            serde_json::json!(null),
-        )["head"]["sha"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    };
 
-    // main, release, and stale at one commit, feature one ahead of them,
-    // with a pull request into main and one into release.
     let clock = inst.world.clock().unwrap();
     let work = tempfile::tempdir().unwrap();
     let src = work.path().join("src");
@@ -556,50 +561,136 @@ async fn a_push_that_fails_puts_its_refs_back() {
         );
     }
 
-    // One push moves feature, creates topic, and deletes stale. A stale lock
-    // on #2's ref makes git refuse to move it, once receive-pack has moved
-    // the branches and the push has moved #1's ref.
     let feature_v2 = commit(&src, clock, "feature.txt", "v2\n");
     git(&src, clock, &["branch", "topic"]);
-    let push = ["push", authed_url.as_str(), "feature", "topic", ":stale"];
-    let lock = bare.join(format!("{}.lock", store::pull_head_ref(2)));
-    std::fs::write(&lock, "").unwrap();
-    let before = store::list_refs(&bare).unwrap();
-    let mark = inst.world.log_after(0, 10_000).unwrap().last().unwrap().seq;
-    let failed = git_output(&src, clock, &push);
-    assert!(!failed.status.success());
-    let stderr = String::from_utf8_lossy(&failed.stderr);
-    assert!(stderr.contains("500"), "{stderr}");
-
-    // No entry, and every ref back where it was.
-    assert!(inst.world.log_after(mark, 10_000).unwrap().is_empty());
-    assert_eq!(store::list_refs(&bare).unwrap(), before);
-    assert_eq!(head_sha(1), feature_v1);
-    assert_eq!(head_sha(2), feature_v1);
-
-    // A retry lands as if the failed push had not happened: its entries
-    // start from the refs the failed push found, so the log rebuilds the
-    // repository.
-    std::fs::remove_file(&lock).unwrap();
-    git(&src, clock, &push);
-    let refs = store::list_refs(&bare).unwrap();
-    for r in [
-        "refs/heads/feature".to_string(),
-        "refs/heads/topic".to_string(),
-        store::pull_head_ref(1),
-        store::pull_head_ref(2),
-    ] {
-        assert_eq!(refs.get(&r), Some(&feature_v2), "{r}");
+    let push = ["push", &authed_url, "feature", "topic", ":stale"]
+        .map(str::to_string)
+        .to_vec();
+    PushThatFails {
+        inst,
+        token,
+        api,
+        bare,
+        src,
+        clock,
+        push,
+        feature_v1,
+        feature_v2,
+        _work: work,
     }
-    assert!(!refs.contains_key("refs/heads/stale"));
-    assert_eq!(head_sha(2), feature_v2);
-    let log = inst.world.log_after(0, 10_000).unwrap();
-    let retried = log
-        .iter()
-        .find(|e| e.seq > mark && e.details["ref"] == "refs/heads/feature")
-        .unwrap();
-    assert_eq!(retried.details["old"], feature_v1.as_str());
-    assert_eq!(refs_from_log(&log, "alice/webapp"), refs);
+}
+
+impl PushThatFails {
+    fn head_sha(&self, number: i64) -> String {
+        face_ok(
+            "GET",
+            &format!("{}/pulls/{number}", self.api),
+            &self.token,
+            serde_json::json!(null),
+        )["head"]["sha"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn args(&self) -> Vec<&str> {
+        self.push.iter().map(String::as_str).collect()
+    }
+
+    /// Send the push, which the test has made fail, and check that it was
+    /// answered `500` and left every ref where it was. Returns the newest
+    /// `seq` before it, from which it should have appended nothing.
+    fn send_and_fail(&self) -> i64 {
+        let before = store::list_refs(&self.bare).unwrap();
+        let mark = self
+            .inst
+            .world
+            .log_after(0, 10_000)
+            .unwrap()
+            .last()
+            .unwrap()
+            .seq;
+        let failed = git_output(&self.src, self.clock, &self.args());
+        assert!(!failed.status.success());
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(stderr.contains("500"), "{stderr}");
+        assert_eq!(store::list_refs(&self.bare).unwrap(), before);
+        mark
+    }
+
+    /// Check that the failed push appended nothing after `mark` and left the
+    /// pull requests on their heads, then retry it, now that it can land: it
+    /// lands as if the failed push had not happened, its entries starting
+    /// from the refs the failed push found, so the log rebuilds the
+    /// repository.
+    fn moved_nothing_and_retry_lands(&self, mark: i64) {
+        assert!(self.inst.world.log_after(mark, 10_000).unwrap().is_empty());
+        assert_eq!(self.head_sha(1), self.feature_v1);
+        assert_eq!(self.head_sha(2), self.feature_v1);
+
+        git(&self.src, self.clock, &self.args());
+        let refs = store::list_refs(&self.bare).unwrap();
+        for r in [
+            "refs/heads/feature".to_string(),
+            "refs/heads/topic".to_string(),
+            store::pull_head_ref(1),
+            store::pull_head_ref(2),
+        ] {
+            assert_eq!(refs.get(&r), Some(&self.feature_v2), "{r}");
+        }
+        assert!(!refs.contains_key("refs/heads/stale"));
+        assert_eq!(self.head_sha(2), self.feature_v2);
+        let log = self.inst.world.log_after(0, 10_000).unwrap();
+        let retried = log
+            .iter()
+            .find(|e| e.seq > mark && e.details["ref"] == "refs/heads/feature")
+            .unwrap();
+        assert_eq!(retried.details["old"], self.feature_v1.as_str());
+        assert_eq!(refs_from_log(&log, "alice/webapp"), refs);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_that_fails_puts_its_refs_back() {
+    let p = push_that_fails().await;
+    // A stale lock on #2's ref makes git refuse to move it, once receive-pack
+    // has moved the branches and the push has moved #1's ref.
+    let lock = p.bare.join(format!("{}.lock", store::pull_head_ref(2)));
+    std::fs::write(&lock, "").unwrap();
+    let mark = p.send_and_fail();
+    std::fs::remove_file(&lock).unwrap();
+    p.moved_nothing_and_retry_lands(mark);
+}
+
+/// A `post-receive` hook runs once receive-pack has moved the pushed refs.
+/// This one kills receive-pack, its parent, so `git http-backend` fails
+/// with the refs moved and the push is never observed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_whose_http_backend_fails_puts_its_refs_back() {
+    let p = push_that_fails().await;
+    let hook = p.bare.join("hooks").join("post-receive");
+    std::fs::write(&hook, "#!/bin/sh\nkill -9 $PPID\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mark = p.send_and_fail();
+    std::fs::remove_file(&hook).unwrap();
+    p.moved_nothing_and_retry_lands(mark);
+}
+
+/// A listener that panics when the push's first entry is appended panics
+/// the push's task once it has moved #1's and #2's refs, before its record
+/// commits. The panic poisons the world's lock, so the world is read
+/// afterwards through a connection of its own, and the push is not retried.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_that_panics_puts_its_refs_back() {
+    let p = push_that_fails().await;
+    p.inst.world.listen(|signal| {
+        if signal == Signal::LogMayHaveGrown {
+            panic!("the push's record panicked");
+        }
+    });
+    let mark = p.send_and_fail();
+    let world = World::open(p.inst.world.root()).unwrap();
+    assert!(world.log_after(mark, 10_000).unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
