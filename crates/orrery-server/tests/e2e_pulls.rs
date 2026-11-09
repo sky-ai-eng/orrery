@@ -457,37 +457,64 @@ async fn patch_edits_close_and_reopen() {
     assert_eq!(reopened["state"], "open");
     assert_eq!(reopened["closed_at"], serde_json::Value::Null);
 
-    // A base that is the head branch is refused as a base that does not
-    // exist is, and the pull keeps the base it had.
-    let (status, own_head) = answer(
-        "PATCH",
-        &url,
-        &s.token,
-        serde_json::json!({ "base": "feature" }),
+    // A base is refused with GitHub's message for what is wrong with it,
+    // and the title beside it still lands. The pull's own head, or a branch
+    // that already holds its commits, has no new commits to propose.
+    let base_refused = |message: &str| {
+        (
+            422,
+            serde_json::json!({
+                "message": "Validation Failed",
+                "errors": [{
+                    "resource": "PullRequest",
+                    "code": "invalid",
+                    "field": "base",
+                    "message": message,
+                }],
+            }),
+        )
+    };
+    let clock = s.inst.world.clock().unwrap();
+    git(
+        &s.src,
+        clock,
+        &["push", &s.authed_url, "feature:refs/heads/holds-feature"],
     );
-    assert_eq!(status, 422);
-    assert_eq!(own_head["errors"][0]["field"], "base");
-    assert_eq!(own_head["errors"][0]["code"], "invalid");
-    let missing = answer(
-        "PATCH",
-        &url,
-        &s.token,
-        serde_json::json!({ "base": "ghost" }),
-    );
-    assert_eq!(missing, (422, own_head));
+    for (base, message) in [
+        (
+            "feature",
+            "There are no new commits between base branch 'feature' and head branch 'feature'",
+        ),
+        (
+            "holds-feature",
+            "There are no new commits between base branch 'holds-feature' and head branch 'feature'",
+        ),
+        ("ghost", "Proposed base branch 'ghost' was not found"),
+    ] {
+        assert_eq!(
+            answer(
+                "PATCH",
+                &url,
+                &s.token,
+                serde_json::json!({ "base": base, "title": base })
+            ),
+            base_refused(message)
+        );
+    }
     let kept = face_ok("GET", &url, &s.token, serde_json::json!(null));
     assert_eq!(kept["base"]["ref"], "main");
+    assert_eq!(kept["title"], "ghost");
 
-    // Bad values are named rejections, and unknown pulls are faithful 404s.
-    assert_eq!(
-        face(
-            "PATCH",
-            &url,
-            &s.token,
-            serde_json::json!({ "state": "parked" })
-        ),
-        Err(422)
+    // An unknown state is ignored, as GitHub ignores it, and the rest of the
+    // request lands. Unknown pulls are faithful 404s.
+    let ignored = face_ok(
+        "PATCH",
+        &url,
+        &s.token,
+        serde_json::json!({ "state": "parked", "title": "Add feature" }),
     );
+    assert_eq!(ignored["state"], "open");
+    assert_eq!(ignored["title"], "Add feature");
     assert_eq!(
         face(
             "PATCH",
@@ -630,21 +657,20 @@ async fn a_closed_pull_refuses_the_edits_github_refuses() {
     );
     assert_eq!(entries(), before + 1);
 
-    // What GitHub does with a base beside a reopen is not mocked.
-    let (status, not_mocked) = patch(
-        1,
-        serde_json::json!({ "base": "release", "state": "open", "title": "T3" }),
-    );
-    assert_eq!(status, 422);
-    assert_eq!(not_mocked["orrery"]["field"], "base (beside a reopen)");
-    assert_eq!(get(1)["state"], "closed");
-    assert_eq!(entries(), before + 1);
-
     // A refused reopen keeps only the body: GitHub writes it first and drops
-    // the title. A reopen is refused while its base branch is gone, naming
-    // both branches, base first, when its head branch is gone too.
+    // the title. A base beside it is judged against the pull it left closed,
+    // and that refusal is the one answered. A reopen is refused while its
+    // base branch is gone, naming both branches, base first, when its head
+    // branch is gone too.
     git(&s.src, clock, &["push", &s.authed_url, ":dev"]);
     let before = entries();
+    assert_eq!(
+        patch(
+            1,
+            serde_json::json!({ "state": "open", "base": "release", "title": "T3", "body": "B3" })
+        ),
+        base_refused
+    );
     assert_eq!(
         patch(
             1,
@@ -670,7 +696,7 @@ async fn a_closed_pull_refuses_the_edits_github_refuses() {
         (&"closed".into(), &"T2".into(), &"B4".into())
     );
     assert_eq!(pull_ref(1).as_deref(), Some(s.feature_sha.as_str()));
-    assert_eq!(entries(), before + 1, "the body edit");
+    assert_eq!(entries(), before + 2, "the two body edits");
 
     // Restoring the base branch lets it reopen.
     let dev_back = format!("{}:refs/heads/dev", s.main_sha);
@@ -752,6 +778,58 @@ async fn a_closed_pull_refuses_the_edits_github_refuses() {
     assert_eq!(
         (&kept["state"], &kept["body"]),
         (&"closed".into(), &"B7".into())
+    );
+
+    // A base beside a reopen that lands is judged against the reopened pull:
+    // it moves the pull after the reopen, or is refused with the reopen kept.
+    assert_eq!(open("dev")["number"], 4);
+    let (status, _) = patch(4, serde_json::json!({ "state": "closed" }));
+    assert_eq!(status, 200);
+    let before = entries();
+    let (status, moved) = patch(
+        4,
+        serde_json::json!({ "state": "open", "base": "main", "title": "TA", "body": "BA" }),
+    );
+    assert_eq!(status, 200, "{moved}");
+    assert_eq!(
+        (
+            &moved["state"],
+            &moved["base"]["ref"],
+            &moved["title"],
+            &moved["body"]
+        ),
+        (&"open".into(), &"main".into(), &"TA".into(), &"BA".into())
+    );
+    let log = s.inst.world.log_after(0, 10_000).unwrap();
+    let actions: Vec<&str> = log
+        .iter()
+        .filter(|e| e.action.starts_with("pull."))
+        .map(|e| e.action.as_str())
+        .skip(before)
+        .collect();
+    assert_eq!(actions, ["pull.edit", "pull.reopen", "pull.edit"]);
+    let (status, _) = patch(4, serde_json::json!({ "state": "closed" }));
+    assert_eq!(status, 200);
+    assert_eq!(
+        patch(
+            4,
+            serde_json::json!({ "state": "open", "base": "release", "title": "TA2", "body": "BA2" })
+        ),
+        refused(
+            "base",
+            "invalid",
+            "A pull request already exists for base branch 'release' and head branch 'feature'"
+        )
+    );
+    let kept = get(4);
+    assert_eq!(
+        (
+            &kept["state"],
+            &kept["base"]["ref"],
+            &kept["title"],
+            &kept["body"]
+        ),
+        (&"open".into(), &"main".into(), &"TA2".into(), &"BA2".into())
     );
 }
 
