@@ -73,7 +73,7 @@ const REPOS_DIR: &str = "repos";
 /// [`World::record_push`] and [`World::record_merge`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefMove<'a> {
-    /// The ref's full name, as its `ref.update` entry records it.
+    /// The ref's full name, such as `refs/heads/main`.
     pub name: &'a str,
     /// The object id before the move, in the caller's spelling for a ref
     /// that did not exist.
@@ -384,11 +384,15 @@ impl World {
     pub fn caller_by_token(&self, token: &str) -> Result<Option<Caller>> {
         let conn = self.lock();
         // The actor columns in `queries::ACTOR_COLUMNS`'s order, qualified,
-        // since `tokens` has a `created_clock_unix` too.
+        // since `tokens` has a `created_clock_unix` too. The code's id is
+        // read out of `origin` so the lookup uses the primary key.
         let found = conn
             .query_row(
                 "SELECT a.id, a.login, a.kind, a.created_clock_unix,
-                        (SELECT app_id FROM oauth_codes WHERE 'oauth:' || oauth_codes.id = t.origin)
+                        CASE WHEN t.origin GLOB 'oauth:*' THEN
+                            (SELECT app_id FROM oauth_codes
+                             WHERE id = CAST(substr(t.origin, 7) AS INTEGER))
+                        END
                  FROM tokens t JOIN actors a ON a.id = t.actor_id
                  WHERE t.token = ?1",
                 params![token],
@@ -399,18 +403,7 @@ impl World {
     }
 
     pub fn actor_by_token(&self, token: &str) -> Result<Option<Actor>> {
-        let conn = self.lock();
-        Ok(conn
-            .query_row(
-                &format!(
-                    "SELECT {} FROM actors
-                     WHERE id = (SELECT actor_id FROM tokens WHERE token = ?1)",
-                    queries::ACTOR_COLUMNS
-                ),
-                params![token],
-                queries::row_to_actor,
-            )
-            .optional()?)
+        Ok(self.caller_by_token(token)?.map(|caller| caller.actor))
     }
 
     // ---- repos ----

@@ -196,6 +196,12 @@ fn an_oauth_code_is_spent_once_and_expires_on_the_virtual_clock() {
     assert_eq!(token.actor, alice);
     assert_eq!(token.scope, "user:email");
     assert_eq!(w.actor_by_token(&token.token).unwrap(), Some(alice.clone()));
+    // The token is the app's, and a token issued to alice is none's, though
+    // its number is this code's id.
+    let caller = w.caller_by_token(&token.token).unwrap().unwrap();
+    assert_eq!(caller.app_id, Some(app.id));
+    let (_, issued) = w.issue_actor_token("alice", by(sys.id)).unwrap();
+    assert_eq!(w.caller_by_token(&issued).unwrap().unwrap().app_id, None);
     assert!(matches!(
         w.exchange_oauth_code(&app.client_id, &app.client_secret, &code, None),
         Err(WorldError::OAuthBadCode)
