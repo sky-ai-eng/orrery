@@ -229,8 +229,9 @@ pub(crate) async fn patch_pull(
     let reopen_at = match state {
         Some("open") if pull.state == PullState::Closed => {
             match reopen_head(&face, &repo, &bare, &pull) {
-                Ok(head) => Some(head),
-                Err(refused) => {
+                Err(fault) => return *fault,
+                Ok(Ok(head)) => Some(head),
+                Ok(Err(refused)) => {
                     if body.is_some()
                         && let Err(e) = face.world.edit_pull(pull.id, actor.id, None, body, None)
                     {
@@ -241,7 +242,7 @@ pub(crate) async fn patch_pull(
                     if parsed.base.is_some() {
                         return closed_base_refused();
                     }
-                    return *refused;
+                    return refused;
                 }
             }
         }
@@ -255,8 +256,9 @@ pub(crate) async fn patch_pull(
     let (base, base_refused) = match parsed.base.as_deref() {
         None => (None, None),
         Some(b) => match resolve_base(&face, &repo, &bare, &pull, head_sha, b, ends_closed) {
-            Ok(resolved) => (Some(resolved), None),
-            Err(resp) => (None, Some(resp)),
+            Err(fault) => return *fault,
+            Ok(Ok(resolved)) => (Some(resolved), None),
+            Ok(Err(refused)) => (None, Some(refused)),
         },
     };
     // A reopened pull takes its new base after the reopen, in GitHub's order.
@@ -279,6 +281,8 @@ pub(crate) async fn patch_pull(
         };
     }
 
+    // A state the pull is already in is a GitHub no-op: nothing is written
+    // for it.
     if let Some(head) = reopen_at {
         // The ref moves before the reopen commits, as a push's re-pins do, so
         // a reader that sees the pull open sees its ref at the head. A reopen
@@ -304,7 +308,6 @@ pub(crate) async fn patch_pull(
             Err(e) => return internal(e),
         };
     }
-    // Same-state writes are GitHub no-ops: the PR is returned unchanged.
     if let Some((r, s)) = &base_after {
         pull = match face
             .world
@@ -315,10 +318,19 @@ pub(crate) async fn patch_pull(
         };
     }
     if let Some(refused) = base_refused {
-        return *refused;
+        return refused;
     }
 
     json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull))
+}
+
+/// A check's outcome: its value, or GitHub's refusal as the inner `Err`.
+/// The outer `Err` is a server fault, which the caller answers before it
+/// writes anything, so a 500 never follows a partial write.
+type Judged<T> = Result<Result<T, Response<Body>>, Box<Response<Body>>>;
+
+fn fault(e: impl std::fmt::Display) -> Box<Response<Body>> {
+    Box::new(internal(e))
 }
 
 /// The branch and sha a `base` edit moves the pull to, or GitHub's refusal
@@ -333,43 +345,42 @@ fn resolve_base(
     head_sha: &str,
     base: &str,
     ends_closed: bool,
-) -> Result<(String, String), Box<Response<Body>>> {
-    let refused =
-        |message: String| Box::new(validation_invalid_message("PullRequest", "base", &message));
+) -> Judged<(String, String)> {
+    let refused = |message: String| -> Judged<(String, String)> {
+        Ok(Err(validation_invalid_message(
+            "PullRequest",
+            "base",
+            &message,
+        )))
+    };
     if ends_closed {
-        return Err(Box::new(closed_base_refused()));
+        return Ok(Err(closed_base_refused()));
     }
-    let sha = match store::rev_parse(bare, &format!("refs/heads/{base}")) {
-        Ok(Some(sha)) => sha,
-        Ok(None) => {
-            return Err(refused(format!(
-                "Proposed base branch '{base}' was not found"
-            )));
-        }
-        Err(e) => return Err(Box::new(internal(e))),
+    let Some(sha) = store::rev_parse(bare, &format!("refs/heads/{base}")).map_err(fault)? else {
+        return refused(format!("Proposed base branch '{base}' was not found"));
     };
     if base == pull.base_ref {
-        return Ok((base.to_string(), sha));
+        return Ok(Ok((base.to_string(), sha)));
     }
     let head = &pull.head_ref;
     // Naming the pull's own head lands here: a branch has no commits that
     // are not in itself.
-    match store::rev_list_count(bare, &sha, head_sha) {
-        Ok(0) => {
-            return Err(refused(format!(
-                "There are no new commits between base branch '{base}' and head branch '{head}'"
-            )));
-        }
-        Ok(_) => {}
-        Err(e) => return Err(Box::new(internal(e))),
+    if store::rev_list_count(bare, &sha, head_sha).map_err(fault)? == 0 {
+        return refused(format!(
+            "There are no new commits between base branch '{base}' and head branch '{head}'"
+        ));
     }
-    match face.world.open_pull_between(repo.id, head, base) {
-        Ok(None) => Ok((base.to_string(), sha)),
-        Ok(Some(_)) => Err(refused(format!(
+    if face
+        .world
+        .open_pull_between(repo.id, head, base)
+        .map_err(fault)?
+        .is_some()
+    {
+        return refused(format!(
             "A pull request already exists for base branch '{base}' and head branch '{head}'"
-        ))),
-        Err(e) => Err(Box::new(internal(e))),
+        ));
     }
+    Ok(Ok((base.to_string(), sha)))
 }
 
 /// GitHub's refusal of a base on a pull that is closed.
@@ -386,42 +397,35 @@ fn closed_base_refused() -> Response<Body> {
 /// when another pull is open from the same head into the same base; and when
 /// the tip does not descend from the pull's head, since it cannot tell what
 /// changed while the pull was closed.
-fn reopen_head(
-    face: &GithubFace,
-    repo: &Repo,
-    bare: &Path,
-    pull: &Pull,
-) -> Result<String, Box<Response<Body>>> {
-    let refused = |why: String| Box::new(reopen_refused(&why));
+fn reopen_head(face: &GithubFace, repo: &Repo, bare: &Path, pull: &Pull) -> Judged<String> {
+    let refused = |why: String| -> Judged<String> { Ok(Err(reopen_refused(&why))) };
     let (base, head) = (&pull.base_ref, &pull.head_ref);
     if pull.merged {
-        return Err(refused("The pull request cannot be reopened.".into()));
+        return refused("The pull request cannot be reopened.".into());
     }
-    let tip_of = |branch: &str| {
-        store::rev_parse(bare, &format!("refs/heads/{branch}")).map_err(|e| Box::new(internal(e)))
-    };
+    let tip_of =
+        |branch: &str| store::rev_parse(bare, &format!("refs/heads/{branch}")).map_err(fault);
     let base_gone = tip_of(base)?.is_none();
     let tip = match (base_gone, tip_of(head)?) {
         (false, Some(tip)) => tip,
-        (true, Some(_)) => return Err(refused(format!("The {base} branch has been deleted."))),
-        (false, None) => return Err(refused(format!("The {head} branch has been deleted."))),
+        (true, Some(_)) => return refused(format!("The {base} branch has been deleted.")),
+        (false, None) => return refused(format!("The {head} branch has been deleted.")),
         (true, None) => {
-            return Err(refused(format!(
-                "The {base} and {head} branches have been deleted."
-            )));
+            return refused(format!("The {base} and {head} branches have been deleted."));
         }
     };
-    match face.world.open_pull_between(repo.id, head, base) {
-        Ok(None) => {}
-        Ok(Some(_)) => return Err(Box::new(duplicate_reopen(pull))),
-        Err(e) => return Err(Box::new(internal(e))),
+    if face
+        .world
+        .open_pull_between(repo.id, head, base)
+        .map_err(fault)?
+        .is_some()
+    {
+        return Ok(Err(duplicate_reopen(pull)));
     }
-    match store::is_ancestor(bare, &pull.head_sha, &tip) {
-        Ok(true) => Ok(tip),
-        Ok(false) => Err(refused(format!(
-            "The {head} branch was force-pushed or recreated."
-        ))),
-        Err(e) => Err(Box::new(internal(e))),
+    if store::is_ancestor(bare, &pull.head_sha, &tip).map_err(fault)? {
+        Ok(Ok(tip))
+    } else {
+        refused(format!("The {head} branch was force-pushed or recreated."))
     }
 }
 
