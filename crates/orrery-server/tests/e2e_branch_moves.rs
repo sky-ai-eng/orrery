@@ -1,4 +1,4 @@
-//! End-to-end for the reads Triage Factory's base-branch watch makes
+//! End-to-end for the reads a consumer watching base branches makes
 //! (spec/surface-github.md §1.4, §1.8 and §3): a branch's tip with its
 //! ETag, the compare between two tips, and a pull request's changed files over
 //! REST and GraphQL.
@@ -17,7 +17,7 @@ fn gql(base: &str, token: &str, query: &str, variables: serde_json::Value) -> se
         .expect("graphql json")
 }
 
-/// TF's `PRChangedPaths` query (`prChangedPathsQuery`), verbatim.
+/// A consumer's `PRChangedPaths` query, verbatim.
 const PR_CHANGED_PATHS: &str = r#"
 	query PRChangedPaths($ids: [ID!]!) {
 		nodes(ids: $ids) {
@@ -30,7 +30,7 @@ const PR_CHANGED_PATHS: &str = r#"
 	}
 "#;
 
-/// TF's `PRChangedPathsPage` query, verbatim.
+/// A consumer's `PRChangedPathsPage` query, verbatim.
 const PR_CHANGED_PATHS_PAGE: &str = r#"
 	query PRChangedPathsPage($id: ID!, $cursor: String!) {
 		node(id: $id) {
@@ -230,7 +230,7 @@ async fn branch_tip_compare_and_changed_files() {
         Err(404)
     );
 
-    // ...and over GraphQL, with TF's documents verbatim.
+    // ...and over GraphQL, with the consumer's documents verbatim.
     let resp = gql(
         &base,
         &alice,

@@ -1,5 +1,5 @@
 //! End-to-end for the poller read surface (spec/surface-github.md §1): the
-//! listing order and ETag/304 fast path TF's discovery depends on, the
+//! listing order and ETag/304 fast path a polling consumer depends on, the
 //! detail reads, contents, branches, and the identity endpoints.
 
 mod common;
@@ -61,7 +61,8 @@ async fn poll_path_reads() {
         serde_json::json!({ "state": "closed" }),
     );
 
-    // Repo object: the fields TF's meta/rename path reads.
+    // Repo object: the fields a consumer reads to follow a repo's metadata
+    // and renames.
     let read = face_ok("GET", &api, &alice, serde_json::json!(null));
     assert_eq!(read["full_name"], "alice/webapp");
     assert_eq!(read["default_branch"], "main");
