@@ -6,10 +6,15 @@
 use std::sync::{Arc, Mutex};
 
 use orrery_world::{
-    ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX, NewCheckRun, NewPull,
-    Pull, PullState, RefChange, RefMove, ReviewState, Signal, TimelineKind, World, WorldError,
-    WorldSecret,
+    ActorKind, Attribution, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX, Door,
+    EventBody, NewCheckRun, NewPull, Pull, PullState, RefChange, RefMove, ReviewState, Signal,
+    TimelineKind, World, WorldError, WorldSecret,
 };
+
+/// A write by `actor_id` as the REST face makes it.
+fn by(actor_id: i64) -> Attribution {
+    Attribution::new(actor_id, Door::Rest)
+}
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -34,7 +39,7 @@ fn fixture() -> Fixture {
     let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
     let (bob, _) = w.create_actor("bob", ActorKind::User).unwrap();
     let repo = w
-        .create_repo(alice.id, "webapp", None, false, "main", alice.id)
+        .create_repo(alice.id, "webapp", None, false, "main", by(alice.id))
         .unwrap();
     Fixture {
         dir,
@@ -46,34 +51,38 @@ fn fixture() -> Fixture {
 }
 
 fn open_pull(f: &Fixture, head: &str, sha: &str) -> Pull {
-    f.w.create_pull(NewPull {
-        repo_id: f.repo,
-        author_id: f.alice,
-        title: "add feature",
-        body: Some("does the thing"),
-        head_ref: head,
-        head_sha: sha,
-        base_ref: "main",
-        base_sha: SHA_A,
-        draft: false,
-    })
+    f.w.create_pull(
+        by(f.alice),
+        NewPull {
+            repo_id: f.repo,
+            title: "add feature",
+            body: Some("does the thing"),
+            head_ref: head,
+            head_sha: sha,
+            base_ref: "main",
+            base_sha: SHA_A,
+            draft: false,
+        },
+    )
     .unwrap()
 }
 
 /// A pull whose head is `main`, into `release`: a merge into `main` re-pins
 /// it.
 fn open_release_pull(f: &Fixture) -> Pull {
-    f.w.create_pull(NewPull {
-        repo_id: f.repo,
-        author_id: f.alice,
-        title: "release",
-        body: None,
-        head_ref: "main",
-        head_sha: SHA_A,
-        base_ref: "release",
-        base_sha: SHA_A,
-        draft: false,
-    })
+    f.w.create_pull(
+        by(f.alice),
+        NewPull {
+            repo_id: f.repo,
+            title: "release",
+            body: None,
+            head_ref: "main",
+            head_sha: SHA_A,
+            base_ref: "release",
+            base_sha: SHA_A,
+            draft: false,
+        },
+    )
     .unwrap()
 }
 
@@ -85,7 +94,39 @@ fn into_main<'a>(old: &'a str, new: &'a str, repins: Vec<i64>) -> RefMove<'a> {
         new,
         repins,
         change: RefChange::Moved,
+        forced: false,
+        commits: vec![new.to_string()],
+        commit_count: 1,
     }
+}
+
+/// The newest write's events, without their envelopes, after checking that
+/// each was made by `login` through the REST face.
+fn last_write(w: &World, login: &str) -> Vec<serde_json::Value> {
+    let log = w.log_after(0, 1000).unwrap();
+    let write = log.last().unwrap().write;
+    let events: Vec<_> = log.iter().filter(|e| e.write == write).collect();
+    assert_eq!(events.len() as i64, write.events);
+    events
+        .into_iter()
+        .map(|e| {
+            assert_eq!((e.actor.login.as_str(), e.door), (login, Door::Rest));
+            serde_json::to_value(&e.body).unwrap()
+        })
+        .collect()
+}
+
+fn types(events: &[serde_json::Value]) -> Vec<&str> {
+    events.iter().map(|e| e["type"].as_str().unwrap()).collect()
+}
+
+fn changed(event: &serde_json::Value) -> Vec<&str> {
+    event["changes"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect()
 }
 
 #[test]
@@ -105,25 +146,35 @@ fn create_pull_returns_the_stored_row_and_numbers_sequentially() {
 
     // One open pull per (head, base); a different base is a different pull.
     assert!(matches!(
-        f.w.create_pull(NewPull {
-            repo_id: f.repo,
-            author_id: f.bob,
-            title: "dup",
-            body: None,
-            head_ref: "feature",
-            head_sha: SHA_B,
-            base_ref: "main",
-            base_sha: SHA_A,
-            draft: false,
-        }),
+        f.w.create_pull(
+            by(f.bob),
+            NewPull {
+                repo_id: f.repo,
+                title: "dup",
+                body: None,
+                head_ref: "feature",
+                head_sha: SHA_B,
+                base_ref: "main",
+                base_sha: SHA_A,
+                draft: false,
+            }
+        ),
         Err(WorldError::PullExists(_))
     ));
 
     let log = f.w.log_after(0, 100).unwrap();
-    let opened = log.iter().find(|e| e.action == "pull.open").unwrap();
-    assert_eq!(opened.details["repo"], "alice/webapp");
-    assert_eq!(opened.details["number"], 1);
-    assert_eq!(opened.actor_login, "alice");
+    let opened = log
+        .iter()
+        .find_map(|e| match &e.body {
+            EventBody::PullOpened(o) => Some((e, o)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(opened.0.actor.login, "alice");
+    assert_eq!(opened.1.subject.repo.name, "webapp");
+    assert_eq!(opened.1.subject.owner.login, "alice");
+    assert_eq!((opened.1.subject.number, opened.1.object.number), (1, 1));
+    assert_eq!(opened.1.object.head.sha, SHA_B);
 }
 
 #[test]
@@ -131,32 +182,32 @@ fn close_reopen_merge_state_machine() {
     let f = fixture();
     let pull = open_pull(&f, "feature", SHA_B);
 
-    let closed = f.w.close_pull(pull.id, f.bob).unwrap();
+    let closed = f.w.close_pull(pull.id, by(f.bob)).unwrap();
     assert_eq!(closed, f.w.pull_by_id(pull.id).unwrap().unwrap());
     assert_eq!(closed.state, PullState::Closed);
     assert!(closed.closed_clock_unix.is_some());
     assert!(!closed.merged);
     assert!(matches!(
-        f.w.close_pull(pull.id, f.bob),
+        f.w.close_pull(pull.id, by(f.bob)),
         Err(WorldError::InvalidTransition(_))
     ));
 
     // A reopen takes the head its caller resolved, in the same write.
-    let reopened = f.w.reopen_pull(pull.id, f.bob, SHA_C).unwrap();
+    let reopened = f.w.reopen_pull(pull.id, by(f.bob), SHA_C).unwrap();
     assert_eq!(reopened.state, PullState::Open);
     assert_eq!(reopened.closed_clock_unix, None);
     assert_eq!(reopened.head_sha, SHA_C);
     let read = f.w.pull_by_number(f.repo, pull.number).unwrap().unwrap();
     assert_eq!(reopened, read);
     assert!(matches!(
-        f.w.reopen_pull(pull.id, f.bob, SHA_B),
+        f.w.reopen_pull(pull.id, by(f.bob), SHA_B),
         Err(WorldError::InvalidTransition(_))
     ));
     let unchanged = f.w.pull_by_number(f.repo, pull.number).unwrap().unwrap();
     assert_eq!(unchanged.head_sha, SHA_C, "a refused reopen moves nothing");
 
     let merge = into_main(SHA_A, SHA_C, Vec::new());
-    let merged = f.w.record_merge(pull.id, f.bob, &merge).unwrap();
+    let merged = f.w.record_merge(pull.id, by(f.bob), &merge).unwrap();
     assert!(merged.merged);
     assert_eq!(merged.state, PullState::Closed);
     assert_eq!(merged.merge_commit_sha.as_deref(), Some(SHA_C));
@@ -166,11 +217,11 @@ fn close_reopen_merge_state_machine() {
 
     // A merged pull is terminal: no reopen, no second merge.
     assert!(matches!(
-        f.w.reopen_pull(pull.id, f.bob, SHA_B),
+        f.w.reopen_pull(pull.id, by(f.bob), SHA_B),
         Err(WorldError::InvalidTransition(_))
     ));
     assert!(matches!(
-        f.w.record_merge(pull.id, f.bob, &merge),
+        f.w.record_merge(pull.id, by(f.bob), &merge),
         Err(WorldError::InvalidTransition(_))
     ));
 
@@ -183,14 +234,14 @@ fn close_reopen_merge_state_machine() {
     );
     assert!(items.iter().all(|i| i.actor_login == "bob"));
 
-    let actions: Vec<String> =
+    let actions: Vec<&str> =
         f.w.log_after(0, 100)
             .unwrap()
-            .into_iter()
-            .map(|e| e.action)
+            .iter()
+            .map(|e| e.body.type_name())
             .collect();
-    for expected in ["pull.open", "pull.close", "pull.reopen", "pull.merge"] {
-        assert!(actions.iter().any(|a| a == expected), "missing {expected}");
+    for expected in ["pull:opened", "pull:closed", "pull:reopened", "pull:merged"] {
+        assert!(actions.contains(&expected), "missing {expected}");
     }
 }
 
@@ -198,7 +249,7 @@ fn close_reopen_merge_state_machine() {
 fn a_reopen_is_refused_while_another_pull_holds_its_head_and_base() {
     let f = fixture();
     let first = open_pull(&f, "feature", SHA_B);
-    f.w.close_pull(first.id, f.alice).unwrap();
+    f.w.close_pull(first.id, by(f.alice)).unwrap();
     let second = open_pull(&f, "feature", SHA_B);
     assert_eq!(
         f.w.open_pull_between(f.repo, "feature", "main").unwrap(),
@@ -211,7 +262,7 @@ fn a_reopen_is_refused_while_another_pull_holds_its_head_and_base() {
     let entries = f.w.log_after(0, 100).unwrap().len();
 
     assert!(matches!(
-        f.w.reopen_pull(first.id, f.bob, SHA_C),
+        f.w.reopen_pull(first.id, by(f.bob), SHA_C),
         Err(WorldError::PullExists(head)) if head == "feature"
     ));
     let kept = f.w.pull_by_number(f.repo, first.number).unwrap().unwrap();
@@ -220,8 +271,8 @@ fn a_reopen_is_refused_while_another_pull_holds_its_head_and_base() {
     assert_eq!(f.w.log_after(0, 100).unwrap().len(), entries);
 
     // Once the second closes, the first reopens.
-    f.w.close_pull(second.id, f.alice).unwrap();
-    let reopened = f.w.reopen_pull(first.id, f.bob, SHA_C).unwrap();
+    f.w.close_pull(second.id, by(f.alice)).unwrap();
+    let reopened = f.w.reopen_pull(first.id, by(f.bob), SHA_C).unwrap();
     assert_eq!(reopened.state, PullState::Open);
 }
 
@@ -230,23 +281,25 @@ fn a_retarget_is_refused_while_another_pull_holds_the_pair() {
     let f = fixture();
     let held = open_pull(&f, "feature", SHA_B);
     let other =
-        f.w.create_pull(NewPull {
-            repo_id: f.repo,
-            author_id: f.alice,
-            title: "into dev",
-            body: None,
-            head_ref: "feature",
-            head_sha: SHA_B,
-            base_ref: "dev",
-            base_sha: SHA_A,
-            draft: false,
-        })
+        f.w.create_pull(
+            by(f.alice),
+            NewPull {
+                repo_id: f.repo,
+                title: "into dev",
+                body: None,
+                head_ref: "feature",
+                head_sha: SHA_B,
+                base_ref: "dev",
+                base_sha: SHA_A,
+                draft: false,
+            },
+        )
         .unwrap();
     let entries = f.w.log_after(0, 100).unwrap().len();
 
     // Retargeting onto the held pair refuses the whole edit.
     assert!(matches!(
-        f.w.edit_pull(other.id, f.alice, Some("retitled"), None, Some(("main", SHA_A))),
+        f.w.edit_pull(other.id, by(f.alice), Some("retitled"), None, Some(("main", SHA_A))),
         Err(WorldError::PullExists(head)) if head == "feature"
     ));
     let kept = f.w.pull_by_number(f.repo, other.number).unwrap().unwrap();
@@ -256,16 +309,16 @@ fn a_retarget_is_refused_while_another_pull_holds_the_pair() {
     // A pull's own base is not another pull's, and closed pulls are outside
     // the rule.
     let same =
-        f.w.edit_pull(held.id, f.alice, None, None, Some(("main", SHA_A)))
+        f.w.edit_pull(held.id, by(f.alice), None, None, Some(("main", SHA_A)))
             .unwrap();
     assert_eq!(same, held);
-    f.w.close_pull(other.id, f.alice).unwrap();
+    f.w.close_pull(other.id, by(f.alice)).unwrap();
     let edited =
-        f.w.edit_pull(other.id, f.alice, None, None, Some(("main", SHA_A)))
+        f.w.edit_pull(other.id, by(f.alice), None, None, Some(("main", SHA_A)))
             .unwrap();
     assert_eq!(edited.base_ref, "main");
     assert!(matches!(
-        f.w.reopen_pull(other.id, f.alice, SHA_B),
+        f.w.reopen_pull(other.id, by(f.alice), SHA_B),
         Err(WorldError::PullExists(_))
     ));
 }
@@ -274,7 +327,7 @@ fn a_retarget_is_refused_while_another_pull_holds_the_pair() {
 fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
     let f = fixture();
     let closed = open_pull(&f, "feature", SHA_B);
-    f.w.close_pull(closed.id, f.alice).unwrap();
+    f.w.close_pull(closed.id, by(f.alice)).unwrap();
     let open = open_pull(&f, "feature", SHA_B);
     let elsewhere = open_pull(&f, "other", SHA_B);
 
@@ -290,15 +343,18 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
     );
 
     let sys = f.w.actor_by_login("orrery").unwrap().unwrap();
-    f.w.advance_clock(60, sys.id).unwrap();
+    f.w.advance_clock(60, by(sys.id)).unwrap();
     let moves = [RefMove {
         name: "refs/heads/feature",
         old: SHA_B,
         new: SHA_C,
         repins: vec![open.number],
         change: RefChange::Moved,
+        forced: false,
+        commits: Vec::new(),
+        commit_count: 0,
     }];
-    f.w.record_push(f.repo, f.alice, &moves, None).unwrap();
+    f.w.record_push(f.repo, by(f.alice), &moves, None).unwrap();
     let head = |n| f.w.pull_by_number(f.repo, n).unwrap().unwrap().head_sha;
     assert_eq!(head(open.number), SHA_C);
     let repinned = f.w.pull_by_number(f.repo, open.number).unwrap().unwrap();
@@ -315,9 +371,12 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
         new: SHA_A,
         repins: vec![open.number, closed.number],
         change: RefChange::Moved,
+        forced: false,
+        commits: Vec::new(),
+        commit_count: 0,
     }];
     assert!(matches!(
-        f.w.record_push(f.repo, f.alice, &stale, None),
+        f.w.record_push(f.repo, by(f.alice), &stale, None),
         Err(WorldError::InvalidTransition(_))
     ));
     assert_eq!(head(open.number), SHA_C);
@@ -337,8 +396,11 @@ fn a_base_move_stands_until_the_head_or_base_is_pinned_again() {
             new,
             repins,
             change,
+            forced: false,
+            commits: Vec::new(),
+            commit_count: 0,
         }];
-        f.w.record_push(f.repo, f.alice, &moves, None).unwrap();
+        f.w.record_push(f.repo, by(f.alice), &moves, None).unwrap();
     };
     assert!(!moved());
 
@@ -351,13 +413,13 @@ fn a_base_move_stands_until_the_head_or_base_is_pinned_again() {
 
     // So do a retarget, and a reopen after a close that leaves it marked.
     push("refs/heads/main", SHA_C, SHA_A, vec![]);
-    f.w.edit_pull(pull.id, f.alice, None, None, Some(("release", SHA_A)))
+    f.w.edit_pull(pull.id, by(f.alice), None, None, Some(("release", SHA_A)))
         .unwrap();
     assert!(!moved());
-    f.w.close_pull(pull.id, f.alice).unwrap();
+    f.w.close_pull(pull.id, by(f.alice)).unwrap();
     push("refs/heads/release", SHA_A, SHA_B, vec![]);
     assert!(moved());
-    f.w.reopen_pull(pull.id, f.alice, SHA_C).unwrap();
+    f.w.reopen_pull(pull.id, by(f.alice), SHA_C).unwrap();
     assert!(!moved());
 }
 
@@ -367,11 +429,10 @@ fn a_merge_records_its_base_move_and_the_merge_together() {
     let pull = open_pull(&f, "feature", SHA_B);
     let release = open_release_pull(&f);
     let sys = f.w.actor_by_login("orrery").unwrap().unwrap();
-    f.w.advance_clock(60, sys.id).unwrap();
-    let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
+    f.w.advance_clock(60, by(sys.id)).unwrap();
 
     let merge = into_main(SHA_A, SHA_C, vec![release.number]);
-    let merged = f.w.record_merge(pull.id, f.bob, &merge).unwrap();
+    let merged = f.w.record_merge(pull.id, by(f.bob), &merge).unwrap();
     assert_eq!(
         merged,
         f.w.pull_by_number(f.repo, pull.number).unwrap().unwrap()
@@ -379,34 +440,38 @@ fn a_merge_records_its_base_move_and_the_merge_together() {
     assert!(merged.merged);
     assert_eq!(merged.merge_commit_sha.as_deref(), Some(SHA_C));
 
-    // The base move's entry, then the merge's. Stored logs carry a merge as
-    // these two entries in this order, and replay reads them that way.
-    let entries = f.w.log_after(mark, 1000).unwrap();
-    let recorded: Vec<(&str, &serde_json::Value)> = entries
-        .iter()
-        .inspect(|e| {
-            assert_eq!(e.actor_login, "bob");
-            assert_eq!(e.clock_unix, DEFAULT_T0_UNIX + 60);
-        })
-        .map(|e| (e.action.as_str(), &e.details))
-        .collect();
+    // The merge, its timeline item, then the base branch's move recorded
+    // as a push of it would be, and the re-pin that move makes.
+    let events = last_write(&f.w, "bob");
     assert_eq!(
-        recorded,
+        types(&events),
         [
-            (
-                "ref.update",
-                &serde_json::json!({
-                    "repo": "alice/webapp", "ref": "refs/heads/main", "old": SHA_A, "new": SHA_C,
-                }),
-            ),
-            (
-                "pull.merge",
-                &serde_json::json!({
-                    "repo": "alice/webapp", "number": pull.number, "merge_commit_sha": SHA_C,
-                }),
-            ),
+            "pull:merged",
+            "timeline_item:created",
+            "repo:pushed",
+            "ref:updated",
+            "pull:head_moved",
         ]
     );
+    assert_eq!(events[0]["subject"]["number"], pull.number);
+    assert_eq!(
+        changed(&events[0]),
+        [
+            "closed_unix",
+            "merge_commit_sha",
+            "merged",
+            "merged_by",
+            "state",
+            "updated_unix"
+        ]
+    );
+    assert_eq!(events[1]["object"]["kind"], "closed");
+    assert_eq!(
+        events[3]["changes"]["sha"],
+        serde_json::json!({ "from": SHA_A, "to": SHA_C })
+    );
+    assert_eq!(events[4]["subject"]["number"], release.number);
+    assert_eq!(events[4]["changes"]["head"]["to"]["sha"], SHA_C);
     let repo = f.w.repo_by_id(f.repo).unwrap().unwrap();
     assert_eq!(repo.pushed_at_clock_unix, Some(DEFAULT_T0_UNIX + 60));
     let repinned = f.w.pull_by_number(f.repo, release.number).unwrap().unwrap();
@@ -419,7 +484,7 @@ fn a_merge_whose_record_is_refused_records_none_of_it() {
     let f = fixture();
     let pull = open_pull(&f, "feature", SHA_B);
     let closed = open_release_pull(&f);
-    f.w.close_pull(closed.id, f.alice).unwrap();
+    f.w.close_pull(closed.id, by(f.alice)).unwrap();
     let release = open_release_pull(&f);
     let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
 
@@ -437,7 +502,7 @@ fn a_merge_whose_record_is_refused_records_none_of_it() {
     };
     for refused in [&elsewhere, &stale, &deleting] {
         assert!(matches!(
-            f.w.record_merge(pull.id, f.bob, refused),
+            f.w.record_merge(pull.id, by(f.bob), refused),
             Err(WorldError::InvalidTransition(_))
         ));
     }
@@ -456,11 +521,11 @@ fn a_merge_whose_record_is_refused_records_none_of_it() {
     assert!(f.w.list_pull_timeline(pull.id).unwrap().is_empty());
 
     // A draft is refused too, though its move is right.
-    f.w.set_pull_draft(pull.id, f.alice, true).unwrap();
+    f.w.set_pull_draft(pull.id, by(f.alice), true).unwrap();
     let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
     let merge = into_main(SHA_A, SHA_C, vec![release.number]);
     assert!(matches!(
-        f.w.record_merge(pull.id, f.bob, &merge),
+        f.w.record_merge(pull.id, by(f.bob), &merge),
         Err(WorldError::InvalidTransition(_))
     ));
     assert!(f.w.log_after(mark, 1000).unwrap().is_empty());
@@ -473,16 +538,16 @@ fn a_reader_sees_all_of_a_merge_or_none_of_it() {
     let pull = open_pull(&f, "feature", SHA_B);
     let release = open_release_pull(&f);
     let sys = f.w.actor_by_login("orrery").unwrap().unwrap();
-    f.w.advance_clock(60, sys.id).unwrap();
+    f.w.advance_clock(60, by(sys.id)).unwrap();
 
     // A connection of its own reads only what has committed. Reading through
-    // it each time the log may have grown shows what a reader woken by either
-    // of the merge's entries can see.
+    // it each time the log may have grown shows what a reader woken by the
+    // merge's events can see.
     let db = f.dir.path().join("world").join("world.db");
     let read_merge = move |conn: &rusqlite::Connection| {
         conn.query_row(
             "SELECT (SELECT COUNT(*) FROM action_log
-                     WHERE action IN ('ref.update', 'pull.merge')),
+                     WHERE type IN ('ref:updated', 'pull:merged')),
                     (SELECT pushed_at_clock_unix FROM repos WHERE id = ?1),
                     (SELECT merged FROM pulls WHERE id = ?2),
                     (SELECT head_sha FROM pulls WHERE id = ?3)",
@@ -513,12 +578,12 @@ fn a_reader_sees_all_of_a_merge_or_none_of_it() {
     });
 
     let merge = into_main(SHA_A, SHA_C, vec![release.number]);
-    f.w.record_merge(pull.id, f.bob, &merge).unwrap();
+    f.w.record_merge(pull.id, by(f.bob), &merge).unwrap();
 
     let none = (0, None, false, SHA_A.to_string());
     let all = (2, Some(DEFAULT_T0_UNIX + 60), true, SHA_C.to_string());
     let seen = seen.lock().unwrap();
-    assert_eq!(seen.len(), 2, "one signal per entry: {seen:?}");
+    assert_eq!(seen.len(), 1, "one signal per write: {seen:?}");
     for state in seen.iter() {
         assert!(
             *state == none || *state == all,
@@ -535,25 +600,24 @@ fn edit_pull_distinguishes_clear_from_keep() {
     let log_before = f.w.log_after(0, 1000).unwrap().len();
 
     // All-None is a no-op: same row back, nothing logged.
-    let unchanged = f.w.edit_pull(pull.id, f.alice, None, None, None).unwrap();
+    let unchanged =
+        f.w.edit_pull(pull.id, by(f.alice), None, None, None)
+            .unwrap();
     assert_eq!(unchanged, pull);
     assert_eq!(f.w.log_after(0, 1000).unwrap().len(), log_before);
 
     let retitled =
-        f.w.edit_pull(pull.id, f.alice, Some("new title"), Some(None), None)
+        f.w.edit_pull(pull.id, by(f.alice), Some("new title"), Some(None), None)
             .unwrap();
     assert_eq!(retitled.title, "new title");
     assert_eq!(retitled.body, None, "explicit null cleared the body");
     let read = f.w.pull_by_number(f.repo, pull.number).unwrap().unwrap();
     assert_eq!(retitled, read);
 
-    let edit =
-        f.w.log_after(0, 1000)
-            .unwrap()
-            .into_iter()
-            .find(|e| e.action == "pull.edit")
-            .unwrap();
-    assert_eq!(edit.details["fields"], serde_json::json!(["title", "body"]));
+    let edit = &last_write(&f.w, "alice")[0];
+    assert_eq!(edit["type"], "pull:edited");
+    assert_eq!(edit["changes"]["title"]["to"], "new title");
+    assert_eq!(changed(edit), ["body", "title"], "the clock did not move");
 }
 
 #[test]
@@ -561,18 +625,26 @@ fn review_and_comment_return_stored_rows_and_bump_the_pull() {
     let f = fixture();
     let pull = open_pull(&f, "feature", SHA_B);
     let sys = f.w.actor_by_login("orrery").unwrap().unwrap();
-    f.w.advance_clock(60, sys.id).unwrap();
+    f.w.advance_clock(60, by(sys.id)).unwrap();
 
     let review =
-        f.w.create_review(pull.id, f.bob, ReviewState::Approved, Some("lgtm"), None)
-            .unwrap();
+        f.w.create_review(
+            pull.id,
+            by(f.bob),
+            ReviewState::Approved,
+            Some("lgtm"),
+            None,
+        )
+        .unwrap();
     assert_eq!(review, f.w.review_by_id(review.id).unwrap().unwrap());
     assert_eq!(review.author_login, "bob");
     assert_eq!(review.state, ReviewState::Approved);
     assert_eq!(review.commit_sha, SHA_B, "pinned to the pull's head");
     assert_eq!(review.submitted_clock_unix, DEFAULT_T0_UNIX + 60);
 
-    let comment = f.w.create_issue_comment(pull.id, f.bob, "ship it").unwrap();
+    let comment =
+        f.w.create_issue_comment(pull.id, by(f.bob), "ship it")
+            .unwrap();
     assert_eq!(
         f.w.list_issue_comments_for_pull(pull.id).unwrap(),
         std::slice::from_ref(&comment)
@@ -587,23 +659,29 @@ fn review_and_comment_return_stored_rows_and_bump_the_pull() {
         "activity bumps the pull"
     );
 
-    let actions: Vec<String> =
+    let actions: Vec<&str> =
         f.w.log_after(0, 100)
             .unwrap()
-            .into_iter()
-            .map(|e| e.action)
+            .iter()
+            .map(|e| e.body.type_name())
             .collect();
-    assert!(actions.iter().any(|a| a == "review.submit"));
-    assert!(actions.iter().any(|a| a == "comment.create"));
+    assert!(actions.contains(&"review:submitted"));
+    assert!(actions.contains(&"comment:created"));
 
     // An explicit commit pin wins over the pull's head.
     let pinned =
-        f.w.create_review(pull.id, f.bob, ReviewState::Commented, None, Some(SHA_A))
-            .unwrap();
+        f.w.create_review(
+            pull.id,
+            by(f.bob),
+            ReviewState::Commented,
+            None,
+            Some(SHA_A),
+        )
+        .unwrap();
     assert_eq!(pinned.commit_sha, SHA_A);
 
     assert!(matches!(
-        f.w.create_review(999, f.bob, ReviewState::Approved, None, None),
+        f.w.create_review(999, by(f.bob), ReviewState::Approved, None, None),
         Err(WorldError::NoSuchPull(999))
     ));
 }
@@ -613,19 +691,21 @@ fn check_run_create_and_patch_return_stored_rows() {
     let f = fixture();
     let (ci, _) = f.w.create_actor("ci-bot", ActorKind::Bot).unwrap();
     let created =
-        f.w.create_check_run(NewCheckRun {
-            repo_id: f.repo,
-            creator_id: ci.id,
-            head_sha: SHA_B,
-            name: "ci/test",
-            status: CheckStatus::Queued,
-            conclusion: None,
-            details_url: None,
-            external_id: Some("run-1"),
-            output: Some(&serde_json::json!({ "title": "queued" })),
-            started_clock_unix: Some(DEFAULT_T0_UNIX),
-            completed_clock_unix: None,
-        })
+        f.w.create_check_run(
+            by(ci.id),
+            NewCheckRun {
+                repo_id: f.repo,
+                head_sha: SHA_B,
+                name: "ci/test",
+                status: CheckStatus::Queued,
+                conclusion: None,
+                details_url: None,
+                external_id: Some("run-1"),
+                output: Some(&serde_json::json!({ "title": "queued" })),
+                started_clock_unix: Some(DEFAULT_T0_UNIX),
+                completed_clock_unix: None,
+            },
+        )
         .unwrap();
     let read = f.w.check_run_by_id(created.id).unwrap().unwrap();
     assert_eq!(created, read);
@@ -636,7 +716,7 @@ fn check_run_create_and_patch_return_stored_rows() {
     let updated =
         f.w.update_check_run(
             created.id,
-            ci.id,
+            by(ci.id),
             CheckRunPatch {
                 status: Some(CheckStatus::Completed),
                 conclusion: Some(CheckConclusion::Success),
@@ -655,18 +735,18 @@ fn check_run_create_and_patch_return_stored_rows() {
     assert_eq!(updated, read);
 
     assert!(matches!(
-        f.w.update_check_run(999, ci.id, CheckRunPatch::default()),
+        f.w.update_check_run(999, by(ci.id), CheckRunPatch::default()),
         Err(WorldError::NoSuchCheckRun(999))
     ));
 
-    let actions: Vec<String> =
+    let actions: Vec<&str> =
         f.w.log_after(0, 100)
             .unwrap()
-            .into_iter()
-            .map(|e| e.action)
+            .iter()
+            .map(|e| e.body.type_name())
             .collect();
-    assert!(actions.iter().any(|a| a == "check_run.create"));
-    assert!(actions.iter().any(|a| a == "check_run.update"));
+    assert!(actions.contains(&"check_run:created"));
+    assert!(actions.contains(&"check_run:updated"));
 }
 
 fn timeline_kinds(f: &Fixture, pull_id: i64) -> Vec<TimelineKind> {
@@ -681,10 +761,10 @@ fn timeline_kinds(f: &Fixture, pull_id: i64) -> Vec<TimelineKind> {
 fn labels_added_and_removed_land_on_the_pull_and_its_timeline() {
     let f = fixture();
     let pull = open_pull(&f, "feature", SHA_B);
-    f.w.advance_clock(60, f.alice).unwrap();
+    f.w.advance_clock(60, by(f.alice)).unwrap();
 
     let labelled =
-        f.w.add_pull_labels(pull.id, f.bob, &["bug", "Bug", "needs-review"])
+        f.w.add_pull_labels(pull.id, by(f.bob), &["bug", "Bug", "needs-review"])
             .unwrap();
     assert_eq!(labelled, f.w.pull_by_id(pull.id).unwrap().unwrap());
     assert_eq!(
@@ -694,17 +774,17 @@ fn labels_added_and_removed_land_on_the_pull_and_its_timeline() {
     );
     assert_eq!(labelled.updated_clock_unix, f.w.clock().unwrap());
 
-    let again = f.w.add_pull_labels(pull.id, f.bob, &["BUG"]).unwrap();
+    let again = f.w.add_pull_labels(pull.id, by(f.bob), &["BUG"]).unwrap();
     assert_eq!(
         again, labelled,
         "a label the pull carries is skipped without a write"
     );
 
-    let removed = f.w.remove_pull_label(pull.id, f.bob, "BUG").unwrap();
+    let removed = f.w.remove_pull_label(pull.id, by(f.bob), "BUG").unwrap();
     assert_eq!(removed, f.w.pull_by_id(pull.id).unwrap().unwrap());
     assert_eq!(removed.labels, vec!["needs-review"]);
     assert!(matches!(
-        f.w.remove_pull_label(pull.id, f.bob, "bug"),
+        f.w.remove_pull_label(pull.id, by(f.bob), "bug"),
         Err(WorldError::NoSuchLabel(_))
     ));
 
@@ -724,25 +804,36 @@ fn labels_added_and_removed_land_on_the_pull_and_its_timeline() {
             .all(|i| i.actor_login == "bob" && i.clock_unix == f.w.clock().unwrap())
     );
 
-    let actions: Vec<(String, serde_json::Value)> =
+    let labels: Vec<(&str, serde_json::Value)> =
         f.w.log_after(0, 100)
             .unwrap()
-            .into_iter()
-            .filter(|e| e.action.starts_with("pull.") && e.action.contains("label"))
-            .map(|e| (e.action, e.details))
+            .iter()
+            .filter(|e| e.body.type_name().contains("label"))
+            .map(|e| {
+                let (EventBody::PullLabeled(c) | EventBody::PullUnlabeled(c)) = &e.body else {
+                    unreachable!()
+                };
+                let labels = c.changes.labels.as_ref().unwrap();
+                (
+                    e.body.type_name(),
+                    serde_json::json!([labels.from, labels.to]),
+                )
+            })
             .collect();
     assert_eq!(
-        actions.len(),
-        2,
-        "one entry per write that changed something: {actions:?}"
+        labels,
+        [
+            (
+                "pull:labeled",
+                serde_json::json!([[], ["bug", "needs-review"]])
+            ),
+            (
+                "pull:unlabeled",
+                serde_json::json!([["bug", "needs-review"], ["needs-review"]])
+            ),
+        ],
+        "one event per write that changed something"
     );
-    assert_eq!(actions[0].0, "pull.label");
-    assert_eq!(
-        actions[0].1["added"],
-        serde_json::json!(["bug", "needs-review"])
-    );
-    assert_eq!(actions[1].0, "pull.unlabel");
-    assert_eq!(actions[1].1["removed"], "bug");
 }
 
 #[test]
@@ -753,7 +844,7 @@ fn an_invalid_label_name_refuses_the_whole_request() {
     for bad in ["", "   ", long.as_str()] {
         assert!(
             matches!(
-                f.w.add_pull_labels(pull.id, f.alice, &["ok", bad]),
+                f.w.add_pull_labels(pull.id, by(f.alice), &["ok", bad]),
                 Err(WorldError::InvalidLabel(_))
             ),
             "{bad:?} accepted"
@@ -762,7 +853,7 @@ fn an_invalid_label_name_refuses_the_whole_request() {
     assert!(f.w.pull_by_id(pull.id).unwrap().unwrap().labels.is_empty());
     assert!(timeline_kinds(&f, pull.id).is_empty());
     assert!(matches!(
-        f.w.add_pull_labels(9999, f.alice, &["ok"]),
+        f.w.add_pull_labels(9999, by(f.alice), &["ok"]),
         Err(WorldError::NoSuchPull(_))
     ));
 }
@@ -771,25 +862,27 @@ fn an_invalid_label_name_refuses_the_whole_request() {
 fn ready_for_review_lands_on_the_timeline_and_convert_to_draft_does_not() {
     let f = fixture();
     let draft =
-        f.w.create_pull(NewPull {
-            repo_id: f.repo,
-            author_id: f.alice,
-            title: "wip",
-            body: None,
-            head_ref: "wip",
-            head_sha: SHA_B,
-            base_ref: "main",
-            base_sha: SHA_A,
-            draft: true,
-        })
+        f.w.create_pull(
+            by(f.alice),
+            NewPull {
+                repo_id: f.repo,
+                title: "wip",
+                body: None,
+                head_ref: "wip",
+                head_sha: SHA_B,
+                base_ref: "main",
+                base_sha: SHA_A,
+                draft: true,
+            },
+        )
         .unwrap();
-    let ready = f.w.set_pull_draft(draft.id, f.alice, false).unwrap();
+    let ready = f.w.set_pull_draft(draft.id, by(f.alice), false).unwrap();
     assert_eq!(ready, f.w.pull_by_id(draft.id).unwrap().unwrap());
     assert!(!ready.draft);
-    let redrafted = f.w.set_pull_draft(draft.id, f.alice, true).unwrap();
+    let redrafted = f.w.set_pull_draft(draft.id, by(f.alice), true).unwrap();
     assert_eq!(redrafted, f.w.pull_by_id(draft.id).unwrap().unwrap());
     assert!(redrafted.draft);
-    assert!(f.w.set_pull_draft(draft.id, f.alice, true).is_err());
+    assert!(f.w.set_pull_draft(draft.id, by(f.alice), true).is_err());
     assert_eq!(
         timeline_kinds(&f, draft.id),
         vec![TimelineKind::ReadyForReview]

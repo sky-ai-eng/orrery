@@ -17,10 +17,15 @@ use std::sync::{Mutex, RwLock};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+#[cfg(any(test, feature = "test-support"))]
+mod audit;
 mod checks;
 mod credentials;
 mod error;
+pub mod events;
 mod identity;
+mod log;
+mod objects;
 mod orgs;
 mod pulls;
 mod queries;
@@ -31,6 +36,7 @@ mod types;
 pub use checks::{CheckRunPatch, NewCheckRun};
 pub use credentials::{OAUTH_CLIENT_ID_PREFIX, WorldSecret};
 pub use error::WorldError;
+pub use events::{Attribution, Door, Event, EventBody, WriteSpan};
 pub use identity::{
     OAUTH_CODE_TTL_SECONDS, validate_oauth_app_callback_url, validate_oauth_app_name,
 };
@@ -49,9 +55,16 @@ pub type Result<T> = std::result::Result<T, WorldError>;
 /// log entries records.
 pub const DEFAULT_T0_UNIX: i64 = 1_577_836_800;
 
-/// The reserved actor that attributes control-plane and engine-internal
-/// mutations in the action log. Seeded at world creation; holds no token.
+/// The reserved actor that makes control-plane and CLI writes. Seeded at
+/// world creation; holds no token.
 pub const SYSTEM_ACTOR_LOGIN: &str = "orrery";
+
+/// The system actor's id: it is the first actor every world seeds.
+pub const SYSTEM_ACTOR_ID: i64 = 1;
+
+/// The most commits a ref event lists ([`RefMove::commits`]), GitHub's
+/// limit for a push.
+pub const REF_EVENT_COMMITS: usize = 2048;
 
 const DB_FILE: &str = "world.db";
 const REPOS_DIR: &str = "repos";
@@ -74,6 +87,15 @@ pub struct RefMove<'a> {
     /// Whether the move created the ref, moved it, or deleted it, which the
     /// kernel cannot read from `old` and `new` in the caller's spelling.
     pub change: RefChange,
+    /// For a move, whether `old` is not an ancestor of `new`.
+    pub forced: bool,
+    /// The commits the move brought in, oldest first: for a move, those
+    /// reachable from `new` and not from `old`; for a created ref, those
+    /// reachable from it that no ref reached before the write. At most
+    /// [`REF_EVENT_COMMITS`], the newest, and none for a deleted ref.
+    pub commits: Vec<String>,
+    /// How many commits the move brought in, all of them.
+    pub commit_count: i64,
 }
 
 /// What a [`RefMove`] did to its ref.
@@ -98,9 +120,9 @@ type Listener = Box<dyn Fn(Signal) + Send + Sync>;
 /// so any read that sees the change it announces begins after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
-    /// An entry was appended to the action log. It may be inside a
+    /// A write appended its events to the log. It may be inside a
     /// transaction that has not committed yet, and that may roll back, so a
-    /// read that follows sees the entry once it commits, or nothing.
+    /// read that follows sees the events once they commit, or nothing.
     LogMayHaveGrown,
     /// The world's state was replaced by a snapshot's, and its action log
     /// with it. `newest_seq` is the newest `seq` in the log the world holds
@@ -111,32 +133,35 @@ pub enum Signal {
 impl World {
     /// Create a new world at `root` (which must not already contain one) with
     /// the clock at `t0_unix` and every credential keyed by `secret`, and seed
-    /// the system actor.
+    /// the system actor. The `orrery` command is the one caller that creates
+    /// a world, so the write is the system actor's, through the CLI.
     pub fn create(root: &Path, t0_unix: i64, secret: &WorldSecret) -> Result<World> {
         if root.join(DB_FILE).exists() {
             return Err(WorldError::AlreadyExists(root.to_path_buf()));
         }
         std::fs::create_dir_all(root.join(REPOS_DIR))?;
         let world = World::connect(root)?;
-        {
-            let conn = world.lock();
-            conn.execute(
+        let by = Attribution::new(SYSTEM_ACTOR_ID, Door::Cli);
+        world.write(by, |w| {
+            w.tx.execute(
                 "INSERT INTO world (id, clock_unix, secret) VALUES (1, ?1, ?2)",
                 params![t0_unix, secret],
             )?;
-            conn.execute(
-                "INSERT INTO actors (login, kind, created_clock_unix) VALUES (?1, 'system', ?2)",
-                params![SYSTEM_ACTOR_LOGIN, t0_unix],
+            w.tx.execute(
+                "INSERT INTO actors (id, login, kind, created_clock_unix)
+                 VALUES (?1, ?2, 'system', ?3)",
+                params![SYSTEM_ACTOR_ID, SYSTEM_ACTOR_LOGIN, t0_unix],
             )?;
-        }
-        let system = world
-            .actor_by_login(SYSTEM_ACTOR_LOGIN)?
-            .expect("system actor was just seeded");
-        world.log_action(
-            system.id,
-            "world.init",
-            &serde_json::json!({ "t0_unix": t0_unix }),
-        )?;
+            w.operation(EventBody::WorldCreated(events::WorldCreated {
+                subject: events::WorldSubject::default(),
+                object: objects::world_object(w.tx)?,
+            }));
+            w.emit(EventBody::ActorCreated(events::ActorCreated {
+                subject: objects::actor_subject(w.tx, SYSTEM_ACTOR_ID)?,
+                object: objects::actor_object(w.tx, SYSTEM_ACTOR_ID)?,
+            }));
+            Ok(())
+        })?;
         Ok(world)
     }
 
@@ -211,135 +236,133 @@ impl World {
     /// live world (spec/usage.md — rollback is a snapshot operation). It
     /// stops at the latest second `jiff` represents, so that every time the
     /// world stamps can be rendered.
-    pub fn advance_clock(&self, seconds: i64, actor_id: i64) -> Result<i64> {
+    pub fn advance_clock(&self, seconds: i64, by: Attribution) -> Result<i64> {
         if seconds <= 0 {
             return Err(WorldError::ClockRegression(seconds));
         }
         let latest = jiff::Timestamp::MAX.as_second();
-        let (from, to) = {
-            let conn = self.lock();
-            let from = queries::clock(&conn)?;
+        self.write(by, |w| {
+            let from = objects::world_object(w.tx)?;
             let to = from
+                .clock_unix
                 .checked_add(seconds)
                 .filter(|to| *to <= latest)
                 .ok_or_else(|| WorldError::ClockOutOfRange {
                     seconds,
-                    remaining: latest.saturating_sub(from).max(0),
+                    remaining: latest.saturating_sub(from.clock_unix).max(0),
                     latest: jiff::Timestamp::MAX,
                 })?;
-            let to: i64 = conn.query_row(
+            let to: i64 = w.tx.query_row(
                 "UPDATE world SET clock_unix = ?1 WHERE id = 1 RETURNING clock_unix",
                 params![to],
                 |r| r.get(0),
             )?;
-            (from, to)
-        };
-        self.log_action(
-            actor_id,
-            "clock.advance",
-            &serde_json::json!({ "seconds": seconds, "from_unix": from, "to_unix": to }),
-        )?;
-        Ok(to)
+            w.operation(EventBody::WorldClockAdvanced(events::WorldChanged {
+                subject: events::WorldSubject::default(),
+                changes: events::WorldChanges::between(&from, &objects::world_object(w.tx)?),
+            }));
+            Ok(to)
+        })
     }
 
     // ---- actors & tokens ----
 
     /// Create an actor and mint its token. The token is derived, not random
     /// (rule 5: replay must reproduce it; rule 12: it is fake by construction),
-    /// and keyed by the world secret, so it cannot be guessed.
+    /// and keyed by the world secret, so it cannot be guessed. No public API
+    /// creates an actor, so the control plane is the one caller, and the
+    /// write is the system actor's.
     pub fn create_actor(&self, login: &str, kind: ActorKind) -> Result<(Actor, String)> {
         validate_login(login)?;
         validate_actor_kind(kind)?;
-        let conn = self.lock();
-        let clock = queries::clock(&conn)?;
-        let actor = conn
-            .query_row(
-                &format!(
-                    "INSERT INTO actors (login, kind, created_clock_unix) VALUES (?1, ?2, ?3)
+        let by = Attribution::new(SYSTEM_ACTOR_ID, Door::Control);
+        self.write(by, |w| {
+            let conn = w.tx;
+            let clock = queries::clock(conn)?;
+            let actor = conn
+                .query_row(
+                    &format!(
+                        "INSERT INTO actors (login, kind, created_clock_unix) VALUES (?1, ?2, ?3)
                      RETURNING {}",
-                    queries::ACTOR_COLUMNS
-                ),
-                params![login, kind.as_str(), clock],
-                queries::row_to_actor,
-            )
-            .map_err(|e| match uniqueness_violation(&e) {
-                true => WorldError::ActorExists(login.to_string()),
-                false => WorldError::from(e),
-            })?;
-        let token = credentials::actor_token(
-            &credentials::world_secret(&conn)?,
-            &actor.login,
-            actor.id,
-            0,
-        );
-        conn.execute(
-            "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![token, actor.id, credentials::TokenOrigin::Actor(0), clock],
-        )?;
-        identity::insert_email(&conn, actor.id, &identity::default_email(&actor.login))?;
-        self.log_locked(
-            &conn,
-            actor.id,
-            "actor.create",
-            &serde_json::json!({ "login": actor.login, "kind": kind.as_str() }),
-        )?;
-        Ok((actor, token))
+                        queries::ACTOR_COLUMNS
+                    ),
+                    params![login, kind.as_str(), clock],
+                    queries::row_to_actor,
+                )
+                .map_err(|e| match uniqueness_violation(&e) {
+                    true => WorldError::ActorExists(login.to_string()),
+                    false => WorldError::from(e),
+                })?;
+            let token = credentials::actor_token(
+                &credentials::world_secret(conn)?,
+                &actor.login,
+                actor.id,
+                0,
+            );
+            conn.execute(
+                "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![token, actor.id, credentials::TokenOrigin::Actor(0), clock],
+            )?;
+            identity::insert_email(conn, actor.id, &identity::default_email(&actor.login))?;
+            w.operation(EventBody::ActorCreated(events::ActorCreated {
+                subject: objects::actor_subject(conn, actor.id)?,
+                object: objects::actor_object(conn, actor.id)?,
+            }));
+            Ok((actor, token))
+        })
     }
 
     /// Issue another token for an existing actor. A stored token is never
     /// read back, so this is how anyone gets one for an actor they did not
     /// create, as in a world re-keyed at its creation. Every token issued
-    /// before stays valid. `by` is the actor the action log attributes the
-    /// issue to.
-    pub fn issue_actor_token(&self, login: &str, by: i64) -> Result<(Actor, String)> {
-        let conn = self.lock();
-        let tx = conn.unchecked_transaction()?;
-        let actor = tx
-            .query_row(
-                &format!(
-                    "SELECT {} FROM actors WHERE login = ?1",
-                    queries::ACTOR_COLUMNS
-                ),
-                params![login],
-                queries::row_to_actor,
-            )
-            .optional()?
-            .ok_or_else(|| WorldError::NoSuchActor(login.to_string()))?;
-        if actor.kind == ActorKind::System {
-            return Err(WorldError::SystemActorToken);
-        }
-        let n: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(CAST(substr(origin, 7) AS INTEGER)), 0) + 1
+    /// before stays valid.
+    pub fn issue_actor_token(&self, login: &str, by: Attribution) -> Result<(Actor, String)> {
+        self.write(by, |w| {
+            let tx = w.tx;
+            let actor = tx
+                .query_row(
+                    &format!(
+                        "SELECT {} FROM actors WHERE login = ?1",
+                        queries::ACTOR_COLUMNS
+                    ),
+                    params![login],
+                    queries::row_to_actor,
+                )
+                .optional()?
+                .ok_or_else(|| WorldError::NoSuchActor(login.to_string()))?;
+            if actor.kind == ActorKind::System {
+                return Err(WorldError::SystemActorToken);
+            }
+            let n: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(CAST(substr(origin, 7) AS INTEGER)), 0) + 1
              FROM tokens WHERE actor_id = ?1 AND origin GLOB 'actor:*'",
-            params![actor.id],
-            |r| r.get(0),
-        )?;
-        let token: String = tx.query_row(
-            "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
+                params![actor.id],
+                |r| r.get(0),
+            )?;
+            let token: String = tx.query_row(
+                "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
              VALUES (?1, ?2, ?3, ?4)
              RETURNING token",
-            params![
-                credentials::actor_token(
-                    &credentials::world_secret(&tx)?,
-                    &actor.login,
+                params![
+                    credentials::actor_token(
+                        &credentials::world_secret(tx)?,
+                        &actor.login,
+                        actor.id,
+                        n
+                    ),
                     actor.id,
-                    n
-                ),
-                actor.id,
-                credentials::TokenOrigin::Actor(n),
-                queries::clock(&tx)?
-            ],
-            |r| r.get(0),
-        )?;
-        self.log_locked(
-            &tx,
-            by,
-            "actor.token.issue",
-            &serde_json::json!({ "login": actor.login, "n": n }),
-        )?;
-        tx.commit()?;
-        Ok((actor, token))
+                    credentials::TokenOrigin::Actor(n),
+                    queries::clock(tx)?
+                ],
+                |r| r.get(0),
+            )?;
+            w.operation(EventBody::ActorTokenIssued(events::ActorTokenIssued {
+                subject: objects::actor_subject(tx, actor.id)?,
+                n,
+            }));
+            Ok((actor, token))
+        })
     }
 
     pub fn actor_by_login(&self, login: &str) -> Result<Option<Actor>> {
@@ -354,6 +377,25 @@ impl World {
                 queries::row_to_actor,
             )
             .optional()?)
+    }
+
+    /// The caller `token` authenticates: the actor it acts as, and the
+    /// OAuth app whose authorization code was traded for it.
+    pub fn caller_by_token(&self, token: &str) -> Result<Option<Caller>> {
+        let conn = self.lock();
+        // The actor columns in `queries::ACTOR_COLUMNS`'s order, qualified,
+        // since `tokens` has a `created_clock_unix` too.
+        let found = conn
+            .query_row(
+                "SELECT a.id, a.login, a.kind, a.created_clock_unix,
+                        (SELECT app_id FROM oauth_codes WHERE 'oauth:' || oauth_codes.id = t.origin)
+                 FROM tokens t JOIN actors a ON a.id = t.actor_id
+                 WHERE t.token = ?1",
+                params![token],
+                |r| Ok((queries::row_to_actor(r)?, r.get::<_, Option<i64>>(4)?)),
+            )
+            .optional()?;
+        Ok(found.map(|(actor, app_id)| Caller { actor, app_id }))
     }
 
     pub fn actor_by_token(&self, token: &str) -> Result<Option<Actor>> {
@@ -382,60 +424,54 @@ impl World {
         description: Option<&str>,
         private: bool,
         default_branch: &str,
-        created_by: i64,
+        by: Attribution,
     ) -> Result<Repo> {
         validate_repo_name(name)?;
-        let conn = self.lock();
-        let tx = conn.unchecked_transaction()?;
-        // The insert's foreign keys refuse an unknown actor too, but as an
-        // untyped SQLite error that does not say which id it was.
-        for id in [owner_id, created_by] {
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM actors WHERE id = ?1)",
-                params![id],
-                |r| r.get(0),
-            )?;
-            if !exists {
-                return Err(WorldError::NoSuchActorId(id));
+        self.write(by, |w| {
+            let tx = w.tx;
+            // The insert's foreign keys refuse an unknown actor too, but as an
+            // untyped SQLite error that does not say which id it was.
+            for id in [owner_id, by.actor_id] {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM actors WHERE id = ?1)",
+                    params![id],
+                    |r| r.get(0),
+                )?;
+                if !exists {
+                    return Err(WorldError::NoSuchActorId(id));
+                }
             }
-        }
-        let clock = queries::clock(&tx)?;
-        let repo = tx
-            .query_row(
-                &format!(
-                    "INSERT INTO repos (owner_id, name, description, private, default_branch,
+            let clock = queries::clock(tx)?;
+            let repo = tx
+                .query_row(
+                    &format!(
+                        "INSERT INTO repos (owner_id, name, description, private, default_branch,
                                         created_by, created_clock_unix)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                      RETURNING {}",
-                    queries::REPO_COLUMNS
-                ),
-                params![
-                    owner_id,
-                    name,
-                    description,
-                    private,
-                    default_branch,
-                    created_by,
-                    clock
-                ],
-                queries::row_to_repo,
-            )
-            .map_err(|e| match uniqueness_violation(&e) {
-                true => WorldError::RepoExists(name.to_string()),
-                false => WorldError::from(e),
-            })?;
-        self.log_locked(
-            &tx,
-            created_by,
-            "repo.create",
-            &serde_json::json!({
-                "owner": repo.owner_login,
-                "name": repo.name,
-                "private": repo.private,
-            }),
-        )?;
-        tx.commit()?;
-        Ok(repo)
+                        queries::REPO_COLUMNS
+                    ),
+                    params![
+                        owner_id,
+                        name,
+                        description,
+                        private,
+                        default_branch,
+                        by.actor_id,
+                        clock
+                    ],
+                    queries::row_to_repo,
+                )
+                .map_err(|e| match uniqueness_violation(&e) {
+                    true => WorldError::RepoExists(name.to_string()),
+                    false => WorldError::from(e),
+                })?;
+            w.operation(EventBody::RepoCreated(events::RepoCreated {
+                subject: objects::repo_subject(tx, repo.id)?,
+                object: objects::repo_object(tx, repo.id)?,
+            }));
+            Ok(repo)
+        })
     }
 
     pub fn repo_by_owner_name(&self, owner: &str, name: &str) -> Result<Option<Repo>> {
@@ -473,14 +509,14 @@ impl World {
         self.with_conn(|conn| queries::list_repos_for_owner(conn, owner_id))
     }
 
-    /// Record a push the git side has taken: `pushed_at` moves to the current
-    /// clock, `default_branch` (when given) becomes the repository's default
-    /// branch, and each move in `moves`, in order, appends a `ref.update`
-    /// entry and re-pins the pulls it names. Every unmerged pull whose base a
-    /// move creates or moves is marked [`Pull::base_moved`] first, so a pull
-    /// the same push re-pins ends unmarked. Then each branch a move deleted
-    /// or created changes the pulls on it, in the same order, as GitHub
-    /// changes them:
+    /// Record a push the git side has taken. Its operation is `repo:pushed`:
+    /// `pushed_at` moves to the current clock, and `default_branch` (when
+    /// given) becomes the repository's default branch. A ref event follows
+    /// for each move in `moves`, in order. Then every unmerged pull whose
+    /// base a move creates or moves is marked [`Pull::base_moved`], and each
+    /// move re-pins the pulls it names, so a pull the same push re-pins ends
+    /// unmarked. Then each branch a move deleted or created changes the pulls
+    /// on it, in the same order, as GitHub changes them:
     ///
     /// - a deleted branch closes every open pull whose head it is, then
     ///   records its deletion on every pull whose head it is, closed and
@@ -489,11 +525,10 @@ impl World {
     /// - a created branch records its restoration on every closed pull whose
     ///   head it is, which stays closed.
     ///
-    /// Each close appends a `pull.close` entry by the pusher, after all of the
-    /// push's `ref.update` entries, and leaves the pull's head, base, and draft
-    /// flag as they were. It is one transaction, so a reader that sees any of
-    /// the push's entries sees the repository and its pulls as the push left
-    /// them. A push that moved no ref records nothing.
+    /// A close leaves the pull's head, base, and draft flag as they were. It
+    /// is one write, so a reader that sees any of the push's events sees the
+    /// repository and its pulls as the push left them. A push that moved no
+    /// ref records nothing.
     ///
     /// A named pull that is not open refuses the whole record: the caller
     /// moved that pull's ref on the strength of it being open, and the world
@@ -501,44 +536,51 @@ impl World {
     pub fn record_push(
         &self,
         repo_id: i64,
-        actor_id: i64,
+        by: Attribution,
         moves: &[RefMove<'_>],
         default_branch: Option<&str>,
     ) -> Result<()> {
         if moves.is_empty() {
             return Ok(());
         }
-        let conn = self.lock();
-        let tx = conn.unchecked_transaction()?;
-        self.record_moves(&tx, repo_id, actor_id, moves, default_branch)?;
-        tx.commit()?;
-        Ok(())
+        self.write(by, |w| {
+            self.record_moves(w, repo_id, moves, default_branch, true)
+        })
     }
 
-    /// The writes a push and a merge share, inside the caller's transaction:
-    /// `pushed_at` and `default_branch` as [`World::record_push`] describes;
-    /// for each move, in order, its `ref.update` entry and its re-pins; and
-    /// then, for each move of a branch it created or deleted, the changes to
-    /// the pulls on it.
+    /// The writes a push and a merge share, inside the caller's write: the
+    /// repository's `repo:pushed`, as the operation when `operation`, then
+    /// everything else [`World::record_push`] describes.
     pub(crate) fn record_moves(
         &self,
-        tx: &Connection,
+        w: &mut log::Write<'_>,
         repo_id: i64,
-        actor_id: i64,
         moves: &[RefMove<'_>],
         default_branch: Option<&str>,
+        operation: bool,
     ) -> Result<()> {
-        let n = tx.execute(
+        let before = objects::repo_object(w.tx, repo_id)?;
+        w.tx.execute(
             "UPDATE repos
              SET pushed_at_clock_unix = (SELECT clock_unix FROM world WHERE id = 1),
                  default_branch = COALESCE(?2, default_branch)
              WHERE id = ?1",
             params![repo_id, default_branch],
         )?;
-        if n == 0 {
-            return Err(WorldError::NoSuchRepo(repo_id));
+        let changes = events::RepoChanges::between(&before, &objects::repo_object(w.tx, repo_id)?);
+        let pushed = EventBody::RepoPushed(events::RepoChanged {
+            subject: objects::repo_subject(w.tx, repo_id)?,
+            changes,
+        });
+        match pushed {
+            pushed if operation => w.operation(pushed),
+            EventBody::RepoPushed(ref c) if c.changes.is_empty() => {}
+            pushed => w.emit(pushed),
         }
-        let repo = pulls::repo_full_name(tx, repo_id)?;
+        for m in moves {
+            let event = ref_event(w.tx, repo_id, m)?;
+            w.emit(event);
+        }
         // Before any re-pin, so a pull whose head and base one push both move
         // ends with its head pinned against the moved base. A deleted base
         // needs no mark: a pull whose base is gone has no test merge at all.
@@ -546,159 +588,22 @@ impl World {
             if let Some(branch) = m.name.strip_prefix("refs/heads/")
                 && m.change != RefChange::Deleted
             {
-                pulls::mark_base_moved(tx, repo_id, branch)?;
+                pulls::mark_base_moved(w, repo_id, branch)?;
             }
         }
         for m in moves {
-            self.log_locked(
-                tx,
-                actor_id,
-                "ref.update",
-                &serde_json::json!({
-                    "repo": repo,
-                    "ref": m.name,
-                    "old": m.old,
-                    "new": m.new,
-                }),
-            )?;
             for &number in &m.repins {
-                pulls::repin_open_pull(tx, repo_id, number, m.new)?;
+                pulls::repin_open_pull(w, repo_id, number, m.new)?;
             }
         }
         // After every re-pin, so a pull a move re-pins is still open when it
         // is re-pinned, though a later move's deletion closes it.
         for m in moves {
             if let Some(branch) = m.name.strip_prefix("refs/heads/") {
-                self.record_branch_change(tx, repo_id, actor_id, branch, m.change)?;
+                self.record_branch_change(w, repo_id, branch, m.change)?;
             }
         }
         Ok(())
-    }
-
-    // ---- action log ----
-
-    /// Append to the action log, stamped with the current clock. The log is
-    /// append-only; nothing in the kernel updates or deletes its rows.
-    pub fn log_action(
-        &self,
-        actor_id: i64,
-        action: &str,
-        details: &serde_json::Value,
-    ) -> Result<LogEntry> {
-        let conn = self.lock();
-        self.log_locked(&conn, actor_id, action, details)
-    }
-
-    /// Append to the action log through an already-held connection (or an
-    /// open transaction — the clock subselect and the insert see the same
-    /// state), and signal [`Signal::LogMayHaveGrown`].
-    pub(crate) fn log_locked(
-        &self,
-        conn: &Connection,
-        actor_id: i64,
-        action: &str,
-        details: &serde_json::Value,
-    ) -> Result<LogEntry> {
-        let entry = conn.query_row(
-            &format!(
-                "INSERT INTO action_log (clock_unix, wall_unix_ms, actor_id, action, details)
-                 VALUES ((SELECT clock_unix FROM world WHERE id = 1), ?1, ?2, ?3, ?4)
-                 RETURNING {LOG_ENTRY_COLUMNS}"
-            ),
-            params![wall_unix_ms(), actor_id, action, details.to_string()],
-            log_entry,
-        )?;
-        self.signal(Signal::LogMayHaveGrown);
-        Ok(entry)
-    }
-
-    /// Log entries with `seq > after_seq`, oldest first, at most `limit`.
-    /// `seq` is a total order by construction, so pagination is stable. It is
-    /// not contiguous: a restore leaves a gap (see [`World::swap_state`]).
-    pub fn log_after(&self, after_seq: i64, limit: usize) -> Result<Vec<LogEntry>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {LOG_ENTRY_COLUMNS} FROM action_log WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2"
-        ))?;
-        let rows = stmt.query_map(params![after_seq, limit as i64], log_entry)?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    /// Whether `seq` is a position in the action log: 0, or the `seq` of an
-    /// entry it holds. Any other number is [`WorldError::NoSuchLogPosition`],
-    /// carrying the log's newest `seq`.
-    pub fn check_log_position(&self, seq: i64) -> Result<()> {
-        check_log_position(&self.lock(), seq)
-    }
-
-    /// One page of the entries with `seq > after_seq`, in `order`, and how
-    /// many such entries there are. With `resume`, the `seq` of the previous
-    /// page's last entry, the page holds only entries past it in `order`, so a
-    /// walk neither repeats nor skips an entry while the log grows. The count
-    /// is read under the same lock as the page. Only `seq`'s order is relied
-    /// on, never that its values are contiguous.
-    ///
-    /// An `after_seq` that is not a position in the log is
-    /// [`WorldError::NoSuchLogPosition`]. A `resume` the log no longer holds
-    /// is [`WorldError::ResumeNotInLog`]:
-    /// the walk's earlier pages came from a log a restore replaced. A `seq`
-    /// is issued once, so while the log holds `resume` it holds the same
-    /// entries up to it, and a walk in either order goes on exactly. Both are
-    /// checked under the lock the page is read under, so no restore lands
-    /// between a check and the read it gates.
-    pub fn log_page(
-        &self,
-        after_seq: i64,
-        order: LogOrder,
-        resume: Option<i64>,
-        limit: usize,
-    ) -> Result<(Vec<LogEntry>, i64)> {
-        let conn = self.lock();
-        check_log_position(&conn, after_seq)?;
-        if let Some(resume) = resume
-            && !queries::log_holds(&conn, resume)?
-        {
-            return Err(WorldError::ResumeNotInLog(resume));
-        }
-        let limit = limit as i64;
-        // Each bound is a plain comparison on `seq`, the rowid, so a page deep
-        // in the log reads only its own rows.
-        let entries = match order {
-            LogOrder::OldestFirst => conn
-                .prepare(&format!(
-                    "SELECT {LOG_ENTRY_COLUMNS} FROM action_log
-                     WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2"
-                ))?
-                .query_map(
-                    params![resume.map_or(after_seq, |r| r.max(after_seq)), limit],
-                    log_entry,
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()?,
-            LogOrder::NewestFirst => conn
-                .prepare(&format!(
-                    "SELECT {LOG_ENTRY_COLUMNS} FROM action_log
-                     WHERE seq > ?1 AND seq <= ?2
-                     ORDER BY seq DESC LIMIT ?3"
-                ))?
-                .query_map(
-                    params![
-                        after_seq,
-                        resume.map_or(i64::MAX, |r| r.saturating_sub(1)),
-                        limit
-                    ],
-                    log_entry,
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()?,
-        };
-        // TODO(ORR-59): this count reads every entry above `after_seq` while
-        // holding the world's connection, about 60 ms at a million entries;
-        // the whole-log total should come from a count kept with the log.
-        let total = conn.query_row(
-            "SELECT COUNT(*) FROM action_log WHERE seq > ?1",
-            params![after_seq],
-            |r| r.get(0),
-        )?;
-        Ok((entries, total))
     }
 
     // ---- snapshot support ----
@@ -730,7 +635,7 @@ impl World {
     pub fn swap_state(&self, f: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
         let mut guard = self.lock();
         checkpoint(&guard)?;
-        let issued = issued_seq(&guard)?;
+        let issued = log::issued_seq(&guard)?;
         let old = std::mem::replace(&mut *guard, Connection::open_in_memory()?);
         drop(old);
         let swap_result = f();
@@ -754,6 +659,40 @@ impl World {
     }
 }
 
+/// The ref event for one move a push or a merge made.
+fn ref_event(conn: &Connection, repo_id: i64, m: &RefMove<'_>) -> Result<EventBody> {
+    let subject = objects::ref_subject(conn, repo_id, m.name)?;
+    let object = |sha: &str| events::RefObject {
+        name: m.name.to_string(),
+        sha: sha.to_string(),
+    };
+    Ok(match m.change {
+        RefChange::Created => EventBody::RefCreated(events::RefCreated {
+            subject,
+            object: object(m.new),
+            commits: m.commits.clone(),
+            commit_count: m.commit_count,
+        }),
+        RefChange::Moved => EventBody::RefUpdated(events::RefUpdated {
+            subject,
+            changes: events::RefChanges {
+                sha: Some(events::Change {
+                    from: m.old.to_string(),
+                    to: m.new.to_string(),
+                }),
+                ..Default::default()
+            },
+            forced: m.forced,
+            commits: m.commits.clone(),
+            commit_count: m.commit_count,
+        }),
+        RefChange::Deleted => EventBody::RefDeleted(events::RefDeleted {
+            subject,
+            object: object(m.old),
+        }),
+    })
+}
+
 fn open_conn(root: &Path) -> Result<Connection> {
     let mut conn = Connection::open(root.join(DB_FILE))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -762,50 +701,9 @@ fn open_conn(root: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-fn check_log_position(conn: &Connection, seq: i64) -> Result<()> {
-    if seq == 0 || queries::log_holds(conn, seq)? {
-        return Ok(());
-    }
-    Err(WorldError::NoSuchLogPosition {
-        seq,
-        newest_seq: queries::last_seq(conn)?,
-    })
-}
-
 fn checkpoint(conn: &Connection) -> Result<()> {
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     Ok(())
-}
-
-/// What every read of the action log and the append's RETURNING project, in
-/// the order `log_entry` reads it.
-const LOG_ENTRY_COLUMNS: &str = "seq, clock_unix, wall_unix_ms,
-    (SELECT login FROM actors WHERE actors.id = action_log.actor_id), action, details";
-
-fn log_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<LogEntry> {
-    Ok(LogEntry {
-        seq: r.get(0)?,
-        clock_unix: r.get(1)?,
-        wall_unix_ms: r.get(2)?,
-        actor_login: r.get(3)?,
-        action: r.get(4)?,
-        details: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(5)?)
-            .unwrap_or(serde_json::Value::Null),
-    })
-}
-
-/// The largest `seq` this database has issued, kept by SQLite for an
-/// `AUTOINCREMENT` key. It outlives the entries it numbered, which `MAX(seq)`
-/// does not.
-fn issued_seq(conn: &Connection) -> Result<i64> {
-    Ok(conn
-        .query_row(
-            "SELECT seq FROM sqlite_sequence WHERE name = 'action_log'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(0))
 }
 
 /// Make the next `seq` this database issues greater than `issued`.
@@ -821,20 +719,6 @@ fn raise_issued_seq(conn: &Connection, issued: i64) -> Result<()> {
         )?;
     }
     Ok(())
-}
-
-/// The real time, in Unix milliseconds, an action-log entry records as the
-/// moment it was appended.
-fn wall_unix_ms() -> i64 {
-    // The world's one wall-clock read. It is recorded for callers showing
-    // when something happened, and nothing in the world reads it, so it is
-    // not an input to replay (rule 5).
-    #[allow(clippy::disallowed_methods)]
-    let now = std::time::SystemTime::now();
-    match now.duration_since(std::time::UNIX_EPOCH) {
-        Ok(since) => since.as_millis() as i64,
-        Err(before) => -(before.duration().as_millis() as i64),
-    }
 }
 
 /// Whether a write failed because a row with the same key already exists: a
@@ -894,9 +778,8 @@ fn validate_repo_name(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ActorKind, DEFAULT_T0_UNIX, World, WorldSecret, uniqueness_violation, wall_unix_ms,
-    };
+    use super::log::wall_unix_ms;
+    use super::{ActorKind, DEFAULT_T0_UNIX, World, WorldSecret, uniqueness_violation};
 
     // No kernel write reaches a foreign-key, CHECK, or NOT NULL failure, so
     // the predicate is checked against each kind of failure directly.
@@ -946,7 +829,7 @@ mod tests {
     // The bounds are read through the function the append reads, so the
     // world's one wall-clock read stays its only one.
     #[test]
-    fn an_entry_records_the_real_time_it_was_appended_at() {
+    fn an_event_records_the_real_time_it_was_appended_at() {
         let dir = tempfile::tempdir().unwrap();
         let w = World::create(
             &dir.path().join("world"),
@@ -961,8 +844,8 @@ mod tests {
 
         let log = w.log_after(0, 100).unwrap();
         let created = log.last().unwrap();
-        assert_eq!(created.action, "actor.create");
-        let at = created.wall_unix_ms.expect("the entry records a real time");
+        assert_eq!(created.body.type_name(), "actor:created");
+        let at = created.wall_unix_ms;
         assert!(
             (before..=after).contains(&at),
             "appended at {at}, outside {before}..={after}"

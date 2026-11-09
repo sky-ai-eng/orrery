@@ -25,6 +25,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+orrery-world = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 ureq.workspace = true
 

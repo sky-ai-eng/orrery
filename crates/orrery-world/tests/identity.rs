@@ -3,8 +3,14 @@
 //! virtual clock.
 
 use orrery_world::{
-    ActorEmail, ActorKind, DEFAULT_T0_UNIX, OAUTH_CODE_TTL_SECONDS, World, WorldError, WorldSecret,
+    ActorEmail, ActorKind, Attribution, DEFAULT_T0_UNIX, Door, EventBody, OAUTH_CODE_TTL_SECONDS,
+    World, WorldError, WorldSecret,
 };
+
+/// A write by `actor_id` as the REST face makes it.
+fn by(actor_id: i64) -> Attribution {
+    Attribution::new(actor_id, Door::Rest)
+}
 
 fn fresh() -> (tempfile::TempDir, World) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -48,7 +54,7 @@ fn set_actor_emails_returns_the_stored_rows() {
                 email("alice@corp.test", true, true),
                 email("Alice@other.test", false, true),
             ],
-            sys.id,
+            by(sys.id),
         )
         .unwrap();
     assert_eq!(returned, w.actor_emails(alice.id).unwrap());
@@ -57,10 +63,16 @@ fn set_actor_emails_returns_the_stored_rows() {
     let logged = w.log_after(0, 100).unwrap();
     let set = logged
         .iter()
-        .find(|e| e.action == "actor.emails.set")
+        .find(|e| e.body.type_name() == "actor:emails_set")
         .expect("logged");
-    assert_eq!(set.actor_login, "orrery");
-    assert_eq!(set.details["login"], "alice");
+    assert_eq!(set.actor.login, "orrery");
+    let EventBody::ActorEmailsSet(set) = &set.body else {
+        unreachable!()
+    };
+    assert_eq!(set.subject.login, "alice");
+    let emails = set.changes.emails.as_ref().expect("the emails changed");
+    assert_eq!(emails.from.len(), 1, "the address an actor starts with");
+    assert_eq!(emails.to, returned);
 }
 
 #[test]
@@ -81,7 +93,7 @@ fn set_actor_emails_validates_the_whole_set() {
     ] {
         assert!(
             matches!(
-                w.set_actor_emails("alice", &bad, sys.id),
+                w.set_actor_emails("alice", &bad, by(sys.id)),
                 Err(WorldError::InvalidEmails(_))
             ),
             "{bad:?} accepted"
@@ -93,11 +105,11 @@ fn set_actor_emails_validates_the_whole_set() {
         "a refused set changes nothing"
     );
     assert!(matches!(
-        w.set_actor_emails("ghost", &[email("g@x.test", true, true)], sys.id),
+        w.set_actor_emails("ghost", &[email("g@x.test", true, true)], by(sys.id)),
         Err(WorldError::NoSuchActor(_))
     ));
     assert!(matches!(
-        w.set_actor_emails("orrery", &[email("o@x.test", true, true)], sys.id),
+        w.set_actor_emails("orrery", &[email("o@x.test", true, true)], by(sys.id)),
         Err(WorldError::NoSuchActor(_))
     ));
 }
@@ -107,7 +119,7 @@ fn create_oauth_app_returns_the_stored_row_with_derived_credentials() {
     let (_dir, w) = fresh();
     let sys = w.actor_by_login("orrery").unwrap().unwrap();
     let app = w
-        .create_oauth_app("gotrue", "http://auth.test/callback", sys.id)
+        .create_oauth_app("gotrue", "http://auth.test/callback", by(sys.id))
         .unwrap();
     assert_eq!(
         Some(app.clone()),
@@ -119,7 +131,7 @@ fn create_oauth_app_returns_the_stored_row_with_derived_credentials() {
     let (_dir2, w2) = fresh();
     let sys2 = w2.actor_by_login("orrery").unwrap().unwrap();
     let again = w2
-        .create_oauth_app("gotrue", "http://auth.test/callback", sys2.id)
+        .create_oauth_app("gotrue", "http://auth.test/callback", by(sys2.id))
         .unwrap();
     assert_eq!(
         (app.client_id, app.client_secret),
@@ -130,7 +142,7 @@ fn create_oauth_app_returns_the_stored_row_with_derived_credentials() {
     // A name is measured in characters, not bytes: each of these is three.
     let longest = "名".repeat(100);
     let app = w
-        .create_oauth_app(&longest, "http://auth.test/cb", sys.id)
+        .create_oauth_app(&longest, "http://auth.test/cb", by(sys.id))
         .unwrap();
     assert_eq!(app.name, longest);
 
@@ -145,7 +157,7 @@ fn create_oauth_app_returns_the_stored_row_with_derived_credentials() {
         // The message names the case, not the result: an app created by
         // mistake would print its client secret.
         let refused = matches!(
-            w.create_oauth_app(name, url, sys.id),
+            w.create_oauth_app(name, url, by(sys.id)),
             Err(WorldError::InvalidOAuthApp { field: f, .. }) if f == field
         );
         assert!(refused, "({name:?}, {url:?}) was not refused on {field}");
@@ -158,7 +170,7 @@ fn an_oauth_code_is_spent_once_and_expires_on_the_virtual_clock() {
     let sys = w.actor_by_login("orrery").unwrap().unwrap();
     let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
     let app = w
-        .create_oauth_app("gotrue", "http://auth.test/callback", sys.id)
+        .create_oauth_app("gotrue", "http://auth.test/callback", by(sys.id))
         .unwrap();
     let redirect = "http://auth.test/callback";
 
@@ -190,20 +202,23 @@ fn an_oauth_code_is_spent_once_and_expires_on_the_virtual_clock() {
     ));
 
     let late = w.issue_oauth_code(&app, &alice, redirect, "").unwrap();
-    w.advance_clock(OAUTH_CODE_TTL_SECONDS + 1, sys.id).unwrap();
+    w.advance_clock(OAUTH_CODE_TTL_SECONDS + 1, by(sys.id))
+        .unwrap();
     assert!(matches!(
         w.exchange_oauth_code(&app.client_id, &app.client_secret, &late, None),
         Err(WorldError::OAuthBadCode)
     ));
 
-    let actions: Vec<String> = w
+    let actions: Vec<(&str, Door, Option<i64>)> = w
         .log_after(0, 100)
         .unwrap()
         .into_iter()
-        .map(|e| e.action)
+        .filter(|e| e.actor.id == alice.id)
+        .map(|e| (e.body.type_name(), e.door, e.app.map(|a| a.id)))
         .collect();
-    assert!(actions.contains(&"oauth.authorize".to_string()));
-    assert!(actions.contains(&"oauth.token".to_string()));
+    let through = |t| (t, Door::Web, Some(app.id));
+    assert!(actions.contains(&through("oauth_authorization:created")));
+    assert!(actions.contains(&through("oauth_authorization:exchanged")));
 }
 
 #[test]
@@ -212,11 +227,15 @@ fn an_issued_client_secret_exchanges_beside_the_registration_secret() {
     let sys = w.actor_by_login("orrery").unwrap().unwrap();
     let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
     let redirect = "http://auth.test/callback";
-    let app = w.create_oauth_app("gotrue", redirect, sys.id).unwrap();
-    let other = w.create_oauth_app("other", redirect, sys.id).unwrap();
+    let app = w.create_oauth_app("gotrue", redirect, by(sys.id)).unwrap();
+    let other = w.create_oauth_app("other", redirect, by(sys.id)).unwrap();
 
-    let first = w.issue_oauth_client_secret(&app.client_id, sys.id).unwrap();
-    let second = w.issue_oauth_client_secret(&app.client_id, sys.id).unwrap();
+    let first = w
+        .issue_oauth_client_secret(&app.client_id, by(sys.id))
+        .unwrap();
+    let second = w
+        .issue_oauth_client_secret(&app.client_id, by(sys.id))
+        .unwrap();
     assert!(first.starts_with("orrfake_secret_"));
     assert_ne!(first, second);
     assert_ne!(first, app.client_secret);
@@ -241,22 +260,23 @@ fn an_issued_client_secret_exchanges_beside_the_registration_secret() {
     ));
 
     assert!(matches!(
-        w.issue_oauth_client_secret("orrfake_client_nope", sys.id),
+        w.issue_oauth_client_secret("orrfake_client_nope", by(sys.id)),
         Err(WorldError::NoSuchOAuthApp(_))
     ));
 
     let log = w.log_after(0, 100).unwrap();
     let issued: Vec<_> = log
         .iter()
-        .filter(|e| e.action == "oauth_app.secret.issue")
-        .map(|e| (e.actor_login.as_str(), e.details.clone()))
+        .filter_map(|e| match &e.body {
+            EventBody::OAuthAppSecretIssued(i) => {
+                Some((e.actor.login.as_str(), i.subject.client_id.as_str(), i.n))
+            }
+            _ => None,
+        })
         .collect();
     assert_eq!(
         issued,
-        [1, 2].map(|n| (
-            "orrery",
-            serde_json::json!({ "client_id": app.client_id, "n": n })
-        ))
+        [1, 2].map(|n| ("orrery", app.client_id.as_str(), n))
     );
     let wire = serde_json::to_string(&log).unwrap();
     for (which, secret) in [("first", &first), ("second", &second)] {

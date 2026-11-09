@@ -358,15 +358,15 @@ async fn pull_request_lifecycle() {
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|e| e["action"].as_str())
+        .filter_map(|e| e["type"].as_str())
         .collect();
     for expected in [
-        "pull.open",
-        "review.submit",
-        "comment.create",
-        "check_run.create",
-        "check_run.update",
-        "pull.merge",
+        "pull:opened",
+        "review:submitted",
+        "comment:created",
+        "check_run:created",
+        "check_run:updated",
+        "pull:merged",
     ] {
         assert!(actions.contains(&expected), "log is missing {expected}");
     }
@@ -580,11 +580,13 @@ async fn a_closed_pull_refuses_the_edits_github_refuses() {
     };
     let bare = store::bare_dir(&s.inst.world.repos_dir(), "alice", "webapp");
     let pull_ref = |n: i64| store::rev_parse(&bare, &store::pull_head_ref(n)).unwrap();
-    // The pull entries in the log, which the pushes between the requests do
-    // not add to.
+    // The writes to pulls in the log, which the pushes between the requests
+    // are not.
     let entries = || {
         let log = s.inst.world.log_after(0, 10_000).unwrap();
-        log.iter().filter(|e| e.action.starts_with("pull.")).count()
+        log.iter()
+            .filter(|e| e.seq == e.write.seq && e.body.type_name().starts_with("pull:"))
+            .count()
     };
     let refused = |field: &str, code: &str, message: &str| {
         (
@@ -803,11 +805,11 @@ async fn a_closed_pull_refuses_the_edits_github_refuses() {
     let log = s.inst.world.log_after(0, 10_000).unwrap();
     let actions: Vec<&str> = log
         .iter()
-        .filter(|e| e.action.starts_with("pull."))
-        .map(|e| e.action.as_str())
+        .filter(|e| e.seq == e.write.seq && e.body.type_name().starts_with("pull:"))
+        .map(|e| e.body.type_name())
         .skip(before)
         .collect();
-    assert_eq!(actions, ["pull.edit", "pull.reopen", "pull.edit"]);
+    assert_eq!(actions, ["pull:edited", "pull:reopened", "pull:edited"]);
     let (status, _) = patch(4, serde_json::json!({ "state": "closed" }));
     assert_eq!(status, 200);
     assert_eq!(

@@ -9,9 +9,14 @@ use std::path::{Path, PathBuf};
 use orrery_snapshot::{DiffSide, SnapshotError, WorldDiff, diff};
 use orrery_world::test_support::with_appended_migrations;
 use orrery_world::{
-    ActorKind, BASELINE_VERSION, DEFAULT_T0_UNIX, SCHEMA_VERSION, World, WorldError, WorldReader,
-    WorldSecret, WorldView,
+    ActorKind, Attribution, BASELINE_VERSION, DEFAULT_T0_UNIX, Door, SCHEMA_VERSION, World,
+    WorldError, WorldReader, WorldSecret, WorldView,
 };
+
+/// A write by `actor_id` as the REST face makes it.
+fn by(actor_id: i64) -> Attribution {
+    Attribution::new(actor_id, Door::Rest)
+}
 
 const FIXTURES: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -84,7 +89,7 @@ fn an_older_snapshot_restores_forks_and_diffs_and_is_never_rewritten() {
     .unwrap();
     let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
     let old = orrery_snapshot::create(&world, &snapshots, "old").unwrap();
-    world.advance_clock(60, alice.id).unwrap();
+    world.advance_clock(60, by(alice.id)).unwrap();
     world.create_actor("bob", ActorKind::User).unwrap();
     let pristine = files(&snapshots.join("old"));
     let forked = dir.path().join("fork");
@@ -256,9 +261,9 @@ fn every_fixture_migrates_opens_and_diffs() {
             .log_after(unchanged.log.shared_seq, 10)
             .unwrap()
             .into_iter()
-            .map(|e| e.action)
+            .map(|e| e.body.type_name().to_string())
             .collect();
-        assert_eq!(since, ["world.rekey"], "fixture v{version}");
+        assert_eq!(since, ["world:rekeyed"], "fixture v{version}");
         world
             .create_actor("after-migration", ActorKind::User)
             .unwrap();

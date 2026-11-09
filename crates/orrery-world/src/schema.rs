@@ -65,6 +65,18 @@ const MIGRATIONS: &[&str] = &[
          FROM pull_timeline;
      DROP TABLE pull_timeline;
      ALTER TABLE pull_timeline_next RENAME TO pull_timeline;",
+    // 10: the log holds events (spec/events.md). `type` and `body` are an
+    // event's type and the rest of its type's fields; `write_seq` and
+    // `write_events` place it in its write; `door` and `app_id` say how the
+    // write reached the world. Entries appended before this version hold
+    // NULL in the new columns.
+    "ALTER TABLE action_log RENAME COLUMN action TO type;
+     ALTER TABLE action_log RENAME COLUMN details TO body;
+     ALTER TABLE action_log ADD COLUMN write_seq INTEGER;
+     ALTER TABLE action_log ADD COLUMN write_events INTEGER CHECK (write_events >= 1);
+     ALTER TABLE action_log ADD COLUMN door TEXT
+         CHECK (door IN ('rest', 'graphql', 'git', 'web', 'control', 'cli'));
+     ALTER TABLE action_log ADD COLUMN app_id INTEGER REFERENCES oauth_apps(id);",
 ];
 
 /// The version this binary reads and writes.
@@ -382,6 +394,12 @@ pub mod test_support {
         pub(super) static APPENDED: Cell<&'static [&'static str]> = const { Cell::new(&[]) };
     }
 
+    /// Whether a test has appended migrations, so the schema holds tables
+    /// and columns this binary does not know.
+    pub(crate) fn extended() -> bool {
+        !APPENDED.get().is_empty()
+    }
+
     pub fn with_appended_migrations<T>(
         migrations: &'static [&'static str],
         f: impl FnOnce() -> T,
@@ -404,8 +422,8 @@ mod tests {
     use super::test_support::with_appended_migrations;
     use super::{BASELINE, BASELINE_VERSION, SCHEMA_VERSION, schema_version};
     use crate::{
-        ActorKind, DEFAULT_T0_UNIX, LogEntry, World, WorldError, WorldReader, WorldSecret,
-        WorldView,
+        ActorKind, Attribution, DEFAULT_T0_UNIX, Door, Event, SYSTEM_ACTOR_ID, World, WorldError,
+        WorldReader, WorldSecret, WorldView,
     };
 
     // The shapes a real migration takes: a column with a default, and a new
@@ -427,9 +445,11 @@ mod tests {
         let root = dir.join("world");
         let w = World::create(&root, DEFAULT_T0_UNIX, &WorldSecret::LOCAL).unwrap();
         let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
-        w.create_repo(alice.id, "webapp", None, false, "main", alice.id)
+        let by = Attribution::new(alice.id, Door::Rest);
+        w.create_repo(alice.id, "webapp", None, false, "main", by)
             .unwrap();
-        w.advance_clock(60, alice.id).unwrap();
+        let system = Attribution::new(SYSTEM_ACTOR_ID, Door::Control);
+        w.advance_clock(60, system).unwrap();
         root
     }
 
@@ -448,7 +468,7 @@ mod tests {
         .unwrap()
     }
 
-    fn whole_log(w: &World) -> Vec<LogEntry> {
+    fn whole_log(w: &World) -> Vec<Event> {
         w.log_after(0, 10_000).unwrap()
     }
 

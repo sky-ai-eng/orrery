@@ -180,15 +180,16 @@ where
 /// for an in-flight query and block new ones for its duration.
 async fn graphql_handler(
     State(state): State<AppState>,
-    axum::extract::Extension(actor): axum::extract::Extension<orrery_world::Actor>,
+    axum::extract::Extension(caller): axum::extract::Extension<orrery_world::Caller>,
     body: axum::body::Bytes,
 ) -> Response<Body> {
     let _gate = state.git.gate().read_owned().await;
-    orrery_face_github::graphql::handle(&state.schema, actor, &body).await
+    orrery_face_github::graphql::handle(&state.schema, caller, &body).await
 }
 
-/// Face auth: resolve the caller's token to an actor and attach it to the
-/// request. Accepted spellings mirror what real clients send (spec/grammar.md):
+/// Face auth: resolve the caller's token to its actor and the OAuth app it
+/// was issued to, and attach both to the request: the actor alone, which
+/// reads take, and the [`orrery_world::Caller`], which writes record. Accepted spellings mirror what real clients send (spec/grammar.md):
 /// `Basic` with the token as the password (git's `x-access-token:<tok>`
 /// convention — username ignored), `Bearer <tok>`, and `token <tok>`.
 ///
@@ -205,9 +206,10 @@ async fn face_auth(State(state): State<AppState>, mut req: Request, next: Next) 
         }
         return bad_credentials();
     };
-    match state.world.actor_by_token(&token) {
-        Ok(Some(actor)) => {
-            req.extensions_mut().insert(actor);
+    match state.world.caller_by_token(&token) {
+        Ok(Some(caller)) => {
+            req.extensions_mut().insert(caller.actor.clone());
+            req.extensions_mut().insert(caller);
             next.run(req).await
         }
         Ok(None) => bad_credentials(),

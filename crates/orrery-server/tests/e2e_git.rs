@@ -61,19 +61,24 @@ async fn author_push_clone_observe() {
     // function of content — replay would reproduce it byte-for-byte.
     let sha = git(&src, clock, &["rev-parse", "HEAD"]).trim().to_string();
 
-    // Observation: the push landed in the action log, actor-attributed and
-    // clock-stamped, and pushed_at ticked.
+    // Observation: the push landed in the log, attributed to alice through
+    // git and clock-stamped, with the commit it brought in, and pushed_at
+    // ticked.
     let log = control_post(base, "/_orrery/log/list", serde_json::json!({}));
     let items = log["items"].as_array().unwrap();
-    let ref_update = items
+    let created = items
         .iter()
-        .find(|e| e["action"] == "ref.update")
-        .expect("push observed as ref.update");
-    assert_eq!(ref_update["actor_login"], "alice");
-    assert_eq!(ref_update["clock_unix"].as_i64().unwrap(), clock);
-    assert_eq!(ref_update["details"]["repo"], "alice/webapp");
-    assert_eq!(ref_update["details"]["ref"], "refs/heads/main");
-    assert_eq!(ref_update["details"]["new"], sha.as_str());
+        .find(|e| e["type"] == "ref:created")
+        .expect("push observed as ref:created");
+    assert_eq!(created["actor"]["login"], "alice");
+    assert_eq!(created["door"], "git");
+    assert_eq!(created["clock_unix"].as_i64().unwrap(), clock);
+    assert_eq!(created["subject"]["owner"]["login"], "alice");
+    assert_eq!(created["subject"]["repo"]["name"], "webapp");
+    assert_eq!(created["subject"]["name"], "refs/heads/main");
+    assert_eq!(created["object"]["sha"], sha.as_str());
+    assert_eq!(created["commits"], serde_json::json!([sha]));
+    assert_eq!(created["commit_count"], 1);
     let stored = inst
         .world
         .repo_by_owner_name("alice", "webapp")
@@ -95,14 +100,23 @@ async fn author_push_clone_observe() {
     git(&src, clock2, &["add", "."]);
     git(&src, clock2, &["commit", "-m", "v2"]);
     git(&src, clock2, &["push", &authed_url, "main"]);
+    let sha2 = git(&src, clock2, &["rev-parse", "HEAD"]).trim().to_string();
     let log = control_post(base, "/_orrery/log/list", serde_json::json!({}));
     let last_push = log["items"]
         .as_array()
         .unwrap()
         .iter()
-        .rfind(|e| e["action"] == "ref.update")
+        .rfind(|e| e["type"] == "ref:updated")
         .unwrap();
     assert_eq!(last_push["clock_unix"].as_i64().unwrap(), clock2);
+    assert_eq!(
+        last_push["changes"]["sha"],
+        serde_json::json!({ "from": sha, "to": sha2 })
+    );
+    assert_eq!(
+        (&last_push["forced"], &last_push["commits"]),
+        (&false.into(), &serde_json::json!([sha2]))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

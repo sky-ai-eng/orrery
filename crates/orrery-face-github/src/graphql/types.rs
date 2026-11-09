@@ -1459,13 +1459,13 @@ pub struct ConvertPullRequestToDraftPayload {
 
 fn set_draft(ctx: &Context<'_>, id: &ID, draft: bool) -> Result<PullRequest, Error> {
     let face = face(ctx);
-    let actor = ctx.data::<world::Actor>()?;
+    let caller = ctx.data::<world::Caller>()?;
     let Some(NodeRef::Pull(pull_id)) = nodeid::parse(id) else {
         return Err(unresolved(id));
     };
     let pull = face
         .world
-        .set_pull_draft(pull_id, actor.id, draft)
+        .set_pull_draft(pull_id, caller.via(world::Door::Graphql), draft)
         .map_err(|e| match e {
             world::WorldError::NoSuchPull(_) => unresolved(id),
             world::WorldError::InvalidTransition(msg) => Error::new(msg),

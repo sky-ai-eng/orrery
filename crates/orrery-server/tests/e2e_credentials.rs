@@ -205,32 +205,30 @@ async fn no_control_plane_read_returns_a_credential() {
         Some(serde_json::json!({ "page_size": 500 })),
     ));
 
-    // The walk saw the history it was meant to: every action, and the
+    // The walk saw the history it was meant to: every write, and the
     // credentials' objects in the diff.
     let all = reads.join("\n");
-    for expected in ["oauth.authorize", "oauth.token", "authorizations_exchanged"] {
+    for expected in [
+        "oauth_authorization:created",
+        "oauth_authorization:exchanged",
+        "authorizations_exchanged",
+    ] {
         assert!(all.contains(expected), "no {expected} in {all}");
     }
-    // Issuing logs which credential it was, never its value.
+    // Issuing records which credential it was, never its value.
     let log: serde_json::Value = serde_json::from_str(reads.last().unwrap()).unwrap();
     let issues: Vec<_> = log["items"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|e| e["action"].as_str().unwrap().ends_with(".issue"))
-        .map(|e| (e["action"].as_str().unwrap(), &e["details"]))
+        .filter(|e| e["type"].as_str().unwrap().ends_with("_issued"))
+        .map(|e| (e["type"].as_str().unwrap(), &e["subject"]["type"], &e["n"]))
         .collect();
     assert_eq!(
         issues,
         [
-            (
-                "actor.token.issue",
-                &serde_json::json!({ "login": "alice", "n": 1 })
-            ),
-            (
-                "oauth_app.secret.issue",
-                &serde_json::json!({ "client_id": client_id, "n": 1 })
-            ),
+            ("actor:token_issued", &"actor".into(), &1.into()),
+            ("oauth_app:secret_issued", &"oauth_app".into(), &1.into()),
         ]
     );
     for (which, credential) in [

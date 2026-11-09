@@ -16,7 +16,7 @@ use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use orrery_world::{LogEntry, Signal, World, WorldError};
+use orrery_world::{Signal, World, WorldError};
 use tokio::sync::watch;
 
 use crate::AppState;
@@ -254,7 +254,7 @@ struct Follow {
     restores: u64,
     /// The `seq` of the last entry sent, or the position it opened at.
     after: i64,
-    page: std::vec::IntoIter<LogEntry>,
+    page: std::vec::IntoIter<orrery_world::Event>,
     /// Read again without waiting for a signal: the stream has just opened,
     /// or the last read filled a page.
     read_now: bool,

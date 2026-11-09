@@ -12,7 +12,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Extension, Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::{get, post};
-use orrery_world::{Actor, RefChange, RefMove, Repo, World};
+use orrery_world::{Caller, Door, REF_EVENT_COMMITS, RefChange, RefMove, Repo, World};
 
 pub mod cgi;
 pub mod store;
@@ -78,10 +78,9 @@ impl GitFace {
     }
 
     /// Point a pull request's `refs/pull/{n}/head` at `head_sha`. The move
-    /// has no log entry of its own: it follows from the pull's `pull.open` or
-    /// `pull.reopen` and from the `ref.update` that moved its head branch, so
-    /// replaying those entries rebuilds it. The caller holds the repository's
-    /// lock for write.
+    /// has no event of its own: the ref is the pull's head, which every
+    /// event that moves it carries. The caller holds the repository's lock
+    /// for write.
     pub fn pin_pull_ref(
         &self,
         repo: &Repo,
@@ -143,20 +142,20 @@ impl GitFace {
         }
     }
 
-    /// Record a completed receive-pack: one `ref.update` log entry per changed
-    /// ref (sorted, so replay order is stable), GitHub's "synchronize" for the
-    /// pull requests on each pushed branch, the closes and timeline items a
-    /// deleted or restored branch brings its pull requests
-    /// ([`World::record_push`]), a `pushed_at` bump, and GitHub's first-push
-    /// rule — the first branch pushed into an empty repo becomes the default
-    /// branch. Receive-pack has already moved the pushed refs, so a step that
-    /// fails here moves them back ([`GitFace::move_back`]), and `HEAD` if the
-    /// push set it, before the error is returned. The caller holds the
-    /// repository's lock for write.
+    /// Record a completed receive-pack ([`World::record_push`]): one ref
+    /// event per changed ref (sorted, so replay order is stable), with the
+    /// commits each brought in, GitHub's "synchronize" for the pull requests
+    /// on each pushed branch, the closes and timeline items a deleted or
+    /// restored branch brings its pull requests, a `pushed_at` bump, and
+    /// GitHub's first-push rule — the first branch pushed into an empty repo
+    /// becomes the default branch. Receive-pack has already moved the pushed
+    /// refs, so a step that fails here moves them back
+    /// ([`GitFace::move_back`]), and `HEAD` if the push set it, before the
+    /// error is returned. The caller holds the repository's lock for write.
     fn observe_push(
         &self,
         repo: &Repo,
-        actor: &Actor,
+        pusher: &Caller,
         before: &BTreeMap<String, String>,
         after: &BTreeMap<String, String>,
     ) -> Result<(), GitFaceError> {
@@ -199,12 +198,28 @@ impl GitFace {
                     }
                     _ => Vec::new(),
                 };
+                // A new ref's commits are the ones no ref reached before.
+                let (forced, (commits, commit_count)) = match change {
+                    RefChange::Created => {
+                        let reached: Vec<&str> = before.values().map(String::as_str).collect();
+                        let added = store::added_commits(&bare, new, &reached, REF_EVENT_COMMITS)?;
+                        (false, added)
+                    }
+                    RefChange::Moved => (
+                        !store::is_ancestor(&bare, old, new)?,
+                        store::added_commits(&bare, new, &[old], REF_EVENT_COMMITS)?,
+                    ),
+                    RefChange::Deleted => (false, (Vec::new(), 0)),
+                };
                 moves.push(RefMove {
                     name,
                     old,
                     new,
                     repins,
                     change,
+                    forced,
+                    commits,
+                    commit_count,
                 });
             }
             // Every ref the push moves is in place before the record commits,
@@ -220,7 +235,8 @@ impl GitFace {
                     pinned.push(number);
                 }
             }
-            self.world.record_push(repo.id, actor.id, &moves, adopted)?;
+            self.world
+                .record_push(repo.id, pusher.via(Door::Git), &moves, adopted)?;
             Ok(())
         };
         if let Err(e) = record() {
@@ -281,7 +297,7 @@ impl UnobservedPush<'_> {
     /// moves back what the push moved when the record fails. Refs that can't
     /// be listed after receive-pack can't be moved back either: which ones it
     /// moved is unknown.
-    fn observe(mut self, pusher: &Actor) -> Result<(), GitFaceError> {
+    fn observe(mut self, pusher: &Caller) -> Result<(), GitFaceError> {
         let observed = store::list_refs(self.bare).and_then(|after| {
             self.face
                 .observe_push(self.repo, pusher, &self.before, &after)
@@ -336,7 +352,7 @@ pub fn is_smart_http_path(path: &str) -> bool {
 async fn info_refs(
     State(face): State<Arc<GitFace>>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
-    actor: Option<Extension<Actor>>,
+    caller: Option<Extension<Caller>>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
@@ -355,7 +371,7 @@ async fn info_refs(
         face,
         &owner,
         &repo_name,
-        actor.as_deref(),
+        caller.as_deref(),
         "GET",
         "info/refs",
         &query,
@@ -368,7 +384,7 @@ async fn info_refs(
 async fn upload_pack(
     State(face): State<Arc<GitFace>>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
-    actor: Option<Extension<Actor>>,
+    caller: Option<Extension<Caller>>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Bytes,
@@ -378,7 +394,7 @@ async fn upload_pack(
         face,
         &owner,
         &repo_name,
-        actor.as_deref(),
+        caller.as_deref(),
         "POST",
         "git-upload-pack",
         &query,
@@ -391,7 +407,7 @@ async fn upload_pack(
 async fn receive_pack(
     State(face): State<Arc<GitFace>>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
-    actor: Option<Extension<Actor>>,
+    caller: Option<Extension<Caller>>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Bytes,
@@ -406,7 +422,7 @@ async fn receive_pack(
             face,
             &owner,
             &repo_name,
-            actor.as_deref(),
+            caller.as_deref(),
             "POST",
             "git-receive-pack",
             &query,
@@ -429,7 +445,7 @@ async fn serve(
     face: Arc<GitFace>,
     owner: &str,
     repo_name: &str,
-    actor: Option<&Actor>,
+    caller: Option<&Caller>,
     method: &str,
     tail: &str,
     query: &str,
@@ -457,7 +473,7 @@ async fn serve(
     // real git client knows credentials would change the answer. The auth
     // middleware already refuses anonymous non-read traffic; this re-check
     // makes the face safe on its own terms.
-    if actor.is_none() && (repo.private || is_push) {
+    if caller.is_none() && (repo.private || is_push) {
         return plain_unauthorized();
     }
     // Fetch requests share the lock, so they never wait on each other. A
@@ -497,7 +513,7 @@ async fn serve(
         content_type: header(headers, "content-type"),
         content_encoding: header(headers, "content-encoding"),
         git_protocol: header(headers, "git-protocol"),
-        remote_user: actor.map(|a| a.login.as_str()),
+        remote_user: caller.map(|c| c.actor.login.as_str()),
         body,
     };
     let cgi_resp = match cgi::run_http_backend(&face.world.repos_dir(), req).await {
@@ -516,7 +532,7 @@ async fn serve(
     if let Some(unobserved) = unobserved
         && cgi_resp.status == 200
     {
-        let pusher = actor.expect("pushes are refused without an actor above");
+        let pusher = caller.expect("pushes are refused without a caller above");
         if let Err(e) = unobserved.observe(pusher) {
             tracing::error!(error = %e, "push observation failed");
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
@@ -563,7 +579,7 @@ mod tests {
     use std::pin::{Pin, pin};
     use std::task::{Context, Poll, Waker};
 
-    use orrery_world::{ActorKind, DEFAULT_T0_UNIX, Signal, WorldSecret};
+    use orrery_world::{ActorKind, Attribution, DEFAULT_T0_UNIX, Signal, WorldSecret};
 
     use super::*;
 
@@ -574,7 +590,7 @@ mod tests {
     struct Fixture {
         face: Arc<GitFace>,
         repo: Repo,
-        alice: Actor,
+        alice: Caller,
         bare: PathBuf,
         main: String,
         _dir: tempfile::TempDir,
@@ -592,7 +608,14 @@ mod tests {
         );
         let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
         let repo = world
-            .create_repo(alice.id, "webapp", None, false, "main", alice.id)
+            .create_repo(
+                alice.id,
+                "webapp",
+                None,
+                false,
+                "main",
+                Attribution::new(alice.id, Door::Rest),
+            )
             .unwrap();
         let face = GitFace::new(world);
         face.init_repo_dir(&repo).unwrap();
@@ -602,7 +625,10 @@ mod tests {
         Fixture {
             face,
             repo,
-            alice,
+            alice: Caller {
+                actor: alice,
+                app_id: None,
+            },
             bare,
             main,
             _dir: dir,
@@ -855,9 +881,9 @@ mod tests {
         );
         let log = f.face.world.log_after(0, 100).unwrap();
         assert!(
-            log.iter().any(|e| e.action == "ref.update"
-                && e.details["ref"] == "refs/heads/topic"
-                && e.details["new"] == topic.as_str()),
+            log.iter().any(|e| matches!(&e.body,
+                orrery_world::EventBody::RefCreated(c)
+                    if c.subject.name == "refs/heads/topic" && c.object.sha == topic)),
             "{log:?}"
         );
     }

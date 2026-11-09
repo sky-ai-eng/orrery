@@ -121,6 +121,48 @@ pub fn rev_list_count(bare: &Path, from: &str, to: &str) -> Result<u64, GitFaceE
         .map_err(|_| GitFaceError::Cgi(format!("rev-list --count returned {out:?}")))
 }
 
+/// The commits reachable from `tip` and from none of `excluded`, oldest
+/// first, and how many there are: at most `limit` of them, the newest. The
+/// revisions go to `rev-list` on its stdin, so a repository with many refs
+/// never overflows its argument list.
+pub fn added_commits(
+    bare: &Path,
+    tip: &str,
+    excluded: &[&str],
+    limit: usize,
+) -> Result<(Vec<String>, i64), GitFaceError> {
+    use std::io::Write as _;
+    let mut child = hermetic_git(bare)
+        .args(["rev-list", "--reverse", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let mut revs = format!("{tip}\n");
+    for oid in excluded {
+        revs.push_str(&format!("^{oid}\n"));
+    }
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(revs.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(GitFaceError::Git {
+            args: format!("rev-list --reverse --stdin <<< {revs:?}"),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
+    }
+    let all: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let count = all.len() as i64;
+    let newest = all[all.len().saturating_sub(limit)..].to_vec();
+    Ok((newest, count))
+}
+
 /// Whether `ancestor` is reachable from `descendant`, a commit counting as its
 /// own ancestor: `git merge-base --is-ancestor`, whose exit code 1 is "no".
 pub fn is_ancestor(bare: &Path, ancestor: &str, descendant: &str) -> Result<bool, GitFaceError> {
