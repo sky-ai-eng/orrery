@@ -1,5 +1,5 @@
 //! The git face: serves clone/fetch/push for the world's bare repos over git
-//! smart-HTTP, and observes every push into the kernel's action log.
+//! smart-HTTP, and records every push in the kernel's log.
 //!
 //! URL shape is GitHub's, deliberately hardcoded: exactly two path segments,
 //! `/{owner}/{repo}[.git]/...` (spec/surface-git.md).
@@ -224,7 +224,7 @@ impl GitFace {
             }
             // Every ref the push moves is in place before the record commits,
             // as receive-pack moved the pushed branches before this ran, so a
-            // reader that can see the push's entries also sees its refs.
+            // reader that can see the push's events also sees its refs.
             if let Some(branch) = adopted {
                 store::set_head_symref(&bare, branch)?;
                 head_set = true;

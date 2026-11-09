@@ -52,7 +52,7 @@ pub type Result<T> = std::result::Result<T, WorldError>;
 /// Fallback T0 when a new world's config doesn't name one: 2020-01-01T00:00:00Z.
 /// A fixed constant rather than "now" so that two worlds created from the same
 /// config are the same world (rule 5), apart from the real time each of their
-/// log entries records.
+/// events records.
 pub const DEFAULT_T0_UNIX: i64 = 1_577_836_800;
 
 /// The reserved actor that makes control-plane and CLI writes. Seeded at
@@ -124,7 +124,7 @@ pub enum Signal {
     /// transaction that has not committed yet, and that may roll back, so a
     /// read that follows sees the events once they commit, or nothing.
     LogMayHaveGrown,
-    /// The world's state was replaced by a snapshot's, and its action log
+    /// The world's state was replaced by a snapshot's, and its log
     /// with it. `newest_seq` is the newest `seq` in the log the world holds
     /// now, or 0 for an empty one.
     StateReplaced { newest_seq: i64 },
@@ -626,7 +626,7 @@ impl World {
     /// A `seq` is issued once per world, so a position a caller holds from
     /// before the swap never names a different entry after it: the reopened
     /// database's next `seq` is raised past every one this world issued
-    /// before. The log then has a gap where the discarded entries were.
+    /// before. The log then has a gap where the discarded events were.
     ///
     /// [`Signal::StateReplaced`] is raised once the reopen succeeds, before
     /// the raise and whatever `f` returned: the state may have changed even

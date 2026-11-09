@@ -1,8 +1,8 @@
-//! `GET /_orrery/log/stream`: the action log as server-sent events, from a
-//! position the caller holds, then each entry as it is appended.
+//! `GET /_orrery/log/stream`: the log's events as server-sent events, from a
+//! position the caller holds, then each one as it is appended.
 //!
 //! The kernel's [`Signal`]s only wake a stream; what a stream sends is always
-//! read through the `World`, so a signal for an entry that never commits
+//! read through the `World`, so a signal for a write that never commits
 //! sends nothing. Between reads a stream holds neither the connection nor the
 //! world write gate, so it holds up no write, snapshot, or restore.
 
@@ -22,7 +22,7 @@ use tokio::sync::watch;
 use crate::AppState;
 use crate::control::{Fault, errors, faults, internal};
 
-/// How many entries a stream reads at a time. A stream holds at most one
+/// How many events a stream reads at a time. A stream holds at most one
 /// page, so a slow caller costs this much memory and no more.
 const PAGE: usize = 100;
 
@@ -221,8 +221,8 @@ pub(crate) fn not_in_log(
         StatusCode::NOT_FOUND,
         "NOT_FOUND",
         &format!(
-            "{named} names seq {seq}, which is not in the action log; \
-             a position is 0 or the seq of an entry, and the newest is {newest}"
+            "{named} names seq {seq}, which is not in the log; \
+             a position is 0 or the seq of an event, and the newest is {newest}"
         ),
         field,
     )

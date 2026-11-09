@@ -3088,7 +3088,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "One entry of a world's log.",
+  "description": "A change to a world, as its log records it.",
   "oneOf": [
     {
       "$ref": "#/$defs/WorldCreated",

@@ -1,6 +1,6 @@
 //! Organization membership, teams and review requests: the single-row-write
 //! rule (returned row == point read), GitHub's refusals, and the timeline and
-//! action-log entries each write owes.
+//! events each write owes.
 
 use orrery_world::{
     ActorKind, Attribution, DEFAULT_T0_UNIX, Door, NewPull, OrgRole, Pull, RequestedReviewer,

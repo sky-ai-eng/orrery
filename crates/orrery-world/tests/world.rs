@@ -448,7 +448,7 @@ fn a_push_records_its_events_pushed_at_and_default_branch() {
     assert_eq!(read.default_branch, "trunk");
 
     // A push that moved nothing records nothing, and a push into a
-    // repository the world does not hold records none of its entries.
+    // repository the world does not hold records none of its events.
     let mark = w.log_after(0, 1000).unwrap().last().unwrap().seq;
     w.record_push(repo.id, by(alice.id), &[], Some("main"))
         .unwrap();
@@ -475,7 +475,7 @@ fn a_reader_sees_all_of_a_push_or_none_of_it() {
 
     // A connection of its own reads only what has committed. Reading through
     // it each time the log may have grown shows what a reader woken by any of
-    // the push's entries can see.
+    // the push's events can see.
     let db = dir.path().join("world").join("world.db");
     let read_push = move |conn: &rusqlite::Connection| {
         conn.query_row(

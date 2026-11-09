@@ -440,7 +440,7 @@ mod tests {
     const BROKEN: &str = "INSERT INTO no_such_table VALUES (1);";
 
     /// A world at this binary's version with a little of everything the
-    /// tests compare: actors, a repo, and log entries.
+    /// tests compare: actors, a repo, and events.
     fn world(dir: &Path) -> PathBuf {
         let root = dir.join("world");
         let w = World::create(&root, DEFAULT_T0_UNIX, &WorldSecret::LOCAL).unwrap();
@@ -522,7 +522,7 @@ mod tests {
             assert_eq!(topics, 1, "the backfill ran");
             assert_eq!(w.list_actors().unwrap(), actors);
             assert_eq!(w.list_repos().unwrap(), repos);
-            assert_eq!(whole_log(&w), log, "the action log reads as before");
+            assert_eq!(whole_log(&w), log, "the log reads as before");
 
             // The migrated world takes writes, and its log carries on.
             w.create_actor("bob", ActorKind::User).unwrap();

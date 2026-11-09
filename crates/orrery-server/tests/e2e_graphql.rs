@@ -792,7 +792,7 @@ async fn review_node_lookup() {
 }
 
 /// The consumer's two mutations: draft flips both ways, wrong-state refusals,
-/// and the action-log trail.
+/// and the events they leave.
 #[tokio::test(flavor = "multi_thread")]
 async fn draft_mutations() {
     let s = seed().await;

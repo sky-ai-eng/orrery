@@ -1,6 +1,6 @@
 //! End-to-end: real `git` against a served world, exercising the recipe from
 //! spec/surface-git.md — blobless clone, clock-dated commits, push, and the
-//! action-log observation. This is rule 2 (real tools judge realness) as a
+//! log observation. This is rule 2 (real tools judge realness) as a
 //! test: no simulated requests anywhere.
 
 mod common;

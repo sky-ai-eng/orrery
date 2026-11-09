@@ -116,7 +116,7 @@ impl World {
     /// Flip the draft flag — GitHub's ready-for-review / convert-to-draft
     /// pair. Refused on a non-open pull, and refused when the pull is already
     /// in the target state: GitHub errors there rather than succeeding as a
-    /// no-op, and a silent no-op would also leave a phantom log entry.
+    /// no-op, and a silent no-op would also leave a phantom event.
     /// Ready-for-review also lands on the pull's timeline, where GitHub reports
     /// when it happened.
     pub fn set_pull_draft(&self, pull_id: i64, by: Attribution, draft: bool) -> Result<Pull> {
@@ -225,15 +225,11 @@ impl World {
                         added.push(name);
                     }
                 }
-                if added.is_empty() {
-                    return Ok(None);
+                match added.is_empty() {
+                    true => Ok(before),
+                    false => touch_pull(tx, pull_id),
                 }
-                touch_pull(tx, pull_id).map(Some)
             })?;
-            let Some(pull) = pull else {
-                w.discard();
-                return Ok(before);
-            };
             for name in added {
                 record_timeline(w, pull_id, &TimelineKind::Labeled(name.to_string()))?;
             }
@@ -307,15 +303,11 @@ impl World {
                         });
                     }
                 }
-                if added.is_empty() {
-                    return Ok(None);
+                match added.is_empty() {
+                    true => Ok(before),
+                    false => touch_pull(tx, pull_id),
                 }
-                touch_pull(tx, pull_id).map(Some)
             })?;
-            let Some(pull) = pull else {
-                w.discard();
-                return Ok(before);
-            };
             for rv in added {
                 record_timeline(w, pull_id, &TimelineKind::ReviewRequested(rv))?;
             }
@@ -365,15 +357,11 @@ impl World {
                     .optional()?;
                 removed.extend(gone.map(|(id, slug)| RequestedReviewer::Team { id, slug }));
             }
-            if removed.is_empty() {
-                return Ok(None);
+            match removed.is_empty() {
+                true => Ok(before),
+                false => touch_pull(tx, pull_id),
             }
-            touch_pull(tx, pull_id).map(Some)
             })?;
-            let Some(pull) = pull else {
-                w.discard();
-                return Ok(before);
-            };
             for rv in removed {
                 record_timeline(w, pull_id, &TimelineKind::ReviewRequestRemoved(rv))?;
             }
@@ -467,7 +455,7 @@ impl World {
                     before.number, base.name
                 )));
             }
-            w.pull_operation(pull_id, EventBody::PullMerged, |tx| {
+            let pull = w.pull_operation(pull_id, EventBody::PullMerged, |tx| {
                 tx.execute(
                     "UPDATE pulls SET state = 'closed', merged = 1, merge_commit_sha = ?1,
                      merged_by_id = ?2,
@@ -478,8 +466,10 @@ impl World {
                 touch_pull(tx, pull_id)
             })?;
             record_timeline(w, pull_id, &TimelineKind::Closed)?;
+            // The base move re-pins only open pulls and marks only unmerged
+            // ones, so it leaves the merged pull as `touch_pull` returned it.
             self.record_moves(w, before.repo_id, std::slice::from_ref(base), None, false)?;
-            queries::require_pull(w.tx, pull_id)
+            Ok(pull)
         })
     }
 

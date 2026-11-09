@@ -280,7 +280,7 @@ async fn issue_oauth_client_secret(
 /// plane.
 const SYSTEM: Attribution = Attribution::new(SYSTEM_ACTOR_ID, Door::Control);
 
-/// The action log, oldest first unless the body orders it newest first.
+/// The log's events, oldest first unless the body orders them newest first.
 /// `after_seq` narrows it to what followed a position another call reported,
 /// such as a diff's `log.shared_seq` or a snapshot's `last_seq`. A position
 /// the log does not hold is refused: what follows it in this log did not
@@ -316,7 +316,7 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
         Err(WorldError::ResumeNotInLog(_)) => errors(
             StatusCode::BAD_REQUEST,
             "INVALID_ARGUMENT",
-            "page_token resumes from an entry the action log no longer holds: \
+            "page_token resumes from an event the log no longer holds: \
              a restore replaced the log since the token was issued; \
              start again from the first page",
             Some("page_token"),

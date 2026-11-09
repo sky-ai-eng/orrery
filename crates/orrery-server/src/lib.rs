@@ -55,7 +55,7 @@ pub struct AppState {
     pub schema: orrery_face_github::graphql::GithubSchema,
     /// See [`Options::anonymous_git_reads`].
     pub anonymous_git_reads: bool,
-    /// What the action log's streams wait on.
+    /// What the log's streams wait on.
     log_changes: Arc<tokio::sync::watch::Sender<log_stream::LogChanges>>,
 }
 

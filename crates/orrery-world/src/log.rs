@@ -41,13 +41,6 @@ impl<'a> Write<'a> {
         self.operation.is_some()
     }
 
-    /// Drop the events made so far: the write found nothing to change after
-    /// it had started recording.
-    pub(crate) fn discard(&mut self) {
-        self.operation = None;
-        self.consequences.clear();
-    }
-
     /// A consequence of the operation, after the ones before it.
     pub(crate) fn emit(&mut self, body: EventBody) {
         self.consequences.push(body);
@@ -68,20 +61,18 @@ impl<'a> Write<'a> {
     }
 
     /// Run `change` on the pull and make it the write's operation, `kind`,
-    /// with whatever it changed.
+    /// with whatever it changed. A change that changed nothing makes no
+    /// event.
     pub(crate) fn pull_operation<T>(
         &mut self,
         pull_id: i64,
         kind: fn(PullChanged) -> EventBody,
         change: impl FnOnce(&Connection) -> Result<T>,
     ) -> Result<T> {
-        let before = objects::pull_object(self.tx, pull_id)?;
-        let out = change(self.tx)?;
-        let after = objects::pull_object(self.tx, pull_id)?;
-        self.operation(kind(PullChanged {
-            subject: objects::pull_subject(self.tx, pull_id)?,
-            changes: PullChanges::between(&before, &after),
-        }));
+        let (out, body) = self.pull_change(pull_id, kind, change)?;
+        if let Some(body) = body {
+            self.operation(body);
+        }
         Ok(out)
     }
 

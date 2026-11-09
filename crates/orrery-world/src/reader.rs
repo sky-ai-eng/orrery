@@ -21,10 +21,10 @@ pub struct ViewMeta {
 
 pub trait WorldView {
     fn view_meta(&self) -> Result<ViewMeta>;
-    /// How many log entries have `seq > after_seq`. A restore leaves a gap
+    /// How many events have `seq > after_seq`. A restore leaves a gap
     /// in `seq`, so this is not a difference of two of them.
     fn log_count_after(&self, after_seq: i64) -> Result<i64>;
-    /// Whether the log holds the entry numbered `seq`.
+    /// Whether the log holds the event numbered `seq`.
     fn log_holds(&self, seq: i64) -> Result<bool>;
     /// The newest `seq` the log holds at or below `seq`, or 0 when it holds
     /// none.

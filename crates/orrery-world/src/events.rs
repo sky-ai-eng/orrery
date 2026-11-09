@@ -82,7 +82,7 @@ impl Attribution {
     }
 }
 
-/// One entry of a world's log.
+/// A change to a world, as its log records it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "Orrery event")]
 pub struct Event {

@@ -1,6 +1,6 @@
 //! Kernel conformance for the collaboration objects: the single-row-write
-//! rule (returned row == point read), the state machine, and the action-log
-//! entries every transition owes. Shas here are caller-supplied strings —
+//! rule (returned row == point read), the state machine, and the events
+//! every transition owes. Shas here are caller-supplied strings —
 //! the kernel takes no view on git; the git face owns resolution.
 
 use std::sync::{Arc, Mutex};
