@@ -306,6 +306,40 @@ async fn a_refused_kind_is_named_as_kind() {
     assert_eq!(faults(&answer), [fault("INVALID_ARGUMENT", Some("kind"))]);
 }
 
+/// An OAuth app's name is measured in characters, so a name in a script of
+/// three bytes a character fits as many characters as an ASCII one.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oauth_app_name_is_measured_in_characters() {
+    let inst = boot().await;
+    let base = &inst.base;
+    let body = |name: String| {
+        json!({ "name": name, "callback_url": "http://auth.test/callback" }).to_string()
+    };
+
+    let longest = "名".repeat(100);
+    let (status, app) = call(
+        base,
+        "POST",
+        "/oauth-apps",
+        body(longest.clone()).as_bytes(),
+    );
+    assert_eq!(status, 201, "{app}");
+    assert_eq!(app["name"], longest.as_str());
+
+    let (status, answer) = call(
+        base,
+        "POST",
+        "/oauth-apps",
+        body("名".repeat(101)).as_bytes(),
+    );
+    assert_eq!(status, 400, "{answer}");
+    assert_eq!(faults(&answer), [fault("INVALID_ARGUMENT", Some("name"))]);
+    assert_eq!(
+        answer["errors"][0]["message"],
+        "must be 1-100 characters and not blank"
+    );
+}
+
 /// A create route checks its values while it reads the body, so a bad value
 /// is named beside every other fault, and one bad value hides no other.
 #[tokio::test(flavor = "multi_thread")]
