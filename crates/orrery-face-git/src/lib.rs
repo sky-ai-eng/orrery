@@ -378,6 +378,9 @@ async fn serve(
         let observed = store::list_refs(&bare)
             .and_then(|after| face.observe_push(&repo, pusher, &before, &after));
         if let Err(e) = observed {
+            // TODO(ORR-70): the refs receive-pack moved stay moved, ahead of the
+            // log, and a retry of the push finds nothing to move; move them back,
+            // as a merge whose record fails does.
             tracing::error!(error = %e, "push observation failed");
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
         }
