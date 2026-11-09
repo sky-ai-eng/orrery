@@ -366,12 +366,15 @@ impl World {
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
         let clock = queries::clock(&tx)?;
-        let id: i64 = tx
+        let repo = tx
             .query_row(
-                "INSERT INTO repos (owner_id, name, description, private, default_branch,
-                                    created_by, created_clock_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 RETURNING id",
+                &format!(
+                    "INSERT INTO repos (owner_id, name, description, private, default_branch,
+                                        created_by, created_clock_unix)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     RETURNING {}",
+                    queries::REPO_COLUMNS
+                ),
                 params![
                     owner_id,
                     name,
@@ -381,19 +384,12 @@ impl World {
                     created_by,
                     clock
                 ],
-                |r| r.get(0),
+                queries::row_to_repo,
             )
             .map_err(|e| match constraint_violation(&e) {
                 true => WorldError::RepoExists(name.to_string()),
                 false => WorldError::from(e),
             })?;
-        let repo = tx
-            .query_row(
-                &format!("{} WHERE r.id = ?1", queries::REPO_SELECT),
-                params![id],
-                queries::row_to_repo,
-            )
-            .map_err(WorldError::from)?;
         self.log_locked(
             &tx,
             created_by,
@@ -413,8 +409,9 @@ impl World {
         Ok(conn
             .query_row(
                 &format!(
-                    "{} WHERE a.login = ?1 AND r.name = ?2",
-                    queries::REPO_SELECT
+                    "SELECT {} FROM repos
+                     WHERE owner_id = (SELECT id FROM actors WHERE login = ?1) AND name = ?2",
+                    queries::REPO_COLUMNS
                 ),
                 params![owner, name],
                 queries::row_to_repo,
@@ -426,7 +423,7 @@ impl World {
         let conn = self.lock();
         Ok(conn
             .query_row(
-                &format!("{} WHERE r.id = ?1", queries::REPO_SELECT),
+                &format!("SELECT {} FROM repos WHERE id = ?1", queries::REPO_COLUMNS),
                 params![id],
                 queries::row_to_repo,
             )
@@ -535,35 +532,16 @@ impl World {
         details: &serde_json::Value,
     ) -> Result<LogEntry> {
         let entry = conn.query_row(
-            "INSERT INTO action_log (clock_unix, wall_unix_ms, actor_id, action, details)
-             VALUES ((SELECT clock_unix FROM world WHERE id = 1), ?1, ?2, ?3, ?4)
-             RETURNING seq, clock_unix, wall_unix_ms, actor_id, action, details",
+            &format!(
+                "INSERT INTO action_log (clock_unix, wall_unix_ms, actor_id, action, details)
+                 VALUES ((SELECT clock_unix FROM world WHERE id = 1), ?1, ?2, ?3, ?4)
+                 RETURNING {LOG_ENTRY_COLUMNS}"
+            ),
             params![wall_unix_ms(), actor_id, action, details.to_string()],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, Option<i64>>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                ))
-            },
+            log_entry,
         )?;
         self.signal(Signal::LogMayHaveGrown);
-        let login: String = conn.query_row(
-            "SELECT login FROM actors WHERE id = ?1",
-            params![entry.3],
-            |r| r.get(0),
-        )?;
-        Ok(LogEntry {
-            seq: entry.0,
-            clock_unix: entry.1,
-            wall_unix_ms: entry.2,
-            actor_login: login,
-            action: entry.4,
-            details: serde_json::from_str(&entry.5).unwrap_or(serde_json::Value::Null),
-        })
+        Ok(entry)
     }
 
     /// Log entries with `seq > after_seq`, oldest first, at most `limit`.
@@ -572,7 +550,7 @@ impl World {
     pub fn log_after(&self, after_seq: i64, limit: usize) -> Result<Vec<LogEntry>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
-            "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2"
+            "SELECT {LOG_ENTRY_COLUMNS} FROM action_log WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2"
         ))?;
         let rows = stmt.query_map(params![after_seq, limit as i64], log_entry)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -620,7 +598,8 @@ impl World {
         let entries = match order {
             LogOrder::OldestFirst => conn
                 .prepare(&format!(
-                    "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2"
+                    "SELECT {LOG_ENTRY_COLUMNS} FROM action_log
+                     WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2"
                 ))?
                 .query_map(
                     params![resume.map_or(after_seq, |r| r.max(after_seq)), limit],
@@ -629,8 +608,9 @@ impl World {
                 .collect::<std::result::Result<Vec<_>, _>>()?,
             LogOrder::NewestFirst => conn
                 .prepare(&format!(
-                    "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 AND l.seq <= ?2
-                     ORDER BY l.seq DESC LIMIT ?3"
+                    "SELECT {LOG_ENTRY_COLUMNS} FROM action_log
+                     WHERE seq > ?1 AND seq <= ?2
+                     ORDER BY seq DESC LIMIT ?3"
                 ))?
                 .query_map(
                     params![
@@ -729,11 +709,10 @@ fn checkpoint(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// What every read of the action log selects, in the order `log_entry`
-/// reads it.
-const LOG_ENTRY_SELECT: &str =
-    "SELECT l.seq, l.clock_unix, l.wall_unix_ms, a.login, l.action, l.details
-     FROM action_log l JOIN actors a ON a.id = l.actor_id";
+/// What every read of the action log and the append's RETURNING project, in
+/// the order `log_entry` reads it.
+const LOG_ENTRY_COLUMNS: &str = "seq, clock_unix, wall_unix_ms,
+    (SELECT login FROM actors WHERE actors.id = action_log.actor_id), action, details";
 
 fn log_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<LogEntry> {
     Ok(LogEntry {

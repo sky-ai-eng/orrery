@@ -112,7 +112,10 @@ impl World {
         self.with_conn(|conn| {
             Ok(conn
                 .query_row(
-                    &format!("{} WHERE v.id = ?1", queries::REVIEW_SELECT),
+                    &format!(
+                        "SELECT {} FROM reviews WHERE id = ?1",
+                        queries::REVIEW_COLUMNS
+                    ),
                     params![id],
                     queries::row_to_review,
                 )
@@ -591,16 +594,15 @@ impl World {
             let pull = queries::require_pull(&tx, pull_id)?;
             let clock = queries::clock(&tx)?;
             let sha = commit_sha.unwrap_or(&pull.head_sha);
-            let id: i64 = tx.query_row(
-                "INSERT INTO reviews (pull_id, author_id, state, body, commit_sha, submitted_clock_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 RETURNING id",
-                params![pull_id, author_id, state.as_str(), body, sha, clock],
-                |r| r.get(0),
-            )?;
             let review = tx.query_row(
-                &format!("{} WHERE v.id = ?1", queries::REVIEW_SELECT),
-                params![id],
+                &format!(
+                    "INSERT INTO reviews (pull_id, author_id, state, body, commit_sha,
+                                          submitted_clock_unix)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     RETURNING {}",
+                    queries::REVIEW_COLUMNS
+                ),
+                params![pull_id, author_id, state.as_str(), body, sha, clock],
                 queries::row_to_review,
             )?;
             // GitHub: once a requested reviewer submits a review, they are no
@@ -638,17 +640,15 @@ impl World {
             let tx = conn.unchecked_transaction()?;
             let pull = queries::require_pull(&tx, pull_id)?;
             let clock = queries::clock(&tx)?;
-            let id: i64 = tx.query_row(
-                "INSERT INTO issue_comments (pull_id, author_id, body,
-                                             created_clock_unix, updated_clock_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?4)
-                 RETURNING id",
-                params![pull_id, author_id, body, clock],
-                |r| r.get(0),
-            )?;
             let comment = tx.query_row(
-                &format!("{} WHERE c.id = ?1", queries::COMMENT_SELECT),
-                params![id],
+                &format!(
+                    "INSERT INTO issue_comments (pull_id, author_id, body,
+                                                 created_clock_unix, updated_clock_unix)
+                     VALUES (?1, ?2, ?3, ?4, ?4)
+                     RETURNING {}",
+                    queries::COMMENT_COLUMNS
+                ),
+                params![pull_id, author_id, body, clock],
                 queries::row_to_comment,
             )?;
             touch_pull(&tx, pull_id)?;
