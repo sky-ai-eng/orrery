@@ -16,7 +16,8 @@ use axum::routing::{get, post};
 use orrery_snapshot::{DiffSide, SnapshotError};
 use orrery_world::{WorldError, WorldView};
 
-use crate::control::{Fault, Fields, errors, internal, keyset_page, page_size};
+use crate::control::{Fault, Fields, errors, internal};
+use crate::list::{self, SortDir};
 use crate::{AppState, json};
 
 pub(crate) fn router() -> Router<AppState> {
@@ -90,18 +91,12 @@ async fn read_one(state: &AppState, name: String) -> Response<Body> {
 }
 
 async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
-    // TODO(ORR-58): pages by the visible `after_name` cursor with no
-    // `total_count`; moves to `list::read_window` and `list::answer`.
     let mut fields = Fields::parse(&body);
-    let page_size = page_size(&mut fields);
-    let after_name: Option<String> = fields.optional("after_name");
-    if let Some(after) = &after_name
-        && let Err(e) = orrery_snapshot::validate_name(after)
-    {
-        fields.fault(Fault::invalid(e.to_string(), "after_name"));
-    }
-    let page_size = match fields.finish(page_size) {
-        Ok(n) => n,
+    let order = list::read_dir(&mut fields, "name");
+    let query = serde_json::json!({ "sort_dir": order });
+    let window = list::read_window::<String>(&mut fields, "snapshots", &query);
+    let window = match fields.finish(Some(window)) {
+        Ok(w) => w,
         Err(resp) => return *resp,
     };
     let guard = state.git.gate().read_owned().await;
@@ -111,28 +106,26 @@ async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
         orrery_snapshot::list(&dir)
     })
     .await;
-    let all = match flatten(result) {
+    let mut all = match flatten(result) {
         Ok(a) => a,
         Err(e) => return snapshot_error(e, None),
     };
-    // Keyset over the listing's name order; the set is bounded by what an
-    // operator created, but the read contract is uniform anyway.
+    // The listing is read whole, in name order, under the gate's read side,
+    // so its length is the total the page was cut from.
+    let total = i64::try_from(all.len()).unwrap_or(i64::MAX);
+    if order == SortDir::Desc {
+        all.reverse();
+    }
     let rows: Vec<_> = all
         .into_iter()
-        .filter(|s| match &after_name {
-            Some(after) => s.name.as_str() > after.as_str(),
-            None => true,
+        .filter(|s| match (&window.resume, order) {
+            (None, _) => true,
+            (Some(last), SortDir::Asc) => s.name > *last,
+            (Some(last), SortDir::Desc) => s.name < *last,
         })
-        .take(page_size + 1)
+        .take(window.fetch())
         .collect();
-    let (items, next_after_name) = keyset_page(rows, page_size, |s| s.name.clone());
-    json(
-        StatusCode::OK,
-        serde_json::json!({
-            "items": items.iter().map(to_value).collect::<Vec<_>>(),
-            "next_after_name": next_after_name,
-        }),
-    )
+    list::answer(rows, &window, total, |s| s.name.clone())
 }
 
 async fn delete_one(

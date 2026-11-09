@@ -73,6 +73,13 @@ pub enum LogOrder {
     NewestFirst,
 }
 
+/// The order a list read returns its items in, by the list's key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyOrder {
+    Ascending,
+    Descending,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PullState {

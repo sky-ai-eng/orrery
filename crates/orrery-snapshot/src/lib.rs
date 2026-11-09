@@ -100,7 +100,7 @@ pub fn list(snapshots_dir: &Path) -> Result<Vec<SnapshotInfo>> {
         let name = entry.file_name().to_string_lossy().into_owned();
         // Only a directory a snapshot could be named is one: `.tmp-*` is an
         // in-flight or crashed copy, and no other operation accepts any
-        // other name, so a listed name is always a usable cursor.
+        // other name, so every listed name is one the others accept.
         if !entry.file_type()?.is_dir() || validate_name(&name).is_err() {
             continue;
         }

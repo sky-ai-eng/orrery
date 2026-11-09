@@ -84,8 +84,8 @@ pub(crate) fn read_window<K: DeserializeOwned>(
         Some(Some(token)) if token.f != fingerprint => {
             if query_is_sound {
                 fields.fault(Fault::invalid(
-                    "page_token was issued for other filters or another order; \
-                     start again from the first page"
+                    "page_token was issued for another list, other filters, or \
+                     another order; start again from the first page"
                         .to_string(),
                     "page_token",
                 ));
@@ -149,6 +149,16 @@ pub(crate) fn read_sort(fields: &mut Fields, keys: &[SortKey]) -> Option<(&'stat
             None
         }
     }
+}
+
+/// Read the order of a list that sorts by one key, `key`: the direction a
+/// body names, and ascending when it names none.
+pub(crate) fn read_dir(fields: &mut Fields, key: &'static str) -> SortDir {
+    let key = SortKey {
+        name: key,
+        default_dir: SortDir::Asc,
+    };
+    read_sort(fields, std::slice::from_ref(&key)).map_or(key.default_dir, |(_, dir)| dir)
 }
 
 /// The answer to a list read of `window.fetch()` rows: the page, the
