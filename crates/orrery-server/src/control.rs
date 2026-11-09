@@ -47,6 +47,7 @@ pub fn router(state: AppState) -> Router {
             post(issue_oauth_client_secret),
         )
         .route("/log/list", post(log_list))
+        .route("/log/stream", get(crate::log_stream::stream))
         .merge(crate::snapshots::router())
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
@@ -684,6 +685,14 @@ pub(crate) struct Fault {
 }
 
 impl Fault {
+    pub(crate) fn new(reason: &'static str, message: String, field: Option<&str>) -> Fault {
+        Fault {
+            reason,
+            message,
+            field: field.map(str::to_string),
+        }
+    }
+
     pub(crate) fn invalid(message: String, field: impl Into<String>) -> Fault {
         Fault {
             reason: "INVALID_ARGUMENT",

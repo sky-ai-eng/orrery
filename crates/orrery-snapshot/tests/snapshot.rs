@@ -188,6 +188,12 @@ fn restore_rewinds_and_the_world_keeps_working() {
     inst.world.create_actor("carol", ActorKind::User).unwrap();
     orrery_snapshot::create(&inst.world, &inst.snapshots(), "again").unwrap();
 
+    // Carol's entry is numbered past the two the restore discarded, and the
+    // diff counts the one entry rather than the span of numbers.
+    let since = inst.diff("before", Some("again"));
+    assert_eq!(since.log.to_seq - since.log.from_seq, 3);
+    assert_eq!(since.log.appended, 1);
+
     assert!(matches!(
         orrery_snapshot::restore(&inst.world, &inst.snapshots(), "ghost"),
         Err(SnapshotError::NotFound(_))
