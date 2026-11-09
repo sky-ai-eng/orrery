@@ -1,6 +1,6 @@
 # Repository lock benchmark
 
-`lock-bench` (`crates/orrery-bench`) measures what the per-repository lock costs. Git reads hold it for read: a fetch's requests, and the GitHub face's reads of a repository's refs. Writes hold it for write: a push, a merge, and opening or editing a pull request. So a write waits for the reads in progress, and a read waits for a write in progress (`spec/surface-git.md`, "What a fetch sees"). The bench measures both waits with real `git`, so a change to the lock, or to what runs under it, can be judged by numbers. Run it with `./scripts/lock-bench.sh`.
+`lock-bench` (`crates/orrery-bench`) measures what the per-repository lock costs. Git reads hold it for read: a fetch's requests, and the GitHub face's reads of a repository's refs. Writes hold it for write: a push, a merge, opening a pull request, and an edit of one that sets its `state` or `base`. Any other edit of a pull request, such as one of only its title or body, holds it for read. So a write waits for the reads in progress, and a read waits for a write in progress (`spec/surface-git.md`, "What a fetch sees"). The bench measures both waits with real `git`, so a change to the lock, or to what runs under it, can be judged by numbers. Run it with `./scripts/lock-bench.sh`.
 
 It is not part of any workflow and nothing runs it automatically. Run it by hand when you change the lock, the git face's request handling, or the work a write does under the lock.
 

@@ -39,11 +39,13 @@ pub struct GitFace {
     /// One read-write lock per repo. A write holds it for write, from the
     /// refs it reads before moving any until its record commits: a push
     /// (receive-pack's before/after ref observation), a merge (its
-    /// check-then-move), and opening or editing a pull request (an edit can
-    /// close, reopen, or retarget it), since which pulls are open on a branch
-    /// decides which pull refs a push moves before it is recorded. Every other git request, a fetch's in
-    /// particular, holds it for read, so it sees the repository before a write
-    /// or after its record, never partway.
+    /// check-then-move), opening a pull request, and an edit of one that sets
+    /// its state or base (closing, reopening, or retargeting it), since which
+    /// pulls are open on a branch decides which pull refs a push moves before
+    /// it is recorded. Every other git request, a fetch's in particular,
+    /// holds it for read, so it sees the repository before a write or after its
+    /// record, never partway, and so does an edit that sets neither, so it
+    /// never lands between a write's read of the pull and that write's record.
     repo_locks: std::sync::Mutex<BTreeMap<i64, Arc<tokio::sync::RwLock<()>>>>,
     /// World-wide write gate: every git-side operation holds it for read;
     /// snapshot create/restore hold it for write, so a copy of the world
