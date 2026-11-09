@@ -520,12 +520,27 @@ impl World {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Whether `seq` is a position in the action log: 0, or the `seq` of an
+    /// entry it holds. Any other number is [`WorldError::NoSuchLogPosition`],
+    /// carrying the log's newest `seq`.
+    pub fn check_log_position(&self, seq: i64) -> Result<()> {
+        check_log_position(&self.lock(), seq)
+    }
+
     /// One page of the entries with `seq > after_seq`, in `order`, and how
     /// many such entries there are. With `resume`, the `seq` of the previous
     /// page's last entry, the page holds only entries past it in `order`, so a
     /// walk neither repeats nor skips an entry while the log grows. The count
     /// is read under the same lock as the page. Only `seq`'s order is relied
     /// on, never that its values are contiguous.
+    ///
+    /// `after_seq` is checked as [`World::check_log_position`] checks it. A
+    /// `resume` the log no longer holds is [`WorldError::ResumeNotInLog`]:
+    /// the walk's earlier pages came from a log a restore replaced. A `seq`
+    /// is issued once, so while the log holds `resume` it holds the same
+    /// entries up to it, and a walk in either order goes on exactly. Both are
+    /// checked under the lock the page is read under, so no restore lands
+    /// between a check and the read it gates.
     pub fn log_page(
         &self,
         after_seq: i64,
@@ -534,6 +549,12 @@ impl World {
         limit: usize,
     ) -> Result<(Vec<LogEntry>, i64)> {
         let conn = self.lock();
+        check_log_position(&conn, after_seq)?;
+        if let Some(resume) = resume
+            && !log_holds(&conn, resume)?
+        {
+            return Err(WorldError::ResumeNotInLog(resume));
+        }
         let limit = limit as i64;
         // Each bound is a plain comparison on `seq`, the rowid, so a page deep
         // in the log reads only its own rows.
@@ -632,6 +653,24 @@ fn open_conn(root: &Path) -> Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     schema::apply(&mut conn)?;
     Ok(conn)
+}
+
+fn check_log_position(conn: &Connection, seq: i64) -> Result<()> {
+    if seq == 0 || log_holds(conn, seq)? {
+        return Ok(());
+    }
+    Err(WorldError::NoSuchLogPosition {
+        seq,
+        newest_seq: queries::last_seq(conn)?,
+    })
+}
+
+fn log_holds(conn: &Connection, seq: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM action_log WHERE seq = ?1)",
+        params![seq],
+        |r| r.get(0),
+    )?)
 }
 
 fn checkpoint(conn: &Connection) -> Result<()> {

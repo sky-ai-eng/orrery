@@ -651,3 +651,151 @@ async fn entries_from_before_real_times_were_recorded_read_null() {
         assert_eq!(item.get("wall_unix_ms"), Some(&Value::Null), "{item}");
     }
 }
+
+fn snapshot(base: &str, name: &str) -> i64 {
+    control_post(base, "/_orrery/snapshots", json!({ "name": name }))["last_seq"]
+        .as_i64()
+        .unwrap()
+}
+
+fn restore(base: &str, name: &str) {
+    control_post(
+        base,
+        &format!("/_orrery/snapshots/{name}/restore"),
+        json!({}),
+    );
+}
+
+/// A position a restore discarded, or one never issued, is refused: the
+/// entries numbered above it in this log did not follow it.
+#[tokio::test(flavor = "multi_thread")]
+async fn after_seq_must_name_an_entry_in_the_log() {
+    let inst = boot().await;
+    let base = &inst.base;
+    mint_actor(base, "alice", "user");
+    let before = snapshot(base, "before");
+    mint_actor(base, "bob", "user");
+    let after = snapshot(base, "after");
+    restore(base, "before");
+    mint_actor(base, "carol", "user");
+    let newest = whole_log(base).last().unwrap()["seq"].as_i64().unwrap();
+    assert!(
+        newest > after,
+        "the second trial is numbered past the first"
+    );
+
+    for seq in [after, newest + 1000] {
+        for order in [json!({}), newest_first()] {
+            for page_size in [json!(null), json!(0)] {
+                let mut body = order.clone();
+                body["after_seq"] = json!(seq);
+                body["page_size"] = page_size;
+                let (status, answer) = post(base, "/log/list", body.clone());
+                assert_eq!(status, 404, "{body}: {answer}");
+                assert_eq!(
+                    faults(&answer),
+                    [fault("NOT_FOUND", Some("after_seq"))],
+                    "{body}"
+                );
+                let message = answer["errors"][0]["message"].as_str().unwrap();
+                assert!(
+                    message.contains(&format!("the newest is {newest}")),
+                    "{answer}"
+                );
+            }
+        }
+    }
+
+    // A position the restore kept still reads what followed it.
+    let followed = list(base, "/log/list", json!({ "after_seq": before }));
+    let after_before: Vec<Value> = whole_log(base)
+        .into_iter()
+        .filter(|e| e["seq"].as_i64() > Some(before))
+        .collect();
+    assert_eq!(followed["items"], json!(after_before));
+    assert_eq!(followed["total_count"], after_before.len());
+}
+
+/// A token resumes from the last entry it served. A restore that discarded
+/// that entry ends the walk; one that kept it does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_walk_goes_on_across_a_restore_only_while_the_log_holds_its_last_entry() {
+    let inst = boot().await;
+    let base = &inst.base;
+    mint_actor(base, "alice", "user");
+    let early = snapshot(base, "early");
+
+    let mut late = 0;
+    for (n, mut first) in [
+        json!({ "after_seq": early, "page_size": 1 }),
+        json!({ "sort_key": "seq", "sort_dir": "desc", "page_size": 1 }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for _ in 0..3 {
+            late += 1;
+            mint_actor(base, &format!("late{late}"), "user");
+        }
+        let page = list(base, "/log/list", first.clone());
+        let served = page["items"][0]["seq"].as_i64().unwrap();
+        assert!(served > early, "{page}");
+        restore(base, "early");
+
+        first["page_token"] = page["next_page_token"].clone();
+        let (status, answer) = post(base, "/log/list", first.clone());
+        assert_eq!(status, 400, "walk {n}: {answer}");
+        assert_eq!(
+            faults(&answer),
+            [fault("INVALID_ARGUMENT", Some("page_token"))],
+            "walk {n}"
+        );
+        let message = answer["errors"][0]["message"].as_str().unwrap();
+        assert!(message.contains("restore"), "{answer}");
+
+        // Started again, the walk reads the restored log, whose newest entry
+        // is the snapshot's.
+        first.as_object_mut().unwrap().remove("page_token");
+        let restarted = list(base, "/log/list", first);
+        let log = whole_log(base);
+        assert_eq!(log.last().unwrap()["seq"].as_i64(), Some(early));
+        let expected = match n {
+            0 => json!({ "items": [], "total_count": 0 }),
+            _ => json!({
+                "items": [log.last().unwrap()],
+                "total_count": log.len(),
+                "next_page_token": restarted["next_page_token"],
+            }),
+        };
+        assert_eq!(restarted, expected, "walk {n}");
+    }
+
+    for login in ["bob", "carol", "dana"] {
+        mint_actor(base, login, "user");
+    }
+    for (n, body) in [
+        json!({ "page_size": 2 }),
+        json!({ "sort_key": "seq", "sort_dir": "desc", "page_size": 2 }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // After the first page: a snapshot that holds everything served, a
+        // second trial, and a restore that discards only the trial.
+        let name = format!("kept{n}");
+        let mut restored = false;
+        let walked = walk(base, body.clone(), || {
+            if !restored {
+                restored = true;
+                snapshot(base, &name);
+                mint_actor(base, &format!("trial{n}"), "user");
+                restore(base, &name);
+            }
+        });
+        let mut log = whole_log(base);
+        if body.get("sort_dir").is_some() {
+            log.reverse();
+        }
+        assert_eq!(walked, log, "walk {n}");
+    }
+}
