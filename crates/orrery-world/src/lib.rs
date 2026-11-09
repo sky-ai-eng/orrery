@@ -65,7 +65,8 @@ type Listener = Box<dyn Fn(Signal) + Send + Sync>;
 
 /// What a [`World`] tells the listeners registered with [`World::listen`].
 /// A signal says only that something may have changed: the change itself is
-/// read through the `World`.
+/// read through the `World`. Each is raised with the connection lock held,
+/// so any read that sees the change it announces begins after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     /// An entry was appended to the action log. It may be inside a
@@ -548,7 +549,11 @@ impl World {
     /// before the swap never names a different entry after it: the reopened
     /// database's next `seq` is raised past every one this world issued
     /// before. The log then has a gap where the discarded entries were.
-    /// Once that is done, [`Signal::StateReplaced`] is raised.
+    ///
+    /// [`Signal::StateReplaced`] is raised once the reopen succeeds, before
+    /// the raise and whatever `f` returned: the state may have changed even
+    /// when a later step fails, and listeners must not go on reading it as
+    /// the log they had.
     pub fn swap_state(&self, f: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
         let mut guard = self.lock();
         checkpoint(&guard)?;
@@ -557,10 +562,10 @@ impl World {
         drop(old);
         let swap_result = f();
         *guard = open_conn(&self.root)?;
-        raise_issued_seq(&guard, issued)?;
         self.signal(Signal::StateReplaced {
             newest_seq: queries::last_seq(&guard)?,
         });
+        raise_issued_seq(&guard, issued)?;
         swap_result?;
         Ok(())
     }

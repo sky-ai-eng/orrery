@@ -1,12 +1,10 @@
 //! `GET /_orrery/log/stream`: the action log as server-sent events, from a
 //! position the caller holds, then each entry as it is appended.
 //!
-//! The kernel's [`Signal`]s only wake a stream. What a stream sends is always
-//! read through the `World`, under its connection lock, so a signal raised
-//! inside a transaction that has not committed yet is harmless: the read
-//! waits for the writer and sees the entry once it commits, or nothing if it
-//! rolled back. A stream holds the lock only for each read and never takes
-//! the world write gate, so it holds up no write, snapshot, or restore.
+//! The kernel's [`Signal`]s only wake a stream; what a stream sends is always
+//! read through the `World`, so a signal for an entry that never commits
+//! sends nothing. Between reads a stream holds neither the connection nor the
+//! world write gate, so it holds up no write, snapshot, or restore.
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
@@ -49,8 +47,6 @@ pub(crate) struct LogChanges {
 pub(crate) fn follow(world: &World) -> Arc<watch::Sender<LogChanges>> {
     let changes = Arc::new(watch::Sender::new(LogChanges::default()));
     let sender = changes.clone();
-    // `send_modify` only takes the channel's own lock, briefly, so it is
-    // fine to call with the connection lock held.
     world.listen(move |signal| match signal {
         Signal::LogMayHaveGrown => sender.send_modify(|_| {}),
         Signal::StateReplaced { newest_seq } => sender.send_modify(|c| {
@@ -297,9 +293,8 @@ impl Follow {
                     return None;
                 }
             };
-            // A restore raises its signal before it releases the connection
-            // lock, so a read that saw the restored log sees the new count
-            // here, and its page is dropped unsent.
+            // Checked after the read, so a page read from a replaced log is
+            // dropped unsent (the ordering is `Signal`'s).
             let changes = *self.changes.borrow();
             if changes.restores != self.restores {
                 self.ended = true;
