@@ -298,23 +298,18 @@ fn create_repo_returns_the_stored_row() {
 }
 
 #[test]
-fn create_repo_with_an_unknown_actor_is_a_foreign_key_failure() {
+fn create_repo_with_an_unknown_actor_is_no_such_actor() {
     let (_dir, w) = fresh();
     let (acme, _) = w.create_actor("acme", ActorKind::Org).unwrap();
     let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
     let unknown = alice.id + 1000;
-    fn foreign_key_failure<T>(r: Result<T, WorldError>) -> bool {
-        matches!(
-            r,
-            Err(WorldError::Sqlite(rusqlite::Error::SqliteFailure(f, _)))
-                if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
-        )
-    }
-    assert!(foreign_key_failure(
-        w.create_repo(unknown, "webapp", None, false, "main", alice.id)
+    assert!(matches!(
+        w.create_repo(unknown, "webapp", None, false, "main", alice.id),
+        Err(WorldError::NoSuchActorId(id)) if id == unknown
     ));
-    assert!(foreign_key_failure(
-        w.create_repo(acme.id, "webapp", None, false, "main", unknown)
+    assert!(matches!(
+        w.create_repo(acme.id, "webapp", None, false, "main", unknown),
+        Err(WorldError::NoSuchActorId(id)) if id == unknown
     ));
     assert!(w.repo_by_owner_name("acme", "webapp").unwrap().is_none());
 }

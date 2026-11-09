@@ -58,6 +58,8 @@ pub enum WorldError {
     InvalidTransition(String),
     #[error("no actor {0:?}")]
     NoSuchActor(String),
+    #[error("no actor with id {0}")]
+    NoSuchActorId(i64),
     #[error("the system actor holds no token")]
     SystemActorToken,
     #[error("invalid emails: {0}")]

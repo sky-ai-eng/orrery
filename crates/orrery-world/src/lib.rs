@@ -376,6 +376,18 @@ impl World {
         validate_repo_name(name)?;
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
+        // The insert's foreign keys refuse an unknown actor too, but as an
+        // untyped SQLite error that does not say which id it was.
+        for id in [owner_id, created_by] {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM actors WHERE id = ?1)",
+                params![id],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(WorldError::NoSuchActorId(id));
+            }
+        }
         let clock = queries::clock(&tx)?;
         let repo = tx
             .query_row(
