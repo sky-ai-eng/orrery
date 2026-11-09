@@ -71,6 +71,17 @@ pub struct RefMove<'a> {
     /// The pulls, by number, that take `new` as their head: for a branch,
     /// what [`World::pulls_to_sync`] named for this move.
     pub repins: Vec<i64>,
+    /// Whether the move created the ref, moved it, or deleted it, which the
+    /// kernel cannot read from `old` and `new` in the caller's spelling.
+    pub change: RefChange,
+}
+
+/// What a [`RefMove`] did to its ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefChange {
+    Created,
+    Moved,
+    Deleted,
 }
 
 pub struct World {
@@ -465,9 +476,24 @@ impl World {
     /// Record a push the git side has taken: `pushed_at` moves to the current
     /// clock, `default_branch` (when given) becomes the repository's default
     /// branch, and each move in `moves`, in order, appends a `ref.update`
-    /// entry and re-pins the pulls it names. It is one transaction, so a
-    /// reader that sees any of the push's entries sees the repository and its
-    /// pulls as the push left them. A push that moved no ref records nothing.
+    /// entry and re-pins the pulls it names. Every unmerged pull whose base a
+    /// move creates or moves is marked [`Pull::base_moved`] first, so a pull
+    /// the same push re-pins ends unmarked. Then each branch a move deleted
+    /// or created changes the pulls on it, in the same order, as GitHub
+    /// changes them:
+    ///
+    /// - a deleted branch closes every open pull whose head it is, then
+    ///   records its deletion on every pull whose head it is, closed and
+    ///   merged ones too; and it records its deletion on every open pull whose
+    ///   base it is, then closes that pull, one pull at a time;
+    /// - a created branch records its restoration on every closed pull whose
+    ///   head it is, which stays closed.
+    ///
+    /// Each close appends a `pull.close` entry by the pusher, after all of the
+    /// push's `ref.update` entries, and leaves the pull's head, base, and draft
+    /// flag as they were. It is one transaction, so a reader that sees any of
+    /// the push's entries sees the repository and its pulls as the push left
+    /// them. A push that moved no ref records nothing.
     ///
     /// A named pull that is not open refuses the whole record: the caller
     /// moved that pull's ref on the strength of it being open, and the world
@@ -490,8 +516,10 @@ impl World {
     }
 
     /// The writes a push and a merge share, inside the caller's transaction:
-    /// `pushed_at` and `default_branch` as [`World::record_push`] describes,
-    /// and for each move, in order, its `ref.update` entry and its re-pins.
+    /// `pushed_at` and `default_branch` as [`World::record_push`] describes;
+    /// for each move, in order, its `ref.update` entry and its re-pins; and
+    /// then, for each move of a branch it created or deleted, the changes to
+    /// the pulls on it.
     pub(crate) fn record_moves(
         &self,
         tx: &Connection,
@@ -511,6 +539,16 @@ impl World {
             return Err(WorldError::NoSuchRepo(repo_id));
         }
         let repo = pulls::repo_full_name(tx, repo_id)?;
+        // Before any re-pin, so a pull whose head and base one push both move
+        // ends with its head pinned against the moved base. A deleted base
+        // needs no mark: a pull whose base is gone has no test merge at all.
+        for m in moves {
+            if let Some(branch) = m.name.strip_prefix("refs/heads/")
+                && m.change != RefChange::Deleted
+            {
+                pulls::mark_base_moved(tx, repo_id, branch)?;
+            }
+        }
         for m in moves {
             self.log_locked(
                 tx,
@@ -525,6 +563,13 @@ impl World {
             )?;
             for &number in &m.repins {
                 pulls::repin_open_pull(tx, repo_id, number, m.new)?;
+            }
+        }
+        // After every re-pin, so a pull a move re-pins is still open when it
+        // is re-pinned, though a later move's deletion closes it.
+        for m in moves {
+            if let Some(branch) = m.name.strip_prefix("refs/heads/") {
+                self.record_branch_change(tx, repo_id, actor_id, branch, m.change)?;
             }
         }
         Ok(())

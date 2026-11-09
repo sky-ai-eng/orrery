@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::queries;
 use crate::types::*;
-use crate::{RefMove, Result, World, WorldError};
+use crate::{RefChange, RefMove, Result, World, WorldError};
 
 pub struct NewPull<'a> {
     pub repo_id: i64,
@@ -203,7 +203,7 @@ impl World {
                 && base_ref != before.base_ref
             {
                 tx.execute(
-                    "UPDATE pulls SET base_ref = ?1, base_sha = ?2 WHERE id = ?3",
+                    "UPDATE pulls SET base_ref = ?1, base_sha = ?2, base_moved = 0 WHERE id = ?3",
                     params![base_ref, base_sha, pull_id],
                 )?;
                 fields.push("base");
@@ -531,6 +531,12 @@ impl World {
                     before.number, before.base_ref, base.name
                 )));
             }
+            if base.change != RefChange::Moved {
+                return Err(WorldError::InvalidTransition(format!(
+                    "pull #{}'s merge must move {}, not create or delete it",
+                    before.number, base.name
+                )));
+            }
             self.record_moves(
                 &tx,
                 before.repo_id,
@@ -577,6 +583,82 @@ impl World {
                 .collect::<rusqlite::Result<Vec<i64>>>()?;
             Ok(numbers)
         })
+    }
+
+    /// What a push's creation or deletion of `branch` does to the pulls on
+    /// it, inside the push's transaction, as [`World::record_push`] describes.
+    /// The order is GitHub's: on a deleted head, every close comes before any
+    /// deletion item, across pulls as well as within one.
+    pub(crate) fn record_branch_change(
+        &self,
+        tx: &Connection,
+        repo_id: i64,
+        actor_id: i64,
+        branch: &str,
+        change: RefChange,
+    ) -> Result<()> {
+        let pulls_on = |side: &str, state: Option<&str>| -> Result<Vec<i64>> {
+            let sql = format!(
+                "SELECT id FROM pulls WHERE repo_id = ?1 AND {side}_ref = ?2
+                 AND (?3 IS NULL OR state = ?3) ORDER BY number"
+            );
+            let ids = tx
+                .prepare(&sql)?
+                .query_map(params![repo_id, branch, state], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            Ok(ids)
+        };
+        match change {
+            RefChange::Moved => {}
+            RefChange::Deleted => {
+                for id in pulls_on("head", Some("open"))? {
+                    self.close_for_deleted_branch(tx, id, actor_id)?;
+                }
+                for id in pulls_on("head", None)? {
+                    let deleted = TimelineKind::HeadRefDeleted(branch.to_string());
+                    record_timeline(tx, id, actor_id, &deleted)?;
+                    touch_pull(tx, id)?;
+                }
+                for id in pulls_on("base", Some("open"))? {
+                    let deleted = TimelineKind::BaseRefDeleted(branch.to_string());
+                    record_timeline(tx, id, actor_id, &deleted)?;
+                    self.close_for_deleted_branch(tx, id, actor_id)?;
+                }
+            }
+            RefChange::Created => {
+                for id in pulls_on("head", Some("closed"))? {
+                    record_timeline(tx, id, actor_id, &TimelineKind::HeadRefRestored)?;
+                    touch_pull(tx, id)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Close an open pull because a push deleted its head or base, as
+    /// [`World::close_pull`] closes one: the same state change, timeline
+    /// item, and `pull.close` entry, by the pusher.
+    fn close_for_deleted_branch(&self, tx: &Connection, pull_id: i64, actor_id: i64) -> Result<()> {
+        let (repo_id, number): (i64, i64) = tx.query_row(
+            "UPDATE pulls SET state = 'closed',
+             closed_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+             WHERE id = ?1 AND state = 'open'
+             RETURNING repo_id, number",
+            params![pull_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        record_timeline(tx, pull_id, actor_id, &TimelineKind::Closed)?;
+        touch_pull(tx, pull_id)?;
+        self.log_locked(
+            tx,
+            actor_id,
+            "pull.close",
+            &serde_json::json!({
+                "repo": repo_full_name(tx, repo_id)?,
+                "number": number,
+            }),
+        )?;
+        Ok(())
     }
 
     /// Submit a review, pinned to the pull's current head. Bumps the pull's
@@ -749,13 +831,16 @@ fn record_timeline(
     actor_id: i64,
     kind: &TimelineKind,
 ) -> Result<()> {
-    let (kind, label, reviewer) = match kind {
-        TimelineKind::Labeled(name) => ("labeled", Some(name.as_str()), None),
-        TimelineKind::Unlabeled(name) => ("unlabeled", Some(name.as_str()), None),
-        TimelineKind::ReadyForReview => ("ready_for_review", None, None),
-        TimelineKind::ReviewRequested(rv) => ("review_requested", None, Some(rv)),
-        TimelineKind::ReviewRequestRemoved(rv) => ("review_request_removed", None, Some(rv)),
-        TimelineKind::Closed => ("closed", None, None),
+    let (kind, label, ref_name, reviewer) = match kind {
+        TimelineKind::Labeled(name) => ("labeled", Some(name.as_str()), None, None),
+        TimelineKind::Unlabeled(name) => ("unlabeled", Some(name.as_str()), None, None),
+        TimelineKind::ReadyForReview => ("ready_for_review", None, None, None),
+        TimelineKind::ReviewRequested(rv) => ("review_requested", None, None, Some(rv)),
+        TimelineKind::ReviewRequestRemoved(rv) => ("review_request_removed", None, None, Some(rv)),
+        TimelineKind::Closed => ("closed", None, None, None),
+        TimelineKind::HeadRefDeleted(name) => ("head_ref_deleted", None, Some(name.as_str()), None),
+        TimelineKind::BaseRefDeleted(name) => ("base_ref_deleted", None, Some(name.as_str()), None),
+        TimelineKind::HeadRefRestored => ("head_ref_restored", None, None, None),
     };
     let (reviewer_login, team_id, team_slug) = match reviewer {
         Some(RequestedReviewer::User(login)) => (Some(login.as_str()), None, None),
@@ -763,14 +848,15 @@ fn record_timeline(
         None => (None, None, None),
     };
     conn.execute(
-        "INSERT INTO pull_timeline (pull_id, kind, label, reviewer_id, team_id, team_slug,
-                                    actor_id, clock_unix)
-         VALUES (?1, ?2, ?3, (SELECT id FROM actors WHERE login = ?4), ?5, ?6, ?7,
+        "INSERT INTO pull_timeline (pull_id, kind, label, ref_name, reviewer_id, team_id,
+                                    team_slug, actor_id, clock_unix)
+         VALUES (?1, ?2, ?3, ?4, (SELECT id FROM actors WHERE login = ?5), ?6, ?7, ?8,
                  (SELECT clock_unix FROM world WHERE id = 1))",
         params![
             pull_id,
             kind,
             label,
+            ref_name,
             reviewer_login,
             team_id,
             team_slug,
@@ -843,7 +929,7 @@ pub(crate) fn repin_open_pull(
     sha: &str,
 ) -> Result<()> {
     let n = conn.execute(
-        "UPDATE pulls SET head_sha = ?1,
+        "UPDATE pulls SET head_sha = ?1, base_moved = 0,
          updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
          WHERE repo_id = ?2 AND number = ?3 AND state = 'open'",
         params![sha, repo_id, number],
@@ -873,6 +959,18 @@ fn touch_pull(conn: &Connection, pull_id: i64) -> Result<Pull> {
     )
     .optional()?
     .ok_or(WorldError::NoSuchPull(pull_id))
+}
+
+/// Mark the unmerged pulls whose base is `branch` as having had their base
+/// move. It moves no `updated_at`: GitHub's does not move on a push to the
+/// base.
+pub(crate) fn mark_base_moved(conn: &Connection, repo_id: i64, branch: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE pulls SET base_moved = 1
+         WHERE repo_id = ?1 AND base_ref = ?2 AND merged = 0 AND base_moved = 0",
+        params![repo_id, branch],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn repo_full_name(conn: &Connection, repo_id: i64) -> Result<String> {

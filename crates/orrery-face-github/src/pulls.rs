@@ -9,9 +9,13 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use orrery_face_git::store;
-use orrery_world::{Actor, NewPull, Pull, PullState, RefMove, Repo, ReviewState, WorldError};
+use orrery_world::{
+    Actor, NewPull, Pull, PullState, RefChange, RefMove, Repo, ReviewState, WorldError,
+};
 
-use crate::render::{comment_json, label_json, pull_json, review_json};
+use crate::render::{
+    comment_json, full_pull_json, label_json, landed_mergeability, pull_json, review_json,
+};
 use crate::{
     GithubFace, github_error, internal, json_response, media, orrery_unsupported_field,
     resolve_repo, validation_custom, validation_custom_field, validation_invalid,
@@ -123,7 +127,13 @@ pub(crate) async fn create_pull(
         Ok(pull) => match face.git.pin_pull_ref(&repo, pull.number, &pull.head_sha) {
             Ok(()) => json_response(
                 StatusCode::CREATED,
-                pull_json(&face, &repo, &owner_actor, &pull),
+                full_pull_json(
+                    &face,
+                    &repo,
+                    &owner_actor,
+                    &pull,
+                    landed_mergeability(&face, &repo, &pull),
+                ),
             ),
             Err(e) => internal(e),
         },
@@ -332,7 +342,16 @@ pub(crate) async fn patch_pull(
         return refused;
     }
 
-    json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull))
+    json_response(
+        StatusCode::OK,
+        full_pull_json(
+            &face,
+            &repo,
+            &owner_actor,
+            &pull,
+            landed_mergeability(&face, &repo, &pull),
+        ),
+    )
 }
 
 /// A check's outcome: its value, or GitHub's refusal as the inner `Err`.
@@ -603,6 +622,7 @@ pub(crate) async fn merge_pull(
         old: &base_tip,
         new: &merge_sha,
         repins,
+        change: RefChange::Moved,
     };
 
     // Every ref the merge moves is in place before its record commits, so a

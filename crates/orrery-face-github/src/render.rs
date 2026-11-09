@@ -2,7 +2,10 @@
 //! generously (rule 1: fields liberal, endpoints strict). The fields each
 //! object carries are listed in spec/surface-github.md §1.0.
 
-use orrery_world::{Actor, ActorKind, CheckRun, IssueComment, Pull, Repo, Review, Team};
+use std::path::Path;
+
+use orrery_face_git::{GitFaceError, store};
+use orrery_world::{Actor, ActorKind, CheckRun, IssueComment, Pull, PullState, Repo, Review, Team};
 
 use crate::GithubFace;
 
@@ -67,10 +70,10 @@ fn host_name(base: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The GitHub pull request object. `merged_at` equals `closed_at` when
-/// merged — one instant on GitHub too. `mergeable: null` is GitHub's
-/// "not computed", which is honest here: Orrery computes mergeability at
-/// merge time, not speculatively.
+/// The GitHub pull request object as a list carries it. `merged_at` equals
+/// `closed_at` when merged — one instant on GitHub too. `mergeable` is null,
+/// GitHub's "not computed": a list's ETag hashes its body, and a test merge
+/// in it would change the tag whenever a base branch moves.
 pub(crate) fn pull_json(
     face: &GithubFace,
     repo: &Repo,
@@ -130,6 +133,96 @@ pub(crate) fn pull_json(
         "assignees": [],
         "milestone": serde_json::Value::Null,
     })
+}
+
+/// The pull request object a single read and the create and edit routes
+/// answer with: the list's, with `mergeable`, `mergeable_state`, and
+/// `rebaseable` rendered from `verdict`.
+pub(crate) fn full_pull_json(
+    face: &GithubFace,
+    repo: &Repo,
+    owner: &Actor,
+    pull: &Pull,
+    verdict: Mergeability,
+) -> serde_json::Value {
+    let mut json = pull_json(face, repo, owner, pull);
+    let (mergeable, state, rebaseable) = match verdict {
+        Mergeability::Unknown => (None, "unknown", None),
+        Mergeability::Conflicting => (Some(false), "dirty", Some(false)),
+        Mergeability::Clean => (Some(true), "clean", Some(pull.state == PullState::Open)),
+    };
+    json["mergeable"] = mergeable.into();
+    json["mergeable_state"] = state.into();
+    json["rebaseable"] = rebaseable.into();
+    json
+}
+
+/// A pull request's mergeability, which REST renders as `mergeable`,
+/// `mergeable_state`, and `rebaseable`, and GraphQL as `mergeable`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mergeability {
+    /// There is no test merge to report.
+    Unknown,
+    /// The base branch is gone, or the test merge conflicts.
+    Conflicting,
+    /// The test merge of the head onto the base branch's tip is clean.
+    Clean,
+}
+
+/// The branch tips a pull request's mergeability is decided from. They are
+/// read under the repository's lock, for read or write, under which the
+/// caller also read the pull, so the pull and its tips come from one state.
+pub(crate) struct MergeRefs {
+    pub(crate) base_tip: Option<String>,
+    pub(crate) head_tip: Option<String>,
+}
+
+impl MergeRefs {
+    pub(crate) fn read(bare: &Path, pull: &Pull) -> Result<MergeRefs, GitFaceError> {
+        let tip = |branch: &str| store::rev_parse(bare, &format!("refs/heads/{branch}"));
+        Ok(MergeRefs {
+            base_tip: tip(&pull.base_ref)?,
+            head_tip: tip(&pull.head_ref)?,
+        })
+    }
+}
+
+/// The mergeability GitHub reports for a pull request, from the tips read
+/// with it. A merged one has none. A closed one whose head branch is gone
+/// keeps the test merge GitHub made when its head or base was last pinned
+/// and cannot make another, so it has none once its base branch has moved
+/// since. The test merge reads only objects, so it needs no lock.
+pub(crate) fn mergeability(
+    bare: &Path,
+    pull: &Pull,
+    refs: &MergeRefs,
+) -> Result<Mergeability, GitFaceError> {
+    if pull.merged {
+        return Ok(Mergeability::Unknown);
+    }
+    let Some(base_tip) = &refs.base_tip else {
+        return Ok(Mergeability::Conflicting);
+    };
+    if pull.state != PullState::Open && pull.base_moved && refs.head_tip.is_none() {
+        return Ok(Mergeability::Unknown);
+    }
+    Ok(match store::merge_tree(bare, base_tip, &pull.head_sha)? {
+        Some(_) => Mergeability::Clean,
+        None => Mergeability::Conflicting,
+    })
+}
+
+/// The mergeability a write route answers with, read under the lock it still
+/// holds. A git failure answers `Unknown`, GitHub's "not computed yet",
+/// rather than failing a response whose write has already landed.
+pub(crate) fn landed_mergeability(face: &GithubFace, repo: &Repo, pull: &Pull) -> Mergeability {
+    let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    MergeRefs::read(&bare, pull)
+        .and_then(|refs| mergeability(&bare, pull, &refs))
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, number = pull.number, "computing mergeability failed");
+            Mergeability::Unknown
+        })
 }
 
 /// The GitHub review object. Wire state is the neutral store state in

@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use orrery_world::{
     ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX, NewCheckRun, NewPull,
-    Pull, PullState, RefMove, ReviewState, Signal, TimelineKind, World, WorldError, WorldSecret,
+    Pull, PullState, RefChange, RefMove, ReviewState, Signal, TimelineKind, World, WorldError,
+    WorldSecret,
 };
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -83,6 +84,7 @@ fn into_main<'a>(old: &'a str, new: &'a str, repins: Vec<i64>) -> RefMove<'a> {
         old,
         new,
         repins,
+        change: RefChange::Moved,
     }
 }
 
@@ -294,6 +296,7 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
         old: SHA_B,
         new: SHA_C,
         repins: vec![open.number],
+        change: RefChange::Moved,
     }];
     f.w.record_push(f.repo, f.alice, &moves, None).unwrap();
     let head = |n| f.w.pull_by_number(f.repo, n).unwrap().unwrap().head_sha;
@@ -311,6 +314,7 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
         old: SHA_C,
         new: SHA_A,
         repins: vec![open.number, closed.number],
+        change: RefChange::Moved,
     }];
     assert!(matches!(
         f.w.record_push(f.repo, f.alice, &stale, None),
@@ -318,6 +322,43 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
     ));
     assert_eq!(head(open.number), SHA_C);
     assert!(f.w.log_after(mark, 1000).unwrap().is_empty());
+}
+
+#[test]
+fn a_base_move_stands_until_the_head_or_base_is_pinned_again() {
+    let f = fixture();
+    let pull = open_pull(&f, "feature", SHA_B);
+    let moved = || f.w.pull_by_id(pull.id).unwrap().unwrap().base_moved;
+    let push = |name, old, new, repins| {
+        let change = RefChange::Moved;
+        let moves = [RefMove {
+            name,
+            old,
+            new,
+            repins,
+            change,
+        }];
+        f.w.record_push(f.repo, f.alice, &moves, None).unwrap();
+    };
+    assert!(!moved());
+
+    // A push to the base marks it, and a push to the head that re-pins it
+    // clears it.
+    push("refs/heads/main", SHA_A, SHA_C, vec![]);
+    assert!(moved());
+    push("refs/heads/feature", SHA_B, SHA_C, vec![pull.number]);
+    assert!(!moved());
+
+    // So do a retarget, and a reopen after a close that leaves it marked.
+    push("refs/heads/main", SHA_C, SHA_A, vec![]);
+    f.w.edit_pull(pull.id, f.alice, None, None, Some(("release", SHA_A)))
+        .unwrap();
+    assert!(!moved());
+    f.w.close_pull(pull.id, f.alice).unwrap();
+    push("refs/heads/release", SHA_A, SHA_B, vec![]);
+    assert!(moved());
+    f.w.reopen_pull(pull.id, f.alice, SHA_C).unwrap();
+    assert!(!moved());
 }
 
 #[test]
@@ -382,14 +423,19 @@ fn a_merge_whose_record_is_refused_records_none_of_it() {
     let release = open_release_pull(&f);
     let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
 
-    // A move of a branch the pull does not merge into, and a re-pin of a
-    // pull that is not open: each refuses the whole record.
+    // A move of a branch the pull does not merge into, a re-pin of a pull
+    // that is not open, and a move that deletes the base: each refuses the
+    // whole record.
     let elsewhere = RefMove {
         name: "refs/heads/release",
         ..into_main(SHA_A, SHA_C, vec![release.number])
     };
     let stale = into_main(SHA_A, SHA_C, vec![release.number, closed.number]);
-    for refused in [&elsewhere, &stale] {
+    let deleting = RefMove {
+        change: RefChange::Deleted,
+        ..into_main(SHA_A, SHA_C, vec![release.number])
+    };
+    for refused in [&elsewhere, &stale, &deleting] {
         assert!(matches!(
             f.w.record_merge(pull.id, f.bob, refused),
             Err(WorldError::InvalidTransition(_))

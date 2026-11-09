@@ -20,7 +20,7 @@ use orrery_world as world;
 
 use crate::GithubFace;
 use crate::nodeid::{self, NodeRef};
-use crate::render::rfc3339;
+use crate::render::{MergeRefs, Mergeability, mergeability, rfc3339};
 
 use super::search;
 
@@ -94,6 +94,9 @@ pub enum PullRequestTimelineItemsItemType {
     ReviewRequestRemovedEvent,
     ReadyForReviewEvent,
     ClosedEvent,
+    HeadRefDeletedEvent,
+    BaseRefDeletedEvent,
+    HeadRefRestoredEvent,
 }
 
 // ---- shared plumbing ------------------------------------------------------
@@ -553,6 +556,23 @@ pub struct ClosedEvent {
     pub actor: Option<GqlActor>,
 }
 
+#[derive(SimpleObject)]
+pub struct HeadRefDeletedEvent {
+    pub actor: Option<GqlActor>,
+    pub head_ref_name: String,
+}
+
+#[derive(SimpleObject)]
+pub struct BaseRefDeletedEvent {
+    pub actor: Option<GqlActor>,
+    pub base_ref_name: Option<String>,
+}
+
+#[derive(SimpleObject)]
+pub struct HeadRefRestoredEvent {
+    pub actor: Option<GqlActor>,
+}
+
 // Variant names mirror GitHub's type names; the postfix is theirs.
 #[allow(clippy::enum_variant_names)]
 #[derive(Union)]
@@ -563,6 +583,9 @@ pub enum PullRequestTimelineItems {
     ReviewRequestRemovedEvent(ReviewRequestRemovedEvent),
     ReadyForReviewEvent(ReadyForReviewEvent),
     ClosedEvent(ClosedEvent),
+    HeadRefDeletedEvent(HeadRefDeletedEvent),
+    BaseRefDeletedEvent(BaseRefDeletedEvent),
+    HeadRefRestoredEvent(HeadRefRestoredEvent),
 }
 
 #[derive(SimpleObject)]
@@ -838,34 +861,31 @@ impl PullRequest {
         )
     }
 
-    /// The pull as it is now, and the commit its diff and mergeability are
-    /// computed against, read together under the repository's lock. The base
-    /// is the base branch's tip while the pull is open (GitHub recomputes
-    /// against the moving base) and `None` once it is terminal or its base
-    /// branch is gone. The row this object was built from can be older than
-    /// the refs: an open row read before a merge, with the base's tip read
-    /// after it, would compare the head against the commit that merged it.
-    async fn current(&self, face: &GithubFace) -> Result<(world::Pull, Option<String>), Error> {
+    /// The pull as it is now, and the branch tips its diff and mergeability
+    /// are computed from, read together under the repository's lock. The row
+    /// this object was built from can be older than the refs: an open row
+    /// read before a merge, with the base's tip read after it, would compare
+    /// the head against the commit that merged it.
+    async fn current(&self, face: &GithubFace) -> Result<(world::Pull, MergeRefs), Error> {
         let _refs = face.git.read_lock(self.repo.id).await;
         let pull = face
             .world
             .pull_by_number(self.repo.id, self.pull.number)
             .map_err(internal)?
             .ok_or_else(|| internal(format!("pull request {} is gone", self.pull.id)))?;
-        let tip = if pull.state == world::PullState::Open {
-            store::rev_parse(&self.bare(face), &format!("refs/heads/{}", pull.base_ref))
-                .map_err(internal)?
-        } else {
-            None
-        };
-        Ok((pull, tip))
+        let refs = MergeRefs::read(&self.bare(face), &pull).map_err(internal)?;
+        Ok((pull, refs))
     }
 
     /// The comparison base for diff stats and files: the base branch's tip
-    /// from [`Self::current`], else the pinned base sha, so a terminal pull's
-    /// numbers stay frozen, as GitHub's do.
-    fn diff_base(pull: &world::Pull, tip: Option<String>) -> String {
-        tip.unwrap_or_else(|| pull.base_sha.clone())
+    /// from [`Self::current`] while the pull is open (GitHub recomputes
+    /// against the moving base), else the pinned base sha, so a terminal
+    /// pull's numbers stay frozen, as GitHub's do.
+    fn diff_base(pull: &world::Pull, refs: MergeRefs) -> String {
+        match refs.base_tip {
+            Some(tip) if pull.state == world::PullState::Open => tip,
+            _ => pull.base_sha.clone(),
+        }
     }
 
     async fn diff_stats(&self, face: &GithubFace) -> Result<store::DiffStats, Error> {
@@ -876,8 +896,8 @@ impl PullRequest {
                 // A sibling field that waited for the lock beside this one may
                 // have filled it already, and then this computes nothing.
                 self.diff.get_or_init(|| {
-                    let (pull, tip) = ends.map_err(|e| e.message)?;
-                    let base = Self::diff_base(&pull, tip);
+                    let (pull, refs) = ends.map_err(|e| e.message)?;
+                    let base = Self::diff_base(&pull, refs);
                     store::diff_stats(&self.bare(face), &base, &pull.head_sha)
                         .map_err(|e| e.to_string())
                 })
@@ -942,16 +962,14 @@ impl PullRequest {
 
     async fn mergeable(&self, ctx: &Context<'_>) -> Result<MergeableState, Error> {
         let face = face(ctx);
-        let (pull, tip) = self.current(face).await?;
-        let Some(base_tip) = tip else {
-            return Ok(MergeableState::Unknown);
-        };
-        let merged =
-            store::merge_tree(&self.bare(face), &base_tip, &pull.head_sha).map_err(internal)?;
-        Ok(match merged {
-            Some(_) => MergeableState::Mergeable,
-            None => MergeableState::Conflicting,
-        })
+        let (pull, refs) = self.current(face).await?;
+        Ok(
+            match mergeability(&self.bare(face), &pull, &refs).map_err(internal)? {
+                Mergeability::Clean => MergeableState::Mergeable,
+                Mergeability::Conflicting => MergeableState::Conflicting,
+                Mergeability::Unknown => MergeableState::Unknown,
+            },
+        )
     }
 
     async fn head_ref_name(&self) -> &str {
@@ -1018,8 +1036,8 @@ impl PullRequest {
             })?;
             skip = consumed.max(0) as usize;
         }
-        let (pull, tip) = self.current(face).await?;
-        let base = Self::diff_base(&pull, tip);
+        let (pull, refs) = self.current(face).await?;
+        let base = Self::diff_base(&pull, refs);
         let files =
             store::changed_files(&self.bare(face), &base, &pull.head_sha).map_err(internal)?;
         let rest: Vec<PullRequestChangedFile> = files
@@ -1224,6 +1242,15 @@ fn timeline_item_type(kind: &world::TimelineKind) -> PullRequestTimelineItemsIte
             PullRequestTimelineItemsItemType::ReviewRequestRemovedEvent
         }
         world::TimelineKind::Closed => PullRequestTimelineItemsItemType::ClosedEvent,
+        world::TimelineKind::HeadRefDeleted(_) => {
+            PullRequestTimelineItemsItemType::HeadRefDeletedEvent
+        }
+        world::TimelineKind::BaseRefDeleted(_) => {
+            PullRequestTimelineItemsItemType::BaseRefDeletedEvent
+        }
+        world::TimelineKind::HeadRefRestored => {
+            PullRequestTimelineItemsItemType::HeadRefRestoredEvent
+        }
     }
 }
 
@@ -1263,6 +1290,23 @@ fn timeline_item(
         world::TimelineKind::Closed => PullRequestTimelineItems::ClosedEvent(ClosedEvent {
             actor: Some(author(face, &item.actor_login)),
         }),
+        world::TimelineKind::HeadRefDeleted(head_ref_name) => {
+            PullRequestTimelineItems::HeadRefDeletedEvent(HeadRefDeletedEvent {
+                actor: Some(author(face, &item.actor_login)),
+                head_ref_name,
+            })
+        }
+        world::TimelineKind::BaseRefDeleted(base_ref_name) => {
+            PullRequestTimelineItems::BaseRefDeletedEvent(BaseRefDeletedEvent {
+                actor: Some(author(face, &item.actor_login)),
+                base_ref_name: Some(base_ref_name),
+            })
+        }
+        world::TimelineKind::HeadRefRestored => {
+            PullRequestTimelineItems::HeadRefRestoredEvent(HeadRefRestoredEvent {
+                actor: Some(author(face, &item.actor_login)),
+            })
+        }
     })
 }
 

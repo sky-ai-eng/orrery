@@ -421,7 +421,9 @@ mod ref_read_tests {
     use axum::body::Bytes;
     use axum::extract::RawQuery;
     use orrery_face_git::store;
-    use orrery_world::{DEFAULT_T0_UNIX, NewPull, Pull, PullState, RefMove, WorldSecret};
+    use orrery_world::{
+        DEFAULT_T0_UNIX, NewPull, Pull, PullState, RefChange, RefMove, WorldSecret,
+    };
 
     use super::*;
 
@@ -588,6 +590,10 @@ mod ref_read_tests {
                 )),
             ),
             (
+                "GET pull",
+                unbudgeted(reads::get_pull(face(), path3("1"), HeaderMap::new())),
+            ),
+            (
                 "GET pull files",
                 unbudgeted(reads::list_pull_files(
                     face(),
@@ -742,6 +748,7 @@ mod ref_read_tests {
                     old: &f.main,
                     new: &merge,
                     repins: Vec::new(),
+                    change: RefChange::Moved,
                 },
             )
             .unwrap();

@@ -12,7 +12,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Extension, Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::{get, post};
-use orrery_world::{Actor, RefMove, Repo, World};
+use orrery_world::{Actor, RefChange, RefMove, Repo, World};
 
 pub mod cgi;
 pub mod store;
@@ -145,12 +145,14 @@ impl GitFace {
 
     /// Record a completed receive-pack: one `ref.update` log entry per changed
     /// ref (sorted, so replay order is stable), GitHub's "synchronize" for the
-    /// pull requests on each pushed branch, a `pushed_at` bump, and GitHub's
-    /// first-push rule — the first branch pushed into an empty repo becomes
-    /// the default branch. Receive-pack has already moved the pushed refs, so
-    /// a step that fails here moves them back ([`GitFace::move_back`]), and
-    /// `HEAD` if the push set it, before the error is returned. The caller
-    /// holds the repository's lock for write.
+    /// pull requests on each pushed branch, the closes and timeline items a
+    /// deleted or restored branch brings its pull requests
+    /// ([`World::record_push`]), a `pushed_at` bump, and GitHub's first-push
+    /// rule — the first branch pushed into an empty repo becomes the default
+    /// branch. Receive-pack has already moved the pushed refs, so a step that
+    /// fails here moves them back ([`GitFace::move_back`]), and `HEAD` if the
+    /// push set it, before the error is returned. The caller holds the
+    /// repository's lock for write.
     fn observe_push(
         &self,
         repo: &Repo,
@@ -192,10 +194,17 @@ impl GitFace {
         let mut record = || -> Result<(), GitFaceError> {
             let mut moves = Vec::with_capacity(changed.len());
             for &(name, old, new) in &changed {
+                let change = if old == store::ZERO_OID {
+                    RefChange::Created
+                } else if new == store::ZERO_OID {
+                    RefChange::Deleted
+                } else {
+                    RefChange::Moved
+                };
                 // A deleted branch leaves its pull requests pinned to the last
                 // sha, as GitHub does.
                 let repins = match name.strip_prefix("refs/heads/") {
-                    Some(branch) if new != store::ZERO_OID => {
+                    Some(branch) if change != RefChange::Deleted => {
                         self.world.pulls_to_sync(repo.id, branch, new)?
                     }
                     _ => Vec::new(),
@@ -205,6 +214,7 @@ impl GitFace {
                     old,
                     new,
                     repins,
+                    change,
                 });
             }
             // Every ref the push moves is in place before the record commits,

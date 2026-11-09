@@ -132,6 +132,11 @@ pub struct Pull {
     /// Slugs of the teams, in the repository's organization, whose review is
     /// pending, in request order.
     pub requested_teams: Vec<String>,
+    /// Whether the base branch has moved since the head or base was last
+    /// pinned: at creation, on a re-pin of the head, on a reopen, or on a
+    /// retarget. GitHub's last test merge was made at one of those, so once a
+    /// closed pull's head branch is gone it has nothing current to report.
+    pub base_moved: bool,
 }
 
 /// One item on a pull's timeline (see `pull_timeline` in the schema).
@@ -154,6 +159,13 @@ pub enum TimelineKind {
     /// Recorded by a merge as well as a plain close: GitHub logs a `closed`
     /// event beside `merged`, by the same actor at the same time.
     Closed,
+    /// A push deleted the pull's head branch, by the name it had.
+    HeadRefDeleted(String),
+    /// A push deleted the pull's base branch, by the name it had, while the
+    /// pull was open.
+    BaseRefDeleted(String),
+    /// A push created the pull's head branch again after it was deleted.
+    HeadRefRestored,
 }
 
 /// Whose review a request asks for: a user by login, or a team by its id,

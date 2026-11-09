@@ -28,6 +28,43 @@ const MIGRATIONS: &[&str] = &[
     // leaving two open.
     "CREATE UNIQUE INDEX pulls_one_open_per_pair ON pulls (repo_id, head_ref, base_ref)
      WHERE state = 'open';",
+    // 9: the timeline items a push records when it deletes or restores a
+    // pull's branch. `ref_name` is the branch a deletion item names, set
+    // exactly for those kinds. SQLite cannot alter a CHECK, so the table is
+    // rebuilt with every row and id it held; nothing references it. And
+    // `pulls.base_moved`: whether the base branch has moved since the pull's
+    // head or base was last pinned, which decides whether a closed pull whose
+    // head branch is gone still has a test merge to report.
+    "ALTER TABLE pulls ADD COLUMN base_moved INTEGER NOT NULL DEFAULT 0
+         CHECK (base_moved IN (0, 1));
+     CREATE TABLE pull_timeline_next (
+        id          INTEGER PRIMARY KEY,
+        pull_id     INTEGER NOT NULL REFERENCES pulls(id),
+        kind        TEXT NOT NULL CHECK (kind IN ('labeled', 'unlabeled', 'ready_for_review',
+                                                  'review_requested', 'review_request_removed',
+                                                  'closed', 'head_ref_deleted',
+                                                  'base_ref_deleted', 'head_ref_restored')),
+        label       TEXT,
+        reviewer_id INTEGER REFERENCES actors(id),
+        team_id     INTEGER,
+        team_slug   TEXT,
+        actor_id    INTEGER NOT NULL REFERENCES actors(id),
+        clock_unix  INTEGER NOT NULL,
+        ref_name    TEXT,
+        CHECK ((kind IN ('labeled', 'unlabeled')) = (label IS NOT NULL)),
+        CHECK ((kind IN ('head_ref_deleted', 'base_ref_deleted')) = (ref_name IS NOT NULL)),
+        CHECK ((team_id IS NULL) = (team_slug IS NULL)),
+        CHECK ((kind IN ('review_requested', 'review_request_removed'))
+               = ((reviewer_id IS NULL) <> (team_id IS NULL))),
+        CHECK (kind IN ('review_requested', 'review_request_removed')
+               OR (reviewer_id IS NULL AND team_id IS NULL))
+     ) STRICT;
+     INSERT INTO pull_timeline_next (id, pull_id, kind, label, reviewer_id, team_id, team_slug,
+                                     actor_id, clock_unix)
+         SELECT id, pull_id, kind, label, reviewer_id, team_id, team_slug, actor_id, clock_unix
+         FROM pull_timeline;
+     DROP TABLE pull_timeline;
+     ALTER TABLE pull_timeline_next RENAME TO pull_timeline;",
 ];
 
 /// The version this binary reads and writes.

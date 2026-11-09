@@ -20,8 +20,8 @@ use sha2::{Digest, Sha256};
 
 use crate::pulls::pull_by_path_number;
 use crate::render::{
-    check_run_json, comment_json, org_full_json, pull_json, repo_json, review_json, team_full_json,
-    team_json, user_full_json,
+    MergeRefs, check_run_json, comment_json, full_pull_json, mergeability, org_full_json,
+    pull_json, repo_json, review_json, team_full_json, team_json, user_full_json,
 };
 use crate::{
     GithubFace, github_error, internal, json_response, media, orrery_unsupported_field, parse_form,
@@ -131,10 +131,16 @@ pub(crate) async fn get_pull(
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response<Body> {
+    // A restore replaces the bare repository under the gate, so a read of
+    // its refs holds the gate throughout.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
     };
+    // The pull and its branches' tips are read under one hold, so a merge or
+    // a push lands before all of them or after all of them.
+    let held = face.git.read_lock(repo.id).await;
     let pull = match pull_by_path_number(&face, &repo, &number) {
         Ok(Some(pull)) => pull,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
@@ -143,7 +149,20 @@ pub(crate) async fn get_pull(
     if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
         return refused;
     }
-    json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull))
+    let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    let refs = match MergeRefs::read(&bare, &pull) {
+        Ok(refs) => refs,
+        Err(e) => return internal(e),
+    };
+    drop(held);
+    let verdict = match mergeability(&bare, &pull, &refs) {
+        Ok(v) => v,
+        Err(e) => return internal(e),
+    };
+    json_response(
+        StatusCode::OK,
+        full_pull_json(&face, &repo, &owner_actor, &pull, verdict),
+    )
 }
 
 pub(crate) async fn list_reviews(

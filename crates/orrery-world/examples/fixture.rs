@@ -14,8 +14,8 @@ use std::path::Path;
 
 use orrery_world::{
     ActorEmail, ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX,
-    NewCheckRun, NewPull, OrgRole, RefMove, ReviewState, SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN,
-    TeamRole, World, WorldSecret,
+    NewCheckRun, NewPull, OrgRole, RefChange, RefMove, ReviewState, SCHEMA_VERSION,
+    SYSTEM_ACTOR_LOGIN, TeamRole, World, WorldSecret,
 };
 
 const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
@@ -91,6 +91,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         old: ZERO_SHA,
         new: BASE_SHA,
         repins: Vec::new(),
+        change: RefChange::Created,
     };
     w.record_push(repo.id, alice.id, &[first_push], None)?;
     w.advance_clock(3600, system.id)?;
@@ -155,6 +156,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         old: BASE_SHA,
         new: MERGE_SHA,
         repins: Vec::new(),
+        change: RefChange::Moved,
     };
     w.record_merge(merged.id, bob.id, &merge)?;
 
@@ -171,6 +173,53 @@ fn populate(w: &World) -> orrery_world::Result<()> {
     })?;
     w.request_reviewers(closed.id, bob.id, &["alice"], &[])?;
     w.close_pull(closed.id, bob.id)?;
+
+    // A pull into a branch that is then deleted, and the deletion and
+    // restoration of the closed pull's head, so the timeline holds every
+    // kind a push records.
+    w.create_pull(NewPull {
+        repo_id: repo.id,
+        author_id: carol.id,
+        title: "Document the release",
+        body: None,
+        head_ref: "docs",
+        head_sha: HEAD_SHA,
+        base_ref: "release",
+        base_sha: BASE_SHA,
+        draft: false,
+    })?;
+    let branch_move = |name, old, new, change| RefMove {
+        name,
+        old,
+        new,
+        repins: Vec::new(),
+        change,
+    };
+    w.record_push(
+        repo.id,
+        carol.id,
+        &[
+            branch_move(
+                "refs/heads/experiment",
+                HEAD_SHA,
+                ZERO_SHA,
+                RefChange::Deleted,
+            ),
+            branch_move("refs/heads/release", BASE_SHA, ZERO_SHA, RefChange::Deleted),
+        ],
+        None,
+    )?;
+    w.record_push(
+        repo.id,
+        bob.id,
+        &[branch_move(
+            "refs/heads/experiment",
+            ZERO_SHA,
+            HEAD_SHA,
+            RefChange::Created,
+        )],
+        None,
+    )?;
 
     let app = w.create_oauth_app("GoTrue", CALLBACK, alice.id)?;
     let issued = w.issue_oauth_client_secret(&app.client_id, system.id)?;

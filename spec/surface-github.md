@@ -19,13 +19,27 @@ Routes answer with these shapes. Fields GitHub sends that are not listed are abs
 | Organization | A nested user plus `url, repos_url, members_url, description` (null), `avatar_url, html_url, created_at, updated_at` |
 | Team | `id, node_id, url, html_url, name, slug, description, privacy` (`closed`), `notification_setting, permission` (`pull`), `members_url, repositories_url, parent` (null). A full team adds `members_count, repos_count` (0), `created_at, updated_at, organization`. |
 | Repository | `id, node_id, name, full_name, owner, private, visibility, description, fork` (false), `html_url, url, clone_url, git_url, ssh_url` (both on the base URL's host without its port, since Orrery serves neither protocol), `default_branch, language` (null), `archived, disabled` (false), `created_at, updated_at, pushed_at` (null until a push or merge) |
-| Pull request | `id, node_id, number, state` (`open` or `closed`), `locked` (false), `title, body, draft, user, html_url, url, issue_url, merged, mergeable` (always null; see GraphQL `mergeable`), `merge_commit_sha, merged_by, created_at, updated_at, closed_at, merged_at, head, base` (each `label, ref, sha, user, repo`), `labels, requested_reviewers, requested_teams, assignees` (empty), `milestone` (null) |
+| Pull request | `id, node_id, number, state` (`open` or `closed`), `locked` (false), `title, body, draft, user, html_url, url, issue_url, merged, mergeable` (null in a list and in the review-request answers; see below), `merge_commit_sha, merged_by, created_at, updated_at, closed_at, merged_at, head, base` (each `label, ref, sha, user, repo`), `labels, requested_reviewers, requested_teams, assignees` (empty), `milestone` (null) |
 | Review | `id, node_id, user, body, state` (`APPROVED`, `CHANGES_REQUESTED`, or `COMMENTED`), `commit_id, html_url, pull_request_url, submitted_at, author_association` (`NONE`) |
 | Issue comment | `id, node_id, user, body, html_url, url, issue_url, created_at, updated_at, author_association` (`NONE`) |
 | Label | `name, color` (`ededed`, what GitHub gives a label created on first use), `default` (false), `description` (null). No `id`. |
 | Check run | `id, node_id, name, head_sha, status, conclusion, external_id, details_url, url, html_url, started_at, completed_at, output, check_suite` (null), `app` (`slug` and `name`, the bot's bare login) |
 
 A pull request's `labels` are ordered by name, ignoring case, and its `requested_reviewers` and `requested_teams` are in request order. Its `head.repo` and `base.repo` are always the same repository.
+
+A single read and the create and edit answers add `mergeable_state` and `rebaseable`, and fill in `mergeable` from a test merge of the head onto the base branch's tip, computed when the answer is rendered. The first row that applies decides:
+
+| Pull request | `mergeable` | `mergeable_state` | `rebaseable` |
+| --- | --- | --- | --- |
+| Merged | null | `unknown` | null |
+| Base branch gone | `false` | `dirty` | `false` |
+| Closed, with its head branch gone and its base branch moved since its last test merge | null | `unknown` | null |
+| The test merge conflicts | `false` | `dirty` | `false` |
+| The test merge is clean | `true` | `clean` | `true` while open, else `false` |
+
+GitHub makes a test merge when a pull request is opened, when its head moves (a push to its head branch, or a merge into that branch), when it is reopened, and when its base is changed. A move of the base branch, by a push or a merge, makes the last one stale. A closed pull request whose head branch is gone gets no new one, so once its base branch has moved since its last test merge there is nothing to report. A draft reads as any other pull request.
+
+A list carries no test merge: `mergeable` stays null and the other two are absent, so the list's `ETag` does not change when a base branch moves.
 
 ### 1.1 Users and organizations
 
@@ -64,7 +78,7 @@ A bot's token is refused on `GET /user`, `/user/emails`, `/user/teams`, and `/us
 | --- | --- |
 | `GET /repos/{o}/{r}/pulls` | `state` is `open` (the default), `closed` (merged included), or `all`, else `422`. Newest first, paged, with an `ETag` on every page (`grammar.md`). `head`, `base`, `sort`, and `direction` are ignored. |
 | `POST /repos/{o}/{r}/pulls` | `{title, head, base, body?, draft?}`. `head` is a branch, or `owner:branch` naming the repository's own owner. Missing fields are `422 missing_field`; a branch that doesn't exist is `422 invalid`. No commits between base and head, or an open pull request with the same head and base, is GitHub's `422` with its message. A cross-repository `head`, `issue`, and `head_repo` are not mocked. The head and base commits are pinned at creation, and the repository's `refs/pull/{n}/head` is set to the head (`surface-git.md`). Answers `201`. |
-| `GET /repos/{o}/{r}/pulls/{n}` | The pull request. |
+| `GET /repos/{o}/{r}/pulls/{n}` | The pull request, with its mergeability (§1.0). |
 | `PATCH /repos/{o}/{r}/pulls/{n}` | `title` (trimmed), `body` (null clears), `state` (`open` or `closed`; any other value is ignored, as on GitHub), and `base` (moving to another branch pins that branch's tip as the base commit). A blank `title` is `422 missing_field`, as on create, and is refused before anything is written. Otherwise the request is written in GitHub's order, and a refusal keeps every write before it: the `body`; then, unless the reopen is refused, the `title` and the state change; then the `base`, judged against the state the pull request is left in and moved after a reopen. Reopening a pull request moves its head to its head branch's tip, and its `refs/pull/{n}/head` with it (`surface-git.md`), in the same commit as the reopen. A refused reopen keeps only the `body`, and is GitHub's `422`, a `custom` error on `state`, unless a `base` was sent beside it: that base is judged against the pull request left closed, and its refusal is the answer. The reopen checks run in this order: for a merged pull request, "state cannot be changed. The pull request cannot be reopened.", whatever its branches hold; for a base or head branch that is gone, "state cannot be changed. The {branch} branch has been deleted.", and for both, "state cannot be changed. The {base} and {head} branches have been deleted."; while another pull request is open from the same head into the same base, the rule that also refuses a create, "state cannot be changed. There is already an open pull request from {head} to {base}."; and for a head branch whose tip does not descend from the head (a force-push, or a branch deleted and recreated elsewhere), "state cannot be changed. The {branch} branch was force-pushed or recreated." A refused `base` is GitHub's `422`, an `invalid` error on `base`, and keeps the request's other writes, in this order: on a pull request that is closed once the state change lands, whatever branch it names, "Cannot change the base branch of a closed pull request."; for a branch that does not exist, "Proposed base branch '{base}' was not found"; for a branch that already holds the head's commits, the head branch among them, "There are no new commits between base branch '{base}' and head branch '{head}'"; and for a base another open pull request from the same head already targets, "A pull request already exists for base branch '{base}' and head branch '{head}'". |
 | `PUT /repos/{o}/{r}/pulls/{n}/merge` | A real merge: `git merge-tree` and `commit-tree`, a two-parent commit authored and committed by `<login> <login@orrery.invalid>` at the world clock, with GitHub's default message unless `commit_title` or `commit_message` is given. A pull request that is not open, is a draft, or conflicts with its base is `405` "Pull Request is not mergeable" (a draft: "Pull Request is still a work in progress"); a `sha` that is not the head is `409`. A `merge_method` other than `merge` is not mocked. The base branch moves by compare-and-swap, and open pull requests whose head is the base branch take its new tip, their `refs/pull/{n}/head` with it. The move is logged as a `ref.update` and the merge as a `pull.merge`, in that order. Both entries, the `pushed_at` bump, the re-pins, and the merged pull request land in one commit, after every ref the merge moves is in place, as a push's do (`surface-git.md`). A merge whose record fails moves its refs back, appends nothing, and answers `500`. Answers `{sha, merged: true, message}`. |
 | `GET /repos/{o}/{r}/pulls/{n}/files` | `[{filename, status, previous_filename?}]` in path order, paged, from `git diff -M` between the base and the head: against the base branch's tip while the pull request is open (or the pinned base if the branch is gone), and against the pinned base once it is closed. `status` is `added`, `removed`, `modified`, `renamed`, `copied`, or `changed`. `additions`, `deletions`, `changes`, `patch`, `sha`, and the URLs are absent. |
@@ -153,14 +167,14 @@ A selection naming a field, type, or argument Orrery lacks fails the whole docum
 
 `databaseId` on `User`, `Bot`, `Team`, and `Organization` is the id REST gives the same account or team. `fullDatabaseId` is GitHub's `BigInt`, a string on the wire. A pull request's `body` is `""` when unset, as GitHub's non-null `String!`.
 
-- `mergeable` is a test merge of the head onto the base branch's tip, computed when it is read: `MERGEABLE` or `CONFLICTING`, or `UNKNOWN` for a pull request that is not open or whose base branch is gone. GitHub answers `UNKNOWN` until its own test merge finishes; Orrery never needs to.
+- `mergeable` is REST's `mergeable` (§1.0) in GraphQL's terms, from the same decision: `MERGEABLE` for `true`, `CONFLICTING` for `false`, and `UNKNOWN` for null. GitHub answers `UNKNOWN` until its own test merge finishes; Orrery never needs to.
 - `additions`, `deletions`, and `changedFiles` come from the same diff as REST pull request files, and a rename counts once. `files` lists `{path, changeType}` in path order; `changeType` is `ADDED`, `DELETED`, `RENAMED`, `COPIED`, `MODIFIED`, or `CHANGED`, and there is no previous path, as on GitHub.
 - `reviewRequests` lists pending requests, users then teams, each in request order. A request's `requestedReviewer` is a `User` or a `Team`.
 - `latestReviews` is each author's newest review. `reviews` takes `states`, and its `totalCount` counts the filtered set.
 - `commits(last:)` has one node, the head commit.
 - `labels` are ordered by name, ignoring case.
 - `mergedBy` is the actor who merged, typed like an author, and null until a merge.
-- `timelineItems` takes `itemTypes` and lists, oldest first: `LabeledEvent` and `UnlabeledEvent` from the label routes, `ReviewRequestedEvent` and `ReviewRequestRemovedEvent` from the review-request routes, `ReadyForReviewEvent` from the mutation, and `ClosedEvent` (with its `actor`) from a close or a merge, since GitHub records a close beside every merge. A request whose team has since been deleted keeps its item with a null `requestedReviewer`, even after a new team takes the slug. Reopening a pull request and converting it to a draft add no item.
+- `timelineItems` takes `itemTypes` and lists, oldest first: `LabeledEvent` and `UnlabeledEvent` from the label routes, `ReviewRequestedEvent` and `ReviewRequestRemovedEvent` from the review-request routes, `ReadyForReviewEvent` from the mutation, `ClosedEvent` (with its `actor`) from a close or a merge, since GitHub records a close beside every merge, and `HeadRefDeletedEvent` (with `actor` and `headRefName`), `BaseRefDeletedEvent` (with `actor` and `baseRefName`), and `HeadRefRestoredEvent` (with `actor`) from a push that deletes or restores a branch (`surface-git.md`, "Deleting and restoring a branch"). A request whose team has since been deleted keeps its item with a null `requestedReviewer`, even after a new team takes the slug. Reopening a pull request and converting it to a draft add no item.
 
 ### 3.4 Connections
 
@@ -180,6 +194,10 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `DELETE …/teams/{team_slug}/memberships/{username}` for a user not on the team is `204`; GitHub documents only `204` and `403`.
 - Team slugs keep ASCII letters and digits only, so "Équipe" becomes `quipe` and "日本" has no slug (`422 invalid` on `name`), where GitHub may transliterate. Two names with one slug ("Café" and "Caf") collide as `already_exists` on `name`. No length limit is applied.
 - An id `node` or `nodes` can't resolve is `null` with no entry in `errors`.
+- A reopen, a base change, and a merge into a pull request's head branch make a test merge, as a push to its head does.
+- A closed pull request whose test merge conflicts reads as an open one does. Every closed pull request observed had a clean test merge.
+- A closed pull request whose head branch is deleted before its base branch moves has no mergeability once the base moves. It was observed only with the base moving first, or in the same push.
+- One push that deletes several branches, or a branch that is the head of some pull requests and the base of others, handles the branches in ref-name order, and each branch's head pull requests before its base pull requests.
 - The message for a negative `first` or `last` on a GraphQL connection: "`first` on the `X` connection cannot be less than zero."
 
 **Deliberate differences:**
@@ -192,6 +210,8 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `GET …/commits/{ref}/check-runs` lists every run on the commit; GitHub's default `filter=latest` keeps the newest run per name.
 - Only a bot creates or updates a check run, and a check run's `head_sha` and a review's `commit_id` are not checked against the repository.
 - `mergeable` is computed on read rather than eventually.
+- A read never makes a test merge. On GitHub, a REST read after a pull request's base branch moves starts one, so a closed pull request whose head branch was deleted after such a read reports that test merge, where Orrery reports `unknown`.
+- REST `mergeable_state` reads no check runs and no branch protection, so it is never `unstable`, `blocked`, or `behind`. `rebaseable` is the test merge's answer, not a replay of the head's commits one at a time, so a head whose merge is clean but whose rebase would stop on a conflict reads `true`.
 - A read of a repository's refs waits for a write under way (a push, a merge, opening a pull request, or an edit of one that sets its `state` or `base`), and sees the refs before it or after its record (`surface-git.md`, "What a fetch sees"). Two fields of one GraphQL query can still see two states.
 - Labels belong to a pull request, not to a repository.
 - A merge commit's author and committer address is `<login>@orrery.invalid`, not the actor's stored primary address.
