@@ -880,3 +880,42 @@ async fn a_walk_goes_on_across_a_restore_only_while_the_log_holds_its_last_entry
         assert_eq!(walked, log, "walk {n}");
     }
 }
+
+/// A snapshot list opens only the snapshots it may serve: the page, and the
+/// one after it that says another page follows. The total and the position
+/// need only names. So a snapshot that cannot be opened is still counted, and
+/// fails only a read that reaches it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_list_opens_only_the_snapshots_it_may_serve() {
+    let inst = boot().await;
+    let base = &inst.base;
+    for name in ["a", "b", "c", "d"] {
+        control_post(base, "/_orrery/snapshots", json!({ "name": name }));
+    }
+    std::fs::write(
+        inst.dir.path().join("snapshots/d/world.db"),
+        b"not a database",
+    )
+    .unwrap();
+
+    assert_eq!(
+        list(base, "/snapshots/list", json!({ "page_size": 0 })),
+        json!({ "items": [], "total_count": 4 })
+    );
+    let first = list(base, "/snapshots/list", json!({ "page_size": 1 }));
+    assert_eq!(first["items"][0]["name"], "a");
+    assert_eq!(first["total_count"], 4);
+    let second = list(
+        base,
+        "/snapshots/list",
+        json!({ "page_size": 1, "page_token": first["next_page_token"] }),
+    );
+    assert_eq!(second["items"][0]["name"], "b");
+    // The page of `c` looks past it, to `d`.
+    let (status, answer) = post(
+        base,
+        "/snapshots/list",
+        json!({ "page_size": 1, "page_token": second["next_page_token"] }),
+    );
+    assert_eq!(status, 500, "{answer}");
+}

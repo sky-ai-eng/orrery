@@ -100,23 +100,28 @@ async fn list(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     };
     let guard = state.git.gate().read_owned().await;
     let dir = state.snapshots_dir.clone();
+    let resume = window.resume.clone();
+    let fetch = window.fetch();
     let result = tokio::task::spawn_blocking(move || {
         let _hold = guard;
-        orrery_snapshot::list(&dir)
+        // The total and the position need only the names, so only the page's
+        // snapshots are opened: opening one may copy and migrate it. The gate
+        // keeps a listed snapshot from being deleted before it is opened.
+        let names = orrery_snapshot::names(&dir)?;
+        let page = names
+            .iter()
+            .filter(|n| resume.as_ref().is_none_or(|last| *n > last))
+            .take(fetch)
+            .filter_map(|n| orrery_snapshot::info(&dir, n).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((page, names.len()))
     })
     .await;
-    let all = match flatten(result) {
-        Ok(a) => a,
+    let (rows, total) = match flatten(result) {
+        Ok(r) => r,
         Err(e) => return snapshot_error(e, None),
     };
-    // The listing is read whole, in name order, under the gate's read side,
-    // so its length is the total the page was cut from.
-    let total = i64::try_from(all.len()).unwrap_or(i64::MAX);
-    let rows: Vec<_> = all
-        .into_iter()
-        .filter(|s| window.resume.as_ref().is_none_or(|last| s.name > *last))
-        .take(window.fetch())
-        .collect();
+    let total = i64::try_from(total).unwrap_or(i64::MAX);
     list::answer(rows, &window, total, |s| s.name.clone())
 }
 

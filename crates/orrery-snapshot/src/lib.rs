@@ -89,6 +89,15 @@ pub fn info(snapshots_dir: &Path, name: &str) -> Result<Option<SnapshotInfo>> {
 
 /// All snapshots, sorted by name (the listing's total order).
 pub fn list(snapshots_dir: &Path) -> Result<Vec<SnapshotInfo>> {
+    names(snapshots_dir)?
+        .iter()
+        .map(|n| info_of(n, &snapshots_dir.join(n)))
+        .collect()
+}
+
+/// The name of every snapshot, sorted (the listing's total order), read
+/// without opening any of them, as opening one may copy and migrate it.
+pub fn names(snapshots_dir: &Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
     let entries = match std::fs::read_dir(snapshots_dir) {
         Ok(e) => e,
@@ -107,10 +116,7 @@ pub fn list(snapshots_dir: &Path) -> Result<Vec<SnapshotInfo>> {
         names.push(name);
     }
     names.sort();
-    names
-        .iter()
-        .map(|n| info_of(n, &snapshots_dir.join(n)))
-        .collect()
+    Ok(names)
 }
 
 pub fn delete(snapshots_dir: &Path, name: &str) -> Result<()> {
