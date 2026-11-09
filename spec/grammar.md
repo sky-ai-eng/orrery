@@ -36,7 +36,7 @@ Every token is fake, prefixed `orrfake_`, and derived from the world's secret, s
    "errors": [{"resource": "…", "code": "custom", "field": "F", "message": "not mocked by orrery"}]}
   ```
 
-  `resource` names what the route is about: `Repository`, `PullRequest`, `PullRequestReview`, `Label`, `CheckRun`, `Team`, `Comparison`, or `OauthAccess` for the OAuth token exchange. The diff and patch media types, where a route lists them as not mocked, are refused the same way, with `field` `Accept`.
+  `resource` names what the route is about: `Repository`, `PullRequest`, `PullRequestReview`, `Label`, `CheckRun`, `Team`, `Comparison`, or `OauthAccess` for the OAuth token exchange. A media type a route lists as not mocked (the diff and patch media types, and XML from the OAuth token exchange) is refused the same way, with `field` `Accept`.
 
 - A body that isn't valid JSON is `400` `{"message": "Problems parsing JSON"}`, and on most routes so is a known field of the wrong type. A body over 2 MiB is `413`.
 - Logins, organization names, and repository names match ignoring case; responses carry each one's stored spelling. A `{number}` that isn't an integer is `404`.
