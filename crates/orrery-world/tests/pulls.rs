@@ -130,6 +130,7 @@ fn close_reopen_merge_state_machine() {
     let pull = open_pull(&f, "feature", SHA_B);
 
     let closed = f.w.close_pull(pull.id, f.bob).unwrap();
+    assert_eq!(closed, f.w.pull_by_id(pull.id).unwrap().unwrap());
     assert_eq!(closed.state, PullState::Closed);
     assert!(closed.closed_clock_unix.is_some());
     assert!(!closed.merged);
@@ -731,8 +732,12 @@ fn ready_for_review_lands_on_the_timeline_and_convert_to_draft_does_not() {
             draft: true,
         })
         .unwrap();
-    f.w.set_pull_draft(draft.id, f.alice, false).unwrap();
-    f.w.set_pull_draft(draft.id, f.alice, true).unwrap();
+    let ready = f.w.set_pull_draft(draft.id, f.alice, false).unwrap();
+    assert_eq!(ready, f.w.pull_by_id(draft.id).unwrap().unwrap());
+    assert!(!ready.draft);
+    let redrafted = f.w.set_pull_draft(draft.id, f.alice, true).unwrap();
+    assert_eq!(redrafted, f.w.pull_by_id(draft.id).unwrap().unwrap());
+    assert!(redrafted.draft);
     assert!(f.w.set_pull_draft(draft.id, f.alice, true).is_err());
     assert_eq!(
         timeline_kinds(&f, draft.id),
