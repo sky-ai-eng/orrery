@@ -212,16 +212,20 @@ pub(crate) async fn patch_pull(
     // still be their branches' tips when the edit lands. Opening a pull takes
     // the lock too, so none opens on a reopened pull's head and base between
     // the check and the reopen. A `state` naming the state the pull is in
-    // takes the lock as well, since another request can change that state
-    // before the re-read. An edit that sets neither reads and moves no ref,
-    // so it takes no lock and does not wait for fetches in progress.
-    let _guard = if state.is_some() || parsed.base.is_some() {
-        Some(face.git.repo_lock(repo.id).write_owned().await)
+    // takes the write side as well, since another request can change that
+    // state before the re-read. An edit that sets neither reads and moves no
+    // ref, so it holds the read side, which fetches share: it waits for no
+    // fetch, and none waits for it. It still waits for a write in progress,
+    // since a merge builds its commit message from the title it read.
+    let lock = face.git.repo_lock(repo.id);
+    let (_write, _read) = if state.is_some() || parsed.base.is_some() {
+        (Some(lock.write_owned().await), None)
     } else {
-        None
+        (None, Some(lock.read_owned().await))
     };
-    // Read again once the gate, and the lock if it is taken, are held, so the
-    // state checks below see current truth.
+    // Read again under the gate and the lock, so what follows works from the
+    // pull as it is now, not as it was before a restore, or a close, that
+    // landed while this edit waited.
     let mut pull = match face.world.pull_by_number(repo.id, pull.number) {
         Ok(Some(p)) => p,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),

@@ -801,23 +801,50 @@ mod ref_read_tests {
         );
     }
 
-    /// A title edit waits for the gate, held as a restore holds it, and the
-    /// pull is closed while it waits. The edit lands on the closed pull and
-    /// answers it closed, as an edit of a closed pull's title does.
+    /// The test holds the repository's lock for write, as a merge does while
+    /// it builds its commit message from the pull's title. An edit that sets
+    /// neither `state` nor `base` waits for it, and lands once it ends.
     #[tokio::test]
-    async fn a_title_edit_sees_a_close_that_landed_while_it_waited() {
+    async fn a_title_or_body_edit_waits_out_a_write() {
         let f = fixture();
-        let gate = f.face.git.gate().write_owned().await;
-        let mut edit = edit(&f, r#"{"title": "Renamed"}"#);
-        assert!(poll_once(edit.as_mut()).is_pending());
-        f.face.world.close_pull(f.pull.id, f.alice.id).unwrap();
-        drop(gate);
+        let lock = f.face.git.repo_lock(f.repo.id);
+        for body in [r#"{"title": "Renamed"}"#, r#"{"body": "Details"}"#] {
+            let merge = lock.clone().write_owned().await;
+            let mut edit = edit(&f, body);
+            assert!(
+                poll_once(edit.as_mut()).is_pending(),
+                "{body}: landed during a write"
+            );
+            drop(merge);
+            answer(body, edit.await).await;
+        }
+    }
 
-        let body = answer("the title edit", edit.await).await;
-        assert_eq!(
-            (&body["title"], &body["state"]),
-            (&serde_json::json!("Renamed"), &serde_json::json!("closed"))
-        );
+    /// An edit waits for the gate, held as a restore holds it, and the pull
+    /// is closed while it waits. The edit answers the pull closed: a title
+    /// edit lands on it, as an edit of a closed pull's title does, and an
+    /// edit that writes nothing answers the pull as the handler re-read it.
+    #[tokio::test]
+    async fn an_edit_answers_a_close_that_landed_while_it_waited() {
+        let f = fixture();
+        for (body, title) in [(r#"{"title": "Renamed"}"#, "Renamed"), ("{}", "Renamed")] {
+            let restore = f.face.git.gate().write_owned().await;
+            let mut edit = edit(&f, body);
+            assert!(poll_once(edit.as_mut()).is_pending());
+            f.face.world.close_pull(f.pull.id, f.alice.id).unwrap();
+            drop(restore);
+
+            let answered = answer(body, edit.await).await;
+            assert_eq!(
+                (&answered["title"], &answered["state"]),
+                (&serde_json::json!(title), &serde_json::json!("closed")),
+                "{body}"
+            );
+            f.face
+                .world
+                .reopen_pull(f.pull.id, f.alice.id, &f.feature)
+                .unwrap();
+        }
     }
 
     /// The test holds the repository's lock for read, as a fetch in progress
