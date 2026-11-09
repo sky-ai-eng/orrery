@@ -20,8 +20,8 @@ use sha2::{Digest, Sha256};
 
 use crate::pulls::pull_by_path_number;
 use crate::render::{
-    check_run_json, comment_json, org_full_json, pull_json, repo_json, review_json, team_full_json,
-    team_json, user_full_json,
+    check_run_json, comment_json, full_pull_json, org_full_json, pull_json, repo_json, review_json,
+    team_full_json, team_json, user_full_json,
 };
 use crate::{
     GithubFace, github_error, internal, json_response, media, orrery_unsupported_field, parse_form,
@@ -143,7 +143,10 @@ pub(crate) async fn get_pull(
     if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
         return refused;
     }
-    json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull))
+    json_response(
+        StatusCode::OK,
+        full_pull_json(&face, &repo, &owner_actor, &pull),
+    )
 }
 
 pub(crate) async fn list_reviews(

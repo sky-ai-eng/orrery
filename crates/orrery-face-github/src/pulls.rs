@@ -13,7 +13,7 @@ use orrery_world::{
     Actor, NewPull, Pull, PullState, RefChange, RefMove, Repo, ReviewState, WorldError,
 };
 
-use crate::render::{comment_json, label_json, pull_json, review_json};
+use crate::render::{comment_json, full_pull_json, label_json, pull_json, review_json};
 use crate::{
     GithubFace, github_error, internal, json_response, media, orrery_unsupported_field,
     resolve_repo, validation_custom, validation_custom_field, validation_invalid,
@@ -125,7 +125,7 @@ pub(crate) async fn create_pull(
         Ok(pull) => match face.git.pin_pull_ref(&repo, pull.number, &pull.head_sha) {
             Ok(()) => json_response(
                 StatusCode::CREATED,
-                pull_json(&face, &repo, &owner_actor, &pull),
+                full_pull_json(&face, &repo, &owner_actor, &pull),
             ),
             Err(e) => internal(e),
         },
@@ -323,7 +323,10 @@ pub(crate) async fn patch_pull(
         return refused;
     }
 
-    json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull))
+    json_response(
+        StatusCode::OK,
+        full_pull_json(&face, &repo, &owner_actor, &pull),
+    )
 }
 
 /// A check's outcome: its value, or GitHub's refusal as the inner `Err`.

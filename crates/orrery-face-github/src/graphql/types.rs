@@ -20,7 +20,7 @@ use orrery_world as world;
 
 use crate::GithubFace;
 use crate::nodeid::{self, NodeRef};
-use crate::render::rfc3339;
+use crate::render::{rfc3339, test_merge};
 
 use super::search;
 
@@ -945,17 +945,11 @@ impl PullRequest {
         if self.pull.state != world::PullState::Open {
             return Ok(MergeableState::Unknown);
         }
-        let face = face(ctx);
-        let bare = self.bare(face);
-        let Some(base_tip) = store::rev_parse(&bare, &format!("refs/heads/{}", self.pull.base_ref))
-            .map_err(internal)?
-        else {
-            return Ok(MergeableState::Unknown);
-        };
-        let merged = store::merge_tree(&bare, &base_tip, &self.pull.head_sha).map_err(internal)?;
-        Ok(match merged {
-            Some(_) => MergeableState::Mergeable,
-            None => MergeableState::Conflicting,
+        let bare = self.bare(face(ctx));
+        Ok(match test_merge(&bare, &self.pull).map_err(internal)? {
+            Some(true) => MergeableState::Mergeable,
+            Some(false) => MergeableState::Conflicting,
+            None => MergeableState::Unknown,
         })
     }
 

@@ -2,6 +2,7 @@
 //! generously (rule 1: fields liberal, endpoints strict). The fields each
 //! object carries are listed in spec/surface-github.md §1.0.
 
+use orrery_face_git::{GitFaceError, store};
 use orrery_world::{Actor, ActorKind, CheckRun, IssueComment, Pull, Repo, Review, Team};
 
 use crate::GithubFace;
@@ -67,10 +68,10 @@ fn host_name(base: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The GitHub pull request object. `merged_at` equals `closed_at` when
-/// merged — one instant on GitHub too. `mergeable: null` is GitHub's
-/// "not computed", which is honest here: Orrery computes mergeability at
-/// merge time, not speculatively.
+/// The GitHub pull request object as a list carries it. `merged_at` equals
+/// `closed_at` when merged — one instant on GitHub too. `mergeable` is null,
+/// GitHub's "not computed": a list's ETag hashes its body, and a test merge
+/// in it would change the tag whenever a base branch moves.
 pub(crate) fn pull_json(
     face: &GithubFace,
     repo: &Repo,
@@ -130,6 +131,61 @@ pub(crate) fn pull_json(
         "assignees": [],
         "milestone": serde_json::Value::Null,
     })
+}
+
+/// The pull request object a single read and the create and edit routes
+/// answer with: the list's, with `mergeable`, `mergeable_state`, and
+/// `rebaseable` from a test merge of the head onto the base branch's tip,
+/// computed when it is rendered.
+pub(crate) fn full_pull_json(
+    face: &GithubFace,
+    repo: &Repo,
+    owner: &Actor,
+    pull: &Pull,
+) -> serde_json::Value {
+    let mut json = pull_json(face, repo, owner, pull);
+    // A git failure answers GitHub's "not computed yet" rather than failing
+    // a response whose write has already landed.
+    let (mergeable, state, rebaseable) = mergeability(face, repo, pull).unwrap_or_else(|e| {
+        tracing::error!(error = %e, number = pull.number, "computing mergeability failed");
+        (None, "unknown", None)
+    });
+    json["mergeable"] = mergeable.into();
+    json["mergeable_state"] = state.into();
+    json["rebaseable"] = rebaseable.into();
+    json
+}
+
+/// `(mergeable, mergeable_state, rebaseable)`, as GitHub reports them.
+fn mergeability(
+    face: &GithubFace,
+    repo: &Repo,
+    pull: &Pull,
+) -> Result<(Option<bool>, &'static str, Option<bool>), GitFaceError> {
+    if pull.merged {
+        return Ok((None, "unknown", None));
+    }
+    let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    if !test_merge(&bare, pull)?.unwrap_or(false) {
+        return Ok((Some(false), "dirty", Some(false)));
+    }
+    let state = if pull.draft { "draft" } else { "clean" };
+    let head = store::rev_parse(&bare, &format!("refs/heads/{}", pull.head_ref))?;
+    Ok((Some(true), state, Some(head.is_some())))
+}
+
+/// Whether the pull's head merges cleanly onto its base branch's tip, or
+/// `None` when the base branch is gone.
+pub(crate) fn test_merge(
+    bare: &std::path::Path,
+    pull: &Pull,
+) -> Result<Option<bool>, GitFaceError> {
+    let Some(base_tip) = store::rev_parse(bare, &format!("refs/heads/{}", pull.base_ref))? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        store::merge_tree(bare, &base_tip, &pull.head_sha)?.is_some(),
+    ))
 }
 
 /// The GitHub review object. Wire state is the neutral store state in
