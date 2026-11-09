@@ -75,6 +75,14 @@ pub enum WorldError {
     OAuthBadCode,
     #[error("the redirect_uri does not match the one the code was issued for")]
     OAuthRedirectMismatch,
+    /// A log position that is neither 0 nor the `seq` of an entry the log
+    /// holds: it was never issued, or a restore discarded it.
+    #[error("seq {seq} is not in the action log; the newest is {newest_seq}")]
+    NoSuchLogPosition { seq: i64, newest_seq: i64 },
+    /// A page resumed from an entry the log no longer holds. The log only
+    /// loses an entry when a restore replaces it.
+    #[error("the entry at seq {0}, which a page resumes from, is not in the action log")]
+    ResumeNotInLog(i64),
     #[error("world schema version {found} does not match this binary's {expected}")]
     SchemaVersion { found: i64, expected: i64 },
     #[error(
