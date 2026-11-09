@@ -223,7 +223,7 @@ fn a_reopen_is_refused_while_another_pull_holds_its_head_and_base() {
 }
 
 #[test]
-fn the_schema_refuses_a_second_open_pull_on_a_head_and_base() {
+fn a_retarget_is_refused_while_another_pull_holds_the_pair() {
     let f = fixture();
     let held = open_pull(&f, "feature", SHA_B);
     let other =
@@ -241,24 +241,30 @@ fn the_schema_refuses_a_second_open_pull_on_a_head_and_base() {
         .unwrap();
     let entries = f.w.log_after(0, 100).unwrap().len();
 
-    // `edit_pull` does not check the rule itself, so retargeting onto the
-    // held pair reaches the index, and the whole edit is refused.
+    // Retargeting onto the held pair refuses the whole edit.
     assert!(matches!(
         f.w.edit_pull(other.id, f.alice, Some("retitled"), None, Some(("main", SHA_A))),
-        Err(WorldError::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
-            if e.code == rusqlite::ErrorCode::ConstraintViolation
+        Err(WorldError::PullExists(head)) if head == "feature"
     ));
     let kept = f.w.pull_by_number(f.repo, other.number).unwrap().unwrap();
     assert_eq!(kept, other, "a refused edit writes nothing");
     assert_eq!(f.w.log_after(0, 100).unwrap().len(), entries);
 
-    // Closed pulls are outside the rule.
-    f.w.close_pull(held.id, f.alice).unwrap();
+    // A pull's own base is not another pull's, and closed pulls are outside
+    // the rule.
+    let same =
+        f.w.edit_pull(held.id, f.alice, None, None, Some(("main", SHA_A)))
+            .unwrap();
+    assert_eq!(same, held);
     f.w.close_pull(other.id, f.alice).unwrap();
     let edited =
         f.w.edit_pull(other.id, f.alice, None, None, Some(("main", SHA_A)))
             .unwrap();
     assert_eq!(edited.base_ref, "main");
+    assert!(matches!(
+        f.w.reopen_pull(other.id, f.alice, SHA_B),
+        Err(WorldError::PullExists(_))
+    ));
 }
 
 #[test]

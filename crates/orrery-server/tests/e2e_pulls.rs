@@ -667,12 +667,59 @@ async fn a_closed_pull_refuses_the_edits_github_refuses() {
     assert_eq!(get(2)["state"], "open");
     assert_eq!(entries(), before);
 
-    // A pull open on the same head into another base does not block it.
-    let (status, _) = patch(2, serde_json::json!({ "base": "release" }));
+    // Retargeting an open pull onto a pair another open pull holds is
+    // refused, and, as on GitHub, the title and body sent beside it still
+    // land. A pull's own base is not another pull's.
+    assert_eq!(open("release")["number"], 3);
+    let before = entries();
+    assert_eq!(
+        patch(
+            3,
+            serde_json::json!({ "base": "dev", "title": "Moved", "body": "Moved too" })
+        ),
+        (
+            422,
+            serde_json::json!({
+                "message": "Validation Failed",
+                "errors": [{
+                    "resource": "PullRequest",
+                    "code": "invalid",
+                    "field": "base",
+                    "message": "A pull request already exists for base branch 'dev' and head branch 'feature'",
+                }],
+            })
+        )
+    );
+    let kept = get(3);
+    assert_eq!(kept["base"]["ref"], "release");
+    assert_eq!(kept["title"], "Moved");
+    assert_eq!(kept["body"], "Moved too");
+    assert_eq!(entries(), before + 1, "the title and body edit");
+    let (status, _) = patch(3, serde_json::json!({ "base": "release" }));
     assert_eq!(status, 200);
-    let (status, reopened) = patch(1, serde_json::json!({ "state": "open" }));
-    assert_eq!(status, 200, "{reopened}");
-    assert_eq!(reopened["state"], "open");
+
+    // Force-pushed as well as held, the first pull is refused for the
+    // duplicate, as GitHub refuses it; with the duplicate closed, for the
+    // force-push. The pull open from the same head into release blocks
+    // neither.
+    git(&s.src, clock, &["commit", "--amend", "-m", "rewritten"]);
+    git(
+        &s.src,
+        clock,
+        &["push", "--force", &s.authed_url, "feature"],
+    );
+    let reopen = serde_json::json!({ "state": "open" });
+    assert_eq!(
+        patch(1, reopen.clone()),
+        state_refused("There is already an open pull request from feature to dev.")
+    );
+    let (status, _) = patch(2, serde_json::json!({ "state": "closed" }));
+    assert_eq!(status, 200);
+    assert_eq!(
+        patch(1, reopen),
+        state_refused("The feature branch was force-pushed or recreated.")
+    );
+    assert_eq!(get(1)["state"], "closed");
 }
 
 /// The fields of a not-mocked refusal: its status, the `field` it names, and

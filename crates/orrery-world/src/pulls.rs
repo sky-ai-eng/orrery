@@ -154,7 +154,9 @@ impl World {
 
     /// Edit title/body/base. `body` distinguishes absent (keep) from explicit
     /// clear; `base` carries the retargeted ref together with its freshly
-    /// pinned sha, resolved by the caller who owns the git side.
+    /// pinned sha, resolved by the caller who owns the git side. A `base`
+    /// that would give an open pull the head and base of another open pull
+    /// refuses the whole edit, as `create_pull` and `reopen_pull` refuse.
     pub fn edit_pull(
         &self,
         pull_id: i64,
@@ -166,6 +168,13 @@ impl World {
         self.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
             let before = queries::require_pull(&tx, pull_id)?;
+            if let Some((base_ref, _)) = base
+                && base_ref != before.base_ref
+                && before.state == PullState::Open
+                && open_pull_between(&tx, before.repo_id, &before.head_ref, base_ref)?.is_some()
+            {
+                return Err(WorldError::PullExists(before.head_ref.clone()));
+            }
             let mut fields = Vec::new();
             if let Some(t) = title
                 && t != before.title

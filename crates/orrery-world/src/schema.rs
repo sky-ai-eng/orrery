@@ -535,6 +535,44 @@ mod tests {
     }
 
     #[test]
+    fn at_most_one_pull_is_open_per_head_and_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = World::open(&world(dir.path())).unwrap();
+        let open_into = |base: &str| {
+            w.with_conn(|conn| {
+                Ok(conn.execute(
+                    "INSERT INTO pulls (repo_id, number, title, author_id, state, draft,
+                                        head_ref, head_sha, base_ref, base_sha,
+                                        created_clock_unix, updated_clock_unix)
+                     SELECT id, (SELECT COUNT(*) + 1 FROM pulls), 't', owner_id, 'open', 0,
+                            'feature', ?2, ?1, ?2, 0, 0
+                     FROM repos",
+                    rusqlite::params![base, "a".repeat(40)],
+                )?)
+            })
+        };
+        open_into("main").unwrap();
+        open_into("dev").unwrap();
+
+        // Writes that skip the kernel's own check still cannot open a second
+        // pull on a held pair.
+        let violation = |r: crate::Result<usize>| {
+            matches!(r, Err(WorldError::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation)
+        };
+        assert!(violation(open_into("main")));
+        assert!(violation(w.with_conn(|conn| Ok(conn.execute(
+            "UPDATE pulls SET base_ref = 'main' WHERE base_ref = 'dev'",
+            []
+        )?))));
+
+        // Closed pulls are outside it.
+        w.with_conn(|conn| Ok(conn.execute("UPDATE pulls SET state = 'closed'", [])?))
+            .unwrap();
+        open_into("main").unwrap();
+    }
+
+    #[test]
     fn a_reader_never_migrates() {
         let dir = tempfile::tempdir().unwrap();
         let root = world(dir.path());

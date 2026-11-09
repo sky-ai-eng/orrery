@@ -252,6 +252,36 @@ pub(crate) async fn patch_pull(
         _ => None,
     };
 
+    // A base another open pull from the same head already holds: GitHub
+    // refuses the base and still writes the title and body sent beside it.
+    if let Some((new_base, _)) = &base
+        && *new_base != pull.base_ref
+    {
+        match face
+            .world
+            .open_pull_between(repo.id, &pull.head_ref, new_base)
+        {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                if title.is_some() || parsed.body.is_some() {
+                    let body = parsed.body.as_ref().map(|b| b.as_deref());
+                    if let Err(e) = face.world.edit_pull(pull.id, actor.id, title, body, None) {
+                        return internal(e);
+                    }
+                }
+                return validation_invalid_message(
+                    "PullRequest",
+                    "base",
+                    &format!(
+                        "A pull request already exists for base branch '{new_base}' and head branch '{}'",
+                        pull.head_ref
+                    ),
+                );
+            }
+            Err(e) => return internal(e),
+        }
+    }
+
     if title.is_some() || parsed.body.is_some() || base.is_some() {
         let edited = face.world.edit_pull(
             pull.id,
@@ -298,9 +328,9 @@ pub(crate) async fn patch_pull(
 
 /// The head a closed pull reopens at: its head branch's tip. GitHub refuses
 /// the reopen when the pull was merged; when its base or head branch is gone;
-/// when the tip does not descend from the pull's head, since it cannot tell
-/// what changed while the pull was closed; and when another pull is open from
-/// the same head into the same base.
+/// when another pull is open from the same head into the same base; and when
+/// the tip does not descend from the pull's head, since it cannot tell what
+/// changed while the pull was closed.
 fn reopen_head(
     face: &GithubFace,
     repo: &Repo,
@@ -326,18 +356,16 @@ fn reopen_head(
             )));
         }
     };
-    match store::is_ancestor(bare, &pull.head_sha, &tip) {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err(refused(format!(
-                "The {head} branch was force-pushed or recreated."
-            )));
-        }
+    match face.world.open_pull_between(repo.id, head, base) {
+        Ok(None) => {}
+        Ok(Some(_)) => return Err(Box::new(duplicate_reopen(pull))),
         Err(e) => return Err(Box::new(internal(e))),
     }
-    match face.world.open_pull_between(repo.id, head, base) {
-        Ok(None) => Ok(tip),
-        Ok(Some(_)) => Err(Box::new(duplicate_reopen(pull))),
+    match store::is_ancestor(bare, &pull.head_sha, &tip) {
+        Ok(true) => Ok(tip),
+        Ok(false) => Err(refused(format!(
+            "The {head} branch was force-pushed or recreated."
+        ))),
         Err(e) => Err(Box::new(internal(e))),
     }
 }
