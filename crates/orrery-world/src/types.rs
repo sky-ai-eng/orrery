@@ -61,6 +61,11 @@ impl Repo {
 pub struct LogEntry {
     pub seq: i64,
     pub clock_unix: i64,
+    /// The real time the entry was appended at, in Unix milliseconds, for a
+    /// caller showing when something happened. Nothing in the world reads it,
+    /// so it is not an input to replay. `None` for an entry appended before the
+    /// world recorded it.
+    pub wall_unix_ms: Option<i64>,
     pub actor_login: String,
     pub action: String,
     pub details: serde_json::Value,
