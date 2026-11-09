@@ -214,9 +214,9 @@ pub(crate) async fn patch_pull(
     // the check and the reopen. A `state` naming the state the pull is in
     // takes the write side as well, since another request can change that
     // state before the re-read. An edit that sets neither reads and moves no
-    // ref, so it holds the read side, which fetches share: it waits for no
-    // fetch, and none waits for it. It still waits for a write in progress,
-    // since a merge builds its commit message from the title it read.
+    // ref, so it holds the read side, which fetches share. Holding a side at
+    // all keeps it from landing between a write's read of the pull and that
+    // write's record.
     let lock = face.git.repo_lock(repo.id);
     let (_write, _read) = if state.is_some() || parsed.base.is_some() {
         (Some(lock.write_owned().await), None)

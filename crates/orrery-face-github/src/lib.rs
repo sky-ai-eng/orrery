@@ -801,9 +801,9 @@ mod ref_read_tests {
         );
     }
 
-    /// The test holds the repository's lock for write, as a merge does while
-    /// it builds its commit message from the pull's title. An edit that sets
-    /// neither `state` nor `base` waits for it, and lands once it ends.
+    /// The test holds the repository's lock for write, as a write does from
+    /// its read of the pull to its record. An edit that sets neither `state`
+    /// nor `base` waits for it, and lands once it ends.
     #[tokio::test]
     async fn a_title_or_body_edit_waits_out_a_write() {
         let f = fixture();

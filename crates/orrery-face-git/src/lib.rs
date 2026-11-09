@@ -45,7 +45,7 @@ pub struct GitFace {
     /// it is recorded. Every other git request, a fetch's in particular,
     /// holds it for read, so it sees the repository before a write or after its
     /// record, never partway, and so does an edit that sets neither, so it
-    /// never lands partway through a merge that read the pull's title.
+    /// never lands between a write's read of the pull and that write's record.
     repo_locks: std::sync::Mutex<BTreeMap<i64, Arc<tokio::sync::RwLock<()>>>>,
     /// World-wide write gate: every git-side operation holds it for read;
     /// snapshot create/restore hold it for write, so a copy of the world
