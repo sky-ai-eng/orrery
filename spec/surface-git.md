@@ -63,7 +63,7 @@ The GitHub face's reads of a repository's refs hold the same lock for read, and 
 - the REST reads of branches, a branch's ref, a compare, contents, check runs for a branch name, a pull request, and a pull request's files; and
 - the GraphQL fields `Repository.ref`, and a pull request's `mergeable`, `additions`, `deletions`, `changedFiles`, and `files`.
 
-A REST read and a GraphQL query also hold the world write gate for read for the whole request, as git traffic does, so a snapshot restore never replaces the repository under one. A read that also reads a pull request, as the REST pull request and its files and each of those pull request fields do, reads it under the same hold as its base and head branches' tips, so they come from one state. A GraphQL field holds the lock only for its own reads, so a write can land between two fields of one query, as between two requests of a fetch.
+A REST read and a GraphQL query also hold the world write gate for read for the whole request, as git traffic does, so a snapshot restore never replaces the repository under one. A read that also reads a pull request reads it under the same hold as the branch tips it uses, so they come from one state: the REST pull request, its files, and each of those pull request fields. A GraphQL field holds the lock only for its own reads, so a write can land between two fields of one query, as between two requests of a fetch.
 
 ## Deleting and restoring a branch
 
