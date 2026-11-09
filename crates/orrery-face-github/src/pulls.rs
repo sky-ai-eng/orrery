@@ -216,6 +216,8 @@ pub(crate) async fn patch_pull(
         Err(e) => return internal(e),
     };
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    // TODO(ORR-68): GitHub refuses a base edit on a closed pull ("Cannot
+    // change the base branch of a closed pull request."); this applies it.
     let base = match parsed.base.as_deref() {
         None => None,
         Some(b) => match store::rev_parse(&bare, &format!("refs/heads/{b}")) {
@@ -279,30 +281,29 @@ pub(crate) async fn patch_pull(
 /// tip does not descend from the pull's head, since it cannot tell what
 /// changed while the pull was closed.
 fn reopen_head(bare: &std::path::Path, pull: &Pull) -> Result<String, Box<Response<Body>>> {
-    if pull.merged {
-        return Err(Box::new(validation_custom(
-            "PullRequest",
-            "state cannot be changed. The pull request has been merged.",
-        )));
-    }
-    let refused = |why: &str| {
+    let refused = |why: String| {
         Box::new(validation_custom_field(
             "PullRequest",
             "state",
-            &format!(
-                "state cannot be changed. The {} branch {why}.",
-                pull.head_ref
-            ),
+            &format!("state cannot be changed. {why}"),
         ))
     };
-    let tip = match store::rev_parse(bare, &format!("refs/heads/{}", pull.head_ref)) {
+    let branch = &pull.head_ref;
+    if pull.merged {
+        return Err(refused("The pull request cannot be reopened.".into()));
+    }
+    // TODO(ORR-68): GitHub also refuses a reopen whose base branch is gone,
+    // naming the base; this reopens the pull, which then cannot merge.
+    let tip = match store::rev_parse(bare, &format!("refs/heads/{branch}")) {
         Ok(Some(tip)) => tip,
-        Ok(None) => return Err(refused("has been deleted")),
+        Ok(None) => return Err(refused(format!("The {branch} branch has been deleted."))),
         Err(e) => return Err(Box::new(internal(e))),
     };
     match store::is_ancestor(bare, &pull.head_sha, &tip) {
         Ok(true) => Ok(tip),
-        Ok(false) => Err(refused("was force-pushed or recreated")),
+        Ok(false) => Err(refused(format!(
+            "The {branch} branch was force-pushed or recreated."
+        ))),
         Err(e) => Err(Box::new(internal(e))),
     }
 }

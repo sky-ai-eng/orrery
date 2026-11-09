@@ -469,6 +469,17 @@ async fn a_reopened_pull_takes_its_head_branchs_tip() {
             .count()
     };
     let reopens = reopen_entries();
+
+    // A merged pull request is refused before its branch is looked at:
+    // GitHub answers the same once the merged head branch is deleted.
+    let merged = (
+        422,
+        refusal("state cannot be changed. The pull request cannot be reopened."),
+    );
+    assert_eq!(patch(1, serde_json::json!({ "state": "open" })), merged);
+    git(&src, clock, &["push", &authed_url, ":feature"]);
+    assert_eq!(patch(1, serde_json::json!({ "state": "open" })), merged);
+
     let reopen_and_retitle = serde_json::json!({ "state": "open", "title": "Retitled" });
     assert_eq!(
         patch(2, reopen_and_retitle.clone()),
