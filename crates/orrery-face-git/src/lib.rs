@@ -160,22 +160,12 @@ impl GitFace {
         before: &BTreeMap<String, String>,
         after: &BTreeMap<String, String>,
     ) -> Result<(), GitFaceError> {
-        let names: std::collections::BTreeSet<&String> =
-            before.keys().chain(after.keys()).collect();
-        let changed: Vec<(&str, &str, &str)> = names
-            .into_iter()
-            .filter_map(|name| {
-                let old = before.get(name).map_or(store::ZERO_OID, String::as_str);
-                let new = after.get(name).map_or(store::ZERO_OID, String::as_str);
-                (old != new).then_some((name.as_str(), old, new))
-            })
-            .collect();
+        let changed = changed_refs(before, after);
         if changed.is_empty() {
             return Ok(());
         }
 
-        let had_branches = before.keys().any(|r| r.starts_with("refs/heads/"));
-        let adopted = if had_branches {
+        let adopted = if has_branches(before) {
             None
         } else {
             let new_branches: Vec<&str> = after
@@ -244,6 +234,85 @@ impl GitFace {
             return Err(e);
         }
         Ok(())
+    }
+}
+
+/// The refs that differ between `before` and `after`, as `(name, old, new)`
+/// in ref-name order, [`store::ZERO_OID`] spelling a ref absent on one side.
+fn changed_refs<'a>(
+    before: &'a BTreeMap<String, String>,
+    after: &'a BTreeMap<String, String>,
+) -> Vec<(&'a str, &'a str, &'a str)> {
+    let names: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let old = before.get(name).map_or(store::ZERO_OID, String::as_str);
+            let new = after.get(name).map_or(store::ZERO_OID, String::as_str);
+            (old != new).then_some((name.as_str(), old, new))
+        })
+        .collect()
+}
+
+fn has_branches(refs: &BTreeMap<String, String>) -> bool {
+    refs.keys().any(|r| r.starts_with("refs/heads/"))
+}
+
+/// A push from the moment it reads the repository's refs, before
+/// receive-pack runs, until it is observed ([`UnobservedPush::observe`]).
+/// Dropped before then, by a return that answers the push with an error or
+/// by a panic unwinding the push's task, it moves back every ref that differs
+/// from the ones it read ([`GitFace::move_back`]), pull request refs an
+/// observation re-pinned included, and `HEAD` to the default branch if the
+/// repository had no branches, since only the first-push rule moves it. The
+/// repository then agrees with the world, which holds nothing of the push,
+/// and a retry starts from the refs the failed push found. The caller holds
+/// the repository's lock for write until this is dropped.
+struct UnobservedPush<'a> {
+    face: &'a GitFace,
+    repo: &'a Repo,
+    bare: &'a std::path::Path,
+    before: BTreeMap<String, String>,
+    armed: bool,
+}
+
+impl UnobservedPush<'_> {
+    /// Record what receive-pack moved ([`GitFace::observe_push`]), which
+    /// moves back what the push moved when the record fails. Refs that can't
+    /// be listed after receive-pack can't be moved back either: which ones it
+    /// moved is unknown.
+    fn observe(mut self, pusher: &Actor) -> Result<(), GitFaceError> {
+        let observed = store::list_refs(self.bare).and_then(|after| {
+            self.face
+                .observe_push(self.repo, pusher, &self.before, &after)
+        });
+        self.armed = false;
+        observed
+    }
+}
+
+impl Drop for UnobservedPush<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Nothing here reads the world, so a pull request ref goes back to the
+        // value read before the push rather than to the head the world pins:
+        // the panic being unwound may have poisoned the world's lock, and a
+        // second panic while unwinding aborts the process.
+        match store::list_refs(self.bare) {
+            Ok(now) => self
+                .face
+                .move_back(self.repo, &changed_refs(&self.before, &now), &[]),
+            Err(e) => {
+                tracing::error!(error = %e, "listing refs after a failed push failed; none moved back");
+            }
+        }
+        if !has_branches(&self.before)
+            && let Err(e) = store::set_head_symref(self.bare, &self.repo.default_branch)
+        {
+            tracing::error!(error = %e, git_ref = "HEAD", "unwind left a ref moved");
+        }
     }
 }
 
@@ -349,8 +418,6 @@ async fn receive_pack(
     match push.await {
         Ok(resp) => resp,
         Err(e) => {
-            // TODO(ORR-74): a push that panics after receive-pack moved refs
-            // leaves them moved, ahead of the log.
             tracing::error!(error = %e, "push task failed");
             plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
         }
@@ -402,9 +469,16 @@ async fn serve(
     } else {
         (None, Some(lock.read().await))
     };
-    let before = if is_push {
+    // Declared after the lock, so it is dropped while the lock is held.
+    let unobserved = if is_push {
         match store::list_refs(&bare) {
-            Ok(refs) => Some(refs),
+            Ok(before) => Some(UnobservedPush {
+                face: &face,
+                repo: &repo,
+                bare: &bare,
+                before,
+                armed: true,
+            }),
             Err(e) => {
                 tracing::error!(error = %e, "listing refs before push failed");
                 return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
@@ -429,23 +503,20 @@ async fn serve(
     let cgi_resp = match cgi::run_http_backend(&face.world.repos_dir(), req).await {
         Ok(r) => r,
         Err(e) => {
-            // TODO(ORR-74): receive-pack may have moved refs before http-backend
-            // failed, and they stay moved, ahead of the log; this arm and a
-            // push answered with a status other than 200 move nothing back.
             tracing::error!(error = %e, "git http-backend failed");
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
         }
     };
 
-    if let Some(before) = before
+    // http-backend writes its whole header block, with no `Status` line,
+    // before it starts receive-pack, and closes its output once it has, so a
+    // push answered with any other status ended before receive-pack ran. It
+    // is not observed, and moved nothing for `unobserved` to move back.
+    if let Some(unobserved) = unobserved
         && cgi_resp.status == 200
     {
         let pusher = actor.expect("pushes are refused without an actor above");
-        // Refs that can't be listed after receive-pack can't be moved back
-        // either: which ones it moved is unknown.
-        let observed = store::list_refs(&bare)
-            .and_then(|after| face.observe_push(&repo, pusher, &before, &after));
-        if let Err(e) = observed {
+        if let Err(e) = unobserved.observe(pusher) {
             tracing::error!(error = %e, "push observation failed");
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
         }
@@ -491,7 +562,7 @@ mod tests {
     use std::pin::{Pin, pin};
     use std::task::{Context, Poll, Waker};
 
-    use orrery_world::{ActorKind, DEFAULT_T0_UNIX, WorldSecret};
+    use orrery_world::{ActorKind, DEFAULT_T0_UNIX, Signal, WorldSecret};
 
     use super::*;
 
@@ -790,6 +861,15 @@ mod tests {
         );
     }
 
+    /// The branch `HEAD` names.
+    fn head(bare: &std::path::Path) -> String {
+        let out = store::hermetic_git(bare)
+            .args(["symbolic-ref", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
     /// The first push into a repository with no branches sets `HEAD`, and a
     /// record that fails then puts `HEAD` back with the branch. git refuses
     /// to delete a repository's current branch, so a repository with no
@@ -800,13 +880,6 @@ mod tests {
     #[test]
     fn a_first_push_that_fails_puts_head_back() {
         let f = fixture();
-        let head = || {
-            let out = store::hermetic_git(&f.bare)
-                .args(["symbolic-ref", "HEAD"])
-                .output()
-                .unwrap();
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
-        };
         store::update_ref_cas(&f.bare, "refs/heads/main", store::ZERO_OID, &f.main).unwrap();
         let before = store::list_refs(&f.bare).unwrap();
         let mark = f.face.world.log_after(0, 100).unwrap().last().unwrap().seq;
@@ -823,7 +896,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store::list_refs(&f.bare).unwrap(), before);
-        assert_eq!(head(), "refs/heads/main");
+        assert_eq!(head(&f.bare), "refs/heads/main");
         assert!(f.face.world.log_after(mark, 100).unwrap().is_empty());
 
         // The same push, recorded, sets `HEAD` and the default branch.
@@ -831,8 +904,37 @@ mod tests {
         f.face
             .observe_push(&f.repo, &f.alice, &before, &after)
             .unwrap();
-        assert_eq!(head(), "refs/heads/topic");
+        assert_eq!(head(&f.bare), "refs/heads/topic");
         let repo = f.face.world.repo_by_owner_name("alice", "webapp").unwrap();
         assert_eq!(repo.unwrap().default_branch, "topic");
+    }
+
+    /// The first push into a repository with no branches, creating `topic`,
+    /// sets `HEAD` to it before its record, and a listener panics the push's
+    /// task as the record appends its first entry. The push is answered
+    /// `500`, `topic` is gone, and `HEAD` names `main` again. The panic
+    /// poisons the world's lock, so the log is read through a connection of
+    /// its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_first_push_that_panics_puts_head_back() {
+        let f = fixture();
+        store::update_ref_cas(&f.bare, "refs/heads/main", store::ZERO_OID, &f.main).unwrap();
+        let before = store::list_refs(&f.bare).unwrap();
+        let mark = f.face.world.log_after(0, 100).unwrap().last().unwrap().seq;
+        let (_, body) = push_topic();
+
+        f.face.world.listen(|signal| {
+            if signal == Signal::LogMayHaveGrown {
+                panic!("the push's record panicked");
+            }
+        });
+        assert_eq!(
+            push(&f, body).await.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(store::list_refs(&f.bare).unwrap(), before);
+        assert_eq!(head(&f.bare), "refs/heads/main");
+        let world = World::open(f.face.world.root()).unwrap();
+        assert!(world.log_after(mark, 100).unwrap().is_empty());
     }
 }
