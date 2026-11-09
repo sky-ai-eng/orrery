@@ -7,9 +7,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orrery_snapshot::{DiffSide, SnapshotError, diff};
 use orrery_world::{
-    ActorEmail, ActorKind, DEFAULT_T0_UNIX, NewPull, OrgRole, Pull, RefChange, RefMove,
-    ReviewState, TeamRole, World, WorldError, WorldSecret, WorldView,
+    ActorEmail, ActorKind, Attribution, DEFAULT_T0_UNIX, Door, EventBody, NewPull, OrgRole, Pull,
+    RefChange, RefMove, ReviewState, TeamRole, World, WorldError, WorldSecret, WorldView,
 };
+
+/// A write by `actor_id` as the REST face makes it.
+fn by(actor_id: i64) -> Attribution {
+    Attribution::new(actor_id, Door::Rest)
+}
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -81,17 +86,19 @@ impl Instance {
 
     fn pull(&self, repo_id: i64, author_id: i64, head_ref: &str, draft: bool) -> Pull {
         self.world
-            .create_pull(NewPull {
-                repo_id,
-                author_id,
-                title: "change",
-                body: None,
-                head_ref,
-                head_sha: SHA_B,
-                base_ref: "main",
-                base_sha: SHA_A,
-                draft,
-            })
+            .create_pull(
+                by(author_id),
+                NewPull {
+                    repo_id,
+                    title: "change",
+                    body: None,
+                    head_ref,
+                    head_sha: SHA_B,
+                    base_ref: "main",
+                    base_sha: SHA_A,
+                    draft,
+                },
+            )
             .expect("create pull")
     }
 }
@@ -114,7 +121,7 @@ fn create_list_info_delete() {
     assert_eq!(before.clock_unix, DEFAULT_T0_UNIX);
     assert!(before.last_seq > 0);
 
-    inst.world.advance_clock(3600, alice.id).unwrap();
+    inst.world.advance_clock(3600, by(alice.id)).unwrap();
     let after = orrery_snapshot::create(&inst.world, &inst.snapshots(), "after").unwrap();
     assert_eq!(after.clock_unix, DEFAULT_T0_UNIX + 3600);
 
@@ -168,7 +175,7 @@ fn restore_rewinds_and_the_world_keeps_working() {
     let (alice, alice_token) = inst.world.create_actor("alice", ActorKind::User).unwrap();
     orrery_snapshot::create(&inst.world, &inst.snapshots(), "before").unwrap();
 
-    inst.world.advance_clock(3600, alice.id).unwrap();
+    inst.world.advance_clock(3600, by(alice.id)).unwrap();
     let (bob, bob_token) = inst.world.create_actor("bob", ActorKind::User).unwrap();
     let _ = bob;
 
@@ -222,7 +229,7 @@ fn a_diffs_shared_seq_is_the_newest_entry_both_logs_hold() {
     };
     let grow = |entries: usize| {
         for _ in 0..entries {
-            inst.world.advance_clock(1, alice.id).unwrap();
+            inst.world.advance_clock(1, by(alice.id)).unwrap();
         }
     };
     let restore = |name: &str| {
@@ -312,12 +319,12 @@ struct Seeded {
 /// second code still waiting to be.
 fn seed(world: &World) -> Seeded {
     let (alice, alice_token) = world.create_actor("alice", ActorKind::User).unwrap();
-    let (_, issued_token) = world.issue_actor_token("alice", alice.id).unwrap();
+    let (_, issued_token) = world.issue_actor_token("alice", by(alice.id)).unwrap();
     let app = world
-        .create_oauth_app("Sign-in", "https://auth.test/callback", alice.id)
+        .create_oauth_app("Sign-in", "https://auth.test/callback", by(alice.id))
         .unwrap();
     let issued_secret = world
-        .issue_oauth_client_secret(&app.client_id, alice.id)
+        .issue_oauth_client_secret(&app.client_id, by(alice.id))
         .unwrap();
     let issue = || {
         world
@@ -427,9 +434,11 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
     );
 
     // Credentials issued in the fork are the twin's, and work only there.
-    let (_, fork_token) = fork.issue_actor_token("alice", source.alice.id).unwrap();
+    let (_, fork_token) = fork
+        .issue_actor_token("alice", by(source.alice.id))
+        .unwrap();
     let (_, twin_token) = twin_world
-        .issue_actor_token("alice", twin.alice.id)
+        .issue_actor_token("alice", by(twin.alice.id))
         .unwrap();
     assert_eq!(fork_token, twin_token);
     assert_eq!(
@@ -438,12 +447,12 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
     );
     assert!(inst.world.actor_by_token(&fork_token).unwrap().is_none());
     let fork_secret_issued = fork
-        .issue_oauth_client_secret(&app.client_id, source.alice.id)
+        .issue_oauth_client_secret(&app.client_id, by(source.alice.id))
         .unwrap();
     assert_eq!(
         fork_secret_issued,
         twin_world
-            .issue_oauth_client_secret(&twin.client_id, twin.alice.id)
+            .issue_oauth_client_secret(&twin.client_id, by(twin.alice.id))
             .unwrap()
     );
 
@@ -455,13 +464,22 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
         );
     }
 
-    // One logged action, attributed to the engine, naming no credential.
+    // One event, the system actor's through the CLI, naming no credential.
     let log = fork.log_after(0, 500).unwrap();
-    let rekeys: Vec<_> = log.iter().filter(|e| e.action == "world.rekey").collect();
+    let rekeys: Vec<_> = log
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::WorldRekeyed(r) => Some((e, r)),
+            _ => None,
+        })
+        .collect();
     assert_eq!(rekeys.len(), 1);
-    assert_eq!(rekeys[0].actor_login, "orrery");
     assert_eq!(
-        rekeys[0].details,
+        (rekeys[0].0.actor.login.as_str(), rekeys[0].0.door),
+        ("orrery", Door::Cli)
+    );
+    assert_eq!(
+        serde_json::to_value(rekeys[0].1.rekeyed).unwrap(),
         serde_json::json!({
             "tokens": 3,
             "oauth_apps": 1,
@@ -491,30 +509,32 @@ fn diff_reports_the_interval_between_states() {
     let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
     let repo = inst
         .world
-        .create_repo(alice.id, "webapp", None, false, "main", alice.id)
+        .create_repo(alice.id, "webapp", None, false, "main", by(alice.id))
         .unwrap();
     orrery_snapshot::create(&inst.world, &inst.snapshots(), "before").unwrap();
 
-    inst.world.advance_clock(3600, alice.id).unwrap();
+    inst.world.advance_clock(3600, by(alice.id)).unwrap();
     let (bob, _) = inst.world.create_actor("bob", ActorKind::User).unwrap();
     let pull = inst
         .world
-        .create_pull(NewPull {
-            repo_id: repo.id,
-            author_id: alice.id,
-            title: "add feature",
-            body: None,
-            head_ref: "feature",
-            head_sha: SHA_B,
-            base_ref: "main",
-            base_sha: SHA_A,
-            draft: false,
-        })
+        .create_pull(
+            by(alice.id),
+            NewPull {
+                repo_id: repo.id,
+                title: "add feature",
+                body: None,
+                head_ref: "feature",
+                head_sha: SHA_B,
+                base_ref: "main",
+                base_sha: SHA_A,
+                draft: false,
+            },
+        )
         .unwrap();
     inst.world
         .create_review(
             pull.id,
-            bob.id,
+            by(bob.id),
             orrery_world::ReviewState::Approved,
             None,
             None,
@@ -526,8 +546,13 @@ fn diff_reports_the_interval_between_states() {
         new: SHA_C,
         repins: Vec::new(),
         change: RefChange::Moved,
+        forced: false,
+        commits: vec![SHA_C.to_string()],
+        commit_count: 1,
     };
-    inst.world.record_merge(pull.id, bob.id, &merge).unwrap();
+    inst.world
+        .record_merge(pull.id, by(bob.id), &merge)
+        .unwrap();
     orrery_snapshot::create(&inst.world, &inst.snapshots(), "after").unwrap();
 
     let open = |name: &str| {
@@ -639,7 +664,7 @@ fn diff_reports_new_actors_with_their_addresses_and_changed_addresses() {
                 email("alice@acme.test", true, true),
                 email("alice@old.test", false, false),
             ],
-            alice.id,
+            by(alice.id),
         )
         .unwrap();
 
@@ -674,7 +699,7 @@ fn diff_reports_new_actors_with_their_addresses_and_changed_addresses() {
                 email("alice@old.test", false, false),
                 email("ALICE@acme.test", true, true),
             ],
-            alice.id,
+            by(alice.id),
         )
         .unwrap();
     assert!(inst.diff("after", None).emails_changed.is_empty());
@@ -689,7 +714,7 @@ fn diff_reports_oauth_apps_and_authorizations_without_their_secrets() {
     let (_, bob_token) = inst.world.create_actor("bob", ActorKind::User).unwrap();
     let app = inst
         .world
-        .create_oauth_app("GoTrue", "https://auth.test/callback", alice.id)
+        .create_oauth_app("GoTrue", "https://auth.test/callback", by(alice.id))
         .unwrap();
     let code = inst
         .world
@@ -742,23 +767,23 @@ fn diff_reports_labels_added_and_removed() {
     let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
     let repo = inst
         .world
-        .create_repo(alice.id, "webapp", None, false, "main", alice.id)
+        .create_repo(alice.id, "webapp", None, false, "main", by(alice.id))
         .unwrap();
     let pull = inst.pull(repo.id, alice.id, "feature", false);
     inst.world
-        .add_pull_labels(pull.id, alice.id, &["bug", "triage"])
+        .add_pull_labels(pull.id, by(alice.id), &["bug", "triage"])
         .unwrap();
     inst.snapshot("before");
 
     inst.world
-        .remove_pull_label(pull.id, alice.id, "triage")
+        .remove_pull_label(pull.id, by(alice.id), "triage")
         .unwrap();
     inst.world
-        .add_pull_labels(pull.id, alice.id, &["needs-review", "BUG"])
+        .add_pull_labels(pull.id, by(alice.id), &["needs-review", "BUG"])
         .unwrap();
     let fresh = inst.pull(repo.id, alice.id, "other", false);
     inst.world
-        .add_pull_labels(fresh.id, alice.id, &["docs"])
+        .add_pull_labels(fresh.id, by(alice.id), &["docs"])
         .unwrap();
 
     let d = inst.diff("before", None);
@@ -790,7 +815,7 @@ fn diff_reports_ready_for_review_and_conversion_to_draft() {
     let (bob, _) = inst.world.create_actor("bob", ActorKind::User).unwrap();
     let repo = inst
         .world
-        .create_repo(alice.id, "webapp", None, false, "main", alice.id)
+        .create_repo(alice.id, "webapp", None, false, "main", by(alice.id))
         .unwrap();
     let readied = inst.pull(repo.id, alice.id, "one", true);
     let round_trip = inst.pull(repo.id, alice.id, "two", true);
@@ -798,16 +823,16 @@ fn diff_reports_ready_for_review_and_conversion_to_draft() {
     inst.snapshot("before");
 
     inst.world
-        .set_pull_draft(readied.id, alice.id, false)
+        .set_pull_draft(readied.id, by(alice.id), false)
         .unwrap();
     inst.world
-        .set_pull_draft(round_trip.id, bob.id, false)
+        .set_pull_draft(round_trip.id, by(bob.id), false)
         .unwrap();
     inst.world
-        .set_pull_draft(round_trip.id, bob.id, true)
+        .set_pull_draft(round_trip.id, by(bob.id), true)
         .unwrap();
     inst.world
-        .set_pull_draft(converted.id, alice.id, true)
+        .set_pull_draft(converted.id, by(alice.id), true)
         .unwrap();
 
     let d = inst.diff("before", None);
@@ -840,15 +865,15 @@ fn diff_reports_org_memberships_and_roles() {
     inst.world.create_actor("dave", ActorKind::User).unwrap();
     inst.world.create_actor("carol", ActorKind::User).unwrap();
     inst.world
-        .set_org_membership("acme", "dave", OrgRole::Member, admin.id)
+        .set_org_membership("acme", "dave", OrgRole::Member, by(admin.id))
         .unwrap();
     inst.snapshot("before");
 
     inst.world
-        .set_org_membership("acme", "dave", OrgRole::Admin, admin.id)
+        .set_org_membership("acme", "dave", OrgRole::Admin, by(admin.id))
         .unwrap();
     inst.world
-        .set_org_membership("acme", "carol", OrgRole::Member, admin.id)
+        .set_org_membership("acme", "carol", OrgRole::Member, by(admin.id))
         .unwrap();
 
     let d = inst.diff("before", None);
@@ -883,31 +908,43 @@ fn diff_reports_teams_and_team_memberships() {
     for login in ["dave", "carol"] {
         inst.world.create_actor(login, ActorKind::User).unwrap();
         inst.world
-            .set_org_membership("acme", login, OrgRole::Member, admin.id)
+            .set_org_membership("acme", login, OrgRole::Member, by(admin.id))
             .unwrap();
     }
     inst.world
-        .create_team("acme", "Platform", None, admin.id)
+        .create_team("acme", "Platform", None, by(admin.id))
         .unwrap();
     inst.world
-        .set_team_membership("acme", "platform", "dave", TeamRole::Member, admin.id)
+        .set_team_membership("acme", "platform", "dave", TeamRole::Member, by(admin.id))
         .unwrap();
     inst.world
-        .set_team_membership("acme", "platform", "carol", TeamRole::Member, admin.id)
+        .set_team_membership("acme", "platform", "carol", TeamRole::Member, by(admin.id))
         .unwrap();
     inst.snapshot("before");
 
     inst.world
-        .set_team_membership("acme", "platform", "dave", TeamRole::Maintainer, admin.id)
+        .set_team_membership(
+            "acme",
+            "platform",
+            "dave",
+            TeamRole::Maintainer,
+            by(admin.id),
+        )
         .unwrap();
     inst.world
-        .remove_team_membership("acme", "platform", "carol", admin.id)
+        .remove_team_membership("acme", "platform", "carol", by(admin.id))
         .unwrap();
     inst.world
-        .create_team("acme", "Release", None, admin.id)
+        .create_team("acme", "Release", None, by(admin.id))
         .unwrap();
     inst.world
-        .set_team_membership("acme", "release", "carol", TeamRole::Maintainer, admin.id)
+        .set_team_membership(
+            "acme",
+            "release",
+            "carol",
+            TeamRole::Maintainer,
+            by(admin.id),
+        )
         .unwrap();
 
     let d = inst.diff("before", None);
@@ -951,24 +988,24 @@ fn diff_reports_a_reused_team_slug_as_a_deletion_and_a_creation() {
     inst.world.create_actor("acme", ActorKind::Org).unwrap();
     inst.world.create_actor("dave", ActorKind::User).unwrap();
     inst.world
-        .set_org_membership("acme", "dave", OrgRole::Member, admin.id)
+        .set_org_membership("acme", "dave", OrgRole::Member, by(admin.id))
         .unwrap();
     inst.world
-        .create_team("acme", "Reviewers", None, admin.id)
+        .create_team("acme", "Reviewers", None, by(admin.id))
         .unwrap();
     inst.world
-        .set_team_membership("acme", "reviewers", "dave", TeamRole::Member, admin.id)
+        .set_team_membership("acme", "reviewers", "dave", TeamRole::Member, by(admin.id))
         .unwrap();
     inst.snapshot("before");
 
     inst.world
-        .delete_team("acme", "reviewers", admin.id)
+        .delete_team("acme", "reviewers", by(admin.id))
         .unwrap();
     inst.world
-        .create_team("acme", "Reviewers", None, admin.id)
+        .create_team("acme", "Reviewers", None, by(admin.id))
         .unwrap();
     inst.world
-        .set_team_membership("acme", "reviewers", "dave", TeamRole::Member, admin.id)
+        .set_team_membership("acme", "reviewers", "dave", TeamRole::Member, by(admin.id))
         .unwrap();
 
     let d = inst.diff("before", None);
@@ -1006,26 +1043,26 @@ fn diff_reports_review_requests_added_and_removed() {
     for login in ["alice", "dave", "carol", "erin"] {
         let (actor, _) = inst.world.create_actor(login, ActorKind::User).unwrap();
         inst.world
-            .set_org_membership("acme", login, OrgRole::Member, admin.id)
+            .set_org_membership("acme", login, OrgRole::Member, by(admin.id))
             .unwrap();
         people.insert(login, actor);
     }
     let alice = &people["alice"];
     let repo = inst
         .world
-        .create_repo(acme.id, "webapp", None, false, "main", alice.id)
+        .create_repo(acme.id, "webapp", None, false, "main", by(alice.id))
         .unwrap();
     inst.world
-        .create_team("acme", "Reviewers", None, admin.id)
+        .create_team("acme", "Reviewers", None, by(admin.id))
         .unwrap();
     inst.world
-        .create_team("acme", "Release", None, admin.id)
+        .create_team("acme", "Release", None, by(admin.id))
         .unwrap();
     let pull = inst.pull(repo.id, alice.id, "feature", false);
     inst.snapshot("before");
 
     inst.world
-        .request_reviewers(pull.id, alice.id, &["dave", "carol"], &["reviewers"])
+        .request_reviewers(pull.id, by(alice.id), &["dave", "carol"], &["reviewers"])
         .unwrap();
     inst.snapshot("requested");
 
@@ -1034,20 +1071,20 @@ fn diff_reports_review_requests_added_and_removed() {
     inst.world
         .create_review(
             pull.id,
-            people["dave"].id,
+            by(people["dave"].id),
             ReviewState::Commented,
             None,
             None,
         )
         .unwrap();
     inst.world
-        .remove_review_requests(pull.id, alice.id, &["carol"], &[])
+        .remove_review_requests(pull.id, by(alice.id), &["carol"], &[])
         .unwrap();
     inst.world
-        .delete_team("acme", "reviewers", admin.id)
+        .delete_team("acme", "reviewers", by(admin.id))
         .unwrap();
     inst.world
-        .request_reviewers(pull.id, alice.id, &["erin"], &["release"])
+        .request_reviewers(pull.id, by(alice.id), &["erin"], &["release"])
         .unwrap();
 
     let names = |rs: &[orrery_snapshot::diff::ReviewRequestChange]| -> Vec<String> {

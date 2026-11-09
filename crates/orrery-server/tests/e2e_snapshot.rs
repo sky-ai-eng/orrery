@@ -496,7 +496,7 @@ async fn the_log_read_from_a_diffs_shared_seq_is_its_appended_entries() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|e| e["details"]["login"].as_str().unwrap())
+        .map(|e| e["subject"]["login"].as_str().unwrap())
         .collect();
     assert_eq!(created, ["dave", "erin", "frank"]);
     assert_eq!(

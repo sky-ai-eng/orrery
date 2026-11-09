@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{HeaderMap, Response, StatusCode};
-use orrery_world::{Actor, ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, NewCheckRun};
+use orrery_world::{
+    Actor, ActorKind, Caller, CheckConclusion, CheckRunPatch, CheckStatus, Door, NewCheckRun,
+};
 
 use crate::render::check_run_json;
 use crate::{
@@ -36,10 +38,12 @@ struct CheckRunBody {
 pub(crate) async fn create_check_run(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
+    let actor = caller.actor;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -82,19 +86,21 @@ pub(crate) async fn create_check_run(
         None if fields.status == CheckStatus::Completed => Some(clock),
         None => None,
     };
-    let created = face.world.create_check_run(NewCheckRun {
-        repo_id: repo.id,
-        creator_id: actor.id,
-        head_sha,
-        name,
-        status: fields.status,
-        conclusion: fields.conclusion,
-        details_url: parsed.details_url.as_deref(),
-        external_id: parsed.external_id.as_deref(),
-        output: parsed.output.as_ref(),
-        started_clock_unix: Some(started),
-        completed_clock_unix: completed,
-    });
+    let created = face.world.create_check_run(
+        by,
+        NewCheckRun {
+            repo_id: repo.id,
+            head_sha,
+            name,
+            status: fields.status,
+            conclusion: fields.conclusion,
+            details_url: parsed.details_url.as_deref(),
+            external_id: parsed.external_id.as_deref(),
+            output: parsed.output.as_ref(),
+            started_clock_unix: Some(started),
+            completed_clock_unix: completed,
+        },
+    );
     match created {
         Ok(run) => json_response(StatusCode::CREATED, check_run_json(&face, &repo, &run)),
         Err(e) => internal(e),
@@ -104,10 +110,12 @@ pub(crate) async fn create_check_run(
 pub(crate) async fn patch_check_run(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
+    let actor = caller.actor;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -160,7 +168,7 @@ pub(crate) async fn patch_check_run(
     };
     let updated = face.world.update_check_run(
         run_id,
-        actor.id,
+        by,
         CheckRunPatch {
             name: parsed.name.as_deref(),
             status: Some(fields.status),

@@ -6,7 +6,7 @@
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{HeaderMap, Response, StatusCode};
-use orrery_world::{Actor, ActorKind, OrgRole, Team, TeamRole, WorldError};
+use orrery_world::{ActorKind, Caller, Door, OrgRole, Team, TeamRole, WorldError};
 
 use crate::render::{actor_json, org_json, team_full_json};
 use crate::{
@@ -69,10 +69,11 @@ struct RoleBody {
 pub(crate) async fn set_org_membership(
     State(face): State<GithubFace>,
     UrlPath((org, username)): UrlPath<(String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     if let Err(resp) = resolve_org(&face, &org) {
         return *resp;
     }
@@ -91,10 +92,7 @@ pub(crate) async fn set_org_membership(
         Some("admin") => OrgRole::Admin,
         Some(_) => return validation_invalid("Membership", "role"),
     };
-    match face
-        .world
-        .set_org_membership(&org, &username, role, actor.id)
-    {
+    match face.world.set_org_membership(&org, &username, role, by) {
         Ok(m) => {
             let base = face.base_url.trim_end_matches('/');
             let user = match face.world.actor_by_login(&m.member_login) {
@@ -138,10 +136,11 @@ struct CreateTeamBody {
 pub(crate) async fn create_team(
     State(face): State<GithubFace>,
     UrlPath(org): UrlPath<String>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     if let Err(resp) = resolve_org(&face, &org) {
         return *resp;
     }
@@ -170,7 +169,7 @@ pub(crate) async fn create_team(
     };
     match face
         .world
-        .create_team(&org, name, parsed.description.as_deref(), actor.id)
+        .create_team(&org, name, parsed.description.as_deref(), by)
     {
         Ok(team) => match team_full_json(&face, &team) {
             Ok(json) => json_response(StatusCode::CREATED, json),
@@ -193,16 +192,17 @@ pub(crate) async fn create_team(
 pub(crate) async fn delete_team(
     State(face): State<GithubFace>,
     UrlPath((org, slug)): UrlPath<(String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     if let Err(resp) = resolve_team(&face, &org, &slug) {
         return *resp;
     }
     if let Some(refused) = media::refuse_unrendered(&headers, "Team") {
         return refused;
     }
-    match face.world.delete_team(&org, &slug, actor.id) {
+    match face.world.delete_team(&org, &slug, by) {
         Ok(()) => no_content(),
         Err(WorldError::NoSuchOrg(_) | WorldError::NoSuchTeam(_)) => {
             github_error(StatusCode::NOT_FOUND, "Not Found")
@@ -216,10 +216,11 @@ pub(crate) async fn delete_team(
 pub(crate) async fn set_team_membership(
     State(face): State<GithubFace>,
     UrlPath((org, slug, username)): UrlPath<(String, String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     if let Err(resp) = resolve_team(&face, &org, &slug) {
         return *resp;
     }
@@ -240,7 +241,7 @@ pub(crate) async fn set_team_membership(
     };
     match face
         .world
-        .set_team_membership(&org, &slug, &username, role, actor.id)
+        .set_team_membership(&org, &slug, &username, role, by)
     {
         Ok(m) => {
             let team = match face.world.team_by_slug(&org, &slug) {
@@ -278,9 +279,10 @@ pub(crate) async fn set_team_membership(
 pub(crate) async fn remove_team_membership(
     State(face): State<GithubFace>,
     UrlPath((org, slug, username)): UrlPath<(String, String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     if let Err(resp) = resolve_team(&face, &org, &slug) {
         return *resp;
     }
@@ -292,7 +294,7 @@ pub(crate) async fn remove_team_membership(
     }
     match face
         .world
-        .remove_team_membership(&org, &slug, &username, actor.id)
+        .remove_team_membership(&org, &slug, &username, by)
     {
         Ok(()) => no_content(),
         Err(WorldError::NoSuchOrg(_) | WorldError::NoSuchTeam(_) | WorldError::NoSuchActor(_)) => {

@@ -4,8 +4,8 @@
 //! Each derivation is an HMAC-SHA256 keyed by the world's secret over public
 //! inputs — a login and an id — so knowing the inputs is not enough to compute
 //! a working credential. The
-//! secret lives only in the `world` table: never in the action log, and no
-//! read returns it.
+//! secret lives only in the `world` table: never in an event, and no read
+//! returns it.
 
 use std::path::Path;
 
@@ -14,7 +14,8 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, 
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
-use crate::{Result, SYSTEM_ACTOR_LOGIN, World, queries};
+use crate::events::{self, Attribution, Door, EventBody};
+use crate::{Result, SYSTEM_ACTOR_ID, World, queries};
 
 /// The key behind every credential a world derives.
 #[derive(Clone)]
@@ -151,8 +152,10 @@ impl World {
     /// Open the world at `root` — a fresh copy of another world's state — as
     /// a new world: give it `secret` and re-derive every credential it
     /// inherited, so it accepts none of its source's. This is the only way a
-    /// world is re-keyed, and only at its creation, so every log entry after
-    /// its `world.rekey` was made under the secret it holds now.
+    /// world is re-keyed, and only at its creation, so every event after its
+    /// `world:rekeyed` was made under the secret it holds now. The `orrery`
+    /// command's fork is the one caller, so the write is the system actor's,
+    /// through the CLI.
     pub fn open_rekeyed(root: &Path, secret: &WorldSecret) -> Result<World> {
         let world = World::open(root)?;
         world.rekey(secret)?;
@@ -163,85 +166,79 @@ impl World {
     /// two secrets. Spent authorization codes keep their values: they can
     /// never be exchanged again.
     fn rekey(&self, secret: &WorldSecret) -> Result<()> {
-        let conn = self.lock();
-        let tx = conn.unchecked_transaction()?;
-        tx.execute("UPDATE world SET secret = ?1 WHERE id = 1", params![secret])?;
+        let by = Attribution::new(SYSTEM_ACTOR_ID, Door::Cli);
+        self.write(by, |w| {
+            let tx = w.tx;
+            tx.execute("UPDATE world SET secret = ?1 WHERE id = 1", params![secret])?;
 
-        let tokens = queries::list(
-            &tx,
-            "SELECT t.token, t.origin, a.login, a.id
+            let tokens = queries::list(
+                tx,
+                "SELECT t.token, t.origin, a.login, a.id
              FROM tokens t JOIN actors a ON a.id = t.actor_id
              ORDER BY t.rowid",
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, TokenOrigin>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                ))
-            },
-        )?;
-        for (old, origin, login, actor_id) in &tokens {
-            let new = match origin {
-                TokenOrigin::Actor(n) => actor_token(secret, login, *actor_id, *n),
-                TokenOrigin::OAuthCode(code_id) => oauth_token(secret, *code_id),
-            };
-            tx.execute(
-                "UPDATE tokens SET token = ?1 WHERE token = ?2",
-                params![new, old],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, TokenOrigin>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
             )?;
-        }
+            for (old, origin, login, actor_id) in &tokens {
+                let new = match origin {
+                    TokenOrigin::Actor(n) => actor_token(secret, login, *actor_id, *n),
+                    TokenOrigin::OAuthCode(code_id) => oauth_token(secret, *code_id),
+                };
+                tx.execute(
+                    "UPDATE tokens SET token = ?1 WHERE token = ?2",
+                    params![new, old],
+                )?;
+            }
 
-        let apps: Vec<i64> =
-            queries::list(&tx, "SELECT id FROM oauth_apps ORDER BY id", |r| r.get(0))?;
-        for id in &apps {
-            tx.execute(
-                "UPDATE oauth_apps SET client_secret = ?1 WHERE id = ?2",
-                params![oauth_client_secret(secret, *id, 0), id],
+            let apps: Vec<i64> =
+                queries::list(tx, "SELECT id FROM oauth_apps ORDER BY id", |r| r.get(0))?;
+            for id in &apps {
+                tx.execute(
+                    "UPDATE oauth_apps SET client_secret = ?1 WHERE id = ?2",
+                    params![oauth_client_secret(secret, *id, 0), id],
+                )?;
+            }
+
+            let app_secrets = queries::list(
+                tx,
+                "SELECT app_id, n FROM oauth_app_secrets ORDER BY app_id, n",
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
             )?;
-        }
+            for (app_id, n) in &app_secrets {
+                tx.execute(
+                    "UPDATE oauth_app_secrets SET secret = ?1 WHERE app_id = ?2 AND n = ?3",
+                    params![oauth_client_secret(secret, *app_id, *n), app_id, n],
+                )?;
+            }
 
-        let app_secrets = queries::list(
-            &tx,
-            "SELECT app_id, n FROM oauth_app_secrets ORDER BY app_id, n",
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-        )?;
-        for (app_id, n) in &app_secrets {
-            tx.execute(
-                "UPDATE oauth_app_secrets SET secret = ?1 WHERE app_id = ?2 AND n = ?3",
-                params![oauth_client_secret(secret, *app_id, *n), app_id, n],
+            let codes: Vec<i64> = queries::list(
+                tx,
+                "SELECT id FROM oauth_codes WHERE exchanged_clock_unix IS NULL ORDER BY id",
+                |r| r.get(0),
             )?;
-        }
+            for id in &codes {
+                tx.execute(
+                    "UPDATE oauth_codes SET code = ?1 WHERE id = ?2",
+                    params![oauth_code(secret, *id), id],
+                )?;
+            }
 
-        let codes: Vec<i64> = queries::list(
-            &tx,
-            "SELECT id FROM oauth_codes WHERE exchanged_clock_unix IS NULL ORDER BY id",
-            |r| r.get(0),
-        )?;
-        for id in &codes {
-            tx.execute(
-                "UPDATE oauth_codes SET code = ?1 WHERE id = ?2",
-                params![oauth_code(secret, *id), id],
-            )?;
-        }
-
-        let system: i64 = tx.query_row(
-            "SELECT id FROM actors WHERE login = ?1",
-            params![SYSTEM_ACTOR_LOGIN],
-            |r| r.get(0),
-        )?;
-        self.log_locked(
-            &tx,
-            system,
-            "world.rekey",
-            &serde_json::json!({
-                "tokens": tokens.len(),
-                "oauth_apps": apps.len(),
-                "oauth_app_secrets": app_secrets.len(),
-                "oauth_codes": codes.len(),
-            }),
-        )?;
-        tx.commit()?;
-        Ok(())
+            w.operation(EventBody::WorldRekeyed(events::WorldRekeyed {
+                subject: events::WorldSubject::default(),
+                rekeyed: events::Rekeyed {
+                    tokens: tokens.len() as i64,
+                    oauth_apps: apps.len() as i64,
+                    oauth_app_secrets: app_secrets.len() as i64,
+                    oauth_codes: codes.len() as i64,
+                },
+            }));
+            Ok(())
+        })
     }
 }

@@ -34,14 +34,14 @@ Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CO
 
 ## What a push does
 
-`git-receive-pack` runs under a per-repository lock, and Orrery compares the repository's refs before and after it. For each ref that changed, in ref-name order, it appends one `ref.update` entry to the action log, attributed to the pushing actor, naming the ref and its old and new object ids. With them:
+`git-receive-pack` runs under a per-repository lock, and Orrery compares the repository's refs before and after it. A push that changed a ref is one write in the log, attributed to the pushing actor through the `git` door: a `repo:pushed` event, then a `ref:created`, `ref:updated`, or `ref:deleted` event for each ref that changed, in ref-name order, with the commits it brought in, then an event for each change to a pull request (`events.md`). With them:
 
 - an open pull request whose head branch moved takes the new tip as its head, GitHub's `synchronize`, and its `refs/pull/{n}/head` moves with it; a deleted branch leaves its pull requests on their last head;
 - a deleted branch closes the open pull requests on it, and a deleted head branch pushed back is recorded on the closed ones (below);
 - the repository's `pushed_at` moves to the world clock; and
 - the first push of a branch into an empty repository sets the default branch, and `HEAD` with it, as on GitHub.
 
-The entries and the state they describe land in one commit, after every ref the push moved is in place, so a reader that can see any of a push's entries sees the repository, its refs, and its pull requests as the push left them. Opening, closing, reopening, and merging a pull request take the same per-repository lock, so the pull requests a push re-pins are the ones open on its branch when it lands.
+The events and the state they describe land in one commit, after every ref the push moved is in place, so a reader that can see any of a push's events sees the repository, its refs, and its pull requests as the push left them. Opening, closing, reopening, and merging a pull request take the same per-repository lock, so the pull requests a push re-pins are the ones open on its branch when it lands.
 
 A push that fails before it is recorded moves back every ref it moved, appends nothing, and answers `500`, whether its record fails, `git http-backend` fails after `git-receive-pack` moved refs (it exits with an error, or its output has no CGI header block), or Orrery panics while serving the push. Each branch the push moved, created, or deleted returns to where it was, `HEAD` to the default branch if the push set it, and each pull request ref it re-pinned to the head the pull request still has. A retry of the push then finds the refs the failed push found, and lands and is recorded as if the failed push had not happened. A panic while Orrery holds the world's database connection leaves the world unable to answer any request until Orrery restarts, so the retry lands only after a restart. A ref that cannot be moved back is logged. So is a push whose refs cannot be read after `git-receive-pack` runs, which moves nothing back, because which refs it moved is unknown.
 
@@ -51,7 +51,7 @@ A commit's author and committer dates come from the client that made it, not fro
 
 ## What a fetch sees
 
-Every other git request, a fetch's ref advertisement and pack in particular, holds the same per-repository lock for read. A push, a merge, opening a pull request, and an edit of one that sets `state` to `open` or `closed`, or sets `base`, hold it for write, even when the edit leaves the state or base as it was. A fetch request therefore sees the repository as it was before a write or after the write's record commits, never in between: not a write's refs ahead of its entries, and not the refs that a failed push, or a merge whose record failed, moves back. Any other edit of a pull request, such as one of only its title or body, reads and moves no ref and holds the lock for read, as a fetch request does: fetch requests and the edit don't wait on each other, but the edit waits for a write that runs or waits, so it never lands between a write's read of the pull request and that write's record. A merge's commit message therefore carries the title the pull request had when it merged.
+Every other git request, a fetch's ref advertisement and pack in particular, holds the same per-repository lock for read. A push, a merge, opening a pull request, and an edit of one that sets `state` to `open` or `closed`, or sets `base`, hold it for write, even when the edit leaves the state or base as it was. A fetch request therefore sees the repository as it was before a write or after the write's record commits, never in between: not a write's refs ahead of its events, and not the refs that a failed push, or a merge whose record failed, moves back. Any other edit of a pull request, such as one of only its title or body, reads and moves no ref and holds the lock for read, as a fetch request does: fetch requests and the edit don't wait on each other, but the edit waits for a write that runs or waits, so it never lands between a write's read of the pull request and that write's record. A merge's commit message therefore carries the title the pull request had when it merged.
 
 - Fetch requests to a repository don't wait on each other.
 - A write waits for the fetch requests already running, and a fetch request that arrives while a write runs or waits waits for it.
@@ -78,7 +78,7 @@ A push that deletes a branch changes the pull requests on it as GitHub does when
 
 A push that creates a branch records its restoration on every closed pull request whose head it is, merged ones included. They stay closed, and a reopen is then judged by the rules in `surface-github.md`.
 
-When one push deletes or creates several branches, they are handled in ref-name order, and a deleted branch's head pull requests before its base pull requests. Every close and every timeline item is attributed to the pusher and moves the pull request's `updated_at`. Each close appends a `pull.close` entry, after all of the push's `ref.update` entries, in the order the pull requests close. The timeline items have no entries of their own: each follows from a `ref.update` entry and the states of the pull requests on its branch, so replaying the log rebuilds them. They land in the push's commit with its entries. GraphQL serves them as `timelineItems` (`surface-github.md` §3.3).
+When one push deletes or creates several branches, they are handled in ref-name order, and a deleted branch's head pull requests before its base pull requests. Every close and every timeline item is attributed to the pusher and moves the pull request's `updated_at`. Each close is a `pull:closed` event and each timeline item a `timeline_item:created` event in the push's write, after its ref events, in the order the engine makes them (`events.md`, "What a push records"). GraphQL serves the items as `timelineItems` (`surface-github.md` §3.3).
 
 ## Pull request refs
 
@@ -90,7 +90,7 @@ Every pull request has a ref, `refs/pull/{n}/head`, at its head, as on GitHub, s
 
 The ref is advertised to fetches, so `git ls-remote` lists it, and hidden from pushes. A push that creates or moves any ref under `refs/pull/` is refused, as GitHub refuses it: `git` reports `deny updating a hidden ref`, and nothing moves.
 
-Orrery moves these refs itself, so they have no `ref.update` entries in the action log. Each one follows from the pull request's `pull.open` and `pull.reopen` entries and from the `ref.update` entries of its head branch, so replaying the log rebuilds it. A diff reads refs from the repositories themselves, so its `ref_changes` lists them with the rest.
+Orrery moves these refs itself, so they have no ref events of their own. Each one is its pull request's `head.sha`, which every event that moves the head carries: `pull:opened`, `pull:reopened`, and `pull:head_moved`. A diff reads refs from the repositories themselves, so its `ref_changes` lists them with the rest.
 
 ## Not served
 

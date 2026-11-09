@@ -21,7 +21,7 @@ use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{HeaderMap, Response, StatusCode, header};
 use axum::routing::{delete, get, patch, post, put};
 use orrery_face_git::GitFace;
-use orrery_world::{Actor, ActorKind, Repo, World, WorldError};
+use orrery_world::{Actor, ActorKind, Attribution, Caller, Door, Repo, World, WorldError};
 
 mod checks;
 pub mod graphql;
@@ -163,10 +163,11 @@ struct CreateRepoBody {
 async fn create_org_repo(
     State(face): State<GithubFace>,
     UrlPath(org): UrlPath<String>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     let owner = match resolve_org(&face, &org) {
         Ok(org) => org,
         Err(resp) => return *resp,
@@ -174,29 +175,30 @@ async fn create_org_repo(
     if let Some(refused) = media::refuse_unrendered(&headers, "Repository") {
         return refused;
     }
-    create_repo(face, owner, actor, &body).await
+    create_repo(face, owner, by, &body).await
 }
 
 async fn create_user_repo(
     State(face): State<GithubFace>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
+    let actor = caller.actor;
     if let Some(refused) = reads::refuse_integration(&actor) {
         return refused;
     }
     if let Some(refused) = media::refuse_unrendered(&headers, "Repository") {
         return refused;
     }
-    let owner = actor.clone();
-    create_repo(face, owner, actor, &body).await
+    create_repo(face, actor, by, &body).await
 }
 
 async fn create_repo(
     face: GithubFace,
     owner: Actor,
-    creator: Actor,
+    by: Attribution,
     body: &[u8],
 ) -> Response<Body> {
     let parsed: CreateRepoBody = match serde_json::from_slice(body) {
@@ -231,7 +233,7 @@ async fn create_repo(
         parsed.description.as_deref(),
         private,
         "main",
-        creator.id,
+        by,
     );
     let repo = match created {
         Ok(r) => r,
@@ -427,6 +429,19 @@ mod ref_read_tests {
 
     use super::*;
 
+    /// A write by `actor_id` as the REST face makes it.
+    fn by(actor_id: i64) -> Attribution {
+        Attribution::new(actor_id, Door::Rest)
+    }
+
+    /// The caller a token issued with `actor` authenticates.
+    fn caller(actor: &Actor) -> Caller {
+        Caller {
+            actor: actor.clone(),
+            app_id: None,
+        }
+    }
+
     type Read<'a> = Pin<Box<dyn Future<Output = Response<Body>> + Send + 'a>>;
 
     /// A world with one public repository, `alice/widgets`: `main` holds a
@@ -461,7 +476,7 @@ mod ref_read_tests {
         };
         let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
         let repo = world
-            .create_repo(alice.id, "widgets", None, false, "main", alice.id)
+            .create_repo(alice.id, "widgets", None, false, "main", by(alice.id))
             .unwrap();
         face.git.init_repo_dir(&repo).unwrap();
         let bare = store::bare_dir(&world.repos_dir(), "alice", "widgets");
@@ -474,17 +489,19 @@ mod ref_read_tests {
         store::update_ref(&bare, "refs/heads/main", &main).unwrap();
         store::update_ref(&bare, "refs/heads/feature", &feature).unwrap();
         let pull = world
-            .create_pull(NewPull {
-                repo_id: repo.id,
-                author_id: alice.id,
-                title: "Add feature",
-                body: None,
-                head_ref: "feature",
-                head_sha: &feature,
-                base_ref: "main",
-                base_sha: &main,
-                draft: false,
-            })
+            .create_pull(
+                by(alice.id),
+                NewPull {
+                    repo_id: repo.id,
+                    title: "Add feature",
+                    body: None,
+                    head_ref: "feature",
+                    head_sha: &feature,
+                    base_ref: "main",
+                    base_sha: &main,
+                    draft: false,
+                },
+            )
             .unwrap();
         Fixture {
             schema: graphql::schema(face.clone()),
@@ -608,7 +625,7 @@ mod ref_read_tests {
     /// One GraphQL query, as alice.
     fn graphql(f: &Fixture, query: String) -> Read<'_> {
         let body = serde_json::to_vec(&serde_json::json!({ "query": query })).unwrap();
-        unbudgeted(async move { graphql::handle(&f.schema, f.alice.clone(), &body).await })
+        unbudgeted(async move { graphql::handle(&f.schema, caller(&f.alice), &body).await })
     }
 
     /// A query selecting `selection` on pull request #1.
@@ -742,13 +759,16 @@ mod ref_read_tests {
             .world
             .record_merge(
                 f.pull.id,
-                f.alice.id,
+                by(f.alice.id),
                 &RefMove {
                     name: "refs/heads/main",
                     old: &f.main,
                     new: &merge,
                     repins: Vec::new(),
                     change: RefChange::Moved,
+                    forced: false,
+                    commits: vec![merge.clone()],
+                    commit_count: 1,
                 },
             )
             .unwrap();
@@ -775,7 +795,7 @@ mod ref_read_tests {
                 "widgets".to_string(),
                 f.pull.number.to_string(),
             )),
-            Extension(f.alice.clone()),
+            Extension(caller(&f.alice)),
             HeaderMap::new(),
             Bytes::from_static(body.as_bytes()),
         ))
@@ -838,7 +858,7 @@ mod ref_read_tests {
             let restore = f.face.git.gate().write_owned().await;
             let mut edit = edit(&f, body);
             assert!(poll_once(edit.as_mut()).is_pending());
-            f.face.world.close_pull(f.pull.id, f.alice.id).unwrap();
+            f.face.world.close_pull(f.pull.id, by(f.alice.id)).unwrap();
             drop(restore);
 
             let answered = answer(body, edit.await).await;
@@ -849,7 +869,7 @@ mod ref_read_tests {
             );
             f.face
                 .world
-                .reopen_pull(f.pull.id, f.alice.id, &f.feature)
+                .reopen_pull(f.pull.id, by(f.alice.id), &f.feature)
                 .unwrap();
         }
     }

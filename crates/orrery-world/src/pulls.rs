@@ -1,17 +1,17 @@
 //! Pull requests, reviews, and issue comments. Numbers share one per-repo
 //! sequence (GitHub numbers issues and PRs together; when issues land they
-//! join this sequence). Every state transition is an action-log entry —
-//! the log is the benchmark substrate, so nothing changes state silently.
+//! join this sequence). Every change is an event, the timeline items a
+//! change adds included, so nothing changes state silently.
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::queries;
+use crate::events::{self, Attribution, EventBody};
+use crate::log::Write;
 use crate::types::*;
-use crate::{RefChange, RefMove, Result, World, WorldError};
+use crate::{RefChange, RefMove, Result, World, WorldError, objects, queries};
 
 pub struct NewPull<'a> {
     pub repo_id: i64,
-    pub author_id: i64,
     pub title: &'a str,
     pub body: Option<&'a str>,
     pub head_ref: &'a str,
@@ -24,11 +24,11 @@ pub struct NewPull<'a> {
 impl World {
     /// Open a pull request. At most one *open* pull per (repo, head, base) —
     /// GitHub's rule; a closed one does not block opening a fresh PR.
-    pub fn create_pull(&self, new: NewPull<'_>) -> Result<Pull> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let clock = queries::clock(&tx)?;
-            if open_pull_between(&tx, new.repo_id, new.head_ref, new.base_ref)?.is_some() {
+    pub fn create_pull(&self, by: Attribution, new: NewPull<'_>) -> Result<Pull> {
+        self.write(by, |w| {
+            let tx = w.tx;
+            let clock = queries::clock(tx)?;
+            if open_pull_between(tx, new.repo_id, new.head_ref, new.base_ref)?.is_some() {
                 return Err(WorldError::PullExists(new.head_ref.to_string()));
             }
             let number: i64 = tx.query_row(
@@ -50,7 +50,7 @@ impl World {
                     number,
                     new.title,
                     new.body,
-                    new.author_id,
+                    by.actor_id,
                     new.draft,
                     new.head_ref,
                     new.head_sha,
@@ -60,20 +60,10 @@ impl World {
                 ],
                 queries::row_to_pull,
             )?;
-            self.log_locked(
-                &tx,
-                new.author_id,
-                "pull.open",
-                &serde_json::json!({
-                    "repo": repo_full_name(&tx, new.repo_id)?,
-                    "number": pull.number,
-                    "title": pull.title,
-                    "head": pull.head_ref,
-                    "base": pull.base_ref,
-                    "draft": pull.draft,
-                }),
-            )?;
-            tx.commit()?;
+            w.operation(EventBody::PullOpened(events::PullOpened {
+                subject: objects::pull_subject(tx, pull.id)?,
+                object: objects::pull_object(tx, pull.id)?,
+            }));
             Ok(pull)
         })
     }
@@ -126,16 +116,19 @@ impl World {
     /// Flip the draft flag — GitHub's ready-for-review / convert-to-draft
     /// pair. Refused on a non-open pull, and refused when the pull is already
     /// in the target state: GitHub errors there rather than succeeding as a
-    /// no-op, and a silent no-op would also leave a phantom log entry.
+    /// no-op, and a silent no-op would also leave a phantom event.
     /// Ready-for-review also lands on the pull's timeline, where GitHub reports
     /// when it happened.
-    pub fn set_pull_draft(&self, pull_id: i64, actor_id: i64, draft: bool) -> Result<Pull> {
-        let (action, timeline) = if draft {
-            ("pull.convert_to_draft", None)
+    pub fn set_pull_draft(&self, pull_id: i64, by: Attribution, draft: bool) -> Result<Pull> {
+        let (kind, timeline): (fn(_) -> _, _) = if draft {
+            (EventBody::PullConvertedToDraft, None)
         } else {
-            ("pull.ready_for_review", Some(TimelineKind::ReadyForReview))
+            (
+                EventBody::PullReadyForReview,
+                Some(TimelineKind::ReadyForReview),
+            )
         };
-        self.transition(pull_id, actor_id, action, timeline, None, |_, p| {
+        self.transition(pull_id, by, kind, timeline, None, |_, p| {
             if p.state != PullState::Open {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} is not open",
@@ -165,65 +158,48 @@ impl World {
     pub fn edit_pull(
         &self,
         pull_id: i64,
-        actor_id: i64,
+        by: Attribution,
         title: Option<&str>,
         body: Option<Option<&str>>,
         base: Option<(&str, &str)>,
     ) -> Result<Pull> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let before = queries::require_pull(&tx, pull_id)?;
+        self.write(by, |w| {
+            let before = queries::require_pull(w.tx, pull_id)?;
             if let Some((base_ref, _)) = base
                 && base_ref != before.base_ref
                 && before.state == PullState::Open
-                && open_pull_between(&tx, before.repo_id, &before.head_ref, base_ref)?.is_some()
+                && open_pull_between(w.tx, before.repo_id, &before.head_ref, base_ref)?.is_some()
             {
                 return Err(WorldError::PullExists(before.head_ref.clone()));
             }
-            let mut fields = Vec::new();
-            if let Some(t) = title
-                && t != before.title
-            {
-                tx.execute(
-                    "UPDATE pulls SET title = ?1 WHERE id = ?2",
-                    params![t, pull_id],
-                )?;
-                fields.push("title");
-            }
-            if let Some(b) = body
-                && b != before.body.as_deref()
-            {
-                tx.execute(
-                    "UPDATE pulls SET body = ?1 WHERE id = ?2",
-                    params![b, pull_id],
-                )?;
-                fields.push("body");
-            }
-            if let Some((base_ref, base_sha)) = base
-                && base_ref != before.base_ref
-            {
-                tx.execute(
-                    "UPDATE pulls SET base_ref = ?1, base_sha = ?2, base_moved = 0 WHERE id = ?3",
-                    params![base_ref, base_sha, pull_id],
-                )?;
-                fields.push("base");
-            }
-            if fields.is_empty() {
+            let title = title.filter(|t| *t != before.title);
+            let body = body.filter(|b| *b != before.body.as_deref());
+            let base = base.filter(|(base_ref, _)| *base_ref != before.base_ref);
+            if title.is_none() && body.is_none() && base.is_none() {
                 return Ok(before);
             }
-            let pull = touch_pull(&tx, pull_id)?;
-            self.log_locked(
-                &tx,
-                actor_id,
-                "pull.edit",
-                &serde_json::json!({
-                    "repo": repo_full_name(&tx, pull.repo_id)?,
-                    "number": pull.number,
-                    "fields": fields,
-                }),
-            )?;
-            tx.commit()?;
-            Ok(pull)
+            w.pull_operation(pull_id, EventBody::PullEdited, |tx| {
+                if let Some(t) = title {
+                    tx.execute(
+                        "UPDATE pulls SET title = ?1 WHERE id = ?2",
+                        params![t, pull_id],
+                    )?;
+                }
+                if let Some(b) = body {
+                    tx.execute(
+                        "UPDATE pulls SET body = ?1 WHERE id = ?2",
+                        params![b, pull_id],
+                    )?;
+                }
+                if let Some((base_ref, base_sha)) = base {
+                    tx.execute(
+                        "UPDATE pulls SET base_ref = ?1, base_sha = ?2, base_moved = 0
+                         WHERE id = ?3",
+                        params![base_ref, base_sha, pull_id],
+                    )?;
+                }
+                touch_pull(tx, pull_id)
+            })
         })
     }
 
@@ -231,83 +207,54 @@ impl World {
     /// already carries (compared without case) are skipped, so only a label
     /// that is new to the pull is logged and lands on its timeline. Every name
     /// is validated before anything is written.
-    pub fn add_pull_labels(&self, pull_id: i64, actor_id: i64, names: &[&str]) -> Result<Pull> {
+    pub fn add_pull_labels(&self, pull_id: i64, by: Attribution, names: &[&str]) -> Result<Pull> {
         if let Some(bad) = names.iter().find(|n| !valid_label(n)) {
             return Err(WorldError::InvalidLabel(bad.to_string()));
         }
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let before = queries::require_pull(&tx, pull_id)?;
+        self.write(by, |w| {
+            let before = queries::require_pull(w.tx, pull_id)?;
             let mut added: Vec<&str> = Vec::new();
-            for name in names {
-                let inserted = tx.execute(
-                    "INSERT INTO pull_labels (pull_id, name) VALUES (?1, ?2)
-                     ON CONFLICT DO NOTHING",
-                    params![pull_id, name],
-                )?;
-                if inserted == 1 {
-                    record_timeline(
-                        &tx,
-                        pull_id,
-                        actor_id,
-                        &TimelineKind::Labeled(name.to_string()),
+            let pull = w.pull_operation(pull_id, EventBody::PullLabeled, |tx| {
+                for name in names {
+                    let inserted = tx.execute(
+                        "INSERT INTO pull_labels (pull_id, name) VALUES (?1, ?2)
+                         ON CONFLICT DO NOTHING",
+                        params![pull_id, name],
                     )?;
-                    added.push(name);
+                    if inserted == 1 {
+                        added.push(name);
+                    }
                 }
+                match added.is_empty() {
+                    true => Ok(before),
+                    false => touch_pull(tx, pull_id),
+                }
+            })?;
+            for name in added {
+                record_timeline(w, pull_id, &TimelineKind::Labeled(name.to_string()))?;
             }
-            if added.is_empty() {
-                return Ok(before);
-            }
-            let pull = touch_pull(&tx, pull_id)?;
-            self.log_locked(
-                &tx,
-                actor_id,
-                "pull.label",
-                &serde_json::json!({
-                    "repo": repo_full_name(&tx, pull.repo_id)?,
-                    "number": pull.number,
-                    "added": added,
-                }),
-            )?;
-            tx.commit()?;
             Ok(pull)
         })
     }
 
     /// Remove one label, GitHub's `DELETE …/issues/{n}/labels/{name}`; the
     /// name matches without case. A label the pull does not carry is refused.
-    pub fn remove_pull_label(&self, pull_id: i64, actor_id: i64, name: &str) -> Result<Pull> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            queries::require_pull(&tx, pull_id)?;
-            let removed: Option<String> = tx
-                .query_row(
-                    "DELETE FROM pull_labels WHERE pull_id = ?1 AND name = ?2 RETURNING name",
-                    params![pull_id, name],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let Some(removed) = removed else {
-                return Err(WorldError::NoSuchLabel(name.to_string()));
-            };
-            record_timeline(
-                &tx,
-                pull_id,
-                actor_id,
-                &TimelineKind::Unlabeled(removed.clone()),
-            )?;
-            let pull = touch_pull(&tx, pull_id)?;
-            self.log_locked(
-                &tx,
-                actor_id,
-                "pull.unlabel",
-                &serde_json::json!({
-                    "repo": repo_full_name(&tx, pull.repo_id)?,
-                    "number": pull.number,
-                    "removed": removed,
-                }),
-            )?;
-            tx.commit()?;
+    pub fn remove_pull_label(&self, pull_id: i64, by: Attribution, name: &str) -> Result<Pull> {
+        self.write(by, |w| {
+            queries::require_pull(w.tx, pull_id)?;
+            let mut removed = String::new();
+            let pull = w.pull_operation(pull_id, EventBody::PullUnlabeled, |tx| {
+                removed = tx
+                    .query_row(
+                        "DELETE FROM pull_labels WHERE pull_id = ?1 AND name = ?2 RETURNING name",
+                        params![pull_id, name],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .ok_or_else(|| WorldError::NoSuchLabel(name.to_string()))?;
+                touch_pull(tx, pull_id)
+            })?;
+            record_timeline(w, pull_id, &TimelineKind::Unlabeled(removed))?;
             Ok(pull)
         })
     }
@@ -320,17 +267,17 @@ impl World {
     pub fn request_reviewers(
         &self,
         pull_id: i64,
-        actor_id: i64,
+        by: Attribution,
         users: &[&str],
         teams: &[&str],
     ) -> Result<Pull> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let before = queries::require_pull(&tx, pull_id)?;
+        self.write(by, |w| {
+            let tx = w.tx;
+            let before = queries::require_pull(tx, pull_id)?;
             let user_ids = users
                 .iter()
                 .map(|login| {
-                    let id = reviewer_user_id(&tx, login)?;
+                    let id = reviewer_user_id(tx, login)?;
                     if login.eq_ignore_ascii_case(&before.author_login) {
                         return Err(WorldError::ReviewerIsAuthor);
                     }
@@ -339,45 +286,31 @@ impl World {
                 .collect::<Result<Vec<i64>>>()?;
             let team_ids = teams
                 .iter()
-                .map(|slug| reviewer_team_id(&tx, before.repo_id, slug))
+                .map(|slug| reviewer_team_id(tx, before.repo_id, slug))
                 .collect::<Result<Vec<i64>>>()?;
             let mut added: Vec<RequestedReviewer> = Vec::new();
-            for id in &user_ids {
-                if insert_request(&tx, pull_id, Some(*id), None)? {
-                    added.push(RequestedReviewer::User(login_of(&tx, *id)?));
+            let pull = w.pull_operation(pull_id, EventBody::PullReviewRequested, |tx| {
+                for id in &user_ids {
+                    if insert_request(tx, pull_id, Some(*id), None)? {
+                        added.push(RequestedReviewer::User(login_of(tx, *id)?));
+                    }
                 }
-            }
-            for id in &team_ids {
-                if insert_request(&tx, pull_id, None, Some(*id))? {
-                    added.push(RequestedReviewer::Team {
-                        id: *id,
-                        slug: slug_of(&tx, *id)?,
-                    });
+                for id in &team_ids {
+                    if insert_request(tx, pull_id, None, Some(*id))? {
+                        added.push(RequestedReviewer::Team {
+                            id: *id,
+                            slug: slug_of(tx, *id)?,
+                        });
+                    }
                 }
+                match added.is_empty() {
+                    true => Ok(before),
+                    false => touch_pull(tx, pull_id),
+                }
+            })?;
+            for rv in added {
+                record_timeline(w, pull_id, &TimelineKind::ReviewRequested(rv))?;
             }
-            if added.is_empty() {
-                return Ok(before);
-            }
-            for rv in &added {
-                record_timeline(
-                    &tx,
-                    pull_id,
-                    actor_id,
-                    &TimelineKind::ReviewRequested(rv.clone()),
-                )?;
-            }
-            let pull = touch_pull(&tx, pull_id)?;
-            self.log_locked(
-                &tx,
-                actor_id,
-                "pull.request_reviewers",
-                &serde_json::json!({
-                    "repo": repo_full_name(&tx, pull.repo_id)?,
-                    "number": pull.number,
-                    "requested": added,
-                }),
-            )?;
-            tx.commit()?;
             Ok(pull)
         })
     }
@@ -389,14 +322,14 @@ impl World {
     pub fn remove_review_requests(
         &self,
         pull_id: i64,
-        actor_id: i64,
+        by: Attribution,
         users: &[&str],
         teams: &[&str],
     ) -> Result<Pull> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let before = queries::require_pull(&tx, pull_id)?;
+        self.write(by, |w| {
+            let before = queries::require_pull(w.tx, pull_id)?;
             let mut removed: Vec<RequestedReviewer> = Vec::new();
+            let pull = w.pull_operation(pull_id, EventBody::PullReviewRequestRemoved, |tx| {
             for login in users {
                 let gone: Option<String> = tx
                     .query_row(
@@ -424,29 +357,14 @@ impl World {
                     .optional()?;
                 removed.extend(gone.map(|(id, slug)| RequestedReviewer::Team { id, slug }));
             }
-            if removed.is_empty() {
-                return Ok(before);
+            match removed.is_empty() {
+                true => Ok(before),
+                false => touch_pull(tx, pull_id),
             }
-            for rv in &removed {
-                record_timeline(
-                    &tx,
-                    pull_id,
-                    actor_id,
-                    &TimelineKind::ReviewRequestRemoved(rv.clone()),
-                )?;
+            })?;
+            for rv in removed {
+                record_timeline(w, pull_id, &TimelineKind::ReviewRequestRemoved(rv))?;
             }
-            let pull = touch_pull(&tx, pull_id)?;
-            self.log_locked(
-                &tx,
-                actor_id,
-                "pull.remove_review_requests",
-                &serde_json::json!({
-                    "repo": repo_full_name(&tx, pull.repo_id)?,
-                    "number": pull.number,
-                    "removed": removed,
-                }),
-            )?;
-            tx.commit()?;
             Ok(pull)
         })
     }
@@ -456,9 +374,10 @@ impl World {
         self.with_conn(|conn| queries::list_timeline_for_pull(conn, pull_id))
     }
 
-    pub fn close_pull(&self, pull_id: i64, actor_id: i64) -> Result<Pull> {
+    pub fn close_pull(&self, pull_id: i64, by: Attribution) -> Result<Pull> {
         let timeline = Some(TimelineKind::Closed);
-        self.transition(pull_id, actor_id, "pull.close", timeline, None, |_, p| {
+        let kind = EventBody::PullClosed;
+        self.transition(pull_id, by, kind, timeline, None, |_, p| {
             if p.state != PullState::Open {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} is not open",
@@ -475,9 +394,10 @@ impl World {
     /// head move commit together. The caller resolves the head from its head
     /// branch, since the kernel never touches git. Refused while another pull
     /// is open from the same head into the same base, as `create_pull` is.
-    pub fn reopen_pull(&self, pull_id: i64, actor_id: i64, head_sha: &str) -> Result<Pull> {
+    pub fn reopen_pull(&self, pull_id: i64, by: Attribution, head_sha: &str) -> Result<Pull> {
         let head = Some(head_sha);
-        self.transition(pull_id, actor_id, "pull.reopen", None, head, |conn, p| {
+        let kind = EventBody::PullReopened;
+        self.transition(pull_id, by, kind, None, head, |conn, p| {
             if p.merged {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} has been merged",
@@ -497,22 +417,20 @@ impl World {
         })
     }
 
-    /// Record a merge the git side already performed. `base` is the move of
-    /// the pull's base branch to the merge commit, recorded as a push of it
-    /// would be: its `ref.update` entry, the `pushed_at` bump, and the
-    /// re-pins of the pulls it names. Then the pull closes as merged, which
-    /// lands on the timeline as a close by the merger, and its `pull.merge`
-    /// entry follows. It is one transaction, so a reader that sees either
-    /// entry sees all of the merge, and a record that fails appends nothing.
-    /// The kernel never touches git: the caller has moved the base branch,
-    /// and each named pull's ref, before it calls.
+    /// Record a merge the git side already performed. Its operation is
+    /// `pull:merged`: the pull closes as merged, which lands on its timeline
+    /// as a close by the merger. Then `base` is recorded as a push of the
+    /// base branch would be: the repository's `pushed_at`, the ref event, and
+    /// the re-pins of the pulls it names. It is one write, so a reader that
+    /// sees any of its events sees all of the merge, and a record that fails
+    /// appends nothing. The kernel never touches git: the caller has moved
+    /// the base branch, and each named pull's ref, before it calls.
     ///
     /// A pull that is not open or is a draft, a `base` that is not the pull's
     /// base branch, or a named pull that is not open refuses the whole record.
-    pub fn record_merge(&self, pull_id: i64, actor_id: i64, base: &RefMove<'_>) -> Result<Pull> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let before = queries::require_pull(&tx, pull_id)?;
+    pub fn record_merge(&self, pull_id: i64, by: Attribution, base: &RefMove<'_>) -> Result<Pull> {
+        self.write(by, |w| {
+            let before = queries::require_pull(w.tx, pull_id)?;
             if before.state != PullState::Open || before.merged {
                 return Err(WorldError::InvalidTransition(format!(
                     "pull #{} is not open",
@@ -537,33 +455,21 @@ impl World {
                     before.number, base.name
                 )));
             }
-            self.record_moves(
-                &tx,
-                before.repo_id,
-                actor_id,
-                std::slice::from_ref(base),
-                None,
-            )?;
-            tx.execute(
-                "UPDATE pulls SET state = 'closed', merged = 1, merge_commit_sha = ?1,
-                 merged_by_id = ?2,
-                 closed_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
-                 WHERE id = ?3",
-                params![base.new, actor_id, pull_id],
-            )?;
-            record_timeline(&tx, pull_id, actor_id, &TimelineKind::Closed)?;
-            let pull = touch_pull(&tx, pull_id)?;
-            self.log_locked(
-                &tx,
-                actor_id,
-                "pull.merge",
-                &serde_json::json!({
-                    "repo": repo_full_name(&tx, pull.repo_id)?,
-                    "number": pull.number,
-                    "merge_commit_sha": base.new,
-                }),
-            )?;
-            tx.commit()?;
+            let pull = w.pull_operation(pull_id, EventBody::PullMerged, |tx| {
+                tx.execute(
+                    "UPDATE pulls SET state = 'closed', merged = 1, merge_commit_sha = ?1,
+                     merged_by_id = ?2,
+                     closed_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+                     WHERE id = ?3",
+                    params![base.new, by.actor_id, pull_id],
+                )?;
+                touch_pull(tx, pull_id)
+            })?;
+            record_timeline(w, pull_id, &TimelineKind::Closed)?;
+            // A merged pull is closed and needs no test merge, so moving its
+            // base changes nothing on it: the row `touch_pull` returned is
+            // the one this write stores.
+            self.record_moves(w, before.repo_id, std::slice::from_ref(base), None, false)?;
             Ok(pull)
         })
     }
@@ -586,18 +492,17 @@ impl World {
     }
 
     /// What a push's creation or deletion of `branch` does to the pulls on
-    /// it, inside the push's transaction, as [`World::record_push`] describes.
+    /// it, inside the push's write, as [`World::record_push`] describes.
     /// The order is GitHub's: on a deleted head, every close comes before any
     /// deletion item, across pulls as well as within one.
     pub(crate) fn record_branch_change(
         &self,
-        tx: &Connection,
+        w: &mut Write<'_>,
         repo_id: i64,
-        actor_id: i64,
         branch: &str,
         change: RefChange,
     ) -> Result<()> {
-        let pulls_on = |side: &str, state: Option<&str>| -> Result<Vec<i64>> {
+        let pulls_on = |tx: &Connection, side: &str, state: Option<&str>| -> Result<Vec<i64>> {
             let sql = format!(
                 "SELECT id FROM pulls WHERE repo_id = ?1 AND {side}_ref = ?2
                  AND (?3 IS NULL OR state = ?3) ORDER BY number"
@@ -611,53 +516,27 @@ impl World {
         match change {
             RefChange::Moved => {}
             RefChange::Deleted => {
-                for id in pulls_on("head", Some("open"))? {
-                    self.close_for_deleted_branch(tx, id, actor_id)?;
+                for id in pulls_on(w.tx, "head", Some("open"))? {
+                    close_for_deleted_branch(w, id)?;
                 }
-                for id in pulls_on("head", None)? {
+                for id in pulls_on(w.tx, "head", None)? {
+                    w.pull(id, EventBody::PullUpdated, |tx| touch_pull(tx, id))?;
                     let deleted = TimelineKind::HeadRefDeleted(branch.to_string());
-                    record_timeline(tx, id, actor_id, &deleted)?;
-                    touch_pull(tx, id)?;
+                    record_timeline(w, id, &deleted)?;
                 }
-                for id in pulls_on("base", Some("open"))? {
+                for id in pulls_on(w.tx, "base", Some("open"))? {
                     let deleted = TimelineKind::BaseRefDeleted(branch.to_string());
-                    record_timeline(tx, id, actor_id, &deleted)?;
-                    self.close_for_deleted_branch(tx, id, actor_id)?;
+                    record_timeline(w, id, &deleted)?;
+                    close_for_deleted_branch(w, id)?;
                 }
             }
             RefChange::Created => {
-                for id in pulls_on("head", Some("closed"))? {
-                    record_timeline(tx, id, actor_id, &TimelineKind::HeadRefRestored)?;
-                    touch_pull(tx, id)?;
+                for id in pulls_on(w.tx, "head", Some("closed"))? {
+                    w.pull(id, EventBody::PullUpdated, |tx| touch_pull(tx, id))?;
+                    record_timeline(w, id, &TimelineKind::HeadRefRestored)?;
                 }
             }
         }
-        Ok(())
-    }
-
-    /// Close an open pull because a push deleted its head or base, as
-    /// [`World::close_pull`] closes one: the same state change, timeline
-    /// item, and `pull.close` entry, by the pusher.
-    fn close_for_deleted_branch(&self, tx: &Connection, pull_id: i64, actor_id: i64) -> Result<()> {
-        let (repo_id, number): (i64, i64) = tx.query_row(
-            "UPDATE pulls SET state = 'closed',
-             closed_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
-             WHERE id = ?1 AND state = 'open'
-             RETURNING repo_id, number",
-            params![pull_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        record_timeline(tx, pull_id, actor_id, &TimelineKind::Closed)?;
-        touch_pull(tx, pull_id)?;
-        self.log_locked(
-            tx,
-            actor_id,
-            "pull.close",
-            &serde_json::json!({
-                "repo": repo_full_name(tx, repo_id)?,
-                "number": number,
-            }),
-        )?;
         Ok(())
     }
 
@@ -666,15 +545,15 @@ impl World {
     pub fn create_review(
         &self,
         pull_id: i64,
-        author_id: i64,
+        by: Attribution,
         state: ReviewState,
         body: Option<&str>,
         commit_sha: Option<&str>,
     ) -> Result<Review> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let pull = queries::require_pull(&tx, pull_id)?;
-            let clock = queries::clock(&tx)?;
+        self.write(by, |w| {
+            let tx = w.tx;
+            let pull = queries::require_pull(tx, pull_id)?;
+            let clock = queries::clock(tx)?;
             let sha = commit_sha.unwrap_or(&pull.head_sha);
             let review = tx.query_row(
                 &format!(
@@ -684,30 +563,30 @@ impl World {
                      RETURNING {}",
                     queries::REVIEW_COLUMNS
                 ),
-                params![pull_id, author_id, state.as_str(), body, sha, clock],
+                params![pull_id, by.actor_id, state.as_str(), body, sha, clock],
                 queries::row_to_review,
             )?;
+            w.operation(EventBody::ReviewSubmitted(events::ReviewSubmitted {
+                subject: objects::review_subject(tx, review.id)?,
+                object: objects::review_object(tx, review.id)?,
+            }));
             // GitHub: once a requested reviewer submits a review, they are no
-            // longer a requested reviewer. Their team's request stays. The
-            // removal leaves no log or timeline entry of its own: the
-            // `review.submit` entry below implies it, and GitHub's timeline
-            // shows only the review.
-            tx.execute(
-                "DELETE FROM review_requests WHERE pull_id = ?1 AND reviewer_id = ?2",
-                params![pull_id, author_id],
-            )?;
-            touch_pull(&tx, pull_id)?;
-            self.log_locked(
-                &tx,
-                author_id,
-                "review.submit",
-                &serde_json::json!({
-                    "repo": repo_full_name(&tx, pull.repo_id)?,
-                    "number": pull.number,
-                    "state": state.as_str(),
-                }),
-            )?;
-            tx.commit()?;
+            // longer a requested reviewer. Their team's request stays, and
+            // GitHub's timeline shows only the review.
+            let mut removed = false;
+            let (_, changed) = w.pull_change(pull_id, EventBody::PullUpdated, |tx| {
+                removed = tx.execute(
+                    "DELETE FROM review_requests WHERE pull_id = ?1 AND reviewer_id = ?2",
+                    params![pull_id, by.actor_id],
+                )? > 0;
+                touch_pull(tx, pull_id)
+            })?;
+            if let Some(EventBody::PullUpdated(changed)) = changed {
+                w.emit(match removed {
+                    true => EventBody::PullReviewRequestRemoved(changed),
+                    false => EventBody::PullUpdated(changed),
+                });
+            }
             Ok(review)
         })
     }
@@ -715,13 +594,13 @@ impl World {
     pub fn create_issue_comment(
         &self,
         pull_id: i64,
-        author_id: i64,
+        by: Attribution,
         body: &str,
     ) -> Result<IssueComment> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let pull = queries::require_pull(&tx, pull_id)?;
-            let clock = queries::clock(&tx)?;
+        self.write(by, |w| {
+            let tx = w.tx;
+            queries::require_pull(tx, pull_id)?;
+            let clock = queries::clock(tx)?;
             let comment = tx.query_row(
                 &format!(
                     "INSERT INTO issue_comments (pull_id, author_id, body,
@@ -730,20 +609,16 @@ impl World {
                      RETURNING {}",
                     queries::COMMENT_COLUMNS
                 ),
-                params![pull_id, author_id, body, clock],
+                params![pull_id, by.actor_id, body, clock],
                 queries::row_to_comment,
             )?;
-            touch_pull(&tx, pull_id)?;
-            self.log_locked(
-                &tx,
-                author_id,
-                "comment.create",
-                &serde_json::json!({
-                    "repo": repo_full_name(&tx, pull.repo_id)?,
-                    "number": pull.number,
-                }),
-            )?;
-            tx.commit()?;
+            w.operation(EventBody::CommentCreated(events::CommentCreated {
+                subject: objects::comment_subject(tx, comment.id)?,
+                object: objects::comment_object(tx, comment.id)?,
+            }));
+            w.pull(pull_id, EventBody::PullUpdated, |tx| {
+                touch_pull(tx, pull_id)
+            })?;
             Ok(comment)
         })
     }
@@ -766,42 +641,52 @@ impl World {
 
     /// Shared shape of close/reopen/draft: guard the current state, reading
     /// inside the transaction where the rule needs other rows, run one
-    /// UPDATE, move the head to `head` if given, record the timeline item if
-    /// there is one, bump `updated`, log, return the stored row.
+    /// UPDATE, move the head to `head` if given, bump `updated`, and make
+    /// that the write's operation, `kind`; then record the timeline item if
+    /// there is one. Returns the stored row.
     fn transition(
         &self,
         pull_id: i64,
-        actor_id: i64,
-        action: &str,
+        by: Attribution,
+        kind: fn(events::PullChanged) -> EventBody,
         timeline: Option<TimelineKind>,
         head: Option<&str>,
         guard: impl FnOnce(&Connection, &Pull) -> Result<&'static str>,
     ) -> Result<Pull> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let before = queries::require_pull(&tx, pull_id)?;
-            let sql = guard(&tx, &before)?;
-            tx.execute(sql, params![pull_id])?;
-            if let Some(sha) = head {
-                repin_open_pull(&tx, before.repo_id, before.number, sha)?;
-            }
+        self.write(by, |w| {
+            let before = queries::require_pull(w.tx, pull_id)?;
+            let sql = guard(w.tx, &before)?;
+            let pull = w.pull_operation(pull_id, kind, |tx| {
+                tx.execute(sql, params![pull_id])?;
+                if let Some(sha) = head {
+                    repin(tx, before.repo_id, before.number, sha)?;
+                }
+                touch_pull(tx, pull_id)
+            })?;
             if let Some(kind) = &timeline {
-                record_timeline(&tx, pull_id, actor_id, kind)?;
+                record_timeline(w, pull_id, kind)?;
             }
-            let pull = touch_pull(&tx, pull_id)?;
-            self.log_locked(
-                &tx,
-                actor_id,
-                action,
-                &serde_json::json!({
-                    "repo": repo_full_name(&tx, pull.repo_id)?,
-                    "number": pull.number,
-                }),
-            )?;
-            tx.commit()?;
             Ok(pull)
         })
     }
+}
+
+/// Close an open pull because a push deleted its head or base, as
+/// [`World::close_pull`] closes one: the same state change and timeline
+/// item, by the pusher, as a `pull:closed` consequence of the push.
+fn close_for_deleted_branch(w: &mut Write<'_>, pull_id: i64) -> Result<()> {
+    w.pull(pull_id, EventBody::PullClosed, |tx| {
+        tx.query_row(
+            "UPDATE pulls SET state = 'closed',
+             closed_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+             WHERE id = ?1 AND state = 'open'
+             RETURNING id",
+            params![pull_id],
+            |r| r.get::<_, i64>(0),
+        )?;
+        touch_pull(tx, pull_id)
+    })?;
+    record_timeline(w, pull_id, &TimelineKind::Closed)
 }
 
 fn open_pull_between(
@@ -825,12 +710,8 @@ fn valid_label(name: &str) -> bool {
     !name.trim().is_empty() && name.chars().count() <= 50
 }
 
-fn record_timeline(
-    conn: &Connection,
-    pull_id: i64,
-    actor_id: i64,
-    kind: &TimelineKind,
-) -> Result<()> {
+/// Add an item to the pull's timeline, by the write's actor, and emit it.
+fn record_timeline(w: &mut Write<'_>, pull_id: i64, kind: &TimelineKind) -> Result<()> {
     let (kind, label, ref_name, reviewer) = match kind {
         TimelineKind::Labeled(name) => ("labeled", Some(name.as_str()), None, None),
         TimelineKind::Unlabeled(name) => ("unlabeled", Some(name.as_str()), None, None),
@@ -847,11 +728,12 @@ fn record_timeline(
         Some(RequestedReviewer::Team { id, slug }) => (None, Some(*id), Some(slug.as_str())),
         None => (None, None, None),
     };
-    conn.execute(
+    let id: i64 = w.tx.query_row(
         "INSERT INTO pull_timeline (pull_id, kind, label, ref_name, reviewer_id, team_id,
                                     team_slug, actor_id, clock_unix)
          VALUES (?1, ?2, ?3, ?4, (SELECT id FROM actors WHERE login = ?5), ?6, ?7, ?8,
-                 (SELECT clock_unix FROM world WHERE id = 1))",
+                 (SELECT clock_unix FROM world WHERE id = 1))
+         RETURNING id",
         params![
             pull_id,
             kind,
@@ -860,9 +742,16 @@ fn record_timeline(
             reviewer_login,
             team_id,
             team_slug,
-            actor_id
+            w.by.actor_id
         ],
+        |r| r.get(0),
     )?;
+    w.emit(EventBody::TimelineItemCreated(
+        events::TimelineItemCreated {
+            subject: objects::timeline_item_subject(w.tx, id)?,
+            object: objects::timeline_item_object(w.tx, id)?,
+        },
+    ));
     Ok(())
 }
 
@@ -920,14 +809,35 @@ fn slug_of(conn: &Connection, team_id: i64) -> Result<String> {
     )?)
 }
 
-/// Move an open pull's head to `sha`. A pull that is not open is an error,
-/// not a skip: a closed pull's head stays where it closed.
+/// Move an open pull's head to `sha`, as a push or a merge of its head
+/// branch does, and emit it. A pull that is not open is an error, not a
+/// skip: a closed pull's head stays where it closed.
 pub(crate) fn repin_open_pull(
-    conn: &Connection,
+    w: &mut Write<'_>,
     repo_id: i64,
     number: i64,
     sha: &str,
 ) -> Result<()> {
+    let id: Option<i64> =
+        w.tx.query_row(
+            "SELECT id FROM pulls WHERE repo_id = ?1 AND number = ?2",
+            params![repo_id, number],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(id) = id else {
+        return Err(WorldError::InvalidTransition(format!(
+            "pull #{number} is not open"
+        )));
+    };
+    w.pull(id, EventBody::PullHeadMoved, |tx| {
+        repin(tx, repo_id, number, sha)
+    })
+}
+
+/// Move an open pull's head to `sha`, clearing its base move, and bump its
+/// `updated`.
+fn repin(conn: &Connection, repo_id: i64, number: i64, sha: &str) -> Result<()> {
     let n = conn.execute(
         "UPDATE pulls SET head_sha = ?1, base_moved = 0,
          updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
@@ -962,22 +872,22 @@ fn touch_pull(conn: &Connection, pull_id: i64) -> Result<Pull> {
 }
 
 /// Mark the unmerged pulls whose base is `branch` as having had their base
-/// move. It moves no `updated_at`: GitHub's does not move on a push to the
-/// base.
-pub(crate) fn mark_base_moved(conn: &Connection, repo_id: i64, branch: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE pulls SET base_moved = 1
-         WHERE repo_id = ?1 AND base_ref = ?2 AND merged = 0 AND base_moved = 0",
-        params![repo_id, branch],
-    )?;
+/// move, each a `pull:updated`. It moves no `updated_at`: GitHub's does not
+/// move on a push to the base.
+pub(crate) fn mark_base_moved(w: &mut Write<'_>, repo_id: i64, branch: &str) -> Result<()> {
+    let ids =
+        w.tx.prepare(
+            "SELECT id FROM pulls
+             WHERE repo_id = ?1 AND base_ref = ?2 AND merged = 0 AND base_moved = 0
+             ORDER BY number",
+        )?
+        .query_map(params![repo_id, branch], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<i64>>>()?;
+    for id in ids {
+        w.pull(id, EventBody::PullUpdated, |tx| {
+            tx.execute("UPDATE pulls SET base_moved = 1 WHERE id = ?1", params![id])?;
+            Ok(())
+        })?;
+    }
     Ok(())
-}
-
-pub(crate) fn repo_full_name(conn: &Connection, repo_id: i64) -> Result<String> {
-    Ok(conn.query_row(
-        "SELECT a.login || '/' || r.name FROM repos r JOIN actors a ON a.id = r.owner_id
-         WHERE r.id = ?1",
-        params![repo_id],
-        |r| r.get(0),
-    )?)
 }

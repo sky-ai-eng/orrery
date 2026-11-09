@@ -792,7 +792,7 @@ async fn review_node_lookup() {
 }
 
 /// The consumer's two mutations: draft flips both ways, wrong-state refusals,
-/// and the action-log trail.
+/// and the events they leave.
 #[tokio::test(flavor = "multi_thread")]
 async fn draft_mutations() {
     let s = seed().await;
@@ -838,14 +838,14 @@ async fn draft_mutations() {
     );
 
     let log = control_post(&s.inst.base, "/_orrery/log/list", serde_json::json!({}));
-    let actions: Vec<&str> = log["items"]
+    let actions: Vec<(&str, &str)> = log["items"]
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|e| e["action"].as_str())
+        .filter_map(|e| Some((e["type"].as_str()?, e["door"].as_str()?)))
         .collect();
-    assert!(actions.contains(&"pull.ready_for_review"));
-    assert!(actions.contains(&"pull.convert_to_draft"));
+    assert!(actions.contains(&("pull:ready_for_review", "graphql")));
+    assert!(actions.contains(&("pull:converted_to_draft", "graphql")));
 }
 
 /// The consumer's organization.teams query: an org that never made a team

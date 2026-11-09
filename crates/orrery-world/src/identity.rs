@@ -5,9 +5,10 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::credentials::{self, TokenOrigin};
+use crate::events::{self, Attribution, Door, EventBody};
 use crate::{
     Actor, ActorEmail, ActorKind, ListedActor, ListedOAuthApp, OAuthApp, OAuthToken, Result, World,
-    WorldError, queries, uniqueness_violation,
+    WorldError, objects, queries, uniqueness_violation,
 };
 
 /// How long an authorization code stays exchangeable: GitHub's ten minutes,
@@ -85,132 +86,136 @@ impl World {
 
     /// Replace an actor's addresses. This is what reality does when a person
     /// verifies an address or picks a new primary, which no public API can
-    /// express. `by` is the actor the action log attributes the change to.
+    /// express. Setting the list an actor already holds changes nothing, and
+    /// appends nothing.
     pub fn set_actor_emails(
         &self,
         login: &str,
         emails: &[ActorEmail],
-        by: i64,
+        by: Attribution,
     ) -> Result<Vec<ActorEmail>> {
         validate_emails(emails)?;
-        let conn = self.lock();
-        let tx = conn.unchecked_transaction()?;
-        let actor = tx
-            .query_row(
-                &format!(
-                    "SELECT {} FROM actors WHERE login = ?1",
-                    queries::ACTOR_COLUMNS
-                ),
-                params![login],
-                queries::row_to_actor,
-            )
-            .optional()?
-            .filter(|a| a.kind != ActorKind::System)
-            .ok_or_else(|| WorldError::NoSuchActor(login.to_string()))?;
-        tx.execute(
-            "DELETE FROM actor_emails WHERE actor_id = ?1",
-            params![actor.id],
-        )?;
-        let mut stored = emails
-            .iter()
-            .map(|e| insert_email(&tx, actor.id, e))
-            .collect::<Result<Vec<_>>>()?;
-        // The point read's order: primary first, then by address (NOCASE).
-        stored.sort_by_key(|e| (!e.primary, e.email.to_ascii_lowercase()));
-        self.log_locked(
-            &tx,
-            by,
-            "actor.emails.set",
-            &serde_json::json!({ "login": actor.login, "emails": stored }),
-        )?;
-        tx.commit()?;
-        Ok(stored)
+        self.write(by, |w| {
+            let tx = w.tx;
+            let actor = tx
+                .query_row(
+                    &format!(
+                        "SELECT {} FROM actors WHERE login = ?1",
+                        queries::ACTOR_COLUMNS
+                    ),
+                    params![login],
+                    queries::row_to_actor,
+                )
+                .optional()?
+                .filter(|a| a.kind != ActorKind::System)
+                .ok_or_else(|| WorldError::NoSuchActor(login.to_string()))?;
+            let before = objects::actor_object(tx, actor.id)?;
+            tx.execute(
+                "DELETE FROM actor_emails WHERE actor_id = ?1",
+                params![actor.id],
+            )?;
+            let mut stored = emails
+                .iter()
+                .map(|e| insert_email(tx, actor.id, e))
+                .collect::<Result<Vec<_>>>()?;
+            // The point read's order: primary first, then by address (NOCASE).
+            stored.sort_by_key(|e| (!e.primary, e.email.to_ascii_lowercase()));
+            let changes =
+                events::ActorChanges::between(&before, &objects::actor_object(tx, actor.id)?);
+            if !changes.is_empty() {
+                w.operation(EventBody::ActorEmailsSet(events::ActorChanged {
+                    subject: objects::actor_subject(tx, actor.id)?,
+                    changes,
+                }));
+            }
+            Ok(stored)
+        })
     }
 
     /// Register an OAuth app. Its client id and secret are derived from its
     /// id (rule 5), so a replayed world issues the same ones; the secret is
     /// keyed by the world secret, the public client id is not.
-    pub fn create_oauth_app(&self, name: &str, callback_url: &str, by: i64) -> Result<OAuthApp> {
+    pub fn create_oauth_app(
+        &self,
+        name: &str,
+        callback_url: &str,
+        by: Attribution,
+    ) -> Result<OAuthApp> {
         validate_oauth_app_name(name)?;
         validate_oauth_app_callback_url(callback_url)?;
-        let conn = self.lock();
-        let tx = conn.unchecked_transaction()?;
-        let clock = queries::clock(&tx)?;
-        let secret = credentials::world_secret(&tx)?;
-        let id: i64 = tx.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM oauth_apps", [], |r| {
-            r.get(0)
-        })?;
-        let app = tx.query_row(
-            &format!(
-                "INSERT INTO oauth_apps (id, name, client_id, client_secret, callback_url,
+        self.write(by, |w| {
+            let tx = w.tx;
+            let clock = queries::clock(tx)?;
+            let secret = credentials::world_secret(tx)?;
+            let id: i64 =
+                tx.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM oauth_apps", [], |r| {
+                    r.get(0)
+                })?;
+            let app = tx.query_row(
+                &format!(
+                    "INSERT INTO oauth_apps (id, name, client_id, client_secret, callback_url,
                                          created_clock_unix)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  RETURNING {OAUTH_APP_COLUMNS}"
-            ),
-            params![
-                id,
-                name,
-                credentials::oauth_client_id(id),
-                credentials::oauth_client_secret(&secret, id, 0),
-                callback_url,
-                clock
-            ],
-            row_to_oauth_app,
-        )?;
-        self.log_locked(
-            &tx,
-            by,
-            "oauth_app.create",
-            &serde_json::json!({
-                "name": app.name,
-                "client_id": app.client_id,
-                "callback_url": app.callback_url,
-            }),
-        )?;
-        tx.commit()?;
-        Ok(app)
+                ),
+                params![
+                    id,
+                    name,
+                    credentials::oauth_client_id(id),
+                    credentials::oauth_client_secret(&secret, id, 0),
+                    callback_url,
+                    clock
+                ],
+                row_to_oauth_app,
+            )?;
+            w.operation(EventBody::OAuthAppCreated(events::OAuthAppCreated {
+                subject: objects::oauth_app_subject(tx, app.id)?,
+                object: objects::oauth_app_object(tx, app.id)?,
+            }));
+            Ok(app)
+        })
     }
 
     /// Issue another client secret for a registered app. A stored secret is
     /// never read back, so this is how anyone gets one for an app they did
     /// not register, as in a world re-keyed at its creation. The secret
     /// issued at registration, and every one issued since, stays valid.
-    pub fn issue_oauth_client_secret(&self, client_id: &str, by: i64) -> Result<String> {
-        let conn = self.lock();
-        let tx = conn.unchecked_transaction()?;
-        let app_id: i64 = tx
-            .query_row(
-                "SELECT id FROM oauth_apps WHERE client_id = ?1",
-                params![client_id],
+    pub fn issue_oauth_client_secret(&self, client_id: &str, by: Attribution) -> Result<String> {
+        self.write(by, |w| {
+            let tx = w.tx;
+            let app_id: i64 = tx
+                .query_row(
+                    "SELECT id FROM oauth_apps WHERE client_id = ?1",
+                    params![client_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| WorldError::NoSuchOAuthApp(client_id.to_string()))?;
+            let n: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(n), 0) + 1 FROM oauth_app_secrets WHERE app_id = ?1",
+                params![app_id],
                 |r| r.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| WorldError::NoSuchOAuthApp(client_id.to_string()))?;
-        let n: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(n), 0) + 1 FROM oauth_app_secrets WHERE app_id = ?1",
-            params![app_id],
-            |r| r.get(0),
-        )?;
-        let secret: String = tx.query_row(
-            "INSERT INTO oauth_app_secrets (app_id, n, secret, created_clock_unix)
+            )?;
+            let secret: String = tx.query_row(
+                "INSERT INTO oauth_app_secrets (app_id, n, secret, created_clock_unix)
              VALUES (?1, ?2, ?3, ?4)
              RETURNING secret",
-            params![
-                app_id,
-                n,
-                credentials::oauth_client_secret(&credentials::world_secret(&tx)?, app_id, n),
-                queries::clock(&tx)?
-            ],
-            |r| r.get(0),
-        )?;
-        self.log_locked(
-            &tx,
-            by,
-            "oauth_app.secret.issue",
-            &serde_json::json!({ "client_id": client_id, "n": n }),
-        )?;
-        tx.commit()?;
-        Ok(secret)
+                params![
+                    app_id,
+                    n,
+                    credentials::oauth_client_secret(&credentials::world_secret(tx)?, app_id, n),
+                    queries::clock(tx)?
+                ],
+                |r| r.get(0),
+            )?;
+            w.operation(EventBody::OAuthAppSecretIssued(
+                events::OAuthAppSecretIssued {
+                    subject: objects::oauth_app_subject(tx, app_id)?,
+                    n,
+                },
+            ));
+            Ok(secret)
+        })
     }
 
     /// The app holding `client_id`, as [`World::oauth_apps_page`] lists
@@ -264,7 +269,8 @@ impl World {
 
     /// Record `actor` authorizing `app` and return the authorization code.
     /// The redirect URI is the one the code was issued for; an exchange that
-    /// names a different one is refused.
+    /// names a different one is refused. Authorizing happens on the OAuth
+    /// web flow's authorize page, so the write is the actor's through it.
     pub fn issue_oauth_code(
         &self,
         app: &OAuthApp,
@@ -272,43 +278,46 @@ impl World {
         redirect_uri: &str,
         scope: &str,
     ) -> Result<String> {
-        let conn = self.lock();
-        let tx = conn.unchecked_transaction()?;
-        let clock = queries::clock(&tx)?;
-        let secret = credentials::world_secret(&tx)?;
-        let id: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(id), 0) + 1 FROM oauth_codes",
-            [],
-            |r| r.get(0),
-        )?;
-        let code: String = tx.query_row(
-            "INSERT INTO oauth_codes (id, code, app_id, actor_id, redirect_uri, scope,
+        let by = Attribution::new(actor.id, Door::Web).with_app(Some(app.id));
+        self.write(by, |w| {
+            let tx = w.tx;
+            let clock = queries::clock(tx)?;
+            let secret = credentials::world_secret(tx)?;
+            let id: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM oauth_codes",
+                [],
+                |r| r.get(0),
+            )?;
+            let code: String = tx.query_row(
+                "INSERT INTO oauth_codes (id, code, app_id, actor_id, redirect_uri, scope,
                                       created_clock_unix)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              RETURNING code",
-            params![
-                id,
-                credentials::oauth_code(&secret, id),
-                app.id,
-                actor.id,
-                redirect_uri,
-                scope,
-                clock
-            ],
-            |r| r.get(0),
-        )?;
-        self.log_locked(
-            &tx,
-            actor.id,
-            "oauth.authorize",
-            &serde_json::json!({ "client_id": app.client_id, "scope": scope }),
-        )?;
-        tx.commit()?;
-        Ok(code)
+                params![
+                    id,
+                    credentials::oauth_code(&secret, id),
+                    app.id,
+                    actor.id,
+                    redirect_uri,
+                    scope,
+                    clock
+                ],
+                |r| r.get(0),
+            )?;
+            w.operation(EventBody::OAuthAuthorizationCreated(
+                events::OAuthAuthorizationCreated {
+                    subject: objects::oauth_authorization_subject(tx, id)?,
+                    object: objects::oauth_authorization_object(tx, id)?,
+                },
+            ));
+            Ok(code)
+        })
     }
 
     /// Trade an authorization code for a token acting as the actor who granted
-    /// it. A code is spent by its first successful exchange.
+    /// it. A code is spent by its first successful exchange. The app trades it
+    /// at the OAuth web flow's token endpoint, on behalf of that actor, so the
+    /// write is the actor's through the app.
     pub fn exchange_oauth_code(
         &self,
         client_id: &str,
@@ -316,76 +325,85 @@ impl World {
         code: &str,
         redirect_uri: Option<&str>,
     ) -> Result<OAuthToken> {
-        let conn = self.lock();
-        let tx = conn.unchecked_transaction()?;
-        let clock = queries::clock(&tx)?;
-        // The secret issued at registration, or any issued since.
-        let app = tx
-            .query_row(
+        let by = |tx: &Connection| -> Result<(Attribution, _)> {
+            let clock = queries::clock(tx)?;
+            // The secret issued at registration, or any issued since.
+            let app = tx
+                .query_row(
+                    &format!(
+                        "SELECT {OAUTH_APP_COLUMNS} FROM oauth_apps WHERE client_id = ?1
+                         AND (client_secret = ?2 OR EXISTS (
+                             SELECT 1 FROM oauth_app_secrets s
+                             WHERE s.app_id = oauth_apps.id AND s.secret = ?2))"
+                    ),
+                    params![client_id, client_secret],
+                    row_to_oauth_app,
+                )
+                .optional()?
+                .ok_or(WorldError::OAuthClientCredentials)?;
+            let (code_id, actor_id, issued_redirect, scope, created, exchanged) = tx
+                .query_row(
+                    "SELECT id, actor_id, redirect_uri, scope, created_clock_unix,
+                            exchanged_clock_unix
+                     FROM oauth_codes WHERE code = ?1 AND app_id = ?2",
+                    params![code, app.id],
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, i64>(4)?,
+                            r.get::<_, Option<i64>>(5)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or(WorldError::OAuthBadCode)?;
+            if exchanged.is_some() || clock > created + OAUTH_CODE_TTL_SECONDS {
+                return Err(WorldError::OAuthBadCode);
+            }
+            if redirect_uri.is_some_and(|r| r != issued_redirect) {
+                return Err(WorldError::OAuthRedirectMismatch);
+            }
+            let by = Attribution::new(actor_id, Door::Web).with_app(Some(app.id));
+            Ok((by, (code_id, scope, clock)))
+        };
+        self.write_by(by, |w, (code_id, scope, clock)| {
+            let tx = w.tx;
+            let before = objects::oauth_authorization_object(tx, code_id)?;
+            tx.execute(
+                "UPDATE oauth_codes SET exchanged_clock_unix = ?1 WHERE id = ?2",
+                params![clock, code_id],
+            )?;
+            let token = credentials::oauth_token(&credentials::world_secret(tx)?, code_id);
+            tx.execute(
+                "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![token, w.by.actor_id, TokenOrigin::OAuthCode(code_id), clock],
+            )?;
+            let actor = tx.query_row(
                 &format!(
-                    "SELECT {OAUTH_APP_COLUMNS} FROM oauth_apps WHERE client_id = ?1
-                     AND (client_secret = ?2 OR EXISTS (
-                         SELECT 1 FROM oauth_app_secrets s
-                         WHERE s.app_id = oauth_apps.id AND s.secret = ?2))"
+                    "SELECT {} FROM actors WHERE id = ?1",
+                    queries::ACTOR_COLUMNS
                 ),
-                params![client_id, client_secret],
-                row_to_oauth_app,
-            )
-            .optional()?
-            .ok_or(WorldError::OAuthClientCredentials)?;
-        let (code_id, actor_id, issued_redirect, scope, created, exchanged) = tx
-            .query_row(
-                "SELECT id, actor_id, redirect_uri, scope, created_clock_unix, exchanged_clock_unix
-                 FROM oauth_codes WHERE code = ?1 AND app_id = ?2",
-                params![code, app.id],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, i64>(4)?,
-                        r.get::<_, Option<i64>>(5)?,
-                    ))
+                params![w.by.actor_id],
+                queries::row_to_actor,
+            )?;
+            w.operation(EventBody::OAuthAuthorizationExchanged(
+                events::OAuthAuthorizationChanged {
+                    subject: objects::oauth_authorization_subject(tx, code_id)?,
+                    changes: events::OAuthAuthorizationChanges::between(
+                        &before,
+                        &objects::oauth_authorization_object(tx, code_id)?,
+                    ),
                 },
-            )
-            .optional()?
-            .ok_or(WorldError::OAuthBadCode)?;
-        if exchanged.is_some() || clock > created + OAUTH_CODE_TTL_SECONDS {
-            return Err(WorldError::OAuthBadCode);
-        }
-        if redirect_uri.is_some_and(|r| r != issued_redirect) {
-            return Err(WorldError::OAuthRedirectMismatch);
-        }
-        tx.execute(
-            "UPDATE oauth_codes SET exchanged_clock_unix = ?1 WHERE id = ?2",
-            params![clock, code_id],
-        )?;
-        let token = credentials::oauth_token(&credentials::world_secret(&tx)?, code_id);
-        tx.execute(
-            "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![token, actor_id, TokenOrigin::OAuthCode(code_id), clock],
-        )?;
-        let actor = tx.query_row(
-            &format!(
-                "SELECT {} FROM actors WHERE id = ?1",
-                queries::ACTOR_COLUMNS
-            ),
-            params![actor_id],
-            queries::row_to_actor,
-        )?;
-        self.log_locked(
-            &tx,
-            actor.id,
-            "oauth.token",
-            &serde_json::json!({ "client_id": app.client_id, "scope": scope }),
-        )?;
-        tx.commit()?;
-        Ok(OAuthToken {
-            actor,
-            token,
-            scope,
+            ));
+            Ok(OAuthToken {
+                actor,
+                token,
+                scope,
+            })
         })
     }
 }

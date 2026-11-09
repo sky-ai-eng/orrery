@@ -2,8 +2,8 @@
 //! (spec/surface-git.md), fetched by number with real `git`. It is set when the
 //! pull request opens, follows its head while it is open, stays where it is
 //! once the pull request closes or its branch goes, takes its branch's tip
-//! when the pull request reopens, refuses pushes, and is rebuilt by replaying
-//! the action log (rule 5).
+//! when the pull request reopens, refuses pushes, and follows from the log's
+//! events (rule 5).
 
 mod common;
 
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use common::{Instance, boot, face, face_answer, face_ok, git, git_output, mint_actor};
 use orrery_face_git::store;
-use orrery_world::{LogEntry, Signal, World};
+use orrery_world::{Event, Signal, World};
 
 /// Commit `file` with `contents` on the current branch and return the sha.
 fn commit(src: &Path, clock: i64, file: &str, contents: &str) -> String {
@@ -37,46 +37,38 @@ fn fetch_pull(client: &Path, clock: i64, number: i64) -> String {
         .to_string()
 }
 
-/// The refs the action log implies for one repository, rebuilt from its
-/// entries alone: a `ref.update` moves its ref, a `pull.open` or `pull.reopen`
-/// pins `refs/pull/{n}/head` at its head branch's tip, and an open pull
-/// request's ref follows every later move of that branch.
-fn refs_from_log(log: &[LogEntry], repo: &str) -> BTreeMap<String, String> {
+/// The refs the log implies for one repository, rebuilt from its events
+/// alone: a ref event sets or removes its ref, and every pull event that
+/// carries the pull's head sets `refs/pull/{n}/head` to it.
+fn refs_from_log(log: &[Event], repo: &str) -> BTreeMap<String, String> {
+    let (owner, name) = repo.split_once('/').unwrap();
     let mut refs = BTreeMap::new();
-    let mut heads: BTreeMap<i64, String> = BTreeMap::new();
-    let mut open: Vec<i64> = Vec::new();
-    for entry in log.iter().filter(|e| e.details["repo"] == repo) {
-        let d = &entry.details;
-        let number = d["number"].as_i64();
-        match entry.action.as_str() {
-            "ref.update" => {
-                let name = d["ref"].as_str().unwrap();
-                let new = d["new"].as_str().unwrap();
-                if new == store::ZERO_OID {
-                    refs.remove(name);
-                    continue;
-                }
-                refs.insert(name.to_string(), new.to_string());
-                if let Some(branch) = name.strip_prefix("refs/heads/") {
-                    for n in open.iter().filter(|n| heads[n] == branch) {
-                        refs.insert(store::pull_head_ref(*n), new.to_string());
-                    }
-                }
+    for e in log {
+        let b = serde_json::to_value(&e.body).unwrap();
+        let subject = &b["subject"];
+        if subject["owner"]["login"] != owner || subject["repo"]["name"] != name {
+            continue;
+        }
+        let sha = |v: &serde_json::Value| v.as_str().unwrap().to_string();
+        match b["type"].as_str().unwrap() {
+            "ref:created" => {
+                refs.insert(sha(&subject["name"]), sha(&b["object"]["sha"]));
             }
-            "pull.open" => {
-                let n = number.unwrap();
-                let head = d["head"].as_str().unwrap().to_string();
-                let tip = refs[&format!("refs/heads/{head}")].clone();
-                refs.insert(store::pull_head_ref(n), tip);
-                heads.insert(n, head);
-                open.push(n);
+            "ref:updated" => {
+                refs.insert(sha(&subject["name"]), sha(&b["changes"]["sha"]["to"]));
             }
-            "pull.close" | "pull.merge" => open.retain(|n| Some(*n) != number),
-            "pull.reopen" => {
-                let n = number.unwrap();
-                let tip = refs[&format!("refs/heads/{}", heads[&n])].clone();
-                refs.insert(store::pull_head_ref(n), tip);
-                open.push(n);
+            "ref:deleted" => {
+                refs.remove(subject["name"].as_str().unwrap());
+            }
+            kind if kind.starts_with("pull:") => {
+                let head = match kind {
+                    "pull:opened" => &b["object"]["head"],
+                    _ => &b["changes"]["head"]["to"],
+                };
+                if let Some(head) = head["sha"].as_str() {
+                    let number = subject["number"].as_i64().unwrap();
+                    refs.insert(store::pull_head_ref(number), head.to_string());
+                }
             }
             _ => {}
         }
@@ -225,14 +217,16 @@ async fn pull_head_refs_follow_the_head_and_refuse_pushes() {
     assert_eq!(pull_ref(9), None);
     assert_eq!(inst.world.log_after(0, 10_000).unwrap().len(), log_before);
 
-    // Replay: the log alone rebuilds every ref the repository holds, the
-    // pull requests' refs included, though none has an entry of its own.
+    // The log alone rebuilds every ref the repository holds, the pull
+    // requests' refs included, though none has an event of its own.
     let log = inst.world.log_after(0, 10_000).unwrap();
     assert!(
-        log.iter().all(|e| !e.details["ref"]
-            .as_str()
-            .is_some_and(|r| r.starts_with("refs/pull/"))),
-        "a pull request's ref follows from its own entries"
+        log.iter().all(
+            |e| !serde_json::to_value(&e.body).unwrap()["subject"]["name"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("refs/pull/"))
+        ),
+        "a pull request's ref follows from its pull's head"
     );
     let refs = store::list_refs(&bare).unwrap();
     assert_eq!(
@@ -245,7 +239,7 @@ async fn pull_head_refs_follow_the_head_and_refuse_pushes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_push_moves_its_refs_before_its_entries_can_be_read() {
+async fn a_push_moves_its_refs_before_its_events_can_be_read() {
     let inst = boot().await;
     let base = inst.base.clone();
     let token = mint_actor(&base, "alice", "user");
@@ -261,13 +255,13 @@ async fn a_push_moves_its_refs_before_its_entries_can_be_read() {
         .replace("http://", &format!("http://x-access-token:{token}@"));
     let bare = store::bare_dir(&inst.world.repos_dir(), "alice", "webapp");
 
-    // A listener runs as each entry is appended, before any reader can see
-    // it, so what it reads from the repository is the earliest view a reader
-    // woken by the entry could have. It runs git with the world's lock held,
-    // which only slows this test, and it records what git answered rather
-    // than panicking there, which would poison the world's lock and hide the
-    // cause.
-    // At each entry: where HEAD resolves, and where `refs/pull/1/head` points.
+    // A listener runs as each write's events are appended, before any reader
+    // can see them, so what it reads from the repository is the earliest view
+    // a reader woken by them could have. It runs git with the world's lock
+    // held, which only slows this test, and it records what git answered
+    // rather than panicking there, which would poison the world's lock and
+    // hide the cause.
+    // At each write: where HEAD resolves, and where `refs/pull/1/head` points.
     type Refs = (
         Result<Option<String>, String>,
         Result<Option<String>, String>,
@@ -395,11 +389,12 @@ async fn base_of_others() -> BaseOfOthers {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_merge_moves_its_refs_before_its_entries_can_be_read() {
+async fn a_merge_moves_its_refs_before_its_events_can_be_read() {
     let s = base_of_others().await;
 
-    // As in the push test above: a listener reads the repository as each
-    // entry is appended, which is the earliest view any reader gets.
+    // As in the push test above: a listener reads the repository as the
+    // write's events are appended, which is the earliest view any reader
+    // gets.
     type Refs = Vec<Result<Option<String>, String>>;
     let seen: Arc<Mutex<Vec<Refs>>> = Arc::default();
     let sink = Arc::clone(&seen);
@@ -428,7 +423,7 @@ async fn a_merge_moves_its_refs_before_its_entries_can_be_read() {
     );
     let merge_sha = merged["sha"].as_str().unwrap().to_string();
     let seen = std::mem::take(&mut *seen.lock().unwrap());
-    assert_eq!(seen.len(), 2, "a ref.update and a pull.merge: {seen:?}");
+    assert_eq!(seen.len(), 1, "one signal for the merge's write: {seen:?}");
     for refs in &seen {
         assert!(
             refs.iter().all(|r| r == &Ok(Some(merge_sha.clone()))),
@@ -620,7 +615,7 @@ impl PushThatFails {
 
     /// Check that the failed push appended nothing after `mark` and left the
     /// pull requests on their heads, then retry it, now that it can land: it
-    /// lands as if the failed push had not happened, its entries starting
+    /// lands as if the failed push had not happened, its events starting
     /// from the refs the failed push found, so the log rebuilds the
     /// repository.
     fn moved_nothing_and_retry_lands(&self, mark: i64) {
@@ -643,9 +638,19 @@ impl PushThatFails {
         let log = self.inst.world.log_after(0, 10_000).unwrap();
         let retried = log
             .iter()
-            .find(|e| e.seq > mark && e.details["ref"] == "refs/heads/feature")
+            .find_map(|e| match &e.body {
+                orrery_world::EventBody::RefUpdated(u)
+                    if e.seq > mark && u.subject.name == "refs/heads/feature" =>
+                {
+                    Some(u)
+                }
+                _ => None,
+            })
             .unwrap();
-        assert_eq!(retried.details["old"], self.feature_v1.as_str());
+        assert_eq!(
+            retried.changes.sha.as_ref().unwrap().from,
+            self.feature_v1.as_str()
+        );
         assert_eq!(refs_from_log(&log, "alice/webapp"), refs);
     }
 }
@@ -833,7 +838,7 @@ async fn a_reopened_pull_takes_its_head_branchs_tip() {
             .log_after(0, 10_000)
             .unwrap()
             .iter()
-            .filter(|e| e.action == "pull.reopen")
+            .filter(|e| e.body.type_name() == "pull:reopened")
             .count()
     };
     let reopens = reopen_entries();
@@ -886,7 +891,7 @@ async fn a_reopened_pull_takes_its_head_branchs_tip() {
     assert_eq!(reopened["title"], "Retitled");
     assert_eq!(reopened["head"]["sha"], rewrite_v1.as_str());
 
-    // Replay: the log alone rebuilds the refs, the reopens' included.
+    // The log alone rebuilds the refs, the reopens' included.
     let log = inst.world.log_after(0, 10_000).unwrap();
     assert_eq!(
         refs_from_log(&log, "alice/webapp"),

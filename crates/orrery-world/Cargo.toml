@@ -5,23 +5,29 @@ edition.workspace = true
 license-file.workspace = true
 publish.workspace = true
 repository.workspace = true
-description = "Orrery's world kernel: world-root layout, SQLite state, the virtual clock, actors, and the append-only action log"
+description = "Orrery's world kernel: world-root layout, SQLite state, the virtual clock, actors, and the append-only log of events"
 
 [features]
-# Exposes `test_support`, which lets another crate's tests append migrations.
-test-support = []
+# For tests: checks every write (src/audit.rs), failing one that stores a
+# value none of its events carries or makes an event its schema refuses, and
+# exposes `test_support`, which lets another crate's tests append migrations.
+test-support = ["dep:boon"]
 
 [dependencies]
+boon = { workspace = true, optional = true }
 hex.workspace = true
 hmac.workspace = true
 jiff.workspace = true
 rusqlite.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# The crate's own integration tests run with the audit too.
+orrery-world = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

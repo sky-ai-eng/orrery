@@ -5,13 +5,12 @@
 
 use rusqlite::{OptionalExtension, params};
 
-use crate::queries;
+use crate::events::{self, Attribution, EventBody};
 use crate::types::*;
-use crate::{Result, World, WorldError};
+use crate::{Result, World, WorldError, objects, queries};
 
 pub struct NewCheckRun<'a> {
     pub repo_id: i64,
-    pub creator_id: i64,
     pub head_sha: &'a str,
     pub name: &'a str,
     pub status: CheckStatus,
@@ -36,10 +35,10 @@ pub struct CheckRunPatch<'a> {
 }
 
 impl World {
-    pub fn create_check_run(&self, new: NewCheckRun<'_>) -> Result<CheckRun> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let clock = queries::clock(&tx)?;
+    pub fn create_check_run(&self, by: Attribution, new: NewCheckRun<'_>) -> Result<CheckRun> {
+        self.write(by, |w| {
+            let tx = w.tx;
+            let clock = queries::clock(tx)?;
             let run = tx.query_row(
                 &format!(
                     "INSERT INTO check_runs (repo_id, head_sha, name, status, conclusion,
@@ -59,38 +58,32 @@ impl World {
                     new.details_url,
                     new.external_id,
                     new.output.map(|v| v.to_string()),
-                    new.creator_id,
+                    by.actor_id,
                     new.started_clock_unix,
                     new.completed_clock_unix,
                     clock
                 ],
                 queries::row_to_check_run,
             )?;
-            self.log_locked(
-                &tx,
-                new.creator_id,
-                "check_run.create",
-                &serde_json::json!({
-                    "repo": crate::pulls::repo_full_name(&tx, new.repo_id)?,
-                    "name": run.name,
-                    "head_sha": run.head_sha,
-                    "status": run.status.as_str(),
-                    "conclusion": run.conclusion.map(CheckConclusion::as_str),
-                }),
-            )?;
-            tx.commit()?;
+            w.operation(EventBody::CheckRunCreated(events::CheckRunCreated {
+                subject: objects::check_run_subject(tx, run.id)?,
+                object: objects::check_run_object(tx, run.id)?,
+            }));
             Ok(run)
         })
     }
 
+    /// Write the fields `patch` names. A patch that changes nothing writes
+    /// nothing.
     pub fn update_check_run(
         &self,
         id: i64,
-        actor_id: i64,
+        by: Attribution,
         patch: CheckRunPatch<'_>,
     ) -> Result<CheckRun> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
+        self.write(by, |w| {
+            let tx = w.tx;
+            let before = objects::check_run_object(tx, id)?;
             let run = tx
                 .query_row(
                     &format!(
@@ -122,19 +115,14 @@ impl World {
                 )
                 .optional()?
                 .ok_or(WorldError::NoSuchCheckRun(id))?;
-            self.log_locked(
-                &tx,
-                actor_id,
-                "check_run.update",
-                &serde_json::json!({
-                    "repo": crate::pulls::repo_full_name(&tx, run.repo_id)?,
-                    "name": run.name,
-                    "head_sha": run.head_sha,
-                    "status": run.status.as_str(),
-                    "conclusion": run.conclusion.map(CheckConclusion::as_str),
-                }),
-            )?;
-            tx.commit()?;
+            let changes =
+                events::CheckRunChanges::between(&before, &objects::check_run_object(tx, id)?);
+            if !changes.is_empty() {
+                w.operation(EventBody::CheckRunUpdated(events::CheckRunChanged {
+                    subject: objects::check_run_subject(tx, id)?,
+                    changes,
+                }));
+            }
             Ok(run)
         })
     }

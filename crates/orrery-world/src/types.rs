@@ -2,7 +2,9 @@
 //! (rule 9): faces translate these into GitHub (or any other vendor) wire
 //! shapes; nothing here knows what a wire shape is.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorKind {
     User,
@@ -39,6 +41,21 @@ pub struct Actor {
     pub created_clock_unix: i64,
 }
 
+/// Who a request's token acts as, and the OAuth app it was issued to, if
+/// an authorization code was traded for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Caller {
+    pub actor: Actor,
+    pub app_id: Option<i64>,
+}
+
+impl Caller {
+    /// The attribution of a write this caller makes through `door`.
+    pub fn via(&self, door: crate::Door) -> crate::Attribution {
+        crate::Attribution::new(self.actor.id, door).with_app(self.app_id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Repo {
     pub id: i64,
@@ -57,28 +74,16 @@ impl Repo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct LogEntry {
-    pub seq: i64,
-    pub clock_unix: i64,
-    /// The real time the entry was appended at, in Unix milliseconds, for a
-    /// caller showing when something happened. Nothing in the world reads it,
-    /// so it is not an input to replay. `None` for an entry appended before the
-    /// world recorded it.
-    pub wall_unix_ms: Option<i64>,
-    pub actor_login: String,
-    pub action: String,
-    pub details: serde_json::Value,
-}
-
-/// The order a read of the action log returns its entries in, by `seq`.
+/// The order a read of the log returns its events in, by `seq`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogOrder {
     OldestFirst,
     NewestFirst,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PullState {
     Open,
@@ -177,7 +182,9 @@ pub enum RequestedReviewer {
     Team { id: i64, slug: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OrgRole {
     Admin,
@@ -219,7 +226,9 @@ pub struct Team {
     pub created_clock_unix: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamRole {
     Member,
@@ -250,7 +259,9 @@ pub struct TeamMembership {
     pub created_clock_unix: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewState {
     Approved,
@@ -298,7 +309,9 @@ pub struct IssueComment {
     pub updated_clock_unix: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     Queued,
@@ -324,7 +337,9 @@ impl CheckStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckConclusion {
     Success,
@@ -386,12 +401,22 @@ pub struct CheckRun {
 
 /// One of an actor's email addresses. Every actor but the system actor holds
 /// exactly one primary address.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = may_grow)]
 pub struct ActorEmail {
     pub email: String,
     pub primary: bool,
     pub verified: bool,
+}
+
+/// The control plane refuses an address with a field it does not know. An
+/// event's addresses may gain fields (spec/events.md, rule 7), so the events'
+/// schema does not refuse them.
+fn may_grow(schema: &mut schemars::Schema) {
+    schema.remove("additionalProperties");
 }
 
 /// An OAuth application actors can authorize. Its client secret is fake by

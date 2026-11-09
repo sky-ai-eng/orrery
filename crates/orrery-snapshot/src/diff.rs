@@ -223,11 +223,11 @@ pub struct LogSpan {
     /// entry. The two logs are the same up to it and differ after it: it is
     /// `from`'s `last_seq` when `to` carries on from `from`, `to`'s when
     /// `from` carries on from `to`, and older than both when a restore
-    /// between them discarded `from`'s newest entries.
+    /// between them discarded `from`'s newest events.
     pub shared_seq: i64,
-    /// How many of `to`'s entries follow `shared_seq`, counted rather than
+    /// How many of `to`'s events follow `shared_seq`, counted rather than
     /// subtracted because `seq` has a gap wherever a restore discarded
-    /// entries. The entries themselves are served by the log list read on a
+    /// events. The events themselves are served by the log list read on a
     /// world whose log is `to`'s, from `after_seq: shared_seq`, not
     /// duplicated here.
     pub appended: i64,
@@ -847,9 +847,9 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
 /// The newest `seq` both logs hold, given each one's newest.
 ///
 /// A `seq` is issued once per world, above every `seq` issued before it, so
-/// every log that holds an entry holds the same entries below it. Two logs
-/// of one world are therefore the same up to the newest entry they share,
-/// and share none after it: the entries of `from`'s that `to` holds are its
+/// every log that holds an event holds the same events below it. Two logs
+/// of one world are therefore the same up to the newest event they share,
+/// and share none after it: the events of `from`'s that `to` holds are its
 /// oldest ones, and the boundary between them is found by bisecting on
 /// `seq`, reading neither log whole.
 fn shared_seq(from: &dyn WorldView, from_seq: i64, to: &dyn WorldView, to_seq: i64) -> Result<i64> {

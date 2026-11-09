@@ -4,7 +4,7 @@ The design source of truth for Orrery. Code must not contradict it, and a delibe
 
 ## What Orrery is
 
-A deterministic mock of GitHub, for testing and benchmarking software that acts on GitHub. It serves a GitHub-faithful face (REST, GraphQL, git, and the OAuth web flow) over vendor-neutral state kept in one directory, advanced by a virtual clock, with every change attributed to an actor in an append-only action log. Snapshots, forks, and a semantic diff between any two states of a world come from that design rather than being built on top of it.
+A deterministic mock of GitHub, for testing and benchmarking software that acts on GitHub. It serves a GitHub-faithful face (REST, GraphQL, git, and the OAuth web flow) over vendor-neutral state kept in one directory, advanced by a virtual clock, with every change recorded as an event, attributed to an actor, in an append-only log. Snapshots, forks, and a semantic diff between any two states of a world come from that design rather than being built on top of it.
 
 A world runs in one of two ways, with the same binary and config:
 
@@ -21,6 +21,7 @@ GitHub is the only face. Rule 8 is what lets another vendor's face be added with
 | [`surface-github.md`](surface-github.md) | Every REST route, GraphQL field, and OAuth endpoint the GitHub face serves, how each behaves, and where Orrery chose a behavior it has not observed on GitHub |
 | [`surface-git.md`](surface-git.md) | The git smart-HTTP surface and the recipe every bare repository is served with |
 | [`grammar.md`](grammar.md) | Behavior every face endpoint shares: base URLs, authentication, pagination, conditional requests, rate limits, and errors |
+| [`events.md`](events.md) | The events a world's log records: their envelope, the rules every one follows, and each type, with its JSON Schema in [`event.schema.json`](event.schema.json) |
 
 ## The rules
 
@@ -33,7 +34,7 @@ GitHub is the only face. Rule 8 is what lets another vendor's face be added with
 **Determinism**
 
 4. **Only three things change the world:** a scenario step, a driver (scenario steps on a timer), or an outside actor's API call. Nothing changes on its own.
-5. **Replay is free.** A seed snapshot plus the action log rebuilds the exact world. If it doesn't, something read a hidden input, and that is a bug.
+5. **Replay is free.** A seed snapshot plus the log rebuilds the exact world: re-executing each write's operation makes the same events again, consequences included. If it doesn't, something read a hidden input, and that is a bug.
 6. **The world never touches the internet.**
 
 **Shape**
@@ -45,7 +46,7 @@ GitHub is the only face. Rule 8 is what lets another vendor's face be added with
 
 **Judgment**
 
-11. **The engine's verdict is the diff; judgment lives above the engine.** Factual questions are answered from two snapshots and the action log, deterministically, and the engine never calls an LLM. A benchmark built on Orrery may add judge rubrics anchored to yes-or-no questions: judges score how well something was done, never whether it happened, and their evidence is the diff, the log, and stored bodies, not agent transcripts.
+11. **The engine's verdict is the diff; judgment lives above the engine.** Factual questions are answered from two snapshots and the log, deterministically, and the engine never calls an LLM. A benchmark built on Orrery may add judge rubrics anchored to yes-or-no questions: judges score how well something was done, never whether it happened, and their evidence is the diff, the log, and stored bodies, not agent transcripts.
 12. **A snapshot is always safe to share:** every credential in a world is fake by construction.
 
 **Scope**

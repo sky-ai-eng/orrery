@@ -10,7 +10,8 @@ use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use orrery_face_git::store;
 use orrery_world::{
-    Actor, NewPull, Pull, PullState, RefChange, RefMove, Repo, ReviewState, WorldError,
+    Caller, Door, NewPull, Pull, PullState, REF_EVENT_COMMITS, RefChange, RefMove, Repo,
+    ReviewState, WorldError,
 };
 
 use crate::render::{
@@ -36,10 +37,11 @@ struct CreatePullBody {
 pub(crate) async fn create_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -112,17 +114,19 @@ pub(crate) async fn create_pull(
         Err(e) => return internal(e),
     }
 
-    let created = face.world.create_pull(NewPull {
-        repo_id: repo.id,
-        author_id: actor.id,
-        title,
-        body: parsed.body.as_deref(),
-        head_ref,
-        head_sha: &head_sha,
-        base_ref,
-        base_sha: &base_sha,
-        draft: parsed.draft.unwrap_or(false),
-    });
+    let created = face.world.create_pull(
+        by,
+        NewPull {
+            repo_id: repo.id,
+            title,
+            body: parsed.body.as_deref(),
+            head_ref,
+            head_sha: &head_sha,
+            base_ref,
+            base_sha: &base_sha,
+            draft: parsed.draft.unwrap_or(false),
+        },
+    );
     match created {
         Ok(pull) => match face.git.pin_pull_ref(&repo, pull.number, &pull.head_sha) {
             Ok(()) => json_response(
@@ -179,10 +183,11 @@ where
 pub(crate) async fn patch_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -254,7 +259,7 @@ pub(crate) async fn patch_pull(
                 Ok(Ok(head)) => Some(head),
                 Ok(Err(refused)) => {
                     if body.is_some()
-                        && let Err(e) = face.world.edit_pull(pull.id, actor.id, None, body, None)
+                        && let Err(e) = face.world.edit_pull(pull.id, by, None, body, None)
                     {
                         return internal(e);
                     }
@@ -291,7 +296,7 @@ pub(crate) async fn patch_pull(
     if title.is_some() || body.is_some() || base_now.is_some() {
         let edited = face.world.edit_pull(
             pull.id,
-            actor.id,
+            by,
             title,
             body,
             base_now.as_ref().map(|(r, s)| (r.as_str(), s.as_str())),
@@ -311,7 +316,7 @@ pub(crate) async fn patch_pull(
         if let Err(e) = face.git.pin_pull_ref(&repo, pull.number, &head) {
             return internal(e);
         }
-        pull = match face.world.reopen_pull(pull.id, actor.id, &head) {
+        pull = match face.world.reopen_pull(pull.id, by, &head) {
             Ok(p) => p,
             Err(e) => {
                 if let Err(undo) = face.git.pin_pull_ref(&repo, pull.number, &pull.head_sha) {
@@ -324,16 +329,13 @@ pub(crate) async fn patch_pull(
             }
         };
     } else if state == Some("closed") && pull.state == PullState::Open {
-        pull = match face.world.close_pull(pull.id, actor.id) {
+        pull = match face.world.close_pull(pull.id, by) {
             Ok(p) => p,
             Err(e) => return internal(e),
         };
     }
     if let Some((r, s)) = &base_after {
-        pull = match face
-            .world
-            .edit_pull(pull.id, actor.id, None, None, Some((r, s)))
-        {
+        pull = match face.world.edit_pull(pull.id, by, None, None, Some((r, s))) {
             Ok(p) => p,
             Err(e) => return internal(e),
         };
@@ -490,10 +492,12 @@ struct MergePullBody {
 pub(crate) async fn merge_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
+    let actor = caller.actor;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -604,8 +608,9 @@ pub(crate) async fn merge_pull(
         Err(e) => return internal(e),
     };
     // The open pull requests whose head is the base branch take the merge
-    // commit as their head, as on a push of it. They are read before the base
-    // moves, so a failed read moves nothing.
+    // commit as their head, as on a push of it. They and the commits the
+    // merge brings in are read before the base moves, so a failed read moves
+    // nothing.
     let base_refname = format!("refs/heads/{}", pull.base_ref);
     let repins = match face
         .world
@@ -614,26 +619,36 @@ pub(crate) async fn merge_pull(
         Ok(r) => r,
         Err(e) => return internal(e),
     };
+    let added = store::added_commits(&bare, &merge_sha, &[&base_tip], REF_EVENT_COMMITS);
+    let (commits, commit_count) = match added {
+        Ok(added) => added,
+        Err(e) => return internal(e),
+    };
     if let Err(e) = store::update_ref_cas(&bare, &base_refname, &merge_sha, &base_tip) {
         return internal(e);
     }
+    // The merge commit's first parent is the base's tip, so the move is
+    // never forced.
     let base = RefMove {
         name: &base_refname,
         old: &base_tip,
         new: &merge_sha,
         repins,
         change: RefChange::Moved,
+        forced: false,
+        commits,
+        commit_count,
     };
 
     // Every ref the merge moves is in place before its record commits, so a
-    // reader that can see the merge's entries also sees its refs.
+    // reader that can see the merge's events also sees its refs.
     let mut pinned = 0;
     let mut record = || -> Result<(), orrery_face_git::GitFaceError> {
         for &number in &base.repins {
             face.git.pin_pull_ref(&repo, number, &merge_sha)?;
             pinned += 1;
         }
-        face.world.record_merge(pull.id, actor.id, &base)?;
+        face.world.record_merge(pull.id, by, &base)?;
         Ok(())
     };
     if let Err(e) = record() {
@@ -667,10 +682,12 @@ struct CreateReviewBody {
 pub(crate) async fn create_review(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
+    let actor = caller.actor;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -731,7 +748,7 @@ pub(crate) async fn create_review(
 
     match face
         .world
-        .create_review(pull.id, actor.id, state, parsed.body.as_deref(), commit_id)
+        .create_review(pull.id, by, state, parsed.body.as_deref(), commit_id)
     {
         Ok(review) => json_response(StatusCode::OK, review_json(&face, &repo, &pull, &review)),
         Err(e) => internal(e),
@@ -748,10 +765,11 @@ struct CreateCommentBody {
 pub(crate) async fn create_comment(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -772,7 +790,7 @@ pub(crate) async fn create_comment(
     let Some(text) = parsed.body.as_deref().filter(|b| !b.is_empty()) else {
         return validation_missing("Issue", "body");
     };
-    match face.world.create_issue_comment(pull.id, actor.id, text) {
+    match face.world.create_issue_comment(pull.id, by, text) {
         Ok(comment) => json_response(
             StatusCode::CREATED,
             comment_json(&face, &repo, &pull, &comment),
@@ -798,10 +816,11 @@ enum AddLabelsBody {
 pub(crate) async fn add_labels(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -830,7 +849,7 @@ pub(crate) async fn add_labels(
     else {
         return orrery_unsupported_field("Label", "labels[] as objects");
     };
-    match face.world.add_pull_labels(pull.id, actor.id, &names) {
+    match face.world.add_pull_labels(pull.id, by, &names) {
         Ok(pull) => json_response(
             StatusCode::OK,
             serde_json::Value::Array(pull.labels.iter().map(|n| label_json(n)).collect()),
@@ -845,9 +864,10 @@ pub(crate) async fn add_labels(
 pub(crate) async fn remove_label(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number, name)): UrlPath<(String, String, String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -860,7 +880,7 @@ pub(crate) async fn remove_label(
     if let Some(refused) = media::refuse_unrendered(&headers, "Label") {
         return refused;
     }
-    match face.world.remove_pull_label(pull.id, actor.id, &name) {
+    match face.world.remove_pull_label(pull.id, by, &name) {
         Ok(pull) => json_response(
             StatusCode::OK,
             serde_json::Value::Array(pull.labels.iter().map(|n| label_json(n)).collect()),
@@ -884,10 +904,11 @@ struct ReviewersBody {
 pub(crate) async fn request_reviewers(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -911,10 +932,7 @@ pub(crate) async fn request_reviewers(
     }
     let users: Vec<&str> = users.iter().map(String::as_str).collect();
     let teams: Vec<&str> = teams.iter().map(String::as_str).collect();
-    match face
-        .world
-        .request_reviewers(pull.id, actor.id, &users, &teams)
-    {
+    match face.world.request_reviewers(pull.id, by, &users, &teams) {
         Ok(pull) => json_response(
             StatusCode::CREATED,
             pull_json(&face, &repo, &owner_actor, &pull),
@@ -943,10 +961,11 @@ pub(crate) async fn request_reviewers(
 pub(crate) async fn remove_review_requests(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
-    Extension(actor): Extension<Actor>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let by = caller.via(Door::Rest);
     let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -975,7 +994,7 @@ pub(crate) async fn remove_review_requests(
     let teams: Vec<&str> = teams.iter().map(String::as_str).collect();
     match face
         .world
-        .remove_review_requests(pull.id, actor.id, &users, &teams)
+        .remove_review_requests(pull.id, by, &users, &teams)
     {
         Ok(pull) => json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull)),
         Err(e) => internal(e),
@@ -1008,9 +1027,22 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Waker};
 
-    use orrery_world::{ActorKind, DEFAULT_T0_UNIX, World, WorldSecret};
+    use orrery_world::{Actor, ActorKind, Attribution, DEFAULT_T0_UNIX, World, WorldSecret};
 
     use super::*;
+
+    /// A write by `actor_id` as the REST face makes it.
+    fn by(actor_id: i64) -> Attribution {
+        Attribution::new(actor_id, Door::Rest)
+    }
+
+    /// The caller a token issued with `actor` authenticates.
+    fn caller(actor: &Actor) -> Caller {
+        Caller {
+            actor: actor.clone(),
+            app_id: None,
+        }
+    }
 
     /// The test holds the gate exclusively, as a restore does. Nothing else
     /// holds the repo lock, so an edit that did not take the gate would
@@ -1034,21 +1066,23 @@ mod tests {
         };
         let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
         let repo = world
-            .create_repo(alice.id, "widgets", None, false, "main", alice.id)
+            .create_repo(alice.id, "widgets", None, false, "main", by(alice.id))
             .unwrap();
         let sha = "a".repeat(40);
         let pull = world
-            .create_pull(NewPull {
-                repo_id: repo.id,
-                author_id: alice.id,
-                title: "before",
-                body: None,
-                head_ref: "feature",
-                head_sha: &sha,
-                base_ref: "main",
-                base_sha: &sha,
-                draft: false,
-            })
+            .create_pull(
+                by(alice.id),
+                NewPull {
+                    repo_id: repo.id,
+                    title: "before",
+                    body: None,
+                    head_ref: "feature",
+                    head_sha: &sha,
+                    base_ref: "main",
+                    base_sha: &sha,
+                    draft: false,
+                },
+            )
             .unwrap();
 
         let held = face.git.gate().write_owned().await;
@@ -1059,7 +1093,7 @@ mod tests {
                 "widgets".to_string(),
                 pull.number.to_string(),
             )),
-            Extension(alice),
+            Extension(caller(&alice)),
             HeaderMap::new(),
             Bytes::from_static(br#"{"title": "after"}"#),
         ));

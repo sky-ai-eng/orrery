@@ -1,7 +1,7 @@
 //! End-to-end for what a push that deletes or restores a branch does to the
 //! pull requests on it (spec/surface-git.md, "What a push does"): real `git`
 //! pushes, and the GraphQL timeline (spec/surface-github.md §3.3), the REST
-//! pull, and the action log read the result.
+//! pull, and the log read the result.
 
 mod common;
 
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use common::{Instance, boot, control_post, face_answer, face_ok, git, mint_actor, snapshot};
 use orrery_face_git::store;
-use orrery_world::{LogEntry, Pull, TimelineKind};
+use orrery_world::{Event, Pull, TimelineKind};
 
 const TIMELINE: &str = r#"
     query($id: ID!, $types: [PullRequestTimelineItemsItemType!]) {
@@ -192,22 +192,30 @@ impl Scene {
             .collect()
     }
 
-    /// The log entries after `seq`, as action, actor, and the ref or pull
-    /// they name, without the clock's.
-    fn entries_after(&self, seq: i64) -> Vec<(String, String, String)> {
+    /// The events after `seq`, as type, actor, and what they are about: a
+    /// ref by name, a pull by number, a timeline item by its pull's number
+    /// and its kind. The clock's are left out.
+    fn events_after(&self, seq: i64) -> Vec<(String, String, String)> {
         self.inst
             .world
             .log_after(seq, 1000)
             .unwrap()
             .into_iter()
-            .filter(|e| e.action != "clock.advance")
+            .filter(|e| e.body.type_name() != "world:clock_advanced")
             .map(|e| {
-                let subject = e.details["ref"]
-                    .as_str()
-                    .map(str::to_string)
-                    .or_else(|| e.details["number"].as_i64().map(|n| format!("#{n}")))
-                    .unwrap_or_default();
-                (e.action, e.actor_login, subject)
+                let body = serde_json::to_value(&e.body).unwrap();
+                let subject = &body["subject"];
+                let about = match subject["type"].as_str().unwrap() {
+                    "ref" | "repo" => subject["name"].as_str().unwrap().to_string(),
+                    "pull" => format!("#{}", subject["number"]),
+                    "timeline_item" => format!(
+                        "#{} {}",
+                        subject["pull"]["number"],
+                        body["object"]["kind"].as_str().unwrap()
+                    ),
+                    other => other.to_string(),
+                };
+                (e.body.type_name().to_string(), e.actor.login, about)
             })
             .collect()
     }
@@ -231,8 +239,8 @@ fn push_to(inst: &Instance, src: &Path, token: &str, refspecs: &[&str]) {
     git(src, inst.world.clock().unwrap(), &args);
 }
 
-fn entry(action: &str, actor: &str, subject: &str) -> (String, String, String) {
-    (action.into(), actor.into(), subject.into())
+fn event(kind: &str, actor: &str, about: &str) -> (String, String, String) {
+    (kind.into(), actor.into(), about.into())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -290,11 +298,16 @@ async fn deleting_a_head_closes_its_open_pulls() {
         ]
     );
     assert_eq!(
-        s.entries_after(mark),
+        s.events_after(mark),
         [
-            entry("ref.update", "bob", "refs/heads/feature"),
-            entry("pull.close", "bob", "#1"),
-            entry("pull.close", "bob", "#2"),
+            event("repo:pushed", "bob", "webapp"),
+            event("ref:deleted", "bob", "refs/heads/feature"),
+            event("pull:closed", "bob", "#1"),
+            event("timeline_item:created", "bob", "#1 closed"),
+            event("pull:closed", "bob", "#2"),
+            event("timeline_item:created", "bob", "#2 closed"),
+            event("timeline_item:created", "bob", "#1 head_ref_deleted"),
+            event("timeline_item:created", "bob", "#2 head_ref_deleted"),
         ]
     );
 
@@ -362,10 +375,15 @@ async fn deleting_a_base_closes_its_open_pulls_without_retargeting_them() {
         ["BaseRefDeletedEvent release by bob"]
     );
     assert_eq!(
-        s.entries_after(mark),
+        s.events_after(mark),
         [
-            entry("ref.update", "bob", "refs/heads/release"),
-            entry("pull.close", "bob", "#2"),
+            event("repo:pushed", "bob", "webapp"),
+            event("ref:deleted", "bob", "refs/heads/release"),
+            event("pull:updated", "bob", "#1"),
+            event("timeline_item:created", "bob", "#1 head_ref_deleted"),
+            event("timeline_item:created", "bob", "#2 base_ref_deleted"),
+            event("pull:closed", "bob", "#2"),
+            event("timeline_item:created", "bob", "#2 closed"),
         ]
     );
 }
@@ -400,10 +418,15 @@ async fn a_closed_pulls_head_is_deleted_and_restored_and_the_pull_reopens() {
         );
     }
     assert_eq!(
-        s.entries_after(mark),
+        s.events_after(mark),
         [
-            entry("ref.update", "bob", "refs/heads/feature"),
-            entry("ref.update", "bob", "refs/heads/fix"),
+            event("repo:pushed", "bob", "webapp"),
+            event("ref:deleted", "bob", "refs/heads/feature"),
+            event("ref:deleted", "bob", "refs/heads/fix"),
+            event("pull:updated", "bob", "#1"),
+            event("timeline_item:created", "bob", "#1 head_ref_deleted"),
+            event("pull:updated", "bob", "#2"),
+            event("timeline_item:created", "bob", "#2 head_ref_deleted"),
         ]
     );
 
@@ -428,79 +451,84 @@ async fn a_closed_pulls_head_is_deleted_and_restored_and_the_pull_reopens() {
 
 /// Re-execute `log` against `into` through the same doors that made it: the
 /// control plane for actors and the clock, real `git` from `objects` for
-/// pushes, and the REST face for repositories and pull requests. A push's
-/// `ref.update` entries are consecutive, by one actor at one clock, so they
-/// are pushed together.
-fn replay(log: &[LogEntry], into: &Instance, objects: &Path) {
+/// pushes, and the REST face for repositories and pull requests. Only each
+/// write's operation is re-executed, the first of its events: the engine
+/// makes the rest again. A push re-pushes every ref its write moved.
+fn replay(log: &[Event], into: &Instance, objects: &Path) {
     let mut tokens: BTreeMap<String, String> = BTreeMap::new();
     let api = format!("{}/api/v3/repos/alice/webapp", into.base);
-    let mut i = 0;
-    while i < log.len() {
-        let e = &log[i];
-        let d = &e.details;
-        let token = tokens.get(&e.actor_login).cloned().unwrap_or_default();
+    for e in log.iter().filter(|e| e.seq == e.write.seq) {
+        let b = serde_json::to_value(&e.body).unwrap();
+        let token = tokens.get(&e.actor.login).cloned().unwrap_or_default();
         let set_state = |state: &str| {
-            let url = format!("{api}/pulls/{}", d["number"]);
+            let url = format!("{api}/pulls/{}", b["subject"]["number"]);
             face_ok("PATCH", &url, &token, serde_json::json!({ "state": state }));
         };
-        match e.action.as_str() {
-            "world.init" => {}
-            "actor.create" => {
-                let login = d["login"].as_str().unwrap();
-                let minted = mint_actor(&into.control, login, d["kind"].as_str().unwrap());
+        match e.body.type_name() {
+            "world:created" => {}
+            "actor:created" => {
+                let login = b["subject"]["login"].as_str().unwrap();
+                let minted =
+                    mint_actor(&into.control, login, b["subject"]["kind"].as_str().unwrap());
                 tokens.insert(login.to_string(), minted);
             }
-            "clock.advance" => {
+            "world:clock_advanced" => {
+                let clock = &b["changes"]["clock_unix"];
+                let seconds = clock["to"].as_i64().unwrap() - clock["from"].as_i64().unwrap();
                 control_post(
                     &into.control,
                     "/_orrery/clock/advance",
-                    serde_json::json!({ "seconds": d["seconds"] }),
+                    serde_json::json!({ "seconds": seconds }),
                 );
             }
-            "repo.create" => {
+            "repo:created" => {
                 face_ok(
                     "POST",
                     &format!("{}/api/v3/user/repos", into.base),
                     &token,
-                    serde_json::json!({ "name": d["name"] }),
+                    serde_json::json!({ "name": b["subject"]["name"] }),
                 );
             }
-            "ref.update" => {
-                let mut refspecs = Vec::new();
-                while let Some(m) = log.get(i).filter(|m| {
-                    m.action == "ref.update"
-                        && m.actor_login == e.actor_login
-                        && m.clock_unix == e.clock_unix
-                }) {
-                    let (name, new) = (&m.details["ref"], &m.details["new"]);
-                    refspecs.push(match new.as_str().unwrap() {
-                        store::ZERO_OID => format!(":{}", name.as_str().unwrap()),
-                        new => format!("{new}:{}", name.as_str().unwrap()),
-                    });
-                    i += 1;
-                }
+            "repo:pushed" => {
+                let refspecs: Vec<String> = log
+                    .iter()
+                    .filter(|m| m.write == e.write)
+                    .filter_map(|m| {
+                        let m = serde_json::to_value(&m.body).unwrap();
+                        let name = m["subject"]["name"].as_str()?.to_string();
+                        match m["type"].as_str().unwrap() {
+                            "ref:created" => Some(format!("{}:{name}", m["object"]["sha"])),
+                            "ref:updated" => Some(format!(
+                                "{}{}:{name}",
+                                if m["forced"] == true { "+" } else { "" },
+                                m["changes"]["sha"]["to"]
+                            )),
+                            "ref:deleted" => Some(format!(":{name}")),
+                            _ => None,
+                        }
+                    })
+                    .map(|spec| spec.replace('"', ""))
+                    .collect();
                 let refspecs: Vec<&str> = refspecs.iter().map(String::as_str).collect();
                 push_to(into, objects, &token, &refspecs);
-                continue;
             }
-            "pull.open" => {
+            "pull:opened" => {
+                let o = &b["object"];
                 let opened = face_ok(
                     "POST",
                     &format!("{api}/pulls"),
                     &token,
                     serde_json::json!({
-                        "title": d["title"], "head": d["head"], "base": d["base"], "draft": d["draft"],
+                        "title": o["title"], "head": o["head"]["ref"], "base": o["base"]["ref"],
+                        "draft": o["draft"],
                     }),
                 );
-                assert_eq!(opened["number"], d["number"]);
+                assert_eq!(opened["number"], o["number"]);
             }
-            // A close the push before it made is already in place, and
-            // closing a closed pull writes nothing.
-            "pull.close" => set_state("closed"),
-            "pull.reopen" => set_state("open"),
+            "pull:closed" => set_state("closed"),
+            "pull:reopened" => set_state("open"),
             other => panic!("the replay does not re-execute {other}"),
         }
-        i += 1;
     }
 }
 
@@ -525,15 +553,20 @@ async fn replaying_the_log_rebuilds_the_closes_and_the_timeline() {
     let log = s.inst.world.log_after(0, 10_000).unwrap();
     replay(&log, &replayed, &s.src());
 
-    let entries = |inst: &Instance| -> Vec<(i64, i64, String, String, serde_json::Value)> {
+    // Every event the re-executed operations made, consequences included,
+    // is the one the original made, but for the real time it was appended.
+    let events = |inst: &Instance| -> Vec<Event> {
         inst.world
             .log_after(0, 10_000)
             .unwrap()
             .into_iter()
-            .map(|e| (e.seq, e.clock_unix, e.actor_login, e.action, e.details))
+            .map(|e| Event {
+                wall_unix_ms: 0,
+                ..e
+            })
             .collect()
     };
-    assert_eq!(entries(&replayed), entries(&s.inst));
+    assert_eq!(events(&replayed), events(&s.inst));
     let repo = |inst: &Instance| {
         inst.world
             .repo_by_owner_name("alice", "webapp")

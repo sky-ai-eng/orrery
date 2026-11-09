@@ -5,9 +5,9 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::queries;
+use crate::events::{self, Attribution, EventBody};
 use crate::types::*;
-use crate::{Result, World, WorldError, uniqueness_violation};
+use crate::{Result, World, WorldError, objects, queries, uniqueness_violation};
 
 impl World {
     /// Add `login` to `org` with `role`, or change the role of a member,
@@ -18,18 +18,19 @@ impl World {
         org: &str,
         login: &str,
         role: OrgRole,
-        actor_id: i64,
+        by: Attribution,
     ) -> Result<OrgMembership> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let org_id = require_org(&tx, org)?;
-            let member_id = require_person(&tx, login)?;
-            if let Some(existing) = org_membership(&tx, org_id, member_id)?
+        self.write(by, |w| {
+            let tx = w.tx;
+            let org_id = require_org(tx, org)?;
+            let member_id = require_person(tx, login)?;
+            if let Some(existing) = org_membership(tx, org_id, member_id)?
                 && existing.role == role
             {
                 return Ok(existing);
             }
-            let clock = queries::clock(&tx)?;
+            let before = objects::org_membership_object(tx, org_id, member_id)?;
+            let clock = queries::clock(tx)?;
             let membership = tx.query_row(
                 &format!(
                     "INSERT INTO org_members (org_id, member_id, role, created_clock_unix)
@@ -41,17 +42,19 @@ impl World {
                 params![org_id, member_id, role.as_str(), clock],
                 queries::row_to_org_member,
             )?;
-            self.log_locked(
-                &tx,
-                actor_id,
-                "org.membership.set",
-                &serde_json::json!({
-                    "org": membership.org_login,
-                    "login": membership.member_login,
-                    "role": role.as_str(),
+            let subject = objects::org_membership_subject(tx, org_id, member_id)?;
+            let after = objects::org_membership_object(tx, org_id, member_id)?
+                .expect("the membership was just written");
+            w.operation(match before {
+                None => EventBody::OrgMembershipCreated(events::OrgMembershipCreated {
+                    subject,
+                    object: after,
                 }),
-            )?;
-            tx.commit()?;
+                Some(before) => EventBody::OrgMembershipUpdated(events::OrgMembershipChanged {
+                    subject,
+                    changes: events::OrgMembershipChanges::between(&before, &after),
+                }),
+            });
             Ok(membership)
         })
     }
@@ -77,17 +80,17 @@ impl World {
         org: &str,
         name: &str,
         description: Option<&str>,
-        creator_id: i64,
+        by: Attribution,
     ) -> Result<Team> {
         let name = name.trim();
         let slug = team_slug(name);
         if slug.is_empty() {
             return Err(WorldError::InvalidTeamName(name.to_string()));
         }
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let org_id = require_org(&tx, org)?;
-            let clock = queries::clock(&tx)?;
+        self.write(by, |w| {
+            let tx = w.tx;
+            let org_id = require_org(tx, org)?;
+            let clock = queries::clock(tx)?;
             let team = tx
                 .query_row(
                     &format!(
@@ -103,20 +106,24 @@ impl World {
                     true => WorldError::TeamExists(name.to_string()),
                     false => WorldError::from(e),
                 })?;
-            if org_membership(&tx, org_id, creator_id)?.is_some() {
+            w.operation(EventBody::TeamCreated(events::TeamCreated {
+                subject: objects::team_subject(tx, team.id)?,
+                object: objects::team_object(tx, team.id)?,
+            }));
+            if org_membership(tx, org_id, by.actor_id)?.is_some() {
                 tx.execute(
                     "INSERT INTO team_members (team_id, member_id, role, created_clock_unix)
                      VALUES (?1, ?2, 'maintainer', ?3)",
-                    params![team.id, creator_id, clock],
+                    params![team.id, by.actor_id, clock],
                 )?;
+                w.emit(EventBody::TeamMembershipCreated(
+                    events::TeamMembershipCreated {
+                        subject: objects::team_membership_subject(tx, team.id, by.actor_id)?,
+                        object: objects::team_membership_object(tx, team.id, by.actor_id)?
+                            .expect("the membership was just written"),
+                    },
+                ));
             }
-            self.log_locked(
-                &tx,
-                creator_id,
-                "team.create",
-                &serde_json::json!({ "org": team.org_login, "slug": team.slug, "name": team.name }),
-            )?;
-            tx.commit()?;
             Ok(team)
         })
     }
@@ -133,30 +140,38 @@ impl World {
     /// Delete a team with its memberships and its pending review requests,
     /// GitHub's `DELETE /orgs/{org}/teams/{team_slug}`. Its past requests
     /// stay on pull timelines, which name the team by its id.
-    pub fn delete_team(&self, org: &str, slug: &str, actor_id: i64) -> Result<()> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let team = require_team(&tx, org, slug)?;
-            let requests = tx.execute(
-                "DELETE FROM review_requests WHERE team_id = ?1",
-                params![team.id],
+    pub fn delete_team(&self, org: &str, slug: &str, by: Attribution) -> Result<()> {
+        self.write(by, |w| {
+            let team = require_team(w.tx, org, slug)?;
+            w.operation(EventBody::TeamDeleted(events::TeamDeleted {
+                subject: objects::team_subject(w.tx, team.id)?,
+                object: objects::team_object(w.tx, team.id)?,
+            }));
+            let pulls = objects::list_by(
+                w.tx,
+                "SELECT pull_id FROM review_requests WHERE team_id = ?1 ORDER BY id",
+                team.id,
+                |r| r.get::<_, i64>(0),
             )?;
-            tx.execute(
-                "DELETE FROM team_members WHERE team_id = ?1",
-                params![team.id],
+            for pull_id in pulls {
+                w.pull(pull_id, EventBody::PullReviewRequestRemoved, |tx| {
+                    tx.execute(
+                        "DELETE FROM review_requests WHERE pull_id = ?1 AND team_id = ?2",
+                        params![pull_id, team.id],
+                    )?;
+                    Ok(())
+                })?;
+            }
+            let members = objects::list_by(
+                w.tx,
+                "SELECT member_id FROM team_members WHERE team_id = ?1 ORDER BY member_id",
+                team.id,
+                |r| r.get::<_, i64>(0),
             )?;
-            tx.execute("DELETE FROM teams WHERE id = ?1", params![team.id])?;
-            self.log_locked(
-                &tx,
-                actor_id,
-                "team.delete",
-                &serde_json::json!({
-                    "org": team.org_login,
-                    "slug": team.slug,
-                    "review_requests_removed": requests,
-                }),
-            )?;
-            tx.commit()?;
+            for member_id in members {
+                remove_member(w, team.id, member_id)?;
+            }
+            w.tx.execute("DELETE FROM teams WHERE id = ?1", params![team.id])?;
             Ok(())
         })
     }
@@ -171,24 +186,25 @@ impl World {
         slug: &str,
         login: &str,
         role: TeamRole,
-        actor_id: i64,
+        by: Attribution,
     ) -> Result<TeamMembership> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let team = require_team(&tx, org, slug)?;
-            let member_id = require_person(&tx, login)?;
-            if org_membership(&tx, team.org_id, member_id)?.is_none() {
+        self.write(by, |w| {
+            let tx = w.tx;
+            let team = require_team(tx, org, slug)?;
+            let member_id = require_person(tx, login)?;
+            if org_membership(tx, team.org_id, member_id)?.is_none() {
                 return Err(WorldError::NotOrgMember {
                     org: team.org_login,
                     login: login.to_string(),
                 });
             }
-            if let Some(existing) = team_membership(&tx, team.id, member_id)?
+            if let Some(existing) = team_membership(tx, team.id, member_id)?
                 && existing.role == role
             {
                 return Ok(existing);
             }
-            let clock = queries::clock(&tx)?;
+            let before = objects::team_membership_object(tx, team.id, member_id)?;
+            let clock = queries::clock(tx)?;
             let membership = tx.query_row(
                 &format!(
                     "INSERT INTO team_members (team_id, member_id, role, created_clock_unix)
@@ -200,18 +216,19 @@ impl World {
                 params![team.id, member_id, role.as_str(), clock],
                 queries::row_to_team_member,
             )?;
-            self.log_locked(
-                &tx,
-                actor_id,
-                "team.membership.set",
-                &serde_json::json!({
-                    "org": team.org_login,
-                    "slug": team.slug,
-                    "login": membership.member_login,
-                    "role": role.as_str(),
+            let subject = objects::team_membership_subject(tx, team.id, member_id)?;
+            let after = objects::team_membership_object(tx, team.id, member_id)?
+                .expect("the membership was just written");
+            w.operation(match before {
+                None => EventBody::TeamMembershipCreated(events::TeamMembershipCreated {
+                    subject,
+                    object: after,
                 }),
-            )?;
-            tx.commit()?;
+                Some(before) => EventBody::TeamMembershipUpdated(events::TeamMembershipChanged {
+                    subject,
+                    changes: events::TeamMembershipChanges::between(&before, &after),
+                }),
+            });
             Ok(membership)
         })
     }
@@ -246,27 +263,12 @@ impl World {
         org: &str,
         slug: &str,
         login: &str,
-        actor_id: i64,
+        by: Attribution,
     ) -> Result<()> {
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let team = require_team(&tx, org, slug)?;
-            let member_id = require_person(&tx, login)?;
-            let removed = tx.execute(
-                "DELETE FROM team_members WHERE team_id = ?1 AND member_id = ?2",
-                params![team.id, member_id],
-            )?;
-            if removed == 0 {
-                return Ok(());
-            }
-            self.log_locked(
-                &tx,
-                actor_id,
-                "team.membership.remove",
-                &serde_json::json!({ "org": team.org_login, "slug": team.slug, "login": login }),
-            )?;
-            tx.commit()?;
-            Ok(())
+        self.write(by, |w| {
+            let team = require_team(w.tx, org, slug)?;
+            let member_id = require_person(w.tx, login)?;
+            remove_member(w, team.id, member_id)
         })
     }
 
@@ -340,6 +342,26 @@ impl World {
             )?)
         })
     }
+}
+
+/// Take `member_id` off the team, if they are on it, and emit the removal:
+/// the write's operation if it has none yet.
+fn remove_member(w: &mut crate::log::Write<'_>, team_id: i64, member_id: i64) -> Result<()> {
+    let Some(object) = objects::team_membership_object(w.tx, team_id, member_id)? else {
+        return Ok(());
+    };
+    let subject = objects::team_membership_subject(w.tx, team_id, member_id)?;
+    w.tx.execute(
+        "DELETE FROM team_members WHERE team_id = ?1 AND member_id = ?2",
+        params![team_id, member_id],
+    )?;
+    let removed =
+        EventBody::TeamMembershipDeleted(events::TeamMembershipDeleted { subject, object });
+    match w.has_operation() {
+        true => w.emit(removed),
+        false => w.operation(removed),
+    }
+    Ok(())
 }
 
 /// GitHub's slug for a team name: lower-cased, with every run of characters

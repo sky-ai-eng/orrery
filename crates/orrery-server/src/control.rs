@@ -16,8 +16,8 @@ use axum::extract::{OriginalUri, Path as UrlPath, State};
 use axum::http::{Method, Response, StatusCode};
 use axum::routing::{get, post, put};
 use orrery_world::{
-    Actor, ActorEmail, ActorKind, LogOrder, SYSTEM_ACTOR_LOGIN, WorldError, validate_actor_kind,
-    validate_login, validate_oauth_app_callback_url, validate_oauth_app_name,
+    Actor, ActorEmail, ActorKind, Attribution, Door, LogOrder, SYSTEM_ACTOR_ID, WorldError,
+    validate_actor_kind, validate_login, validate_oauth_app_callback_url, validate_oauth_app_name,
 };
 use serde_json::value::RawValue;
 
@@ -45,6 +45,7 @@ pub fn router(state: AppState) -> Router {
             post(issue_oauth_client_secret),
         )
         .route("/log/list", post(log_list))
+        .route("/log/schema", get(log_schema))
         .route("/log/stream", get(crate::log_stream::stream))
         .merge(crate::snapshots::router())
         .method_not_allowed_fallback(method_not_allowed)
@@ -109,11 +110,7 @@ async fn advance_clock(State(state): State<AppState>, body: Bytes) -> Response<B
         Ok(s) => s,
         Err(resp) => return *resp,
     };
-    let system = match system_actor(&state) {
-        Ok(a) => a,
-        Err(resp) => return *resp,
-    };
-    match state.world.advance_clock(seconds, system.id) {
+    match state.world.advance_clock(seconds, SYSTEM) {
         Ok(clock) => json(StatusCode::OK, clock_body(clock)),
         Err(e @ WorldError::ClockOutOfRange { .. }) => errors(
             StatusCode::BAD_REQUEST,
@@ -166,11 +163,7 @@ async fn issue_actor_token(
     if let Err(resp) = Fields::parse(&body).finish(Some(())) {
         return *resp;
     }
-    let system = match system_actor(&state) {
-        Ok(a) => a,
-        Err(resp) => return *resp,
-    };
-    match state.world.issue_actor_token(&login, system.id) {
+    match state.world.issue_actor_token(&login, SYSTEM) {
         Ok((actor, token)) => actor_token_created(&actor, &token),
         Err(e @ WorldError::SystemActorToken) => errors(
             StatusCode::BAD_REQUEST,
@@ -208,11 +201,7 @@ async fn set_actor_emails(
         Ok(e) => e,
         Err(resp) => return *resp,
     };
-    let system = match system_actor(&state) {
-        Ok(a) => a,
-        Err(resp) => return *resp,
-    };
-    match state.world.set_actor_emails(&login, &emails, system.id) {
+    match state.world.set_actor_emails(&login, &emails, SYSTEM) {
         Ok(emails) => json(StatusCode::OK, serde_json::json!({ "emails": emails })),
         Err(e @ WorldError::InvalidEmails(_)) => errors(
             StatusCode::BAD_REQUEST,
@@ -247,14 +236,7 @@ async fn create_oauth_app(State(state): State<AppState>, body: Bytes) -> Respons
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let system = match system_actor(&state) {
-        Ok(a) => a,
-        Err(resp) => return *resp,
-    };
-    match state
-        .world
-        .create_oauth_app(&name, &callback_url, system.id)
-    {
+    match state.world.create_oauth_app(&name, &callback_url, SYSTEM) {
         Ok(app) => json(StatusCode::CREATED, serde_json::json!(app)),
         Err(e) => internal(e),
     }
@@ -282,11 +264,7 @@ async fn issue_oauth_client_secret(
     if let Err(resp) = Fields::parse(&body).finish(Some(())) {
         return *resp;
     }
-    let system = match system_actor(&state) {
-        Ok(a) => a,
-        Err(resp) => return *resp,
-    };
-    match state.world.issue_oauth_client_secret(&client_id, system.id) {
+    match state.world.issue_oauth_client_secret(&client_id, SYSTEM) {
         Ok(secret) => json(
             StatusCode::CREATED,
             serde_json::json!({ "client_id": client_id, "client_secret": secret }),
@@ -298,15 +276,11 @@ async fn issue_oauth_client_secret(
     }
 }
 
-fn system_actor(state: &AppState) -> Result<Actor, Box<Response<Body>>> {
-    match state.world.actor_by_login(SYSTEM_ACTOR_LOGIN) {
-        Ok(Some(a)) => Ok(a),
-        Ok(None) => Err(Box::new(internal("system actor missing"))),
-        Err(e) => Err(Box::new(internal(e))),
-    }
-}
+/// Every control-plane write is the system actor's, through the control
+/// plane.
+const SYSTEM: Attribution = Attribution::new(SYSTEM_ACTOR_ID, Door::Control);
 
-/// The action log, oldest first unless the body orders it newest first.
+/// The log's events, oldest first unless the body orders them newest first.
 /// `after_seq` narrows it to what followed a position another call reported,
 /// such as a diff's `log.shared_seq` or a snapshot's `last_seq`. A position
 /// the log does not hold is refused: what follows it in this log did not
@@ -342,13 +316,19 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
         Err(WorldError::ResumeNotInLog(_)) => errors(
             StatusCode::BAD_REQUEST,
             "INVALID_ARGUMENT",
-            "page_token resumes from an entry the action log no longer holds: \
+            "page_token resumes from an event the log no longer holds: \
              a restore replaced the log since the token was issued; \
              start again from the first page",
             Some("page_token"),
         ),
         Err(e) => internal(e),
     }
+}
+
+/// The JSON Schema of the log's events, as this build writes them: what
+/// `log/list` and `log/stream` serve each event as.
+async fn log_schema() -> Response<Body> {
+    json(StatusCode::OK, orrery_world::events::schema())
 }
 
 /// Which actors a world holds, so a caller handed a world it did not build

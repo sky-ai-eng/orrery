@@ -1,4 +1,4 @@
-//! The action log as server-sent events (`GET /_orrery/log/stream`), read
+//! The log's events as server-sent events (`GET /_orrery/log/stream`), read
 //! over HTTP from a served world: the catch-up and what follows it, resuming
 //! from `Last-Event-ID`, the refusals, and how a restore ends a stream.
 

@@ -1,11 +1,16 @@
 //! Organization membership, teams and review requests: the single-row-write
 //! rule (returned row == point read), GitHub's refusals, and the timeline and
-//! action-log entries each write owes.
+//! events each write owes.
 
 use orrery_world::{
-    ActorKind, DEFAULT_T0_UNIX, NewPull, OrgRole, Pull, RequestedReviewer, ReviewState, TeamRole,
-    TimelineKind, World, WorldError, WorldSecret,
+    ActorKind, Attribution, DEFAULT_T0_UNIX, Door, NewPull, OrgRole, Pull, RequestedReviewer,
+    ReviewState, TeamRole, TimelineKind, World, WorldError, WorldSecret,
 };
+
+/// A write by `actor_id` as the REST face makes it.
+fn by(actor_id: i64) -> Attribution {
+    Attribution::new(actor_id, Door::Rest)
+}
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -34,12 +39,12 @@ fn fixture() -> Fixture {
     let (bob, _) = w.create_actor("bob", ActorKind::User).unwrap();
     let (carol, _) = w.create_actor("carol", ActorKind::User).unwrap();
     let (acme, _) = w.create_actor("acme", ActorKind::Org).unwrap();
-    w.set_org_membership("acme", "alice", OrgRole::Admin, alice.id)
+    w.set_org_membership("acme", "alice", OrgRole::Admin, by(alice.id))
         .unwrap();
-    w.set_org_membership("acme", "bob", OrgRole::Member, alice.id)
+    w.set_org_membership("acme", "bob", OrgRole::Member, by(alice.id))
         .unwrap();
     let repo = w
-        .create_repo(acme.id, "webapp", None, false, "main", alice.id)
+        .create_repo(acme.id, "webapp", None, false, "main", by(alice.id))
         .unwrap();
     Fixture {
         _dir: dir,
@@ -53,17 +58,19 @@ fn fixture() -> Fixture {
 }
 
 fn open_pull(f: &Fixture) -> Pull {
-    f.w.create_pull(NewPull {
-        repo_id: f.repo,
-        author_id: f.alice,
-        title: "Add feature",
-        body: None,
-        head_ref: "feature",
-        head_sha: SHA_B,
-        base_ref: "main",
-        base_sha: SHA_A,
-        draft: false,
-    })
+    f.w.create_pull(
+        by(f.alice),
+        NewPull {
+            repo_id: f.repo,
+            title: "Add feature",
+            body: None,
+            head_ref: "feature",
+            head_sha: SHA_B,
+            base_ref: "main",
+            base_sha: SHA_A,
+            draft: false,
+        },
+    )
     .unwrap()
 }
 
@@ -71,7 +78,17 @@ fn actions(w: &World) -> Vec<String> {
     w.log_after(0, 1000)
         .unwrap()
         .into_iter()
-        .map(|e| e.action)
+        .map(|e| e.body.type_name().to_string())
+        .collect()
+}
+
+/// The types of the newest write's events, in order.
+fn last_write(w: &World) -> Vec<&'static str> {
+    let log = w.log_after(0, 1000).unwrap();
+    let write = log.last().unwrap().write.seq;
+    log.iter()
+        .filter(|e| e.write.seq == write)
+        .map(|e| e.body.type_name())
         .collect()
 }
 
@@ -80,7 +97,7 @@ fn org_membership_returns_the_stored_row_and_changes_role_in_place() {
     let f = fixture();
     f.w.create_actor("dave", ActorKind::User).unwrap();
     let set =
-        f.w.set_org_membership("acme", "dave", OrgRole::Member, f.alice)
+        f.w.set_org_membership("acme", "dave", OrgRole::Member, by(f.alice))
             .unwrap();
     assert_eq!(
         Some(set.clone()),
@@ -91,7 +108,7 @@ fn org_membership_returns_the_stored_row_and_changes_role_in_place() {
 
     let logged = actions(&f.w).len();
     let same =
-        f.w.set_org_membership("ACME", "Dave", OrgRole::Member, f.alice)
+        f.w.set_org_membership("ACME", "Dave", OrgRole::Member, by(f.alice))
             .unwrap();
     assert_eq!(same, set);
     assert_eq!(
@@ -101,23 +118,23 @@ fn org_membership_returns_the_stored_row_and_changes_role_in_place() {
     );
 
     let promoted =
-        f.w.set_org_membership("acme", "dave", OrgRole::Admin, f.alice)
+        f.w.set_org_membership("acme", "dave", OrgRole::Admin, by(f.alice))
             .unwrap();
     assert_eq!(promoted.role, OrgRole::Admin);
     assert_eq!(promoted.created_clock_unix, set.created_clock_unix);
     assert_eq!(Some(promoted), f.w.org_membership("acme", "dave").unwrap());
 
     assert!(matches!(
-        f.w.set_org_membership("alice", "bob", OrgRole::Member, f.alice),
+        f.w.set_org_membership("alice", "bob", OrgRole::Member, by(f.alice)),
         Err(WorldError::NoSuchOrg(_))
     ));
     assert!(matches!(
-        f.w.set_org_membership("acme", "ghost", OrgRole::Member, f.alice),
+        f.w.set_org_membership("acme", "ghost", OrgRole::Member, by(f.alice)),
         Err(WorldError::NoSuchActor(_))
     ));
     f.w.create_actor("ci", ActorKind::Bot).unwrap();
     assert!(matches!(
-        f.w.set_org_membership("acme", "ci", OrgRole::Member, f.alice),
+        f.w.set_org_membership("acme", "ci", OrgRole::Member, by(f.alice)),
         Err(WorldError::NoSuchActor(_))
     ));
 }
@@ -126,8 +143,13 @@ fn org_membership_returns_the_stored_row_and_changes_role_in_place() {
 fn a_team_returns_the_stored_row_and_its_creator_maintains_it() {
     let f = fixture();
     let team =
-        f.w.create_team("acme", "Platform Team", Some("owns the platform"), f.alice)
-            .unwrap();
+        f.w.create_team(
+            "acme",
+            "Platform Team",
+            Some("owns the platform"),
+            by(f.alice),
+        )
+        .unwrap();
     assert_eq!(
         Some(team.clone()),
         f.w.team_by_slug("acme", "platform-team").unwrap()
@@ -146,39 +168,44 @@ fn a_team_returns_the_stored_row_and_its_creator_maintains_it() {
             .role,
         TeamRole::Maintainer
     );
+    assert_eq!(
+        last_write(&f.w),
+        ["team:created", "team_membership:created"]
+    );
 
-    let outsider = f.w.create_team("acme", "Docs", None, f.carol).unwrap();
+    let outsider = f.w.create_team("acme", "Docs", None, by(f.carol)).unwrap();
     assert_eq!(
         f.w.team_members_count(outsider.id).unwrap(),
         0,
         "a non-member creator does not join"
     );
+    assert_eq!(last_write(&f.w), ["team:created"]);
 
     assert!(matches!(
-        f.w.create_team("acme", "platform team", None, f.alice),
+        f.w.create_team("acme", "platform team", None, by(f.alice)),
         Err(WorldError::TeamExists(_))
     ));
     assert!(matches!(
-        f.w.create_team("acme", "Platform-Team", None, f.alice),
+        f.w.create_team("acme", "Platform-Team", None, by(f.alice)),
         Err(WorldError::TeamExists(_)),
     ));
     assert!(matches!(
-        f.w.create_team("acme", " !! ", None, f.alice),
+        f.w.create_team("acme", " !! ", None, by(f.alice)),
         Err(WorldError::InvalidTeamName(_))
     ));
     assert!(matches!(
-        f.w.create_team("alice", "Mine", None, f.alice),
+        f.w.create_team("alice", "Mine", None, by(f.alice)),
         Err(WorldError::NoSuchOrg(_))
     ));
-    assert!(actions(&f.w).contains(&"team.create".to_string()));
 }
 
 #[test]
 fn team_membership_requires_org_membership() {
     let f = fixture();
-    f.w.create_team("acme", "Platform", None, f.alice).unwrap();
+    f.w.create_team("acme", "Platform", None, by(f.alice))
+        .unwrap();
     let set =
-        f.w.set_team_membership("acme", "platform", "bob", TeamRole::Member, f.alice)
+        f.w.set_team_membership("acme", "platform", "bob", TeamRole::Member, by(f.alice))
             .unwrap();
     assert_eq!(
         Some(set.clone()),
@@ -188,22 +215,22 @@ fn team_membership_requires_org_membership() {
     assert_eq!(f.w.team_members_count(set.team_id).unwrap(), 2);
 
     assert!(matches!(
-        f.w.set_team_membership("acme", "platform", "carol", TeamRole::Member, f.alice),
+        f.w.set_team_membership("acme", "platform", "carol", TeamRole::Member, by(f.alice)),
         Err(WorldError::NotOrgMember { .. })
     ));
     assert!(matches!(
-        f.w.set_team_membership("acme", "nope", "bob", TeamRole::Member, f.alice),
+        f.w.set_team_membership("acme", "nope", "bob", TeamRole::Member, by(f.alice)),
         Err(WorldError::NoSuchTeam(_))
     ));
 
-    f.w.remove_team_membership("acme", "platform", "bob", f.alice)
+    f.w.remove_team_membership("acme", "platform", "bob", by(f.alice))
         .unwrap();
     assert_eq!(
         f.w.team_membership("acme", "platform", "bob").unwrap(),
         None
     );
     let logged = actions(&f.w).len();
-    f.w.remove_team_membership("acme", "platform", "bob", f.alice)
+    f.w.remove_team_membership("acme", "platform", "bob", by(f.alice))
         .unwrap();
     assert_eq!(
         actions(&f.w).len(),
@@ -211,20 +238,21 @@ fn team_membership_requires_org_membership() {
         "removing someone not on the team succeeds and writes nothing"
     );
     assert!(matches!(
-        f.w.remove_team_membership("acme", "platform", "ghost", f.alice),
+        f.w.remove_team_membership("acme", "platform", "ghost", by(f.alice)),
         Err(WorldError::NoSuchActor(_))
     ));
     let acts = actions(&f.w);
-    assert!(acts.contains(&"team.membership.set".to_string()));
-    assert!(acts.contains(&"team.membership.remove".to_string()));
+    assert!(acts.contains(&"team_membership:created".to_string()));
+    assert!(acts.contains(&"team_membership:deleted".to_string()));
 }
 
 #[test]
 fn listing_teams_by_org_member_and_filter() {
     let f = fixture();
-    f.w.create_team("acme", "Platform", None, f.alice).unwrap();
-    f.w.create_team("acme", "Web", None, f.carol).unwrap();
-    f.w.set_team_membership("acme", "web", "bob", TeamRole::Member, f.alice)
+    f.w.create_team("acme", "Platform", None, by(f.alice))
+        .unwrap();
+    f.w.create_team("acme", "Web", None, by(f.carol)).unwrap();
+    f.w.set_team_membership("acme", "web", "bob", TeamRole::Member, by(f.alice))
         .unwrap();
 
     let slugs = |teams: Vec<orrery_world::Team>| -> Vec<String> {
@@ -259,18 +287,19 @@ fn timeline(f: &Fixture, pull_id: i64) -> Vec<TimelineKind> {
 #[test]
 fn review_requests_land_on_the_pull_and_its_timeline() {
     let f = fixture();
-    f.w.create_team("acme", "Platform", None, f.alice).unwrap();
+    f.w.create_team("acme", "Platform", None, by(f.alice))
+        .unwrap();
     let pull = open_pull(&f);
 
     let requested =
-        f.w.request_reviewers(pull.id, f.alice, &["bob", "carol"], &["platform"])
+        f.w.request_reviewers(pull.id, by(f.alice), &["bob", "carol"], &["platform"])
             .unwrap();
     assert_eq!(requested, f.w.pull_by_id(pull.id).unwrap().unwrap());
     assert_eq!(requested.requested_reviewers, ["bob", "carol"]);
     assert_eq!(requested.requested_teams, ["platform"]);
 
     let again =
-        f.w.request_reviewers(pull.id, f.alice, &["BOB"], &[])
+        f.w.request_reviewers(pull.id, by(f.alice), &["BOB"], &[])
             .unwrap();
     assert_eq!(
         again, requested,
@@ -278,7 +307,7 @@ fn review_requests_land_on_the_pull_and_its_timeline() {
     );
 
     let removed =
-        f.w.remove_review_requests(pull.id, f.alice, &["carol", "ghost"], &["platform"])
+        f.w.remove_review_requests(pull.id, by(f.alice), &["carol", "ghost"], &["platform"])
             .unwrap();
     assert_eq!(removed, f.w.pull_by_id(pull.id).unwrap().unwrap());
     assert_eq!(removed.requested_reviewers, ["bob"]);
@@ -301,8 +330,8 @@ fn review_requests_land_on_the_pull_and_its_timeline() {
         ]
     );
     let acts = actions(&f.w);
-    assert!(acts.contains(&"pull.request_reviewers".to_string()));
-    assert!(acts.contains(&"pull.remove_review_requests".to_string()));
+    assert!(acts.contains(&"pull:review_requested".to_string()));
+    assert!(acts.contains(&"pull:review_request_removed".to_string()));
 }
 
 #[test]
@@ -318,14 +347,14 @@ fn an_invalid_reviewer_refuses_the_whole_request() {
     ] {
         assert!(
             matches!(
-                f.w.request_reviewers(pull.id, f.alice, &users, &teams),
+                f.w.request_reviewers(pull.id, by(f.alice), &users, &teams),
                 Err(WorldError::InvalidReviewer(_))
             ),
             "{users:?} {teams:?} accepted"
         );
     }
     assert!(matches!(
-        f.w.request_reviewers(pull.id, f.bob, &["bob", "alice"], &[]),
+        f.w.request_reviewers(pull.id, by(f.bob), &["bob", "alice"], &[]),
         Err(WorldError::ReviewerIsAuthor)
     ));
     assert_eq!(
@@ -336,24 +365,27 @@ fn an_invalid_reviewer_refuses_the_whole_request() {
 
     // A repository a user owns has no teams to ask.
     let own =
-        f.w.create_repo(f.bob, "dotfiles", None, false, "main", f.bob)
+        f.w.create_repo(f.bob, "dotfiles", None, false, "main", by(f.bob))
             .unwrap();
-    f.w.create_team("acme", "Platform", None, f.alice).unwrap();
+    f.w.create_team("acme", "Platform", None, by(f.alice))
+        .unwrap();
     let theirs =
-        f.w.create_pull(NewPull {
-            repo_id: own.id,
-            author_id: f.bob,
-            title: "tweak",
-            body: None,
-            head_ref: "t",
-            head_sha: SHA_B,
-            base_ref: "main",
-            base_sha: SHA_A,
-            draft: false,
-        })
+        f.w.create_pull(
+            by(f.bob),
+            NewPull {
+                repo_id: own.id,
+                title: "tweak",
+                body: None,
+                head_ref: "t",
+                head_sha: SHA_B,
+                base_ref: "main",
+                base_sha: SHA_A,
+                draft: false,
+            },
+        )
         .unwrap();
     assert!(matches!(
-        f.w.request_reviewers(theirs.id, f.bob, &[], &["platform"]),
+        f.w.request_reviewers(theirs.id, by(f.bob), &[], &["platform"]),
         Err(WorldError::InvalidReviewer(_))
     ));
 }
@@ -361,13 +393,14 @@ fn an_invalid_reviewer_refuses_the_whole_request() {
 #[test]
 fn a_review_clears_its_authors_request_but_not_their_teams() {
     let f = fixture();
-    f.w.create_team("acme", "Platform", None, f.alice).unwrap();
-    f.w.set_team_membership("acme", "platform", "bob", TeamRole::Member, f.alice)
+    f.w.create_team("acme", "Platform", None, by(f.alice))
+        .unwrap();
+    f.w.set_team_membership("acme", "platform", "bob", TeamRole::Member, by(f.alice))
         .unwrap();
     let pull = open_pull(&f);
-    f.w.request_reviewers(pull.id, f.alice, &["bob", "carol"], &["platform"])
+    f.w.request_reviewers(pull.id, by(f.alice), &["bob", "carol"], &["platform"])
         .unwrap();
-    f.w.create_review(pull.id, f.bob, ReviewState::Approved, None, None)
+    f.w.create_review(pull.id, by(f.bob), ReviewState::Approved, None, None)
         .unwrap();
     let after = f.w.pull_by_id(pull.id).unwrap().unwrap();
     assert_eq!(after.requested_reviewers, ["carol"]);
@@ -382,14 +415,26 @@ fn a_review_clears_its_authors_request_but_not_their_teams() {
 #[test]
 fn deleting_a_team_drops_its_requests_and_keeps_its_history() {
     let f = fixture();
-    let old = f.w.create_team("acme", "Platform", None, f.alice).unwrap();
-    f.w.set_team_membership("acme", "platform", "bob", TeamRole::Member, f.alice)
+    let old =
+        f.w.create_team("acme", "Platform", None, by(f.alice))
+            .unwrap();
+    f.w.set_team_membership("acme", "platform", "bob", TeamRole::Member, by(f.alice))
         .unwrap();
     let pull = open_pull(&f);
-    f.w.request_reviewers(pull.id, f.alice, &[], &["platform"])
+    f.w.request_reviewers(pull.id, by(f.alice), &[], &["platform"])
         .unwrap();
 
-    f.w.delete_team("acme", "platform", f.alice).unwrap();
+    f.w.delete_team("acme", "platform", by(f.alice)).unwrap();
+    assert_eq!(
+        last_write(&f.w),
+        [
+            "team:deleted",
+            "pull:review_request_removed",
+            "team_membership:deleted",
+            "team_membership:deleted",
+        ],
+        "the deletion, then its pending request and its two memberships"
+    );
     assert_eq!(f.w.team_by_slug("acme", "platform").unwrap(), None);
     assert!(f.w.list_teams_for_member(f.bob).unwrap().is_empty());
     let after = f.w.pull_by_id(pull.id).unwrap().unwrap();
@@ -402,11 +447,13 @@ fn deleting_a_team_drops_its_requests_and_keeps_its_history() {
         })]
     );
     assert!(matches!(
-        f.w.delete_team("acme", "platform", f.alice),
+        f.w.delete_team("acme", "platform", by(f.alice)),
         Err(WorldError::NoSuchTeam(_))
     ));
 
-    let again = f.w.create_team("acme", "Platform", None, f.alice).unwrap();
+    let again =
+        f.w.create_team("acme", "Platform", None, by(f.alice))
+            .unwrap();
     assert_ne!(again.id, old.id, "a team id is never reused");
     assert_eq!(f.w.team_by_id(old.id).unwrap(), None);
     assert_eq!(
@@ -414,5 +461,4 @@ fn deleting_a_team_drops_its_requests_and_keeps_its_history() {
         1,
         "a new team starts with its creator only"
     );
-    assert!(actions(&f.w).contains(&"team.delete".to_string()));
 }

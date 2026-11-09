@@ -13,10 +13,15 @@
 use std::path::Path;
 
 use orrery_world::{
-    ActorEmail, ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX,
-    NewCheckRun, NewPull, OrgRole, RefChange, RefMove, ReviewState, SCHEMA_VERSION,
-    SYSTEM_ACTOR_LOGIN, TeamRole, World, WorldSecret,
+    ActorEmail, ActorKind, Attribution, CheckConclusion, CheckRunPatch, CheckStatus,
+    DEFAULT_T0_UNIX, Door, NewCheckRun, NewPull, OrgRole, RefChange, RefMove, ReviewState,
+    SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, TeamRole, World, WorldSecret,
 };
+
+/// A write by `actor_id` as the REST face makes it.
+fn by(actor_id: i64) -> Attribution {
+    Attribution::new(actor_id, Door::Rest)
+}
 
 const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
 const BASE_SHA: &str = "1111111111111111111111111111111111111111";
@@ -53,7 +58,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         .actor_by_login(SYSTEM_ACTOR_LOGIN)?
         .expect("every world has the system actor");
     let (alice, _) = w.create_actor("alice", ActorKind::User)?;
-    w.issue_actor_token("alice", system.id)?;
+    w.issue_actor_token("alice", by(system.id))?;
     let (bob, _) = w.create_actor("bob", ActorKind::User)?;
     let (carol, _) = w.create_actor("carol", ActorKind::User)?;
     let (ci, _) = w.create_actor("ci-bot", ActorKind::Bot)?;
@@ -72,78 +77,103 @@ fn populate(w: &World) -> orrery_world::Result<()> {
                 verified: false,
             },
         ],
-        alice.id,
+        by(alice.id),
     )?;
 
-    w.set_org_membership("acme", "alice", OrgRole::Admin, system.id)?;
-    w.set_org_membership("acme", "bob", OrgRole::Member, alice.id)?;
-    w.set_org_membership("acme", "carol", OrgRole::Member, alice.id)?;
-    w.create_team("acme", "Platform", Some("keeps the lights on"), alice.id)?;
-    w.set_team_membership("acme", "platform", "bob", TeamRole::Maintainer, alice.id)?;
-    w.set_team_membership("acme", "platform", "carol", TeamRole::Member, alice.id)?;
+    w.set_org_membership("acme", "alice", OrgRole::Admin, by(system.id))?;
+    w.set_org_membership("acme", "bob", OrgRole::Member, by(alice.id))?;
+    w.set_org_membership("acme", "carol", OrgRole::Member, by(alice.id))?;
+    w.create_team(
+        "acme",
+        "Platform",
+        Some("keeps the lights on"),
+        by(alice.id),
+    )?;
+    w.set_team_membership(
+        "acme",
+        "platform",
+        "bob",
+        TeamRole::Maintainer,
+        by(alice.id),
+    )?;
+    w.set_team_membership("acme", "platform", "carol", TeamRole::Member, by(alice.id))?;
     // Deleted after a review is requested from it, so a timeline row names
     // a team that no longer exists.
-    w.create_team("acme", "Interim", None, alice.id)?;
+    w.create_team("acme", "Interim", None, by(alice.id))?;
 
-    let repo = w.create_repo(acme.id, "webapp", Some("the app"), false, "main", alice.id)?;
+    let repo = w.create_repo(
+        acme.id,
+        "webapp",
+        Some("the app"),
+        false,
+        "main",
+        by(alice.id),
+    )?;
     let first_push = RefMove {
         name: "refs/heads/main",
         old: ZERO_SHA,
         new: BASE_SHA,
         repins: Vec::new(),
         change: RefChange::Created,
+        forced: false,
+        commits: Vec::new(),
+        commit_count: 0,
     };
-    w.record_push(repo.id, alice.id, &[first_push], None)?;
-    w.advance_clock(3600, system.id)?;
+    w.record_push(repo.id, by(alice.id), &[first_push], None)?;
+    w.advance_clock(3600, by(system.id))?;
 
-    let merged = w.create_pull(NewPull {
-        repo_id: repo.id,
-        author_id: alice.id,
-        title: "Add the feature",
-        body: Some("Closes nothing; it is a fixture."),
-        head_ref: "feature",
-        head_sha: HEAD_SHA,
-        base_ref: "main",
-        base_sha: BASE_SHA,
-        draft: true,
-    })?;
-    w.set_pull_draft(merged.id, alice.id, false)?;
-    w.add_pull_labels(merged.id, alice.id, &["bug", "triage"])?;
-    w.remove_pull_label(merged.id, alice.id, "triage")?;
+    let merged = w.create_pull(
+        by(alice.id),
+        NewPull {
+            repo_id: repo.id,
+            title: "Add the feature",
+            body: Some("Closes nothing; it is a fixture."),
+            head_ref: "feature",
+            head_sha: HEAD_SHA,
+            base_ref: "main",
+            base_sha: BASE_SHA,
+            draft: true,
+        },
+    )?;
+    w.set_pull_draft(merged.id, by(alice.id), false)?;
+    w.add_pull_labels(merged.id, by(alice.id), &["bug", "triage"])?;
+    w.remove_pull_label(merged.id, by(alice.id), "triage")?;
     w.request_reviewers(
         merged.id,
-        alice.id,
+        by(alice.id),
         &["bob", "carol"],
         &["platform", "interim"],
     )?;
-    w.remove_review_requests(merged.id, alice.id, &["carol"], &[])?;
-    w.delete_team("acme", "interim", alice.id)?;
+    w.remove_review_requests(merged.id, by(alice.id), &["carol"], &[])?;
+    w.delete_team("acme", "interim", by(alice.id))?;
     w.create_review(
         merged.id,
-        bob.id,
+        by(bob.id),
         ReviewState::ChangesRequested,
         Some("one nit"),
         None,
     )?;
-    w.create_issue_comment(merged.id, carol.id, "Looks close.")?;
-    w.advance_clock(600, system.id)?;
-    w.create_review(merged.id, bob.id, ReviewState::Approved, None, None)?;
-    let check = w.create_check_run(NewCheckRun {
-        repo_id: repo.id,
-        creator_id: ci.id,
-        head_sha: HEAD_SHA,
-        name: "build",
-        status: CheckStatus::InProgress,
-        conclusion: None,
-        details_url: Some("https://ci.example.test/runs/1"),
-        external_id: Some("run-1"),
-        output: Some(&serde_json::json!({ "title": "Building", "summary": "" })),
-        started_clock_unix: Some(DEFAULT_T0_UNIX + 3600),
-        completed_clock_unix: None,
-    })?;
+    w.create_issue_comment(merged.id, by(carol.id), "Looks close.")?;
+    w.advance_clock(600, by(system.id))?;
+    w.create_review(merged.id, by(bob.id), ReviewState::Approved, None, None)?;
+    let check = w.create_check_run(
+        by(ci.id),
+        NewCheckRun {
+            repo_id: repo.id,
+            head_sha: HEAD_SHA,
+            name: "build",
+            status: CheckStatus::InProgress,
+            conclusion: None,
+            details_url: Some("https://ci.example.test/runs/1"),
+            external_id: Some("run-1"),
+            output: Some(&serde_json::json!({ "title": "Building", "summary": "" })),
+            started_clock_unix: Some(DEFAULT_T0_UNIX + 3600),
+            completed_clock_unix: None,
+        },
+    )?;
     w.update_check_run(
         check.id,
-        ci.id,
+        by(ci.id),
         CheckRunPatch {
             status: Some(CheckStatus::Completed),
             conclusion: Some(CheckConclusion::Success),
@@ -157,47 +187,57 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         new: MERGE_SHA,
         repins: Vec::new(),
         change: RefChange::Moved,
+        forced: false,
+        commits: Vec::new(),
+        commit_count: 0,
     };
-    w.record_merge(merged.id, bob.id, &merge)?;
+    w.record_merge(merged.id, by(bob.id), &merge)?;
 
-    let closed = w.create_pull(NewPull {
-        repo_id: repo.id,
-        author_id: bob.id,
-        title: "Try another way",
-        body: None,
-        head_ref: "experiment",
-        head_sha: HEAD_SHA,
-        base_ref: "main",
-        base_sha: BASE_SHA,
-        draft: false,
-    })?;
-    w.request_reviewers(closed.id, bob.id, &["alice"], &[])?;
-    w.close_pull(closed.id, bob.id)?;
+    let closed = w.create_pull(
+        by(bob.id),
+        NewPull {
+            repo_id: repo.id,
+            title: "Try another way",
+            body: None,
+            head_ref: "experiment",
+            head_sha: HEAD_SHA,
+            base_ref: "main",
+            base_sha: BASE_SHA,
+            draft: false,
+        },
+    )?;
+    w.request_reviewers(closed.id, by(bob.id), &["alice"], &[])?;
+    w.close_pull(closed.id, by(bob.id))?;
 
     // A pull into a branch that is then deleted, and the deletion and
     // restoration of the closed pull's head, so the timeline holds every
     // kind a push records.
-    w.create_pull(NewPull {
-        repo_id: repo.id,
-        author_id: carol.id,
-        title: "Document the release",
-        body: None,
-        head_ref: "docs",
-        head_sha: HEAD_SHA,
-        base_ref: "release",
-        base_sha: BASE_SHA,
-        draft: false,
-    })?;
+    w.create_pull(
+        by(carol.id),
+        NewPull {
+            repo_id: repo.id,
+            title: "Document the release",
+            body: None,
+            head_ref: "docs",
+            head_sha: HEAD_SHA,
+            base_ref: "release",
+            base_sha: BASE_SHA,
+            draft: false,
+        },
+    )?;
     let branch_move = |name, old, new, change| RefMove {
         name,
         old,
         new,
         repins: Vec::new(),
         change,
+        forced: false,
+        commits: Vec::new(),
+        commit_count: 0,
     };
     w.record_push(
         repo.id,
-        carol.id,
+        by(carol.id),
         &[
             branch_move(
                 "refs/heads/experiment",
@@ -211,7 +251,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
     )?;
     w.record_push(
         repo.id,
-        bob.id,
+        by(bob.id),
         &[branch_move(
             "refs/heads/experiment",
             ZERO_SHA,
@@ -221,8 +261,8 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         None,
     )?;
 
-    let app = w.create_oauth_app("GoTrue", CALLBACK, alice.id)?;
-    let issued = w.issue_oauth_client_secret(&app.client_id, system.id)?;
+    let app = w.create_oauth_app("GoTrue", CALLBACK, by(alice.id))?;
+    let issued = w.issue_oauth_client_secret(&app.client_id, by(system.id))?;
     let code = w.issue_oauth_code(&app, &alice, CALLBACK, "user:email")?;
     w.exchange_oauth_code(&app.client_id, &issued, &code, Some(CALLBACK))?;
     w.issue_oauth_code(&app, &bob, CALLBACK, "read:org")?;
