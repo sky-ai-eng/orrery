@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{boot, control_post, fault, faults, mint_actor};
+use common::{boot, boot_at, control_post, fault, faults, mint_actor};
 use orrery_world::{OAUTH_CLIENT_ID_PREFIX, SYSTEM_ACTOR_LOGIN};
 use serde_json::{Value, json};
 
@@ -705,4 +705,30 @@ async fn a_page_token_answers_only_the_query_it_was_issued_for() {
         refused(json!({ "sort_dir": "up", "page_token": token })),
         [fault("INVALID_ARGUMENT", Some("sort_dir"))]
     );
+}
+
+/// A world written before the log recorded real times migrates with those
+/// entries' times unrecorded: each reads as null, and none is invented.
+#[tokio::test(flavor = "multi_thread")]
+async fn entries_from_before_real_times_were_recorded_read_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("world");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../orrery-world/tests/fixtures/v6.db"
+        ),
+        root.join("world.db"),
+    )
+    .unwrap();
+    let inst = boot_at(dir, &root).await;
+
+    let log = list(&inst.base, "/log/list", json!({ "page_size": 500 }));
+    let items = log["items"].as_array().unwrap();
+    assert!(!items.is_empty());
+    assert_eq!(log["total_count"], items.len(), "the whole log");
+    for item in items {
+        assert_eq!(item.get("wall_unix_ms"), Some(&Value::Null), "{item}");
+    }
 }

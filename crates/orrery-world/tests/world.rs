@@ -315,6 +315,16 @@ fn pushed_at_and_default_branch_updates() {
 }
 
 #[test]
+fn an_appended_entry_is_returned_as_the_log_reads_it() {
+    let (_dir, w) = fresh();
+    let sys = w.actor_by_login("orrery").unwrap().unwrap();
+    let appended = w
+        .log_action(sys.id, "test.tick", &serde_json::json!({ "i": 1 }))
+        .unwrap();
+    assert_eq!(w.log_after(appended.seq - 1, 1).unwrap(), [appended]);
+}
+
+#[test]
 fn log_is_ordered_and_keyset_paginated() {
     let (_dir, w) = fresh();
     let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
