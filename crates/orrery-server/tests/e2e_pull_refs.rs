@@ -10,7 +10,6 @@ mod common;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::{Instance, boot, face, face_answer, face_ok, git, git_output, mint_actor};
@@ -684,14 +683,11 @@ async fn a_push_whose_http_backend_fails_puts_its_refs_back() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_that_panics_puts_its_refs_back() {
     let p = push_that_fails().await;
-    let armed = Arc::new(AtomicBool::new(false));
-    let trip = Arc::clone(&armed);
-    p.inst.world.listen(move |signal| {
-        if signal == Signal::LogMayHaveGrown && trip.load(Ordering::SeqCst) {
+    p.inst.world.listen(|signal| {
+        if signal == Signal::LogMayHaveGrown {
             panic!("the push's record panicked");
         }
     });
-    armed.store(true, Ordering::SeqCst);
     let mark = p.send_and_fail();
     let world = World::open(p.inst.world.root()).unwrap();
     assert!(world.log_after(mark, 10_000).unwrap().is_empty());

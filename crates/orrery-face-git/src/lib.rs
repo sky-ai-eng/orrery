@@ -510,8 +510,9 @@ async fn serve(
 
     // http-backend writes its whole header block, with no `Status` line,
     // before it starts receive-pack, and closes its output once it has, so a
-    // push answered with any other status ended before receive-pack ran. It
-    // is not observed, and moved nothing for `unobserved` to move back.
+    // push answered with any other status ended before receive-pack ran and
+    // is not observed. `unobserved` is still dropped armed on that path, so
+    // it would move back any ref that had moved; it finds none.
     if let Some(unobserved) = unobserved
         && cgi_resp.status == 200
     {
