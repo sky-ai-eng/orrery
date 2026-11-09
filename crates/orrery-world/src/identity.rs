@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::credentials::{self, TokenOrigin};
 use crate::{
     Actor, ActorEmail, ActorKind, ListedActor, ListedOAuthApp, OAuthApp, OAuthToken, Result, World,
-    WorldError, constraint_violation, queries,
+    WorldError, queries, uniqueness_violation,
 };
 
 /// How long an authorization code stays exchangeable: GitHub's ten minutes,
@@ -408,7 +408,7 @@ pub(crate) fn insert_email(conn: &Connection, actor_id: i64, e: &ActorEmail) -> 
         params![actor_id, e.email, e.primary, e.verified],
         row_to_email,
     )
-    .map_err(|err| match constraint_violation(&err) {
+    .map_err(|err| match uniqueness_violation(&err) {
         true => WorldError::InvalidEmails(format!("{:?} is listed twice", e.email)),
         false => WorldError::from(err),
     })

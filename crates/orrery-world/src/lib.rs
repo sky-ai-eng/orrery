@@ -251,7 +251,7 @@ impl World {
                 params![login, kind.as_str(), clock],
                 queries::row_to_actor,
             )
-            .map_err(|e| match constraint_violation(&e) {
+            .map_err(|e| match uniqueness_violation(&e) {
                 true => WorldError::ActorExists(login.to_string()),
                 false => WorldError::from(e),
             })?;
@@ -397,7 +397,7 @@ impl World {
                 ],
                 queries::row_to_repo,
             )
-            .map_err(|e| match constraint_violation(&e) {
+            .map_err(|e| match uniqueness_violation(&e) {
                 true => WorldError::RepoExists(name.to_string()),
                 false => WorldError::from(e),
             })?;
@@ -780,11 +780,15 @@ fn wall_unix_ms() -> i64 {
     }
 }
 
-pub(crate) fn constraint_violation(e: &rusqlite::Error) -> bool {
+/// Whether a write failed because a row with the same key already exists: a
+/// UNIQUE constraint or index, or a PRIMARY KEY. A foreign-key, CHECK, or NOT
+/// NULL failure is a different fault, and its caller reports it as itself.
+pub(crate) fn uniqueness_violation(e: &rusqlite::Error) -> bool {
     matches!(
         e,
         rusqlite::Error::SqliteFailure(f, _)
-            if f.code == rusqlite::ErrorCode::ConstraintViolation
+            if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                || f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
     )
 }
 
