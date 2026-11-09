@@ -45,141 +45,95 @@ pub struct GithubFace {
 }
 
 pub fn router(face: GithubFace) -> Router {
-    // Each route names the resource it is about, which a refused media type
-    // reports, and any rendering it serves beside JSON (`media`).
     Router::new()
-        .route(
-            "/orgs/{org}",
-            media::json("Organization", get(reads::get_org)),
-        )
-        .route(
-            "/orgs/{org}/repos",
-            media::json("Repository", post(create_org_repo)),
-        )
+        .route("/orgs/{org}", get(reads::get_org))
+        .route("/orgs/{org}/repos", post(create_org_repo))
         .route(
             "/orgs/{org}/teams",
-            media::json("Team", get(reads::list_org_teams).post(orgs::create_team)),
+            get(reads::list_org_teams).post(orgs::create_team),
         )
-        .route(
-            "/orgs/{org}/teams/{team_slug}",
-            media::json("Team", delete(orgs::delete_team)),
-        )
+        .route("/orgs/{org}/teams/{team_slug}", delete(orgs::delete_team))
         .route(
             "/orgs/{org}/teams/{team_slug}/memberships/{username}",
-            media::json(
-                "TeamMember",
-                put(orgs::set_team_membership).delete(orgs::remove_team_membership),
-            ),
+            put(orgs::set_team_membership).delete(orgs::remove_team_membership),
         )
         .route(
             "/orgs/{org}/memberships/{username}",
-            media::json("Membership", put(orgs::set_org_membership)),
+            put(orgs::set_org_membership),
         )
-        .route(
-            "/users/{username}",
-            media::json("User", get(reads::get_user_by_login)),
-        )
-        .route("/user", media::json("User", get(reads::get_user)))
-        .route(
-            "/user/emails",
-            media::json("UserEmail", get(reads::get_user_emails)),
-        )
-        .route(
-            "/user/teams",
-            media::json("Team", get(reads::list_user_teams)),
-        )
+        .route("/users/{username}", get(reads::get_user_by_login))
+        .route("/user", get(reads::get_user))
+        .route("/user/emails", get(reads::get_user_emails))
+        .route("/user/teams", get(reads::list_user_teams))
         .route(
             "/user/repos",
-            media::json(
-                "Repository",
-                get(reads::list_user_repos).post(create_user_repo),
-            ),
+            get(reads::list_user_repos).post(create_user_repo),
         )
-        .route(
-            "/repos/{owner}/{repo}",
-            media::json("Repository", get(reads::get_repo)),
-        )
+        .route("/repos/{owner}/{repo}", get(reads::get_repo))
         .route(
             "/repos/{owner}/{repo}/pulls",
-            media::json(
-                "PullRequest",
-                get(reads::list_pulls).post(pulls::create_pull),
-            ),
+            get(reads::list_pulls).post(pulls::create_pull),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}",
-            media::json("PullRequest", get(reads::get_pull).patch(pulls::patch_pull)),
+            get(reads::get_pull).patch(pulls::patch_pull),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/merge",
-            media::json("PullRequest", put(pulls::merge_pull)),
+            put(pulls::merge_pull),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/files",
-            media::json("PullRequest", get(reads::list_pull_files)),
+            get(reads::list_pull_files),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/reviews",
-            media::json(
-                "PullRequestReview",
-                get(reads::list_reviews).post(pulls::create_review),
-            ),
+            get(reads::list_reviews).post(pulls::create_review),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/requested_reviewers",
-            media::json(
-                "PullRequest",
-                post(pulls::request_reviewers).delete(pulls::remove_review_requests),
-            ),
+            post(pulls::request_reviewers).delete(pulls::remove_review_requests),
         )
         .route(
             "/repos/{owner}/{repo}/pulls/{number}/comments",
-            media::json("PullRequestReviewComment", get(reads::list_review_comments)),
+            get(reads::list_review_comments),
         )
         .route(
             "/repos/{owner}/{repo}/issues/{number}/comments",
-            media::json(
-                "IssueComment",
-                get(reads::list_issue_comments).post(pulls::create_comment),
-            ),
+            get(reads::list_issue_comments).post(pulls::create_comment),
         )
         .route(
             "/repos/{owner}/{repo}/issues/{number}/labels",
-            media::json("Label", post(pulls::add_labels)),
+            post(pulls::add_labels),
         )
         .route(
             "/repos/{owner}/{repo}/issues/{number}/labels/{name}",
-            media::json("Label", delete(pulls::remove_label)),
+            delete(pulls::remove_label),
         )
         .route(
             "/repos/{owner}/{repo}/commits/{sha}/check-runs",
-            media::json("CheckRun", get(reads::list_check_runs_for_ref)),
+            get(reads::list_check_runs_for_ref),
         )
-        // For a file, the object media type answers the object the JSON
-        // one does.
         .route(
             "/repos/{owner}/{repo}/contents/{*path}",
-            media::rendering("Content", &["object"], get(reads::get_contents)),
+            get(reads::get_contents),
         )
-        .route(
-            "/repos/{owner}/{repo}/branches",
-            media::json("Branch", get(reads::list_branches)),
-        )
+        .route("/repos/{owner}/{repo}/branches", get(reads::list_branches))
         .route(
             "/repos/{owner}/{repo}/git/ref/heads/{*branch}",
-            media::json("Ref", get(reads::get_branch_ref)),
+            get(reads::get_branch_ref),
         )
         .route(
             "/repos/{owner}/{repo}/compare/{basehead}",
-            media::json("Comparison", get(reads::compare)),
+            get(reads::compare),
         )
         .route(
             "/repos/{owner}/{repo}/check-runs",
-            media::json("CheckRun", post(checks::create_check_run)),
+            post(checks::create_check_run),
         )
         .route(
             "/repos/{owner}/{repo}/check-runs/{id}",
-            media::json("CheckRun", patch(checks::patch_check_run)),
+            patch(checks::patch_check_run),
         )
         .with_state(face)
 }
@@ -210,22 +164,29 @@ async fn create_org_repo(
     State(face): State<GithubFace>,
     UrlPath(org): UrlPath<String>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response<Body> {
-    let owner = match face.world.actor_by_login(&org) {
-        Ok(Some(a)) if a.kind == ActorKind::Org => a,
-        Ok(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(e) => return internal(e),
+    let owner = match resolve_org(&face, &org) {
+        Ok(org) => org,
+        Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "Repository") {
+        return refused;
+    }
     create_repo(face, owner, actor, &body).await
 }
 
 async fn create_user_repo(
     State(face): State<GithubFace>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response<Body> {
     if let Some(refused) = reads::refuse_integration(&actor) {
+        return refused;
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "Repository") {
         return refused;
     }
     let owner = actor.clone();
@@ -314,6 +275,16 @@ pub(crate) fn resolve_repo(
         Err(e) => return Err(Box::new(internal(e))),
     };
     Ok((repo, owner_actor))
+}
+
+/// Resolve `{org}` to the organization actor, or GitHub's 404 for a login that
+/// names no organization.
+pub(crate) fn resolve_org(face: &GithubFace, org: &str) -> Result<Actor, Box<Response<Body>>> {
+    match face.world.actor_by_login(org) {
+        Ok(Some(a)) if a.kind == ActorKind::Org => Ok(a),
+        Ok(_) => Err(Box::new(github_error(StatusCode::NOT_FOUND, "Not Found"))),
+        Err(e) => Err(Box::new(internal(e))),
+    }
 }
 
 /// A query string or an `application/x-www-form-urlencoded` body as its

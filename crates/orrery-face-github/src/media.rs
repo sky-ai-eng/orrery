@@ -6,58 +6,36 @@
 //! asking for anything else is refused by name rather than answered with JSON
 //! that lacks what it asked for (rule 1).
 
-use axum::extract::{Request, State};
-use axum::http::{HeaderMap, header};
-use axum::middleware::{self, Next};
-use axum::response::Response;
-use axum::routing::MethodRouter;
+use axum::body::Body;
+use axum::http::{HeaderMap, Response, header};
 
-use crate::{GithubFace, orrery_unsupported_field};
+use crate::orrery_unsupported_field;
 
-#[derive(Clone, Copy)]
-struct Renders {
-    resource: &'static str,
-    params: &'static [&'static str],
+/// The not-mocked refusal naming `Accept`, when it lists a GitHub media type
+/// asking for a rendering of `resource` other than JSON.
+///
+/// Every REST handler calls this, or [`refuse_unrendered_except`], once, as
+/// a statement of its own, after it has found what its path names and before
+/// it reads its body or writes anything. That is GitHub's order: something
+/// that doesn't exist is a `404` whatever the request accepts, and a refused
+/// write must land nothing.
+pub(crate) fn refuse_unrendered(headers: &HeaderMap, resource: &str) -> Option<Response<Body>> {
+    refuse_unrendered_except(headers, resource, &[])
 }
 
-/// `methods`, which answer JSON about `resource`, behind the refusal of every
-/// GitHub media type asking for another rendering.
-pub(crate) fn json(
-    resource: &'static str,
-    methods: MethodRouter<GithubFace>,
-) -> MethodRouter<GithubFace> {
-    rendering(resource, &[], methods)
-}
-
-/// As [`json`], for routes that also answer the renderings `params` name
-/// (`object` in `application/vnd.github.object`).
-pub(crate) fn rendering(
-    resource: &'static str,
-    params: &'static [&'static str],
-    methods: MethodRouter<GithubFace>,
-) -> MethodRouter<GithubFace> {
-    // A route layer, so a method the path doesn't serve still falls through
-    // to the not-mocked `501`, whatever it accepts.
-    methods.route_layer(middleware::from_fn_with_state(
-        Renders { resource, params },
-        refuse_unrendered,
-    ))
-}
-
-async fn refuse_unrendered(
-    State(renders): State<Renders>,
-    request: Request,
-    next: Next,
-) -> Response {
-    if unrendered(request.headers(), renders.params) {
-        return orrery_unsupported_field(renders.resource, "Accept");
-    }
-    next.run(request).await
+/// As [`refuse_unrendered`], for a route that also answers the renderings
+/// `renders` names (`object` in `application/vnd.github.object`).
+pub(crate) fn refuse_unrendered_except(
+    headers: &HeaderMap,
+    resource: &str,
+    renders: &[&str],
+) -> Option<Response<Body>> {
+    unrendered(headers, renders).then(|| orrery_unsupported_field(resource, "Accept"))
 }
 
 /// Whether any media type `Accept` lists is a GitHub media type asking for a
-/// rendering that is neither JSON nor one of `params`.
-fn unrendered(headers: &HeaderMap, params: &[&str]) -> bool {
+/// rendering that is neither JSON nor one of `renders`.
+fn unrendered(headers: &HeaderMap, renders: &[&str]) -> bool {
     headers
         .get_all(header::ACCEPT)
         .iter()
@@ -67,7 +45,7 @@ fn unrendered(headers: &HeaderMap, params: &[&str]) -> bool {
             value
                 .split(',')
                 .filter_map(|range| rendering_param(range.split(';').next().unwrap_or("").trim()))
-                .any(|param| !param.is_empty() && !params.contains(&param))
+                .any(|param| !param.is_empty() && !renders.contains(&param))
         })
 }
 

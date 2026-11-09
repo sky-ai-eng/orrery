@@ -517,8 +517,9 @@ fn not_mocked_field(answer: &(u16, serde_json::Value)) -> (u16, &str, &str) {
 
 /// A GitHub media type asking for a rendering the face doesn't produce is
 /// refused by name, on reads and writes alike, rather than answered with JSON
-/// that lacks what it asked for. The JSON types, and the previews gh sends,
-/// get the answer they always did.
+/// that lacks what it asked for, once the route has found what its path
+/// names. The JSON types, and the previews gh sends, get the answer they
+/// always did.
 #[tokio::test(flavor = "multi_thread")]
 async fn unrendered_media_types_are_not_mocked() {
     let s = seed().await;
@@ -561,13 +562,12 @@ async fn unrendered_media_types_are_not_mocked() {
         assert_eq!((status, &pull), (200, &plain), "{accept}");
     }
 
-    // The header is checked before the path is looked up.
+    // Something that doesn't exist is GitHub's 404, whatever the request
+    // accepts.
     let full = [("accept", "application/vnd.github.full+json")];
     for missing in ["2", "abc"] {
         let missing = format!("{}/pulls/{missing}", s.api);
-        let answer = face_answer("GET", &missing, &s.token, &full, None);
-        assert_eq!(not_mocked_field(&answer), (422, "Accept", "PullRequest"));
-        let (status, body) = face_answer("GET", &missing, &s.token, &[], None);
+        let (status, body) = face_answer("GET", &missing, &s.token, &full, None);
         assert_eq!((status, &body["message"]), (404, &"Not Found".into()));
     }
 
@@ -586,6 +586,37 @@ async fn unrendered_media_types_are_not_mocked() {
     assert_eq!(not_mocked_field(&answer), (422, "Accept", "IssueComment"));
     let listed = face_ok("GET", &comments, &s.token, serde_json::json!(null));
     assert_eq!(listed, serde_json::json!([]));
+
+    // An organization write finds what its path names before it is refused,
+    // and is refused before it lands.
+    mint_actor(&s.inst.base, "acme", "org");
+    let base = &s.inst.base;
+    for missing in [
+        "/orgs/nope/memberships/bob",
+        "/orgs/acme/memberships/nobody",
+    ] {
+        let (status, body) = face_answer(
+            "PUT",
+            &format!("{base}/api/v3{missing}"),
+            &s.token,
+            &full,
+            Some(serde_json::json!({})),
+        );
+        assert_eq!(
+            (status, &body["message"]),
+            (404, &"Not Found".into()),
+            "{missing}"
+        );
+    }
+    let answer = face_answer(
+        "PUT",
+        &format!("{base}/api/v3/orgs/acme/memberships/bob"),
+        &s.token,
+        &full,
+        Some(serde_json::json!({})),
+    );
+    assert_eq!(not_mocked_field(&answer), (422, "Accept", "Membership"));
+    assert_eq!(s.inst.world.org_membership("acme", "bob").unwrap(), None);
 
     // A file's raw bytes and its rendering are refused; the object media type
     // answers the object the JSON one does.

@@ -192,7 +192,6 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `GET …/commits/{ref}/check-runs` lists every run on the commit; GitHub's default `filter=latest` keeps the newest run per name.
 - Only a bot creates or updates a check run, and a check run's `head_sha` and a review's `commit_id` are not checked against the repository.
 - `mergeable` is computed on read rather than eventually.
-- A REST request in a GitHub media type Orrery doesn't render is refused before its path is read, so one for something that doesn't exist is the `422`, where GitHub answers `404`.
 - Labels belong to a pull request, not to a repository.
 - A merge commit's author and committer address is `<login>@orrery.invalid`, not the actor's stored primary address.
 

@@ -9,13 +9,13 @@ use std::collections::BTreeMap;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};
-use axum::http::{Response, StatusCode};
+use axum::http::{HeaderMap, Response, StatusCode};
 use orrery_world::{Actor, ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, NewCheckRun};
 
 use crate::render::check_run_json;
 use crate::{
-    GithubFace, github_error, internal, json_response, orrery_unsupported_field, resolve_repo,
-    validation_custom, validation_invalid, validation_missing,
+    GithubFace, github_error, internal, json_response, media, orrery_unsupported_field,
+    resolve_repo, validation_custom, validation_invalid, validation_missing,
 };
 
 #[derive(serde::Deserialize)]
@@ -37,6 +37,7 @@ pub(crate) async fn create_check_run(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
@@ -45,6 +46,9 @@ pub(crate) async fn create_check_run(
     };
     if actor.kind != ActorKind::Bot {
         return bot_only(&actor);
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "CheckRun") {
+        return refused;
     }
     let parsed: CheckRunBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
@@ -101,6 +105,7 @@ pub(crate) async fn patch_check_run(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
@@ -118,6 +123,9 @@ pub(crate) async fn patch_check_run(
         Ok(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(e) => return internal(e),
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "CheckRun") {
+        return refused;
+    }
     let parsed: CheckRunBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
