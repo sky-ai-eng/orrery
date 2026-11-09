@@ -314,6 +314,18 @@ pub fn commit_tree(
     Ok(run(&mut cmd)?.trim().to_string())
 }
 
+/// The ref GitHub keeps at a pull request's head, through which a client
+/// fetches the pull request by number (`git fetch origin pull/7/head`).
+pub fn pull_head_ref(number: i64) -> String {
+    format!("refs/pull/{number}/head")
+}
+
+/// Point a ref at `new`, whatever it held, creating it if it is absent.
+pub fn update_ref(bare: &Path, refname: &str, new: &str) -> Result<(), GitFaceError> {
+    run(hermetic_git(bare).args(["update-ref", refname, new]))?;
+    Ok(())
+}
+
 /// Move a ref with compare-and-swap on its old value, so a concurrent push
 /// between mergeability check and ref move fails loudly instead of clobbering.
 pub fn update_ref_cas(
