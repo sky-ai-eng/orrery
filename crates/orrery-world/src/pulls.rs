@@ -7,11 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::queries;
 use crate::types::*;
-use crate::{Result, World, WorldError};
-
-/// The open pulls a move of branch `?3` to sha `?1` in repo `?2` re-pins:
-/// those whose head is the branch and not already at the sha.
-const SYNC_TARGETS: &str = "repo_id = ?2 AND head_ref = ?3 AND state = 'open' AND head_sha <> ?1";
+use crate::{RefMove, Result, World, WorldError};
 
 pub struct NewPull<'a> {
     pub repo_id: i64,
@@ -487,16 +483,19 @@ impl World {
         })
     }
 
-    /// Record a merge the git side already performed: state bookkeeping only —
-    /// the ref move and its `ref.update` entry are the caller's, since the
-    /// kernel never touches git. The merge closes the pull, so it lands on the
-    /// timeline as a close by the merger.
-    pub fn record_merge(
-        &self,
-        pull_id: i64,
-        actor_id: i64,
-        merge_commit_sha: &str,
-    ) -> Result<Pull> {
+    /// Record a merge the git side already performed. `base` is the move of
+    /// the pull's base branch to the merge commit, recorded as a push of it
+    /// would be: its `ref.update` entry, the `pushed_at` bump, and the
+    /// re-pins of the pulls it names. Then the pull closes as merged, which
+    /// lands on the timeline as a close by the merger, and its `pull.merge`
+    /// entry follows. It is one transaction, so a reader that sees either
+    /// entry sees all of the merge, and a record that fails appends nothing.
+    /// The kernel never touches git: the caller has moved the base branch,
+    /// and each named pull's ref, before it calls.
+    ///
+    /// A pull that is not open or is a draft, a `base` that is not the pull's
+    /// base branch, or a named pull that is not open refuses the whole record.
+    pub fn record_merge(&self, pull_id: i64, actor_id: i64, base: &RefMove<'_>) -> Result<Pull> {
         self.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
             let before = queries::require_pull(&tx, pull_id)?;
@@ -506,12 +505,31 @@ impl World {
                     before.number
                 )));
             }
+            if before.draft {
+                return Err(WorldError::InvalidTransition(format!(
+                    "pull #{} is a draft",
+                    before.number
+                )));
+            }
+            if base.name != format!("refs/heads/{}", before.base_ref) {
+                return Err(WorldError::InvalidTransition(format!(
+                    "pull #{} merges into {}, not {}",
+                    before.number, before.base_ref, base.name
+                )));
+            }
+            self.record_moves(
+                &tx,
+                before.repo_id,
+                actor_id,
+                std::slice::from_ref(base),
+                None,
+            )?;
             tx.execute(
                 "UPDATE pulls SET state = 'closed', merged = 1, merge_commit_sha = ?1,
                  merged_by_id = ?2,
                  closed_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
                  WHERE id = ?3",
-                params![merge_commit_sha, actor_id, pull_id],
+                params![base.new, actor_id, pull_id],
             )?;
             record_timeline(&tx, pull_id, actor_id, &TimelineKind::Closed)?;
             touch_pull(&tx, pull_id)?;
@@ -523,7 +541,7 @@ impl World {
                 &serde_json::json!({
                     "repo": repo_full_name(&tx, pull.repo_id)?,
                     "number": pull.number,
-                    "merge_commit_sha": merge_commit_sha,
+                    "merge_commit_sha": base.new,
                 }),
             )?;
             tx.commit()?;
@@ -531,32 +549,18 @@ impl World {
         })
     }
 
-    /// Re-pin the head sha of every open pull whose head branch just moved —
-    /// GitHub's "synchronize". Returns the affected pull numbers.
-    pub fn sync_pull_heads(&self, repo_id: i64, branch: &str, new_sha: &str) -> Result<Vec<i64>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(&format!(
-                "UPDATE pulls SET head_sha = ?1,
-                 updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
-                 WHERE {SYNC_TARGETS}
-                 RETURNING number"
-            ))?;
-            let numbers = stmt
-                .query_map(params![new_sha, repo_id, branch], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<i64>>>()?;
-            Ok(numbers)
-        })
-    }
-
-    /// The pulls [`World::sync_pull_heads`] would re-pin for the same move,
-    /// by number, without re-pinning them.
+    /// The open pulls whose head is `branch` and not already at `new_sha`, by
+    /// number: the pulls a push or a merge that moves the branch to `new_sha`
+    /// re-pins, GitHub's "synchronize".
     pub fn pulls_to_sync(&self, repo_id: i64, branch: &str, new_sha: &str) -> Result<Vec<i64>> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(&format!(
-                "SELECT number FROM pulls WHERE {SYNC_TARGETS} ORDER BY number"
-            ))?;
+            let mut stmt = conn.prepare(
+                "SELECT number FROM pulls
+                 WHERE repo_id = ?1 AND head_ref = ?2 AND state = 'open' AND head_sha <> ?3
+                 ORDER BY number",
+            )?;
             let numbers = stmt
-                .query_map(params![new_sha, repo_id, branch], |r| r.get(0))?
+                .query_map(params![repo_id, branch, new_sha], |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<i64>>>()?;
             Ok(numbers)
         })
