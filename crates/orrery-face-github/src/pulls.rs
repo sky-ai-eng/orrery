@@ -784,23 +784,19 @@ fn is_full_sha(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::task::{Context, Waker};
 
     use orrery_world::{ActorKind, DEFAULT_T0_UNIX, World, WorldSecret};
 
     use super::*;
 
-    /// Long enough for an edit that does not wait on the gate to finish.
-    async fn settle() {
-        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(200)))
-            .await
-            .unwrap();
-    }
-
-    /// The test holds the gate exclusively, as a restore does. An edit sent
-    /// meanwhile waits, and lands once the gate is released.
-    #[tokio::test(flavor = "multi_thread")]
+    /// The test holds the gate exclusively, as a restore does. Nothing else
+    /// holds the repo lock, so an edit that did not take the gate would
+    /// finish on its first poll; this one waits, and lands once the gate is
+    /// released.
+    #[tokio::test]
     async fn a_pull_edit_waits_on_the_gate() {
         let dir = tempfile::tempdir().unwrap();
         let world = Arc::new(
@@ -836,7 +832,7 @@ mod tests {
             .unwrap();
 
         let held = face.git.gate().write_owned().await;
-        let edit = tokio::spawn(patch_pull(
+        let mut edit = std::pin::pin!(patch_pull(
             State(face.clone()),
             UrlPath((
                 "alice".to_string(),
@@ -847,8 +843,12 @@ mod tests {
             HeaderMap::new(),
             Bytes::from_static(br#"{"title": "after"}"#),
         ));
-        settle().await;
-        assert!(!edit.is_finished(), "the edit did not wait");
+        assert!(
+            edit.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending(),
+            "the edit did not wait"
+        );
         assert_eq!(
             world
                 .pull_by_number(repo.id, pull.number)
@@ -859,7 +859,7 @@ mod tests {
         );
 
         drop(held);
-        assert_eq!(edit.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(edit.await.status(), StatusCode::OK);
         assert_eq!(
             world
                 .pull_by_number(repo.id, pull.number)
