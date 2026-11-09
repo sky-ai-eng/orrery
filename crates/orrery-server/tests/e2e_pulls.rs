@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{boot, control_post, face, face_ok, git, mint_actor};
+use common::{boot, control_post, face, face_answer, face_ok, git, mint_actor};
 
 struct Seeded {
     inst: common::Instance,
@@ -499,4 +499,126 @@ async fn patch_edits_close_and_reopen() {
         ),
         Err(405)
     );
+}
+
+/// The fields of a not-mocked refusal: its status, the `field` it names, and
+/// the `resource` its `errors[]` entry is about.
+fn not_mocked_field(answer: &(u16, serde_json::Value)) -> (u16, &str, &str) {
+    let (status, body) = answer;
+    assert_eq!(body["orrery"]["not_mocked"], true, "{body}");
+    let error = &body["errors"][0];
+    assert_eq!(error["field"], body["orrery"]["field"], "{body}");
+    (
+        *status,
+        error["field"].as_str().unwrap(),
+        error["resource"].as_str().unwrap(),
+    )
+}
+
+/// A pull request's diff and patch media are refused by name, as compare's
+/// are, rather than answered with the JSON object. A pull that doesn't exist
+/// is still GitHub's 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn pull_diff_and_patch_media_are_not_mocked() {
+    let s = seed().await;
+    face_ok(
+        "POST",
+        &format!("{}/pulls", s.api),
+        &s.token,
+        serde_json::json!({ "title": "Feature", "head": "feature", "base": "main" }),
+    );
+    let url = format!("{}/pulls/1", s.api);
+    for accept in [
+        "application/vnd.github.v3.diff",
+        "application/vnd.github.v3.patch",
+        "Application/VND.GitHub.DIFF",
+    ] {
+        let answer = face_answer("GET", &url, &s.token, &[("accept", accept)], None);
+        assert_eq!(
+            not_mocked_field(&answer),
+            (422, "Accept", "PullRequest"),
+            "{accept}"
+        );
+    }
+    for missing in ["2", "abc"] {
+        let (status, body) = face_answer(
+            "GET",
+            &format!("{}/pulls/{missing}", s.api),
+            &s.token,
+            &[("accept", "application/vnd.github.v3.diff")],
+            None,
+        );
+        assert_eq!(
+            (status, &body["message"]),
+            (404, &"Not Found".into()),
+            "{missing}"
+        );
+    }
+    let (status, pull) = face_answer(
+        "GET",
+        &url,
+        &s.token,
+        &[("accept", "application/vnd.github+json")],
+        None,
+    );
+    assert_eq!(status, 200, "{pull}");
+    assert_eq!(pull["number"], 1);
+    assert_eq!(pull["head"]["sha"], s.feature_sha.as_str());
+}
+
+/// Each not-mocked field refusal names the resource its route is about.
+#[tokio::test(flavor = "multi_thread")]
+async fn not_mocked_fields_name_their_resource() {
+    let s = seed().await;
+    face_ok(
+        "POST",
+        &format!("{}/pulls", s.api),
+        &s.token,
+        serde_json::json!({ "title": "Feature", "head": "feature", "base": "main" }),
+    );
+    let cases = [
+        (
+            "PUT",
+            format!("{}/pulls/1/merge", s.api),
+            &s.token,
+            serde_json::json!({ "merge_method": "squash" }),
+            ("merge_method=squash", "PullRequest"),
+        ),
+        (
+            "POST",
+            format!("{}/pulls/1/reviews", s.api),
+            &s.bob_token,
+            serde_json::json!({
+                "event": "COMMENT",
+                "comments": [{ "path": "feature.txt", "line": 1, "body": "nit" }],
+            }),
+            ("comments", "PullRequestReview"),
+        ),
+        (
+            "POST",
+            format!("{}/issues/1/labels", s.api),
+            &s.token,
+            serde_json::json!({ "labels": [{ "name": "bug" }] }),
+            ("labels[] as objects", "Label"),
+        ),
+        (
+            "POST",
+            format!("{}/check-runs", s.api),
+            &s.ci_token,
+            serde_json::json!({
+                "name": "build",
+                "head_sha": s.feature_sha,
+                "actions": [{ "label": "Fix", "description": "fix it", "identifier": "fix" }],
+            }),
+            ("actions", "CheckRun"),
+        ),
+    ];
+    for (method, url, token, body, (field, resource)) in cases {
+        let answer = face_answer(method, &url, token, &[], Some(body));
+        assert_eq!(
+            not_mocked_field(&answer),
+            (422, field, resource),
+            "{method} {url}"
+        );
+    }
 }

@@ -210,6 +210,23 @@ async fn oauth_web_flow() {
     let wrong: serde_json::Value = wrong.body_mut().read_json().unwrap();
     assert_eq!(wrong["error"], "incorrect_client_credentials");
 
+    // XML is refused by name, as a field like any other.
+    let mut xml = http
+        .post(&token_url)
+        .header("accept", "application/xml")
+        .send_form([
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+            ("code", "x"),
+        ])
+        .unwrap();
+    assert_eq!(xml.status(), 422);
+    let xml: serde_json::Value = xml.body_mut().read_json().unwrap();
+    assert_eq!(xml["orrery"]["not_mocked"], true, "{xml}");
+    assert_eq!(xml["orrery"]["field"], "Accept", "{xml}");
+    assert_eq!(xml["errors"][0]["field"], "Accept", "{xml}");
+    assert_eq!(xml["errors"][0]["resource"], "OauthAccess", "{xml}");
+
     // The control plane validates strictly and names the field.
     let bad = http
         .put(format!("{base}/_orrery/actors/alice/emails"))

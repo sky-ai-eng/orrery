@@ -36,6 +36,8 @@ Every token is fake, prefixed `orrfake_`, and derived from the world's secret, s
    "errors": [{"resource": "…", "code": "custom", "field": "F", "message": "not mocked by orrery"}]}
   ```
 
+  `resource` names what the route is about: `Repository`, `PullRequest`, `PullRequestReview`, `Label`, `CheckRun`, `Team`, `Comparison`, or `OauthAccess` for the OAuth token exchange. A media type a route lists as not mocked (the diff and patch media types, and XML from the OAuth token exchange) is refused the same way, with `field` `Accept`.
+
 - A body that isn't valid JSON is `400` `{"message": "Problems parsing JSON"}`, and on most routes so is a known field of the wrong type. A body over 2 MiB is `413`.
 - Query values are decoded as a URL query is: `%XX`, and `+` as a space. A repeated parameter keeps its first value.
 - Logins, organization names, and repository names match ignoring case; responses carry each one's stored spelling. A `{number}` that isn't an integer is `404`.
@@ -48,11 +50,11 @@ Every token is fake, prefixed `orrfake_`, and derived from the world's secret, s
 
 ## Surface Orrery doesn't serve
 
-A REST path or method with no route answers `501`, deliberately unlike any GitHub response, so it can't be read as "no such thing":
+A REST path or method with no route answers `501`, deliberately unlike any GitHub response, so it can't be read as "no such thing". It names the method and the path as the request sent it:
 
 ```json
-{"message": "orrery: GET /rate_limit is not mocked",
- "orrery": {"not_mocked": true, "method": "GET", "path": "/rate_limit",
+{"message": "orrery: GET /api/v3/rate_limit is not mocked",
+ "orrery": {"not_mocked": true, "method": "GET", "path": "/api/v3/rate_limit",
             "hint": "If a consumer needs this endpoint, add it to the surface inventory (spec/surface-github.md) and implement it."}}
 ```
 
@@ -73,5 +75,4 @@ Orrery doesn't rate limit. It sends no `X-RateLimit-*` headers, GraphQL `rateLim
 ## Known gaps
 
 - A path Orrery routes, called with a method it doesn't serve (`GET /api/graphql`, `PATCH /repos/{o}/{r}`), answers a bare `405` rather than the `501` above.
-- The `path` a REST `501` reports omits the `/api/v3` prefix.
-- A not-mocked field's `errors[].resource` is `Repository` on most routes, whatever the route's resource.
+- A GitHub media type Orrery doesn't render, other than the diff and patch media types the routes that list them refuse, gets the plain JSON answer: `application/vnd.github.full+json` on a pull request has no `body_html`, and `application/vnd.github.raw+json` on contents answers the JSON object, not the file.

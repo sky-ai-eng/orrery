@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{boot, face, face_ok, git, mint_actor};
+use common::{boot, face, face_answer, face_ok, git, mint_actor};
 
 fn gql(base: &str, token: &str, query: &str, variables: serde_json::Value) -> serde_json::Value {
     ureq::post(format!("{base}/api/graphql"))
@@ -187,6 +187,23 @@ async fn branch_tip_compare_and_changed_files() {
         Err(404),
         "an old tip that no longer exists is a 404"
     );
+    // The diff and patch media are refused by name, never answered with JSON.
+    for accept in [
+        "application/vnd.github.v3.diff",
+        "application/vnd.github.PATCH",
+    ] {
+        let (status, refused) = face_answer(
+            "GET",
+            &format!("{api}/compare/{first}...{second}"),
+            &alice,
+            &[("accept", accept)],
+            None,
+        );
+        assert_eq!(status, 422, "{accept}: {refused}");
+        assert_eq!(refused["orrery"]["not_mocked"], true, "{refused}");
+        assert_eq!(refused["errors"][0]["field"], "Accept", "{refused}");
+        assert_eq!(refused["errors"][0]["resource"], "Comparison", "{refused}");
+    }
 
     // The pull's files over REST: only what the pull changes, against the
     // moved base.

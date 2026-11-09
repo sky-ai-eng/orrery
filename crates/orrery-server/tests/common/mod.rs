@@ -175,6 +175,49 @@ pub fn face(
     }
 }
 
+/// A face call answered with its status and JSON body, whatever the status,
+/// sending `headers` beside the token.
+pub fn face_answer(
+    method: &str,
+    url: &str,
+    token: &str,
+    headers: &[(&str, &str)],
+    body: Option<serde_json::Value>,
+) -> (u16, serde_json::Value) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let auth = format!("token {token}");
+    let mut resp = match (method, body) {
+        ("GET", None) => headers
+            .iter()
+            .fold(
+                agent.get(url).header("authorization", &auth),
+                |r, (k, v)| r.header(*k, *v),
+            )
+            .call(),
+        (method, Some(body)) => {
+            let request = match method {
+                "POST" => agent.post(url),
+                "PUT" => agent.put(url),
+                "PATCH" => agent.patch(url),
+                other => panic!("unsupported method {other} with a body"),
+            };
+            headers
+                .iter()
+                .fold(request.header("authorization", &auth), |r, (k, v)| {
+                    r.header(*k, *v)
+                })
+                .send_json(body)
+        }
+        (other, None) => panic!("unsupported method {other} without a body"),
+    }
+    .unwrap_or_else(|e| panic!("{method} {url} transport error: {e:?}"));
+    let status = resp.status().as_u16();
+    (status, resp.body_mut().read_json().expect("face json"))
+}
+
 /// Each control-plane error's `(reason, field)`, in the order the answer
 /// lists them.
 pub fn faults(answer: &serde_json::Value) -> Vec<(String, Option<String>)> {

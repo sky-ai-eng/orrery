@@ -18,7 +18,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Extension, Path as UrlPath, State};
-use axum::http::{Response, StatusCode};
+use axum::http::{HeaderMap, Response, StatusCode, header};
 use axum::routing::{delete, get, patch, post, put};
 use orrery_face_git::GitFace;
 use orrery_world::{Actor, ActorKind, Repo, World, WorldError};
@@ -197,7 +197,7 @@ async fn create_repo(
     };
     for field in UNSUPPORTED_BEHAVIORAL_FIELDS {
         if parsed.rest.contains_key(*field) {
-            return orrery_unsupported_field(field);
+            return orrery_unsupported_field("Repository", field);
         }
     }
     let Some(name) = parsed
@@ -211,7 +211,9 @@ async fn create_repo(
     let private = match parsed.visibility.as_deref() {
         Some("private") => true,
         Some("public") => false,
-        Some(other) => return orrery_unsupported_field(&format!("visibility={other}")),
+        Some(other) => {
+            return orrery_unsupported_field("Repository", &format!("visibility={other}"));
+        }
         None => parsed.private.unwrap_or(false),
     };
 
@@ -316,17 +318,11 @@ pub(crate) fn validation_custom(resource: &str, message: &str) -> Response<Body>
     json_response(StatusCode::UNPROCESSABLE_ENTITY, body)
 }
 
-/// Loud refusal for a real-GitHub field Orrery chooses not to fake. Shaped
-/// like a GitHub 422 so strict clients parse it, but self-describing so a
-/// human reads exactly what to do (NOT-MOCKED at field granularity).
-// TODO(ORR-46): name each caller's own resource; pulls, reviews, labels,
-// check runs, and OAuth all report `Repository` through this.
-pub(crate) fn orrery_unsupported_field(field: &str) -> Response<Body> {
-    orrery_unsupported_field_on("Repository", field)
-}
-
-/// [`orrery_unsupported_field`] for a request about another `resource`.
-pub(crate) fn orrery_unsupported_field_on(resource: &str, field: &str) -> Response<Body> {
+/// Loud refusal for a real-GitHub field Orrery chooses not to fake, on the
+/// `resource` the request is about. Shaped like a GitHub 422 so strict
+/// clients parse it, but self-describing so a human reads exactly what to do
+/// (NOT-MOCKED at field granularity).
+pub(crate) fn orrery_unsupported_field(resource: &str, field: &str) -> Response<Body> {
     let body = serde_json::json!({
         "message": format!("orrery: request field {field:?} is not mocked"),
         "orrery": {
@@ -347,6 +343,16 @@ pub(crate) fn github_error(status: StatusCode, message: &str) -> Response<Body> 
 pub(crate) fn internal(e: impl std::fmt::Display) -> Response<Body> {
     tracing::error!(error = %e, "github face internal error");
     github_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+}
+
+/// A header's value, lowercased because the values matched against it (media
+/// types, mostly) compare ignoring case; empty when absent or not ASCII.
+pub(crate) fn header_str(headers: &HeaderMap, name: header::HeaderName) -> String {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 pub(crate) fn json_response(status: StatusCode, body: serde_json::Value) -> Response<Body> {

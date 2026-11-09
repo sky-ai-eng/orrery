@@ -51,7 +51,7 @@ pub(crate) async fn create_check_run(
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
     };
     if parsed.rest.contains_key("actions") {
-        return orrery_unsupported_field("actions");
+        return orrery_unsupported_field("CheckRun", "actions");
     }
     let Some(name) = parsed.name.as_deref().filter(|n| !n.is_empty()) else {
         return validation_missing("CheckRun", "name");
@@ -123,12 +123,13 @@ pub(crate) async fn patch_check_run(
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
     };
     if parsed.rest.contains_key("actions") {
-        return orrery_unsupported_field("actions");
+        return orrery_unsupported_field("CheckRun", "actions");
     }
     // Rebinding a check run to another commit is not a thing GitHub's PATCH
     // does; refuse rather than silently ignore the field.
     if parsed.head_sha.is_some() {
         return orrery_unsupported_field(
+            "CheckRun",
             "head_sha (a check run cannot be moved to another commit)",
         );
     }

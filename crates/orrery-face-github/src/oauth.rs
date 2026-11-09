@@ -17,7 +17,7 @@ use axum::routing::{get, post};
 use base64::Engine as _;
 use orrery_world::{ActorKind, OAuthApp, WorldError};
 
-use crate::{GithubFace, internal, parse_form};
+use crate::{GithubFace, header_str, internal, parse_form};
 
 const ERROR_DOC: &str = "https://docs.github.com/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors";
 
@@ -104,7 +104,7 @@ async fn access_token(
 ) -> Response<Body> {
     let accept = header_str(&headers, header::ACCEPT);
     if accept.contains("xml") {
-        return crate::orrery_unsupported_field("Accept: application/xml");
+        return crate::orrery_unsupported_field("OauthAccess", "Accept");
     }
     let as_json = accept.contains("application/json");
     let mut params = parse_form(query.as_deref().unwrap_or("").as_bytes());
@@ -353,14 +353,6 @@ fn with_query(url: &str, pairs: &[(&str, &str)]) -> String {
         out.push_str(f);
     }
     out
-}
-
-fn header_str(headers: &HeaderMap, name: header::HeaderName) -> String {
-    headers
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_ascii_lowercase()
 }
 
 fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
