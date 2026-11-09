@@ -192,6 +192,37 @@ fn close_reopen_merge_state_machine() {
 }
 
 #[test]
+fn a_reopen_is_refused_while_another_pull_holds_its_head_and_base() {
+    let f = fixture();
+    let first = open_pull(&f, "feature", SHA_B);
+    f.w.close_pull(first.id, f.alice).unwrap();
+    let second = open_pull(&f, "feature", SHA_B);
+    assert_eq!(
+        f.w.open_pull_between(f.repo, "feature", "main").unwrap(),
+        Some(second.number)
+    );
+    assert_eq!(
+        f.w.open_pull_between(f.repo, "feature", "dev").unwrap(),
+        None
+    );
+    let entries = f.w.log_after(0, 100).unwrap().len();
+
+    assert!(matches!(
+        f.w.reopen_pull(first.id, f.bob, SHA_C),
+        Err(WorldError::PullExists(head)) if head == "feature"
+    ));
+    let kept = f.w.pull_by_number(f.repo, first.number).unwrap().unwrap();
+    assert_eq!(kept.state, PullState::Closed);
+    assert_eq!(kept.head_sha, SHA_B, "a refused reopen moves nothing");
+    assert_eq!(f.w.log_after(0, 100).unwrap().len(), entries);
+
+    // Once the second closes, the first reopens.
+    f.w.close_pull(second.id, f.alice).unwrap();
+    let reopened = f.w.reopen_pull(first.id, f.bob, SHA_C).unwrap();
+    assert_eq!(reopened.state, PullState::Open);
+}
+
+#[test]
 fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
     let f = fixture();
     let closed = open_pull(&f, "feature", SHA_B);

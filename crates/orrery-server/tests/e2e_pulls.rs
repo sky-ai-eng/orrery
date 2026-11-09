@@ -5,6 +5,7 @@
 mod common;
 
 use common::{boot, control_post, face, face_answer, face_ok, git, mint_actor};
+use orrery_face_git::store;
 
 struct Seeded {
     inst: common::Instance,
@@ -520,6 +521,158 @@ async fn patch_edits_close_and_reopen() {
         ),
         Err(405)
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_pull_refuses_the_edits_github_refuses() {
+    let s = seed().await;
+    let clock = s.inst.world.clock().unwrap();
+    git(
+        &s.src,
+        clock,
+        &["push", &s.authed_url, "main:dev", "main:release"],
+    );
+    let open = |base: &str| {
+        face_ok(
+            "POST",
+            &format!("{}/pulls", s.api),
+            &s.token,
+            serde_json::json!({ "title": "Add feature", "head": "feature", "base": base }),
+        )
+    };
+    let patch = |n: i64, body: serde_json::Value| {
+        answer("PATCH", &format!("{}/pulls/{n}", s.api), &s.token, body)
+    };
+    let get = |n: i64| {
+        face_ok(
+            "GET",
+            &format!("{}/pulls/{n}", s.api),
+            &s.token,
+            serde_json::json!(null),
+        )
+    };
+    let bare = store::bare_dir(&s.inst.world.repos_dir(), "alice", "webapp");
+    let pull_ref = |n: i64| store::rev_parse(&bare, &store::pull_head_ref(n)).unwrap();
+    // The pull entries in the log: a refusal adds none, while the pushes
+    // between the refusals add entries of their own.
+    let entries = || {
+        let log = s.inst.world.log_after(0, 10_000).unwrap();
+        log.iter().filter(|e| e.action.starts_with("pull.")).count()
+    };
+    open("dev");
+
+    // GitHub refuses a base on a closed pull, and on a pull the same request
+    // closes, whichever branch it names and before it looks at a reopen.
+    let base_refused = (
+        422,
+        serde_json::json!({
+            "message": "Validation Failed",
+            "errors": [{
+                "resource": "PullRequest",
+                "code": "invalid",
+                "field": "base",
+                "message": "Cannot change the base branch of a closed pull request.",
+            }],
+        }),
+    );
+    let before = entries();
+    assert_eq!(
+        patch(
+            1,
+            serde_json::json!({ "state": "closed", "base": "release" })
+        ),
+        base_refused
+    );
+    assert_eq!(get(1)["state"], "open");
+    assert_eq!(entries(), before);
+    let (status, _) = patch(1, serde_json::json!({ "state": "closed" }));
+    assert_eq!(status, 200);
+    let before = entries();
+    for body in [
+        serde_json::json!({ "base": "release" }),
+        serde_json::json!({ "base": "dev" }),
+        serde_json::json!({ "base": "release", "title": "Retitled" }),
+        serde_json::json!({ "base": "release", "state": "open" }),
+    ] {
+        assert_eq!(patch(1, body.clone()), base_refused, "{body}");
+    }
+    let kept = get(1);
+    assert_eq!(kept["state"], "closed");
+    assert_eq!(kept["base"]["ref"], "dev");
+    assert_eq!(kept["title"], "Add feature");
+    assert_eq!(entries(), before);
+
+    // A reopen is refused while its base branch is gone, and names both
+    // branches, base first, when its head branch is gone too. The refusal
+    // writes nothing, the title beside it included.
+    let state_refused = |why: &str| {
+        (
+            422,
+            serde_json::json!({
+                "message": "Validation Failed",
+                "errors": [{
+                    "resource": "PullRequest",
+                    "code": "custom",
+                    "field": "state",
+                    "message": format!("state cannot be changed. {why}"),
+                }],
+            }),
+        )
+    };
+    let reopen_and_retitle = serde_json::json!({ "state": "open", "title": "Retitled" });
+    git(&s.src, clock, &["push", &s.authed_url, ":dev"]);
+    assert_eq!(
+        patch(1, reopen_and_retitle.clone()),
+        state_refused("The dev branch has been deleted.")
+    );
+    git(&s.src, clock, &["push", &s.authed_url, ":feature"]);
+    assert_eq!(
+        patch(1, reopen_and_retitle.clone()),
+        state_refused("The dev and feature branches have been deleted.")
+    );
+    let feature_back = format!("{}:refs/heads/feature", s.feature_sha);
+    git(&s.src, clock, &["push", &s.authed_url, &feature_back]);
+    assert_eq!(
+        patch(1, reopen_and_retitle.clone()),
+        state_refused("The dev branch has been deleted.")
+    );
+    let kept = get(1);
+    assert_eq!(kept["state"], "closed");
+    assert_eq!(kept["title"], "Add feature");
+    assert_eq!(pull_ref(1).as_deref(), Some(s.feature_sha.as_str()));
+    assert_eq!(entries(), before);
+
+    // Restoring the base branch lets it reopen.
+    let dev_back = format!("{}:refs/heads/dev", s.main_sha);
+    git(&s.src, clock, &["push", &s.authed_url, &dev_back]);
+    let (status, reopened) = patch(1, reopen_and_retitle);
+    assert_eq!(status, 200, "{reopened}");
+    assert_eq!(reopened["state"], "open");
+    assert_eq!(reopened["title"], "Retitled");
+
+    // Closed again, with a second pull opened on the same head and base, it
+    // is refused as the create of a third would be, and only the second stays
+    // open.
+    let (status, _) = patch(1, serde_json::json!({ "state": "closed" }));
+    assert_eq!(status, 200);
+    assert_eq!(open("dev")["number"], 2);
+    let before = entries();
+    assert_eq!(
+        patch(1, serde_json::json!({ "state": "open", "title": "Twice" })),
+        state_refused("There is already an open pull request from feature to dev.")
+    );
+    let kept = get(1);
+    assert_eq!(kept["state"], "closed");
+    assert_eq!(kept["title"], "Retitled");
+    assert_eq!(get(2)["state"], "open");
+    assert_eq!(entries(), before);
+
+    // A pull open on the same head into another base does not block it.
+    let (status, _) = patch(2, serde_json::json!({ "base": "release" }));
+    assert_eq!(status, 200);
+    let (status, reopened) = patch(1, serde_json::json!({ "state": "open" }));
+    assert_eq!(status, 200, "{reopened}");
+    assert_eq!(reopened["state"], "open");
 }
 
 /// The fields of a not-mocked refusal: its status, the `field` it names, and
