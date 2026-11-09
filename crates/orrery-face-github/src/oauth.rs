@@ -17,7 +17,7 @@ use axum::routing::{get, post};
 use base64::Engine as _;
 use orrery_world::{ActorKind, OAuthApp, WorldError};
 
-use crate::{GithubFace, header_str, internal};
+use crate::{GithubFace, header_str, internal, parse_form};
 
 const ERROR_DOC: &str = "https://docs.github.com/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors";
 
@@ -369,51 +369,6 @@ fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
         .split_once(':')
         .map(|(a, b)| (a.to_string(), b.to_string()))?;
     Some((id, secret))
-}
-
-/// `application/x-www-form-urlencoded` (or a query string) into its pairs.
-/// A repeated key keeps its first value.
-fn parse_form(raw: &[u8]) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for pair in String::from_utf8_lossy(raw)
-        .split('&')
-        .filter(|p| !p.is_empty())
-    {
-        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        out.entry(percent_decode(k))
-            .or_insert_with(|| percent_decode(v));
-    }
-    out
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => out.push(b' '),
-            b'%' if i + 2 < bytes.len() => match (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                (Some(hi), Some(lo)) => {
-                    out.push(hi << 4 | lo);
-                    i += 2;
-                }
-                _ => out.push(b'%'),
-            },
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn encode_form(pairs: &[(&str, &str)]) -> String {

@@ -39,6 +39,7 @@ Every token is fake, prefixed `orrfake_`, and derived from the world's secret, s
   `resource` names what the route is about: `Repository`, `PullRequest`, `PullRequestReview`, `Label`, `CheckRun`, `Team`, `Comparison`, or `OauthAccess` for the OAuth token exchange. A media type a route lists as not mocked (the diff and patch media types, and XML from the OAuth token exchange) is refused the same way, with `field` `Accept`.
 
 - A body that isn't valid JSON is `400` `{"message": "Problems parsing JSON"}`, and on most routes so is a known field of the wrong type. A body over 2 MiB is `413`.
+- Query values are decoded as a URL query is: `%XX`, and `+` as a space. A repeated parameter keeps its first value.
 - Logins, organization names, and repository names match ignoring case; responses carry each one's stored spelling. A `{number}` that isn't an integer is `404`.
 
 ## Responses
@@ -74,5 +75,4 @@ Orrery doesn't rate limit. It sends no `X-RateLimit-*` headers, GraphQL `rateLim
 ## Known gaps
 
 - A path Orrery routes, called with a method it doesn't serve (`GET /api/graphql`, `PATCH /repos/{o}/{r}`), answers a bare `405` rather than the `501` above.
-- Query values are not percent-decoded, so `?ref=a%2Fb` looks for the ref `a%2Fb`.
 - A GitHub media type Orrery doesn't render, other than the diff and patch media types the routes that list them refuse, gets the plain JSON answer: `application/vnd.github.full+json` on a pull request has no `body_html`, and `application/vnd.github.raw+json` on contents answers the JSON object, not the file.

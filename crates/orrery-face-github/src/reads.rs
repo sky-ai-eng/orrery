@@ -24,7 +24,7 @@ use crate::render::{
 };
 use crate::{
     GithubFace, github_error, header_str, internal, json_response, orrery_unsupported_field,
-    resolve_repo, validation_invalid,
+    parse_form, resolve_repo, validation_invalid,
 };
 
 /// GitHub's listing defaults: 30 per page, cap 100, silently clamped —
@@ -41,13 +41,8 @@ fn page_params(query: &str) -> (usize, usize) {
     (per_page, page)
 }
 
-// TODO(ORR-47): values are not percent-decoded, so `?ref=a%2Fb` looks for a
-// ref named `a%2Fb`; every query value the face reads comes through here.
 fn query_param(query: &str, name: &str) -> Option<String> {
-    query
-        .split('&')
-        .find_map(|kv| kv.strip_prefix(&format!("{name}=")))
-        .map(str::to_string)
+    parse_form(query.as_bytes()).remove(name)
 }
 
 fn paginate<T>(items: Vec<T>, per_page: usize, page: usize) -> Vec<T> {

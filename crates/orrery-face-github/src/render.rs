@@ -29,7 +29,7 @@ pub(crate) fn user_json(face: &GithubFace, login: &str) -> serde_json::Value {
 /// The GitHub repo object.
 pub fn repo_json(face: &GithubFace, repo: &Repo, owner: &Actor) -> serde_json::Value {
     let base = face.base_url.trim_end_matches('/');
-    let host = base.split("://").nth(1).unwrap_or(base);
+    let host = host_name(base);
     let full_name = repo.full_name();
     serde_json::json!({
         "id": repo.id,
@@ -44,8 +44,6 @@ pub fn repo_json(face: &GithubFace, repo: &Repo, owner: &Actor) -> serde_json::V
         "html_url": format!("{base}/{full_name}"),
         "url": format!("{base}/api/v3/repos/{full_name}"),
         "clone_url": format!("{base}/{full_name}.git"),
-        // TODO(ORR-47): `host` carries the listener's port, which makes
-        // `ssh_url` an ill-formed scp-style address.
         "git_url": format!("git://{host}/{full_name}.git"),
         "ssh_url": format!("git@{host}:{full_name}.git"),
         "default_branch": repo.default_branch,
@@ -56,6 +54,17 @@ pub fn repo_json(face: &GithubFace, repo: &Repo, owner: &Actor) -> serde_json::V
         "updated_at": rfc3339(repo.created_clock_unix),
         "pushed_at": repo.pushed_at_clock_unix.map(rfc3339),
     })
+}
+
+/// The base URL's host name, without its scheme, port, or path. Orrery serves
+/// neither `git://` nor ssh, so `git_url` and `ssh_url` only need to be
+/// well-formed, and a port in an scp-style address is read as part of the
+/// path.
+fn host_name(base: &str) -> String {
+    base.parse::<axum::http::Uri>()
+        .ok()
+        .and_then(|uri| uri.host().map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// The GitHub pull request object. `merged_at` equals `closed_at` when
