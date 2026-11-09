@@ -37,6 +37,7 @@ Every token is fake, prefixed `orrfake_`, and derived from the world's secret, s
   ```
 
 - A body that isn't valid JSON is `400` `{"message": "Problems parsing JSON"}`, and on most routes so is a known field of the wrong type. A body over 2 MiB is `413`.
+- Query values are decoded as a URL query is: `%XX`, and `+` as a space. A repeated parameter keeps its first value.
 - Logins, organization names, and repository names match ignoring case; responses carry each one's stored spelling. A `{number}` that isn't an integer is `404`.
 
 ## Responses
@@ -73,5 +74,4 @@ Orrery doesn't rate limit. It sends no `X-RateLimit-*` headers, GraphQL `rateLim
 
 - A path Orrery routes, called with a method it doesn't serve (`GET /api/graphql`, `PATCH /repos/{o}/{r}`), answers a bare `405` rather than the `501` above.
 - The `path` a REST `501` reports omits the `/api/v3` prefix.
-- Query values are not percent-decoded, so `?ref=a%2Fb` looks for the ref `a%2Fb`.
 - A not-mocked field's `errors[].resource` is `Repository` on most routes, whatever the route's resource.

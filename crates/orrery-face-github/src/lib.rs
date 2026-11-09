@@ -12,6 +12,7 @@
 //! rejected loudly with the field named (the NOT-MOCKED principle applied at
 //! field granularity).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Router;
@@ -264,6 +265,17 @@ pub(crate) fn resolve_repo(
         Err(e) => return Err(Box::new(internal(e))),
     };
     Ok((repo, owner_actor))
+}
+
+/// A query string or an `application/x-www-form-urlencoded` body as its
+/// pairs, each key and value decoded as a URL query is (`%XX`, and `+` as a
+/// space). A repeated key keeps its first value.
+pub(crate) fn parse_form(raw: &[u8]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (k, v) in form_urlencoded::parse(raw) {
+        out.entry(k.into_owned()).or_insert_with(|| v.into_owned());
+    }
+    out
 }
 
 /// The GitHub 422 creation-failure envelope, as consumers parse it

@@ -66,6 +66,13 @@ async fn poll_path_reads() {
     assert_eq!(read["full_name"], "alice/webapp");
     assert_eq!(read["default_branch"], "main");
     assert!(read["clone_url"].as_str().unwrap().ends_with("webapp.git"));
+    // The harness serves on an ephemeral port, which neither scp-style ssh
+    // nor `git://` addresses carry.
+    let host_port = base.strip_prefix("http://").unwrap();
+    let (host, port) = host_port.rsplit_once(':').unwrap();
+    assert!(port.parse::<u16>().is_ok(), "{base} has no port");
+    assert_eq!(read["ssh_url"], format!("git@{host}:alice/webapp.git"));
+    assert_eq!(read["git_url"], format!("git://{host}/alice/webapp.git"));
     assert_eq!(
         face(
             "GET",
@@ -323,6 +330,75 @@ async fn poll_path_reads() {
         serde_json::json!(null),
     );
     assert!(bobs.as_array().unwrap().is_empty());
+}
+
+/// Every query value the face reads is decoded as a URL query is, so a
+/// branch name's `/` can be escaped and an escaped letter reads as itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn query_values_are_percent_decoded() {
+    let inst = boot().await;
+    let base = inst.base.clone();
+    let alice = mint_actor(&base, "alice", "user");
+    let repo = face_ok(
+        "POST",
+        &format!("{base}/api/v3/user/repos"),
+        &alice,
+        serde_json::json!({ "name": "webapp" }),
+    );
+    let authed_url = repo["clone_url"]
+        .as_str()
+        .unwrap()
+        .replace("http://", &format!("http://x-access-token:{alice}@"));
+
+    let clock = inst.world.clock().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    git(&src, clock, &["init", "-b", "main", "."]);
+    std::fs::write(src.join("README.md"), "# webapp\n").unwrap();
+    git(&src, clock, &["add", "."]);
+    git(&src, clock, &["commit", "-m", "init"]);
+    git(&src, clock, &["checkout", "-b", "feature/x"]);
+    std::fs::write(src.join("x.txt"), "x\n").unwrap();
+    git(&src, clock, &["add", "."]);
+    git(&src, clock, &["commit", "-m", "x"]);
+    git(&src, clock, &["push", &authed_url, "main", "feature/x"]);
+    let api = format!("{base}/api/v3/repos/alice/webapp");
+
+    let file = face_ok(
+        "GET",
+        &format!("{api}/contents/x.txt?ref=feature%2Fx"),
+        &alice,
+        serde_json::json!(null),
+    );
+    assert_eq!(file["path"], "x.txt");
+
+    face_ok(
+        "POST",
+        &format!("{api}/pulls"),
+        &alice,
+        serde_json::json!({ "title": "X", "head": "feature/x", "base": "main" }),
+    );
+    face_ok(
+        "PATCH",
+        &format!("{api}/pulls/1"),
+        &alice,
+        serde_json::json!({ "state": "closed" }),
+    );
+    let closed = face_ok(
+        "GET",
+        &format!("{api}/pulls?state=closed"),
+        &alice,
+        serde_json::json!(null),
+    );
+    assert_eq!(closed.as_array().unwrap().len(), 1);
+    let escaped = face_ok(
+        "GET",
+        &format!("{api}/pulls?state=%63losed"),
+        &alice,
+        serde_json::json!(null),
+    );
+    assert_eq!(escaped, closed);
 }
 
 /// The poller's per-cycle team reconcile reads an org's teams, and the local

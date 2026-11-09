@@ -68,6 +68,34 @@ async fn seed() -> Seeded {
     }
 }
 
+/// A face call's status and JSON body, whatever the status.
+fn answer(
+    method: &str,
+    url: &str,
+    token: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let auth = format!("token {token}");
+    let sent = match method {
+        "POST" => agent
+            .post(url)
+            .header("authorization", &auth)
+            .send_json(body),
+        "PATCH" => agent
+            .patch(url)
+            .header("authorization", &auth)
+            .send_json(body),
+        other => panic!("unsupported method {other}"),
+    };
+    let mut resp = sent.unwrap_or_else(|e| panic!("{method} {url}: {e:?}"));
+    let status = resp.status().as_u16();
+    (status, resp.body_mut().read_json().expect("face json"))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pull_request_lifecycle() {
     let s = seed().await;
@@ -364,6 +392,52 @@ async fn patch_edits_close_and_reopen() {
     );
     assert_eq!(patched["title"], "Add feature");
     assert_eq!(patched["body"], serde_json::Value::Null);
+
+    // A blank title is refused with the create's own 422 and changes
+    // nothing; a null title keeps the one stored.
+    let (status, create_refusal) = answer(
+        "POST",
+        &format!("{}/pulls", s.api),
+        &s.token,
+        serde_json::json!({ "title": " ", "head": "feature", "base": "main" }),
+    );
+    assert_eq!(status, 422);
+    assert_eq!(create_refusal["errors"][0]["code"], "missing_field");
+    assert_eq!(create_refusal["errors"][0]["field"], "title");
+    let absent = answer(
+        "POST",
+        &format!("{}/pulls", s.api),
+        &s.token,
+        serde_json::json!({ "head": "feature", "base": "main" }),
+    );
+    assert_eq!(absent, (422, create_refusal.clone()));
+    for blank in ["", "   "] {
+        let (status, edit_refusal) = answer(
+            "PATCH",
+            &url,
+            &s.token,
+            serde_json::json!({ "title": blank, "state": "closed" }),
+        );
+        assert_eq!(status, 422, "title {blank:?}");
+        assert_eq!(edit_refusal, create_refusal, "title {blank:?}");
+    }
+    let kept = face_ok("GET", &url, &s.token, serde_json::json!(null));
+    assert_eq!(kept["title"], "Add feature");
+    assert_eq!(kept["state"], "open");
+    let kept = face_ok(
+        "PATCH",
+        &url,
+        &s.token,
+        serde_json::json!({ "title": null }),
+    );
+    assert_eq!(kept["title"], "Add feature");
+    let trimmed = face_ok(
+        "PATCH",
+        &url,
+        &s.token,
+        serde_json::json!({ "title": "  Add feature  " }),
+    );
+    assert_eq!(trimmed["title"], "Add feature");
 
     let closed = face_ok(
         "PATCH",

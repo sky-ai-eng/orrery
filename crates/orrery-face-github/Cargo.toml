@@ -10,6 +10,7 @@ description = "The GitHub REST face, grown strictly on demand per spec/surface-g
 async-graphql.workspace = true
 axum.workspace = true
 base64.workspace = true
+form_urlencoded.workspace = true
 hex.workspace = true
 jiff.workspace = true
 orrery-face-git.workspace = true
