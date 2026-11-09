@@ -27,9 +27,8 @@ Each repository is a bare repository at `<world>/repos/<owner>/<repo>.git`, crea
 | `uploadpack.allowFilter = true` | Partial clones (`git clone --filter=blob:none`) |
 | `uploadpack.allowAnySHA1InWant = true` | A partial clone fetches missing blobs by object id during checkout |
 | `http.receivepack = true` | `git http-backend` refuses pushes without it |
+| `receive.hideRefs = refs/pull` | A push to a pull request's ref is refused, as on GitHub ("Pull request refs") |
 | `gc.auto = 0` | Object files are never rewritten, so a snapshot can share them with the live world |
-
-Every `http-backend` run is also given `receive.hideRefs = refs/pull`, in its environment rather than in the repository's config, so every repository refuses a push to a pull request's ref, whichever version of Orrery created it (see "Pull request refs").
 
 Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`, and `GIT_TERMINAL_PROMPT=0`, so the operator's own git configuration never changes a world.
 

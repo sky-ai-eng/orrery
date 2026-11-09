@@ -44,13 +44,6 @@ pub async fn run_http_backend(
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
-        // A pull request's refs are the engine's to move: a push to one is
-        // refused as "deny updating a hidden ref", as on GitHub. Given to
-        // every run, not written into each repository's config, so it holds
-        // for a repository whichever binary created it.
-        .env("GIT_CONFIG_COUNT", "1")
-        .env("GIT_CONFIG_KEY_0", "receive.hideRefs")
-        .env("GIT_CONFIG_VALUE_0", "refs/pull")
         .env("REQUEST_METHOD", req.method)
         .env("PATH_INFO", &req.path_info)
         .env("QUERY_STRING", req.query)

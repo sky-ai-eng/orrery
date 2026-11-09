@@ -28,8 +28,9 @@ pub fn bare_dir(repos_dir: &Path, owner_login: &str, name: &str) -> PathBuf {
 
 /// Initialize a bare repo with the serving recipe from spec/surface-git.md:
 /// blobless clones need allowFilter, promisor by-OID fetches need
-/// allowAnySHA1InWant, pushes over http-backend need http.receivepack, and
-/// gc.auto=0 keeps object files append-only so snapshots can share them.
+/// allowAnySHA1InWant, pushes over http-backend need http.receivepack,
+/// receive.hideRefs refuses pushes to the pull request refs the engine moves,
+/// and gc.auto=0 keeps object files append-only so snapshots can share them.
 ///
 /// Idempotent: re-applying to an existing bare repo only re-asserts the
 /// recipe, so a crash between the kernel row insert and disk init heals on
@@ -49,6 +50,7 @@ pub fn init_bare(
         ("uploadpack.allowFilter", "true"),
         ("uploadpack.allowAnySHA1InWant", "true"),
         ("http.receivepack", "true"),
+        ("receive.hideRefs", "refs/pull"),
         ("gc.auto", "0"),
     ] {
         run(hermetic_git(&dir).args(["config", key, value]))?;
