@@ -291,12 +291,15 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
     let fork = World::open(&forked_root).unwrap();
 
     // Tokens: the source's are refused, the re-derived ones act as alice.
-    for token in [
-        &source.alice_token,
-        &source.issued_token,
-        &source.oauth_token,
+    for (which, token) in [
+        ("alice", &source.alice_token),
+        ("issued", &source.issued_token),
+        ("oauth", &source.oauth_token),
     ] {
-        assert!(fork.actor_by_token(token).unwrap().is_none(), "{token}");
+        assert!(
+            fork.actor_by_token(token).unwrap().is_none(),
+            "the fork accepts the source's {which} token"
+        );
     }
     for token in [&twin.alice_token, &twin.issued_token, &twin.oauth_token] {
         assert_eq!(
@@ -392,18 +395,18 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
         })
     );
     let wire = serde_json::to_string(&log).unwrap();
-    for secret in [
-        &"c3".repeat(32),
-        &twin.alice_token,
-        &twin.issued_token,
-        &twin.oauth_token,
-        &twin.client_secret,
-        &twin.issued_secret,
-        &twin.pending_code,
-        &fork_token,
-        &fork_secret_issued,
+    for (which, secret) in [
+        ("fork's world secret", &"c3".repeat(32)),
+        ("alice token", &twin.alice_token),
+        ("issued token", &twin.issued_token),
+        ("oauth token", &twin.oauth_token),
+        ("client secret", &twin.client_secret),
+        ("issued secret", &twin.issued_secret),
+        ("pending code", &twin.pending_code),
+        ("fork token", &fork_token),
+        ("fork's issued secret", &fork_secret_issued),
     ] {
-        assert!(!wire.contains(secret.as_str()), "the log leaks {secret}");
+        assert!(!wire.contains(secret.as_str()), "the log leaks the {which}");
     }
 }
 
@@ -640,14 +643,14 @@ fn diff_reports_oauth_apps_and_authorizations_without_their_secrets() {
     assert_eq!(whole.authorizations_exchanged.len(), 1);
 
     let wire = serde_json::to_string(&whole).unwrap();
-    for secret in [
-        SECRET_HEX,
-        &bob_token,
-        &app.client_secret,
-        &code,
-        &token.token,
+    for (which, secret) in [
+        ("world secret", SECRET_HEX),
+        ("bob's token", &bob_token),
+        ("client secret", &app.client_secret),
+        ("code", &code),
+        ("oauth token", &token.token),
     ] {
-        assert!(!wire.contains(secret), "diff leaks {secret}");
+        assert!(!wire.contains(secret), "diff leaks the {which}");
     }
 }
 

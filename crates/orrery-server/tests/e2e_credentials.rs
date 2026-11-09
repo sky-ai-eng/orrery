@@ -228,20 +228,20 @@ async fn no_control_plane_read_returns_a_credential() {
             ),
         ]
     );
-    for credential in [
-        "6b".repeat(32),
-        alice,
-        bob,
-        carol,
-        issued_token,
-        client_secret,
-        issued_secret,
-        spent_code,
-        pending_code,
-        oauth_token,
+    for (which, credential) in [
+        ("world secret", "6b".repeat(32)),
+        ("alice's token", alice),
+        ("bob's token", bob),
+        ("carol's token", carol),
+        ("issued token", issued_token),
+        ("client secret", client_secret),
+        ("issued secret", issued_secret),
+        ("spent code", spent_code),
+        ("pending code", pending_code),
+        ("oauth token", oauth_token),
     ] {
-        for read in &reads {
-            assert!(!read.contains(&credential), "{credential} leaks in {read}");
+        for (n, read) in reads.iter().enumerate() {
+            assert!(!read.contains(&credential), "the {which} leaks in read {n}");
         }
     }
 }
