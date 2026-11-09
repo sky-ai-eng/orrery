@@ -71,9 +71,12 @@ pub(crate) async fn create_pull(
         }
     };
 
-    // Hold the repo write lock so a concurrent push can't move the head
-    // between sha resolution and the kernel insert — the pinned head_sha
-    // must be the tip the PR actually proposes.
+    // The world write gate keeps a snapshot from copying, or a restore from
+    // replacing, the world between the kernel insert and the ref write. The
+    // repo write lock keeps a concurrent push from moving the head between
+    // sha resolution and the kernel insert — the pinned head_sha must be the
+    // tip the PR actually proposes.
+    let _gate = face.git.gate().read_owned().await;
     let lock = face.git.repo_lock(repo.id);
     let _guard = lock.lock().await;
 
