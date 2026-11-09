@@ -459,14 +459,16 @@ pub fn update_ref(bare: &Path, refname: &str, new: &str) -> Result<(), GitFaceEr
 /// Move a ref with compare-and-swap on its old value, so a concurrent push
 /// between mergeability check and ref move fails loudly instead of clobbering.
 /// [`ZERO_OID`] spells an absent ref on either side: as `old`, the ref must
-/// not exist; as `new`, the ref is deleted.
+/// not exist; as `new`, the ref is deleted. A symbolic ref is moved or
+/// deleted itself: without `--no-deref`, git moves the ref it points at, so
+/// deleting `refs/heads/alias -> refs/heads/main` would delete `main`.
 pub fn update_ref_cas(
     bare: &Path,
     refname: &str,
     new: &str,
     old: &str,
 ) -> Result<(), GitFaceError> {
-    run(hermetic_git(bare).args(["update-ref", refname, new, old]))?;
+    run(hermetic_git(bare).args(["update-ref", "--no-deref", refname, new, old]))?;
     Ok(())
 }
 

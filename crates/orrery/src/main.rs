@@ -491,10 +491,6 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         t0_unix,
         &config.instance.secret.secret()?,
     )?);
-    // A push is recorded only by the process serving it, so a process that
-    // died mid-push can have left refs its log does not describe.
-    orrery_face_git::restore_refs(&world)
-        .context("putting the world's refs where its log puts them")?;
 
     let listen = config
         .server
@@ -512,6 +508,13 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         Some(control_listen) => Some(control_listen.bind().await?),
         None => None,
     };
+    // A push is recorded only by the process serving it, so a process that
+    // died mid-push can have left refs its log does not describe. This runs
+    // once every listener is bound, because a second `serve` of an instance
+    // that is already served fails to bind, and it must fail before it moves
+    // a ref the serving process has moved and not yet recorded.
+    orrery_face_git::restore_refs(&world)
+        .context("putting the world's refs where its log puts them")?;
 
     tracing::info!(
         world = %world_root.display(),

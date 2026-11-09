@@ -294,26 +294,22 @@ fn has_branches(refs: &BTreeMap<String, String>) -> bool {
 /// and `HEAD` names the default branch. Each change is logged. A ref that
 /// can't be moved back is reported in [`GitFaceError::RefsNotRestored`],
 /// after every other repository has been put right, and the world must not
-/// be served: it would serve refs its log does not describe. It runs before
-/// the world serves anything, so it takes no repository lock.
+/// be served: it would serve refs its log does not describe. It takes no
+/// repository lock, so nothing may serve the world while it runs.
 pub fn restore_refs(world: &World) -> Result<(), GitFaceError> {
     use orrery_world::WorldView as _;
 
-    let mut logged = world.logged_refs()?;
-    let mut pull_heads: BTreeMap<i64, Vec<(i64, String)>> = BTreeMap::new();
+    let mut expected_by_repo = world.logged_refs()?;
     for pull in world.list_pulls()? {
-        pull_heads
+        expected_by_repo
             .entry(pull.repo_id)
             .or_default()
-            .push((pull.number, pull.head_sha));
+            .insert(store::pull_head_ref(pull.number), pull.head_sha);
     }
     let repos_dir = world.repos_dir();
     let mut stuck = Vec::new();
     for repo in world.list_repos()? {
-        let mut expected = logged.remove(&repo.id).unwrap_or_default();
-        for (number, head) in pull_heads.remove(&repo.id).unwrap_or_default() {
-            expected.insert(store::pull_head_ref(number), head);
-        }
+        let expected = expected_by_repo.remove(&repo.id).unwrap_or_default();
         if let Err(e) = restore_repo(&repos_dir, &repo, &expected, &mut stuck) {
             stuck.push(format!("{}: {e}", repo.full_name()));
         }
@@ -1022,8 +1018,9 @@ mod tests {
     /// `alice/webapp`, and which has a pull request from `feature` into
     /// `main`, has every kind of damage a killed push or a hand-run git can
     /// leave: a branch moved, one deleted, one created, `refs/heads/a`
-    /// replaced by `refs/heads/a/b`, the pull request's ref moved, `HEAD`
-    /// naming another branch, and lock files left on refs. Start-up puts
+    /// replaced by `refs/heads/a/b`, the pull request's ref moved, a symbolic
+    /// ref to `main`, `HEAD` naming another branch, and lock files left on
+    /// refs. Start-up puts
     /// every ref back where the world puts it, removes the lock files, and
     /// appends nothing to the log.
     #[test]
@@ -1060,6 +1057,11 @@ mod tests {
         store::update_ref_cas(&f.bare, "refs/heads/a", store::ZERO_OID, &f.main).unwrap();
         store::update_ref(&f.bare, "refs/heads/a/b", &stray).unwrap();
         store::update_ref(&f.bare, &store::pull_head_ref(1), &stray).unwrap();
+        let alias = store::hermetic_git(&f.bare)
+            .args(["symbolic-ref", "refs/heads/alias", "refs/heads/main"])
+            .status()
+            .unwrap();
+        assert!(alias.success());
         store::set_head_symref(&f.bare, "topic").unwrap();
         for lock in [
             "refs/heads/main.lock",

@@ -161,11 +161,28 @@ fn a_live_socket_is_not_taken_over() {
         ),
     );
     let (_first, ready) = serve(&config, &[]);
+    // A ref the serving process has moved and not yet recorded, as
+    // receive-pack leaves one partway through a push.
+    let token = common::mint(&ready.listen, "alice");
+    common::call(
+        &ready.listen,
+        "POST",
+        "/api/v3/user/repos",
+        Some(&token),
+        r#"{"name":"webapp"}"#,
+        201,
+    );
+    let bare = dir.path().join("instance/world/repos/alice/webapp.git");
+    let tree = git(&bare, &["mktree"]);
+    let pushed = git(&bare, &["commit-tree", &tree, "-m", "in flight"]);
+    git(&bare, &["update-ref", "refs/heads/topic", &pushed]);
+
     let second = orrery_serve(&config, &[]).output().unwrap();
     assert!(!second.status.success());
     let stderr = String::from_utf8_lossy(&second.stderr);
     assert!(stderr.contains("in use by another process"), "{stderr}");
     assert_eq!(String::from_utf8_lossy(&second.stdout), "");
+    assert_eq!(git(&bare, &["rev-parse", "refs/heads/topic"]), pushed);
     let (status, _) = request(&ready.listen, "GET", "/_orrery/healthz", None, "");
     assert_eq!(status, 200);
 }
