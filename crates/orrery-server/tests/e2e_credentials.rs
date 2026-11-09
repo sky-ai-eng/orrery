@@ -196,6 +196,11 @@ async fn no_control_plane_read_returns_a_credential() {
     reads.push(control("GET", &format!("/oauth-apps/{client_id}"), None));
     reads.push(control(
         "POST",
+        "/log/recent",
+        Some(serde_json::json!({ "page_size": 500 })),
+    ));
+    reads.push(control(
+        "POST",
         "/log/list",
         Some(serde_json::json!({ "page_size": 500 })),
     ));

@@ -425,22 +425,34 @@ impl World {
     /// `seq` is a total order by construction, so pagination is stable.
     pub fn log_after(&self, after_seq: i64, limit: usize) -> Result<Vec<LogEntry>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT l.seq, l.clock_unix, a.login, l.action, l.details
-             FROM action_log l JOIN actors a ON a.id = l.actor_id
-             WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![after_seq, limit as i64], |r| {
-            Ok(LogEntry {
-                seq: r.get(0)?,
-                clock_unix: r.get(1)?,
-                actor_login: r.get(2)?,
-                action: r.get(3)?,
-                details: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(4)?)
-                    .unwrap_or(serde_json::Value::Null),
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "{LOG_ENTRY_SELECT} WHERE l.seq > ?1 ORDER BY l.seq ASC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![after_seq, limit as i64], log_entry)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Log entries with `seq < before_seq`, newest first, at most `limit`;
+    /// with no `before_seq`, the newest `limit` entries. Only `seq`'s order
+    /// is relied on: its values can skip numbers.
+    pub fn log_before(&self, before_seq: Option<i64>, limit: usize) -> Result<Vec<LogEntry>> {
+        let conn = self.lock();
+        let limit = limit as i64;
+        // Two statements rather than `?1 IS NULL OR …`, so the cursor stays a
+        // range on the rowid and a page deep in the log reads only its rows.
+        let rows = match before_seq {
+            Some(before_seq) => conn
+                .prepare(&format!(
+                    "{LOG_ENTRY_SELECT} WHERE l.seq < ?1 ORDER BY l.seq DESC LIMIT ?2"
+                ))?
+                .query_map(params![before_seq, limit], log_entry)?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            None => conn
+                .prepare(&format!("{LOG_ENTRY_SELECT} ORDER BY l.seq DESC LIMIT ?1"))?
+                .query_map(params![limit], log_entry)?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        };
+        Ok(rows)
     }
 
     // ---- snapshot support ----
@@ -490,6 +502,22 @@ fn open_conn(root: &Path) -> Result<Connection> {
 fn checkpoint(conn: &Connection) -> Result<()> {
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     Ok(())
+}
+
+/// What every read of the action log selects, in the order `log_entry`
+/// reads it.
+const LOG_ENTRY_SELECT: &str = "SELECT l.seq, l.clock_unix, a.login, l.action, l.details
+     FROM action_log l JOIN actors a ON a.id = l.actor_id";
+
+fn log_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<LogEntry> {
+    Ok(LogEntry {
+        seq: r.get(0)?,
+        clock_unix: r.get(1)?,
+        actor_login: r.get(2)?,
+        action: r.get(3)?,
+        details: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(4)?)
+            .unwrap_or(serde_json::Value::Null),
+    })
 }
 
 /// Append to the action log through an already-held connection (or an open

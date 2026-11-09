@@ -47,6 +47,7 @@ pub fn router(state: AppState) -> Router {
             post(issue_oauth_client_secret),
         )
         .route("/log/list", post(log_list))
+        .route("/log/recent", post(log_recent))
         .merge(crate::snapshots::router())
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
@@ -327,6 +328,35 @@ async fn log_list(State(state): State<AppState>, body: Bytes) -> Response<Body> 
             json(
                 StatusCode::OK,
                 serde_json::json!({ "items": items, "next_after_seq": next }),
+            )
+        }
+        Err(e) => internal(e),
+    }
+}
+
+/// The log newest first, so a caller showing the latest entries reads only
+/// those. A cursor above the newest entry is a valid position and starts the
+/// page at the newest.
+async fn log_recent(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    let mut fields = Fields::parse(&body);
+    let before_seq: Option<i64> = fields.optional("before_seq");
+    if before_seq.is_some_and(|s| s < 1) {
+        fields.fault(Fault::out_of_range(
+            "before_seq must be 1 or more".to_string(),
+            "before_seq",
+        ));
+    }
+    let page_size = page_size(&mut fields);
+    let page_size = match fields.finish(page_size) {
+        Ok(n) => n,
+        Err(resp) => return *resp,
+    };
+    match state.world.log_before(before_seq, page_size + 1) {
+        Ok(items) => {
+            let (items, next) = keyset_page(items, page_size, |e| e.seq);
+            json(
+                StatusCode::OK,
+                serde_json::json!({ "items": items, "next_before_seq": next }),
             )
         }
         Err(e) => internal(e),

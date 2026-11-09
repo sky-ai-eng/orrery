@@ -384,6 +384,7 @@ async fn reading_writes_nothing() {
     let before = log();
     list(base, "/actors/list", json!({}));
     list(base, "/oauth-apps/list", json!({}));
+    list(base, "/log/recent", json!({}));
     read(base, "/actors/alice");
     read(base, &format!("/oauth-apps/{client_id}"));
     get(base, "/actors/ghost");
@@ -414,4 +415,74 @@ async fn the_logs_last_page_has_a_null_cursor() {
     let rest = list(base, "/log/list", json!({ "after_seq": last }));
     assert_eq!(rest["items"].as_array().unwrap().len(), 1);
     assert_eq!(rest["next_after_seq"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_log_reads_newest_first_one_page_at_a_time() {
+    let inst = boot().await;
+    let base = &inst.base;
+    for login in ["alice", "bob", "carol", "dana", "erin"] {
+        mint_actor(base, login, "user");
+    }
+    // The log oldest first, reversed, is what the walk below must visit. It
+    // is compared entry by entry, since `seq` can skip numbers.
+    let oldest_first = list(base, "/log/list", json!({ "page_size": 500 }));
+    assert_eq!(oldest_first["next_after_seq"], Value::Null);
+    let mut newest_first = oldest_first["items"].as_array().unwrap().clone();
+    newest_first.reverse();
+    let n = newest_first.len();
+    let newest_seq = newest_first[0]["seq"].clone();
+
+    let first = list(base, "/log/recent", json!({ "page_size": 1 }));
+    assert_eq!(first["items"], json!([newest_first[0]]));
+    assert_eq!(first["next_before_seq"], newest_seq);
+    // The cursor is a position, not a reference: one above the newest entry
+    // starts the page at the newest.
+    let above = newest_seq.as_i64().unwrap() + 1000;
+    assert_eq!(
+        list(
+            base,
+            "/log/recent",
+            json!({ "page_size": 1, "before_seq": above })
+        ),
+        first
+    );
+
+    // A page size that leaves the last page short.
+    let page_size = (2..n).find(|k| !n.is_multiple_of(*k)).unwrap();
+    let mut walked = Vec::new();
+    let mut body = json!({ "page_size": page_size });
+    loop {
+        let page = list(base, "/log/recent", body.clone());
+        let items = page["items"].as_array().unwrap();
+        walked.extend(items.iter().cloned());
+        assert!(walked.len() <= n, "the walk passed the oldest entry");
+        let next = &page["next_before_seq"];
+        if next.is_null() {
+            assert_eq!(items.len(), n % page_size);
+            break;
+        }
+        assert_eq!(items.len(), page_size);
+        assert_eq!(next, &items[page_size - 1]["seq"]);
+        body["before_seq"] = next.clone();
+    }
+    assert_eq!(walked, newest_first);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newest_first_cursor_below_one_is_out_of_range() {
+    let inst = boot().await;
+    for before_seq in [0, -1] {
+        let (status, answer) = post(
+            &inst.base,
+            "/log/recent",
+            json!({ "before_seq": before_seq }),
+        );
+        assert_eq!(status, 400, "{before_seq}: {answer}");
+        assert_eq!(
+            faults(&answer),
+            [fault("OUT_OF_RANGE", Some("before_seq"))],
+            "{before_seq}"
+        );
+    }
 }

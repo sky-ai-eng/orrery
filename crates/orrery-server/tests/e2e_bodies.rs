@@ -73,6 +73,13 @@ fn routes() -> Vec<Route> {
         },
         Route {
             method: "POST",
+            path: "/log/recent",
+            accepted: json!({ "page_size": 10 }),
+            required: &[],
+            mistyped: ("before_seq", json!("1")),
+        },
+        Route {
+            method: "POST",
             path: "/snapshots",
             accepted: json!({ "name": "before" }),
             required: &["name"],
