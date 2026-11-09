@@ -25,6 +25,7 @@ use orrery_world::{Actor, ActorKind, Repo, World, WorldError};
 
 mod checks;
 pub mod graphql;
+mod media;
 pub mod nodeid;
 pub mod oauth;
 mod orgs;
@@ -163,22 +164,29 @@ async fn create_org_repo(
     State(face): State<GithubFace>,
     UrlPath(org): UrlPath<String>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response<Body> {
-    let owner = match face.world.actor_by_login(&org) {
-        Ok(Some(a)) if a.kind == ActorKind::Org => a,
-        Ok(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(e) => return internal(e),
+    let owner = match resolve_org(&face, &org) {
+        Ok(org) => org,
+        Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "Repository") {
+        return refused;
+    }
     create_repo(face, owner, actor, &body).await
 }
 
 async fn create_user_repo(
     State(face): State<GithubFace>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response<Body> {
     if let Some(refused) = reads::refuse_integration(&actor) {
+        return refused;
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "Repository") {
         return refused;
     }
     let owner = actor.clone();
@@ -267,6 +275,16 @@ pub(crate) fn resolve_repo(
         Err(e) => return Err(Box::new(internal(e))),
     };
     Ok((repo, owner_actor))
+}
+
+/// Resolve `{org}` to the organization actor, or GitHub's 404 for a login that
+/// names no organization.
+pub(crate) fn resolve_org(face: &GithubFace, org: &str) -> Result<Actor, Box<Response<Body>>> {
+    match face.world.actor_by_login(org) {
+        Ok(Some(a)) if a.kind == ActorKind::Org => Ok(a),
+        Ok(_) => Err(Box::new(github_error(StatusCode::NOT_FOUND, "Not Found"))),
+        Err(e) => Err(Box::new(internal(e))),
+    }
 }
 
 /// A query string or an `application/x-www-form-urlencoded` body as its

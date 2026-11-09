@@ -12,7 +12,7 @@
 
 use axum::body::Body;
 use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
-use axum::http::{HeaderMap, Response, StatusCode, header};
+use axum::http::{HeaderMap, Response, StatusCode};
 use base64::Engine as _;
 use orrery_face_git::store;
 use orrery_world::{Actor, ActorKind, PullState};
@@ -24,8 +24,8 @@ use crate::render::{
     team_json, user_full_json,
 };
 use crate::{
-    GithubFace, github_error, header_str, internal, json_response, orrery_unsupported_field,
-    parse_form, resolve_repo, validation_invalid,
+    GithubFace, github_error, internal, json_response, media, orrery_unsupported_field, parse_form,
+    resolve_org, resolve_repo, validation_invalid,
 };
 
 /// GitHub's listing defaults: 30 per page, cap 100, silently clamped —
@@ -57,11 +57,15 @@ fn paginate<T>(items: Vec<T>, per_page: usize, page: usize) -> Vec<T> {
 pub(crate) async fn get_repo(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
+    headers: HeaderMap,
 ) -> Response<Body> {
     let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "Repository") {
+        return refused;
+    }
     json_response(StatusCode::OK, repo_json(&face, &repo, &owner_actor))
 }
 
@@ -75,6 +79,9 @@ pub(crate) async fn list_pulls(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
+        return refused;
+    }
     let query = query.unwrap_or_default();
     let state = match query_param(&query, "state").as_deref() {
         None | Some("open") => Some(PullState::Open),
@@ -119,17 +126,6 @@ pub(crate) async fn list_pulls(
         .expect("static response parts are valid")
 }
 
-/// The diff and patch media types, refused on `resource`: answering them
-/// with JSON would be a plausible wrong answer.
-// TODO(ORR-50): refuse every GitHub media type the face doesn't render, on
-// every REST route; the body renderings (`full+json` and the like) on pulls,
-// reviews, and comments, and raw contents, still get the plain JSON answer.
-fn refuse_diff_media(headers: &HeaderMap, resource: &str) -> Option<Response<Body>> {
-    let accept = header_str(headers, header::ACCEPT);
-    (accept.contains("diff") || accept.contains("patch"))
-        .then(|| orrery_unsupported_field(resource, "Accept"))
-}
-
 pub(crate) async fn get_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
@@ -144,7 +140,7 @@ pub(crate) async fn get_pull(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
-    if let Some(refused) = refuse_diff_media(&headers, "PullRequest") {
+    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
         return refused;
     }
     json_response(StatusCode::OK, pull_json(&face, &repo, &owner_actor, &pull))
@@ -154,6 +150,7 @@ pub(crate) async fn list_reviews(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
@@ -164,6 +161,9 @@ pub(crate) async fn list_reviews(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequestReview") {
+        return refused;
+    }
     let (per_page, page) = page_params(&query.unwrap_or_default());
     match face.world.list_reviews_for_pull(pull.id) {
         Ok(reviews) => {
@@ -183,22 +183,28 @@ pub(crate) async fn list_reviews(
 pub(crate) async fn list_review_comments(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
+    headers: HeaderMap,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
     };
     match pull_by_path_number(&face, &repo, &number) {
-        Ok(Some(_)) => json_response(StatusCode::OK, serde_json::json!([])),
-        Ok(None) => github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(resp) => *resp,
+        Ok(Some(_)) => {}
+        Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(resp) => return *resp,
     }
+    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequestReviewComment") {
+        return refused;
+    }
+    json_response(StatusCode::OK, serde_json::json!([]))
 }
 
 pub(crate) async fn list_issue_comments(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
@@ -209,6 +215,9 @@ pub(crate) async fn list_issue_comments(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "IssueComment") {
+        return refused;
+    }
     let (per_page, page) = page_params(&query.unwrap_or_default());
     match face.world.list_issue_comments_for_pull(pull.id) {
         Ok(comments) => {
@@ -226,6 +235,7 @@ pub(crate) async fn list_check_runs_for_ref(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, git_ref)): UrlPath<(String, String, String)>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
@@ -247,6 +257,9 @@ pub(crate) async fn list_check_runs_for_ref(
             Err(e) => return internal(e),
         }
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "CheckRun") {
+        return refused;
+    }
     let (per_page, page) = page_params(&query.unwrap_or_default());
     match face.world.list_check_runs_for_sha(repo.id, &sha) {
         Ok(runs) => {
@@ -268,6 +281,7 @@ pub(crate) async fn get_contents(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, path)): UrlPath<(String, String, String)>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
@@ -290,6 +304,10 @@ pub(crate) async fn get_contents(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(e) => return internal(e),
     };
+    // For a file, the object media type answers the object the JSON one does.
+    if let Some(refused) = media::refuse_unrendered_except(&headers, "Content", &["object"]) {
+        return refused;
+    }
     let base = face.base_url.trim_end_matches('/');
     let full_name = repo.full_name();
     let name = path.rsplit('/').next().unwrap_or(&path);
@@ -316,11 +334,15 @@ pub(crate) async fn list_branches(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "Branch") {
+        return refused;
+    }
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
     let refs = match store::list_refs(&bare) {
         Ok(r) => r,
@@ -376,6 +398,9 @@ pub(crate) async fn get_branch_ref(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(e) => return internal(e),
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "Ref") {
+        return refused;
+    }
     let api = format!(
         "{}/api/v3/repos/{}",
         face.base_url.trim_end_matches('/'),
@@ -470,9 +495,6 @@ pub(crate) async fn compare(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    if let Some(refused) = refuse_diff_media(&headers, "Comparison") {
-        return refused;
-    }
     let Some((base_rev, head_rev)) = basehead.split_once("...") else {
         return github_error(StatusCode::NOT_FOUND, "Not Found");
     };
@@ -484,6 +506,9 @@ pub(crate) async fn compare(
             Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
             Err(e) => return internal(e),
         }
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "Comparison") {
+        return refused;
     }
     match compare_json(&bare, &ends[0], &ends[1]) {
         Ok(json) => json_response(StatusCode::OK, json),
@@ -498,6 +523,7 @@ pub(crate) async fn list_pull_files(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
@@ -508,6 +534,9 @@ pub(crate) async fn list_pull_files(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
+        return refused;
+    }
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
     let base = if pull.state == PullState::Open {
         match store::rev_parse(&bare, &format!("refs/heads/{}", pull.base_ref)) {
@@ -533,8 +562,12 @@ pub(crate) async fn list_pull_files(
 pub(crate) async fn get_user(
     State(face): State<GithubFace>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
 ) -> Response<Body> {
     if let Some(refused) = refuse_integration(&actor) {
+        return refused;
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "User") {
         return refused;
     }
     json_response(StatusCode::OK, user_full_json(&face, &actor))
@@ -545,18 +578,21 @@ pub(crate) async fn get_user(
 pub(crate) async fn get_user_by_login(
     State(face): State<GithubFace>,
     UrlPath(username): UrlPath<String>,
+    headers: HeaderMap,
 ) -> Response<Body> {
     let (login, bot) = match username.strip_suffix("[bot]") {
         Some(slug) => (slug, true),
         None => (username.as_str(), false),
     };
-    match face.world.actor_by_login(login) {
-        Ok(Some(a)) if (a.kind == ActorKind::Bot) == bot && a.kind != ActorKind::System => {
-            json_response(StatusCode::OK, user_full_json(&face, &a))
-        }
-        Ok(_) => github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(e) => internal(e),
+    let account = match face.world.actor_by_login(login) {
+        Ok(Some(a)) if (a.kind == ActorKind::Bot) == bot && a.kind != ActorKind::System => a,
+        Ok(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => return internal(e),
+    };
+    if let Some(refused) = media::refuse_unrendered(&headers, "User") {
+        return refused;
     }
+    json_response(StatusCode::OK, user_full_json(&face, &account))
 }
 
 /// An organization by login. A user's login, or one nobody holds, is
@@ -564,14 +600,16 @@ pub(crate) async fn get_user_by_login(
 pub(crate) async fn get_org(
     State(face): State<GithubFace>,
     UrlPath(org): UrlPath<String>,
+    headers: HeaderMap,
 ) -> Response<Body> {
-    match face.world.actor_by_login(&org) {
-        Ok(Some(a)) if a.kind == ActorKind::Org => {
-            json_response(StatusCode::OK, org_full_json(&face, &a))
-        }
-        Ok(_) => github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(e) => internal(e),
+    let org = match resolve_org(&face, &org) {
+        Ok(org) => org,
+        Err(resp) => return *resp,
+    };
+    if let Some(refused) = media::refuse_unrendered(&headers, "Organization") {
+        return refused;
     }
+    json_response(StatusCode::OK, org_full_json(&face, &org))
 }
 
 /// A bot actor stands for a GitHub App installation, and GitHub refuses an
@@ -595,8 +633,12 @@ pub(crate) fn refuse_integration(actor: &Actor) -> Option<Response<Body>> {
 pub(crate) async fn get_user_emails(
     State(face): State<GithubFace>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
 ) -> Response<Body> {
     if let Some(refused) = refuse_integration(&actor) {
+        return refused;
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "UserEmail") {
         return refused;
     }
     match face.world.actor_emails(actor.id) {
@@ -626,12 +668,15 @@ pub(crate) async fn list_org_teams(
     State(face): State<GithubFace>,
     UrlPath(org): UrlPath<String>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response<Body> {
-    let org = match face.world.actor_by_login(&org) {
-        Ok(Some(a)) if a.kind == orrery_world::ActorKind::Org => a,
-        Ok(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(e) => return internal(e),
+    let org = match resolve_org(&face, &org) {
+        Ok(org) => org,
+        Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "Team") {
+        return refused;
+    }
     let teams = match face.world.list_org_teams(org.id, None) {
         Ok(t) => t,
         Err(e) => return internal(e),
@@ -650,8 +695,12 @@ pub(crate) async fn list_user_teams(
     State(face): State<GithubFace>,
     Extension(actor): Extension<Actor>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response<Body> {
     if let Some(refused) = refuse_integration(&actor) {
+        return refused;
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "Team") {
         return refused;
     }
     let teams = match face.world.list_teams_for_member(actor.id) {
@@ -673,8 +722,12 @@ pub(crate) async fn list_user_repos(
     State(face): State<GithubFace>,
     Extension(actor): Extension<Actor>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response<Body> {
     if let Some(refused) = refuse_integration(&actor) {
+        return refused;
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "Repository") {
         return refused;
     }
     let query = query.unwrap_or_default();

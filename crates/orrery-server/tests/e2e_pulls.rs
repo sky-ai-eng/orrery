@@ -515,11 +515,13 @@ fn not_mocked_field(answer: &(u16, serde_json::Value)) -> (u16, &str, &str) {
     )
 }
 
-/// A pull request's diff and patch media are refused by name, as compare's
-/// are, rather than answered with the JSON object. A pull that doesn't exist
-/// is still GitHub's 404.
+/// A GitHub media type asking for a rendering the face doesn't produce is
+/// refused by name, on reads and writes alike, rather than answered with JSON
+/// that lacks what it asked for, once the route has found what its path
+/// names. The JSON types, and the previews gh sends, get the answer they
+/// always did.
 #[tokio::test(flavor = "multi_thread")]
-async fn pull_diff_and_patch_media_are_not_mocked() {
+async fn unrendered_media_types_are_not_mocked() {
     let s = seed().await;
     face_ok(
         "POST",
@@ -529,9 +531,15 @@ async fn pull_diff_and_patch_media_are_not_mocked() {
     );
     let url = format!("{}/pulls/1", s.api);
     for accept in [
+        "application/vnd.github.full+json",
+        "application/vnd.github.v3.raw+json",
+        "application/vnd.github.text+json",
+        "application/vnd.github.html+json",
         "application/vnd.github.v3.diff",
         "application/vnd.github.v3.patch",
         "Application/VND.GitHub.DIFF",
+        // One unrendered type among JSON ones is enough.
+        "application/json, application/vnd.github.v3.full+json;q=0.9",
     ] {
         let answer = face_answer("GET", &url, &s.token, &[("accept", accept)], None);
         assert_eq!(
@@ -540,13 +548,59 @@ async fn pull_diff_and_patch_media_are_not_mocked() {
             "{accept}"
         );
     }
+
+    let plain = face_ok("GET", &url, &s.token, serde_json::json!(null));
+    assert_eq!(plain["head"]["sha"], s.feature_sha.as_str());
+    for accept in [
+        "application/vnd.github+json",
+        "application/vnd.github.v3+json",
+        "application/json",
+        "*/*",
+        "application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview",
+    ] {
+        let (status, pull) = face_answer("GET", &url, &s.token, &[("accept", accept)], None);
+        assert_eq!((status, &pull), (200, &plain), "{accept}");
+    }
+
+    // Something that doesn't exist is GitHub's 404, whatever the request
+    // accepts.
+    let full = [("accept", "application/vnd.github.full+json")];
     for missing in ["2", "abc"] {
+        let missing = format!("{}/pulls/{missing}", s.api);
+        let (status, body) = face_answer("GET", &missing, &s.token, &full, None);
+        assert_eq!((status, &body["message"]), (404, &"Not Found".into()));
+    }
+
+    // A write is refused before it lands.
+    let comments = format!("{}/issues/1/comments", s.api);
+    let answer = face_answer(
+        "POST",
+        &comments,
+        &s.bob_token,
+        &full,
+        Some(serde_json::json!({ "body": "ship it" })),
+    );
+    assert_eq!(not_mocked_field(&answer), (422, "Accept", "IssueComment"));
+    let html = [("accept", "application/vnd.github.html+json")];
+    let answer = face_answer("GET", &comments, &s.token, &html, None);
+    assert_eq!(not_mocked_field(&answer), (422, "Accept", "IssueComment"));
+    let listed = face_ok("GET", &comments, &s.token, serde_json::json!(null));
+    assert_eq!(listed, serde_json::json!([]));
+
+    // An organization write finds what its path names before it is refused,
+    // and is refused before it lands.
+    mint_actor(&s.inst.base, "acme", "org");
+    let base = &s.inst.base;
+    for missing in [
+        "/orgs/nope/memberships/bob",
+        "/orgs/acme/memberships/nobody",
+    ] {
         let (status, body) = face_answer(
-            "GET",
-            &format!("{}/pulls/{missing}", s.api),
+            "PUT",
+            &format!("{base}/api/v3{missing}"),
             &s.token,
-            &[("accept", "application/vnd.github.v3.diff")],
-            None,
+            &full,
+            Some(serde_json::json!({})),
         );
         assert_eq!(
             (status, &body["message"]),
@@ -554,16 +608,44 @@ async fn pull_diff_and_patch_media_are_not_mocked() {
             "{missing}"
         );
     }
-    let (status, pull) = face_answer(
-        "GET",
-        &url,
+    let answer = face_answer(
+        "PUT",
+        &format!("{base}/api/v3/orgs/acme/memberships/bob"),
         &s.token,
-        &[("accept", "application/vnd.github+json")],
-        None,
+        &full,
+        Some(serde_json::json!({})),
     );
-    assert_eq!(status, 200, "{pull}");
-    assert_eq!(pull["number"], 1);
-    assert_eq!(pull["head"]["sha"], s.feature_sha.as_str());
+    assert_eq!(not_mocked_field(&answer), (422, "Accept", "Membership"));
+    assert_eq!(s.inst.world.org_membership("acme", "bob").unwrap(), None);
+
+    // A file's raw bytes and its rendering are refused; the object media type
+    // answers the object the JSON one does.
+    let readme = format!("{}/contents/README.md", s.api);
+    for accept in [
+        "application/vnd.github.raw+json",
+        "application/vnd.github.v3.raw",
+        "application/vnd.github.html+json",
+    ] {
+        let answer = face_answer("GET", &readme, &s.token, &[("accept", accept)], None);
+        assert_eq!(
+            not_mocked_field(&answer),
+            (422, "Accept", "Content"),
+            "{accept}"
+        );
+    }
+    let file = face_ok("GET", &readme, &s.token, serde_json::json!(null));
+    let object = [("accept", "application/vnd.github.object+json")];
+    assert_eq!(
+        face_answer("GET", &readme, &s.token, &object, None),
+        (200, file)
+    );
+    // The object media type is a rendering of contents alone.
+    let answer = face_answer("GET", &url, &s.token, &object, None);
+    assert_eq!(not_mocked_field(&answer), (422, "Accept", "PullRequest"));
+
+    // A method the path doesn't serve is still the not-mocked 501.
+    let (status, body) = face_answer("PUT", &url, &s.token, &full, Some(serde_json::json!({})));
+    assert_eq!((status, &body["orrery"]["method"]), (501, &"PUT".into()));
 }
 
 /// Each not-mocked field refusal names the resource its route is about.

@@ -6,14 +6,14 @@ use std::collections::BTreeMap;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};
-use axum::http::{Response, StatusCode};
+use axum::http::{HeaderMap, Response, StatusCode};
 use orrery_face_git::store;
 use orrery_world::{Actor, NewPull, Pull, PullState, Repo, ReviewState, WorldError};
 
 use crate::render::{comment_json, label_json, pull_json, review_json};
 use crate::{
-    GithubFace, github_error, internal, json_response, orrery_unsupported_field, resolve_repo,
-    validation_custom, validation_invalid, validation_missing,
+    GithubFace, github_error, internal, json_response, media, orrery_unsupported_field,
+    resolve_repo, validation_custom, validation_invalid, validation_missing,
 };
 
 #[derive(serde::Deserialize)]
@@ -31,12 +31,16 @@ pub(crate) async fn create_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
     let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
+        return refused;
+    }
     let parsed: CreatePullBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
@@ -164,6 +168,7 @@ pub(crate) async fn patch_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
     let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
@@ -175,6 +180,9 @@ pub(crate) async fn patch_pull(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
+        return refused;
+    }
     let parsed: PatchPullBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
@@ -257,6 +265,7 @@ pub(crate) async fn merge_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
@@ -268,6 +277,9 @@ pub(crate) async fn merge_pull(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
+        return refused;
+    }
     let parsed: MergePullBody =
         match serde_json::from_slice(if body.is_empty() { b"{}" } else { &body }) {
             Ok(p) => p,
@@ -415,6 +427,7 @@ pub(crate) async fn create_review(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
@@ -426,6 +439,9 @@ pub(crate) async fn create_review(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequestReview") {
+        return refused;
+    }
     let parsed: CreateReviewBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
@@ -492,6 +508,7 @@ pub(crate) async fn create_comment(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
@@ -503,6 +520,9 @@ pub(crate) async fn create_comment(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "IssueComment") {
+        return refused;
+    }
     let parsed: CreateCommentBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
@@ -538,6 +558,7 @@ pub(crate) async fn add_labels(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
@@ -549,6 +570,9 @@ pub(crate) async fn add_labels(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "Label") {
+        return refused;
+    }
     let values = match serde_json::from_slice(&body) {
         Ok(AddLabelsBody::Wrapped { labels, rest }) => {
             let _ = rest;
@@ -581,6 +605,7 @@ pub(crate) async fn remove_label(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number, name)): UrlPath<(String, String, String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
 ) -> Response<Body> {
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
@@ -591,6 +616,9 @@ pub(crate) async fn remove_label(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "Label") {
+        return refused;
+    }
     match face.world.remove_pull_label(pull.id, actor.id, &name) {
         Ok(pull) => json_response(
             StatusCode::OK,
@@ -616,6 +644,7 @@ pub(crate) async fn request_reviewers(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
     let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
@@ -627,6 +656,9 @@ pub(crate) async fn request_reviewers(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
+        return refused;
+    }
     let parsed: ReviewersBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
@@ -671,6 +703,7 @@ pub(crate) async fn remove_review_requests(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
     let (repo, owner_actor) = match resolve_repo(&face, &owner, &repo_name) {
@@ -682,6 +715,9 @@ pub(crate) async fn remove_review_requests(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
+        return refused;
+    }
     let parsed: ReviewersBody = if body.iter().all(u8::is_ascii_whitespace) {
         ReviewersBody::default()
     } else {

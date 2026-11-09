@@ -5,13 +5,13 @@
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};
-use axum::http::{Response, StatusCode};
-use orrery_world::{Actor, OrgRole, TeamRole, WorldError};
+use axum::http::{HeaderMap, Response, StatusCode};
+use orrery_world::{Actor, ActorKind, OrgRole, Team, TeamRole, WorldError};
 
 use crate::render::{actor_json, org_json, team_full_json};
 use crate::{
-    GithubFace, github_error, internal, json_response, orrery_unsupported_field, validation_custom,
-    validation_invalid, validation_missing,
+    GithubFace, github_error, internal, json_response, media, orrery_unsupported_field,
+    resolve_org, validation_custom, validation_invalid, validation_missing,
 };
 
 /// Decode a body GitHub treats as optional: an empty one is `{}`.
@@ -27,6 +27,29 @@ fn optional_body<T: serde::de::DeserializeOwned + Default>(
             "Problems parsing JSON",
         ))
     })
+}
+
+// The writes below look up what their path names before writing, though the
+// world's write checks it again, so that a missing organization, team, or user
+// is GitHub's 404 before anything else about the request is judged.
+
+/// The team `{org}/{team_slug}` names, or GitHub's 404.
+fn resolve_team(face: &GithubFace, org: &str, slug: &str) -> Result<Team, Box<Response<Body>>> {
+    match face.world.team_by_slug(org, slug) {
+        Ok(Some(team)) => Ok(team),
+        Ok(None) => Err(Box::new(github_error(StatusCode::NOT_FOUND, "Not Found"))),
+        Err(e) => Err(Box::new(internal(e))),
+    }
+}
+
+/// GitHub's 404 unless `login` is a user, the only kind of account that can
+/// be a member.
+fn resolve_user(face: &GithubFace, login: &str) -> Result<(), Box<Response<Body>>> {
+    match face.world.actor_by_login(login) {
+        Ok(Some(a)) if a.kind == ActorKind::User => Ok(()),
+        Ok(_) => Err(Box::new(github_error(StatusCode::NOT_FOUND, "Not Found"))),
+        Err(e) => Err(Box::new(internal(e))),
+    }
 }
 
 fn no_content() -> Response<Body> {
@@ -47,8 +70,18 @@ pub(crate) async fn set_org_membership(
     State(face): State<GithubFace>,
     UrlPath((org, username)): UrlPath<(String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    if let Err(resp) = resolve_org(&face, &org) {
+        return *resp;
+    }
+    if let Err(resp) = resolve_user(&face, &username) {
+        return *resp;
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "Membership") {
+        return refused;
+    }
     let parsed: RoleBody = match optional_body(&body) {
         Ok(b) => b,
         Err(resp) => return *resp,
@@ -106,8 +139,15 @@ pub(crate) async fn create_team(
     State(face): State<GithubFace>,
     UrlPath(org): UrlPath<String>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    if let Err(resp) = resolve_org(&face, &org) {
+        return *resp;
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "Team") {
+        return refused;
+    }
     let parsed: CreateTeamBody = match optional_body(&body) {
         Ok(p) => p,
         Err(resp) => return *resp,
@@ -154,7 +194,14 @@ pub(crate) async fn delete_team(
     State(face): State<GithubFace>,
     UrlPath((org, slug)): UrlPath<(String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
 ) -> Response<Body> {
+    if let Err(resp) = resolve_team(&face, &org, &slug) {
+        return *resp;
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "Team") {
+        return refused;
+    }
     match face.world.delete_team(&org, &slug, actor.id) {
         Ok(()) => no_content(),
         Err(WorldError::NoSuchOrg(_) | WorldError::NoSuchTeam(_)) => {
@@ -170,8 +217,18 @@ pub(crate) async fn set_team_membership(
     State(face): State<GithubFace>,
     UrlPath((org, slug, username)): UrlPath<(String, String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    if let Err(resp) = resolve_team(&face, &org, &slug) {
+        return *resp;
+    }
+    if let Err(resp) = resolve_user(&face, &username) {
+        return *resp;
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "TeamMember") {
+        return refused;
+    }
     let parsed: RoleBody = match optional_body(&body) {
         Ok(b) => b,
         Err(resp) => return *resp,
@@ -222,7 +279,17 @@ pub(crate) async fn remove_team_membership(
     State(face): State<GithubFace>,
     UrlPath((org, slug, username)): UrlPath<(String, String, String)>,
     Extension(actor): Extension<Actor>,
+    headers: HeaderMap,
 ) -> Response<Body> {
+    if let Err(resp) = resolve_team(&face, &org, &slug) {
+        return *resp;
+    }
+    if let Err(resp) = resolve_user(&face, &username) {
+        return *resp;
+    }
+    if let Some(refused) = media::refuse_unrendered(&headers, "TeamMember") {
+        return refused;
+    }
     match face
         .world
         .remove_team_membership(&org, &slug, &username, actor.id)

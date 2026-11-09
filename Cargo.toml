@@ -53,6 +53,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = { version = "3", features = ["json"] }
 
 # dev
+syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"
 
 [workspace.lints.clippy]
