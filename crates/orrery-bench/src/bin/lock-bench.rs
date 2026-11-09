@@ -125,9 +125,10 @@ fn seeded(engine: &(String, PathBuf), payload: &Path, work: &Path) -> Result<Ser
 }
 
 /// A bare clone over HTTP. Its wall time, and its longest POST from the
-/// request going out to the response's status line: the server buffers each
-/// answer whole before sending it, so that is how long the clone's pack
-/// request held the repository's lock, to within a few milliseconds.
+/// request going out to the response's status line. The server buffers each
+/// answer whole before sending it, so that span is the pack request's time
+/// under the repository's lock, plus sending the request and any wait for a
+/// write to finish.
 fn clone(server: &Server, dest: &Path) -> Result<(Duration, Duration)> {
     if dest.exists() {
         std::fs::remove_dir_all(dest)?;
@@ -180,7 +181,9 @@ fn summary(sample: &[Duration]) -> String {
 
 fn hold(args: &Args, work: &Path) -> Result<()> {
     println!("== hold: one clone at a time");
-    println!("   pack request = the time a clone holds the repository's lock for read");
+    println!(
+        "   pack request = the time a clone holds the repository's lock for read, no writes running"
+    );
     let mut table = Table::new(&[
         "payload",
         "engine",
@@ -336,7 +339,7 @@ fn writers(args: &Args, work: &Path) -> Result<()> {
         "push busy",
         "open busy",
         "merge busy",
-        "clones' pack request",
+        "clones' pack request, with waits",
     ]);
     for name in &args.payloads {
         let payload = payload::build(work, name, args.seed)?;
@@ -419,20 +422,7 @@ fn big_push(args: &Args, work: &Path) -> Result<()> {
         "n",
     ]);
     let tiny = payload::build(work, "tiny", args.seed)?;
-    let big = work
-        .join("payloads")
-        .join(format!("push{}-seed{}", args.push_mb, args.seed));
-    if !big.join(".git").join("orrery-bench-built").exists() {
-        if big.exists() {
-            std::fs::remove_dir_all(&big)?;
-        }
-        std::fs::create_dir_all(&big)?;
-        git::run(&big, &["init", "-q", "-b", "main", "."])?;
-        payload::write_binary(&big, args.push_mb, &mut Rng::new(args.seed ^ 0xB16))?;
-        git::run(&big, &["add", "-A", "."])?;
-        git::run(&big, &["commit", "-q", "-m", "big"])?;
-        std::fs::write(big.join(".git").join("orrery-bench-built"), "")?;
-    }
+    let big = payload::build(work, &format!("bin{}", args.push_mb), args.seed)?;
     for engine in &args.engines {
         let server = seeded(engine, &tiny, work)?;
         let ls_remote = || -> Result<Duration> {

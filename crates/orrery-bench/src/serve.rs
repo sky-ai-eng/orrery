@@ -18,7 +18,7 @@ pub struct Server {
     pub url: String,
     /// `alice/bench`'s bare repository.
     pub bare: PathBuf,
-    child: Child,
+    _child: Reaped,
     _stdout: BufReader<ChildStdout>,
     _dir: tempfile::TempDir,
 }
@@ -40,27 +40,25 @@ impl Server {
             ),
         )?;
         let log = std::fs::File::create(dir.path().join("serve.log"))?;
-        let mut child = Command::new(binary)
-            .args(["serve", "--config"])
-            .arg(&config)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(log)
-            .spawn()
-            .with_context(|| format!("starting {}", binary.display()))?;
-        let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
+        let mut child = Reaped(
+            Command::new(binary)
+                .args(["serve", "--config"])
+                .arg(&config)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(log)
+                .spawn()
+                .with_context(|| format!("starting {}", binary.display()))?,
+        );
+        let mut stdout = BufReader::new(child.0.stdout.take().expect("stdout is piped"));
         let mut ready = String::new();
         stdout.read_line(&mut ready)?;
-        let ready: Value = match serde_json::from_str(&ready) {
-            Ok(v) => v,
-            Err(_) => {
-                let _ = child.kill();
-                bail!(
-                    "{} printed no ready line; its log is in {}",
-                    binary.display(),
-                    dir.path().display()
-                );
-            }
+        let Ok(ready) = serde_json::from_str::<Value>(&ready) else {
+            bail!(
+                "{} printed no ready line; its log is in {}",
+                binary.display(),
+                dir.path().display()
+            );
         };
         let base = ready["base_url"]
             .as_str()
@@ -72,7 +70,7 @@ impl Server {
             url: String::new(),
             bare: instance.join("world/repos/alice/bench.git"),
             base,
-            child,
+            _child: child,
             _stdout: stdout,
             _dir: dir,
         };
@@ -139,10 +137,14 @@ impl Server {
     }
 }
 
-impl Drop for Server {
+/// A served world's process, stopped when this is dropped, so a start that
+/// fails partway leaves no server running.
+struct Reaped(Child);
+
+impl Drop for Reaped {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 

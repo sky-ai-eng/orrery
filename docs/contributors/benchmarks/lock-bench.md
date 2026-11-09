@@ -1,6 +1,6 @@
 # Repository lock benchmark
 
-`lock-bench` (`crates/orrery-bench`) measures what the per-repository lock costs. Git reads hold it for read: a fetch's requests, and the GitHub face's reads of a repository's refs. Writes hold it for write: a push, a merge, and opening, closing, or reopening a pull request. So a write waits for the reads in progress, and a read waits for a write in progress (`spec/surface-git.md`, "What a fetch sees"). The bench measures both waits with real `git`, so a change to the lock, or to what runs under it, can be judged by numbers. Run it with `./scripts/lock-bench.sh`.
+`lock-bench` (`crates/orrery-bench`) measures what the per-repository lock costs. Git reads hold it for read: a fetch's requests, and the GitHub face's reads of a repository's refs. Writes hold it for write: a push, a merge, and opening or editing a pull request. So a write waits for the reads in progress, and a read waits for a write in progress (`spec/surface-git.md`, "What a fetch sees"). The bench measures both waits with real `git`, so a change to the lock, or to what runs under it, can be judged by numbers. Run it with `./scripts/lock-bench.sh`.
 
 It is not part of any workflow and nothing runs it automatically. Run it by hand when you change the lock, the git face's request handling, or the work a write does under the lock.
 
@@ -35,7 +35,13 @@ The scenarios:
 - **`fanout`**: `--parallel` clones started together. It reports the time until all of them have finished. If reads waited on each other, this would grow with the number of clones.
 - **`big-push`**: `git ls-remote` back to back while one push of `--push-mb` MB of random data runs. It reports the push's time and each `ls-remote`'s, which shows how long a read waits behind a large write.
 
-A clone's pack request time is read from `GIT_TRACE_CURL`. It runs from the moment the upload-pack POST goes out to the response's status line. The git face buffers `git http-backend`'s answer whole before sending it, so that span is the time the server spent under the lock, to within a few milliseconds.
+A clone's pack request time is read from `GIT_TRACE_CURL`. It runs from the moment the upload-pack POST goes out to the response's status line. The git face buffers `git http-backend`'s answer whole before sending it, so that span is:
+
+- the time the server spent under the lock;
+- the time spent sending the request, which is small for a clone; and
+- any wait for a write to finish.
+
+With no writes running, as in `hold`, it is the time the clone held the lock.
 
 ## Running it
 
@@ -79,7 +85,7 @@ git worktree add /tmp/orrery-main origin/main
 Times are milliseconds, given as p50 / p90 / max, each the nearest rank, except where a column says otherwise.
 
 - **`repo MB`**: the size of the served repository's object store after seeding.
-- **`pack request`**: the time a clone held the lock for read. A write that arrives while a clone runs waits for at most the rest of it. Fetch requests share the read side, so the longest one in progress is what a write waits for, not their sum.
+- **`pack request`**: in `hold`, the time a clone held the lock for read. A write that arrives while a clone runs waits for at most the rest of it. In `writers`, it also counts the clones' own waits behind writes, which is why that column says "with waits". Fetch requests share the read side, so the longest one in progress is what a write waits for, not their sum.
 - **`push busy`, `open busy`, `merge busy`**: the writes while clients clone. Compared with `push idle`, they show what the waits cost. The p50 barely moves, because most writes don't land during a pack request. The max is about one pack request.
 - **`all done`**: for `fanout`, the wall time until the last clone finished.
 - **`ls-remote during push`**: a read's wait behind a push. Only the server's `git-receive-pack` run holds the lock. The request body arrives before the lock is taken, so a client's own packing time doesn't count.
@@ -121,7 +127,9 @@ Push latency, p50 / p90 / max. An idle push's p50 is 45 to 55 ms in every engine
 | `src168+bin150` | 59 / 83 / 216 | 56 / 189 / 1365 | 55 / 938 / 1209 |
 
 - With the read-write lock, a push's p50 doesn't move.
-- Its max is about one pack request: 408 ms against pack requests of up to 448 ms on `src168`, and 1365 against 1467 on `src168+bin150`.
+- Its max is about one pack request plus the push itself:
+  - 408 ms on `src168`, whose pack requests take 314 to 334 ms alone (`hold`), and an idle push about 55 ms; and
+  - 1365 ms on `src168+bin150`, whose pack requests take 971 to 1290 ms alone.
 - Opening and merging a pull request wait the same way. On `this`, the worst was 44 ms to open (`src5`) and 160 ms to merge (`src168+bin150`).
 - `main`'s writes wait for nothing. Its tail is the machine's CPUs, shared with the clones.
 

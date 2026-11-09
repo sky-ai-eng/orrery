@@ -22,10 +22,9 @@ cd "$(dirname "$0")/.."
 
 cargo build --release -q -p orrery -p orrery-bench
 
-args=("$@")
 case " $* " in
   *" --engine"*) ;;
-  *) args=(--engine "this=$PWD/target/release/orrery" "${args[@]}") ;;
+  *) set -- --engine "this=$PWD/target/release/orrery" "$@" ;;
 esac
 
 OUT_DIR="$PWD/bench-results"
@@ -35,4 +34,4 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 OUT="$OUT_DIR/lock-bench-$STAMP.txt"
 
 echo "==> running lock bench (report: bench-results/lock-bench-$STAMP.txt)"
-./target/release/lock-bench --work "$PWD/target/lock-bench" "${args[@]}" | tee "$OUT"
+./target/release/lock-bench --work "$PWD/target/lock-bench" "$@" | tee "$OUT"
