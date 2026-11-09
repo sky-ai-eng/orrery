@@ -68,8 +68,7 @@ const MIGRATIONS: &[&str] = &[
     // 10: the log holds events (spec/events.md). `type` and `body` are an
     // event's type and the rest of its type's fields; `write_seq` and
     // `write_events` place it in its write; `door` and `app_id` say how the
-    // write reached the world. Entries appended before this version hold
-    // NULL in the new columns.
+    // write reached the world.
     "ALTER TABLE action_log RENAME COLUMN action TO type;
      ALTER TABLE action_log RENAME COLUMN details TO body;
      ALTER TABLE action_log ADD COLUMN write_seq INTEGER;
