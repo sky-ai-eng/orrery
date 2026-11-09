@@ -56,6 +56,22 @@ pub const SYSTEM_ACTOR_LOGIN: &str = "orrery";
 const DB_FILE: &str = "world.db";
 const REPOS_DIR: &str = "repos";
 
+/// A ref a push moved, as the git side observed it, for [`World::record_push`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefMove<'a> {
+    /// The ref's full name, as its `ref.update` entry records it.
+    pub name: &'a str,
+    /// The object id before the push, in the caller's spelling for a ref
+    /// that did not exist.
+    pub old: &'a str,
+    /// The object id after the push, in the caller's spelling for a ref the
+    /// push deleted.
+    pub new: &'a str,
+    /// The pulls, by number, that take `new` as their head: for a branch,
+    /// what [`World::pulls_to_sync`] named for this move.
+    pub repins: Vec<i64>,
+}
+
 pub struct World {
     root: PathBuf,
     conn: Mutex<Connection>,
@@ -440,15 +456,66 @@ impl World {
         Ok(())
     }
 
-    pub fn set_default_branch(&self, repo_id: i64, branch: &str) -> Result<()> {
+    /// Record a push the git side has taken: `pushed_at` moves to the current
+    /// clock, `default_branch` (when given) becomes the repository's default
+    /// branch, and each move in `moves`, in order, appends a `ref.update`
+    /// entry and re-pins the pulls it names. It is one transaction, so a
+    /// reader that sees any of the push's entries sees the repository and its
+    /// pulls as the push left them. A push that moved no ref records nothing.
+    ///
+    /// A named pull that is not open refuses the whole record: the caller
+    /// moved that pull's ref on the strength of it being open, and the world
+    /// no longer agrees.
+    pub fn record_push(
+        &self,
+        repo_id: i64,
+        actor_id: i64,
+        moves: &[RefMove<'_>],
+        default_branch: Option<&str>,
+    ) -> Result<()> {
+        if moves.is_empty() {
+            return Ok(());
+        }
         let conn = self.lock();
-        let n = conn.execute(
-            "UPDATE repos SET default_branch = ?1 WHERE id = ?2",
-            params![branch, repo_id],
+        let tx = conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "UPDATE repos
+             SET pushed_at_clock_unix = (SELECT clock_unix FROM world WHERE id = 1),
+                 default_branch = COALESCE(?2, default_branch)
+             WHERE id = ?1",
+            params![repo_id, default_branch],
         )?;
         if n == 0 {
             return Err(WorldError::NoSuchRepo(repo_id));
         }
+        let repo = pulls::repo_full_name(&tx, repo_id)?;
+        for m in moves {
+            self.log_locked(
+                &tx,
+                actor_id,
+                "ref.update",
+                &serde_json::json!({
+                    "repo": repo,
+                    "ref": m.name,
+                    "old": m.old,
+                    "new": m.new,
+                }),
+            )?;
+            for &number in &m.repins {
+                let n = tx.execute(
+                    "UPDATE pulls SET head_sha = ?1,
+                     updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+                     WHERE repo_id = ?2 AND number = ?3 AND state = 'open'",
+                    params![m.new, repo_id, number],
+                )?;
+                if n == 0 {
+                    return Err(WorldError::InvalidTransition(format!(
+                        "pull #{number} is not open"
+                    )));
+                }
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 

@@ -12,7 +12,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Extension, Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::{get, post};
-use orrery_world::{Actor, Repo, World};
+use orrery_world::{Actor, RefMove, Repo, World};
 
 pub mod cgi;
 pub mod store;
@@ -38,7 +38,9 @@ pub struct GitFace {
     world: Arc<World>,
     /// Serializes git-side writes per repo — receive-pack's before/after ref
     /// observation and the merge endpoint's check-then-move — so neither can
-    /// interleave with a concurrent write to the same repo.
+    /// interleave with a concurrent write to the same repo. Opening, closing,
+    /// and reopening a pull request take it too: which pulls are open on a
+    /// branch decides which pull refs a push moves before it is recorded.
     repo_locks: std::sync::Mutex<BTreeMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     /// World-wide write gate: every git-side operation holds it for read;
     /// snapshot create/restore hold it for write, so a copy of the world
@@ -109,9 +111,10 @@ impl GitFace {
     }
 
     /// Record a completed receive-pack: one `ref.update` log entry per changed
-    /// ref (sorted, so replay order is stable), a `pushed_at` bump, and
-    /// GitHub's first-push rule — the first branch pushed into an empty repo
-    /// becomes the default branch.
+    /// ref (sorted, so replay order is stable), GitHub's "synchronize" for the
+    /// pull requests on each pushed branch, a `pushed_at` bump, and GitHub's
+    /// first-push rule — the first branch pushed into an empty repo becomes
+    /// the default branch. The caller holds the repository's lock.
     fn observe_push(
         &self,
         repo: &Repo,
@@ -119,9 +122,9 @@ impl GitFace {
         before: &BTreeMap<String, String>,
         after: &BTreeMap<String, String>,
     ) -> Result<(), GitFaceError> {
-        let mut changed = false;
         let names: std::collections::BTreeSet<&String> =
             before.keys().chain(after.keys()).collect();
+        let mut moves = Vec::new();
         for name in names {
             let old = before
                 .get(name)
@@ -134,48 +137,52 @@ impl GitFace {
             if old == new {
                 continue;
             }
-            changed = true;
-            self.world.log_action(
-                actor.id,
-                "ref.update",
-                &serde_json::json!({
-                    "repo": format!("{}/{}", repo.owner_login, repo.name),
-                    "ref": name,
-                    "old": old,
-                    "new": new,
-                }),
-            )?;
             // A deleted branch leaves its pull requests pinned to the last
             // sha, as GitHub does.
-            if let Some(branch) = name.strip_prefix("refs/heads/")
-                && new != store::ZERO_OID
-            {
-                self.sync_pull_heads(repo, branch, new)?;
-            }
+            let repins = match name.strip_prefix("refs/heads/") {
+                Some(branch) if new != store::ZERO_OID => {
+                    self.world.pulls_to_sync(repo.id, branch, new)?
+                }
+                _ => Vec::new(),
+            };
+            moves.push(RefMove {
+                name,
+                old,
+                new,
+                repins,
+            });
         }
-        if !changed {
+        if moves.is_empty() {
             return Ok(());
         }
-        self.world.touch_pushed(repo.id)?;
 
         let had_branches = before.keys().any(|r| r.starts_with("refs/heads/"));
-        if !had_branches {
+        let adopted = if had_branches {
+            None
+        } else {
             let new_branches: Vec<&str> = after
                 .keys()
                 .filter_map(|r| r.strip_prefix("refs/heads/"))
                 .collect();
-            let adopted = ["main", "master"]
+            ["main", "master"]
                 .into_iter()
                 .find(|b| new_branches.contains(b))
-                .or(new_branches.first().copied());
-            if let Some(branch) = adopted
-                && branch != repo.default_branch
-            {
-                self.world.set_default_branch(repo.id, branch)?;
-                let bare = store::bare_dir(&self.world.repos_dir(), &repo.owner_login, &repo.name);
-                store::set_head_symref(&bare, branch)?;
+                .or(new_branches.first().copied())
+                .filter(|b| *b != repo.default_branch)
+        };
+        // Every ref the push moves is in place before the record commits, as
+        // receive-pack moved the pushed branches before this ran, so a reader
+        // that can see the push's entries also sees its refs.
+        let bare = store::bare_dir(&self.world.repos_dir(), &repo.owner_login, &repo.name);
+        if let Some(branch) = adopted {
+            store::set_head_symref(&bare, branch)?;
+        }
+        for m in &moves {
+            for &number in &m.repins {
+                self.pin_pull_ref(repo, number, m.new)?;
             }
         }
+        self.world.record_push(repo.id, actor.id, &moves, adopted)?;
         Ok(())
     }
 }

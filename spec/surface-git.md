@@ -34,11 +34,13 @@ Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CO
 
 ## What a push does
 
-`git-receive-pack` runs under a per-repository lock, and Orrery compares the repository's refs before and after it. For each ref that changed it appends one `ref.update` entry to the action log, attributed to the pushing actor, naming the ref and its old and new object ids. Then:
+`git-receive-pack` runs under a per-repository lock, and Orrery compares the repository's refs before and after it. For each ref that changed, in ref-name order, it appends one `ref.update` entry to the action log, attributed to the pushing actor, naming the ref and its old and new object ids. With them:
 
 - an open pull request whose head branch moved takes the new tip as its head, GitHub's `synchronize`, and its `refs/pull/{n}/head` moves with it; a deleted branch leaves its pull requests on their last head;
 - the repository's `pushed_at` moves to the world clock; and
-- the first push of a branch into an empty repository sets the default branch, as on GitHub.
+- the first push of a branch into an empty repository sets the default branch, and `HEAD` with it, as on GitHub.
+
+The entries and the state they describe land in one commit, after every ref the push moved is in place, so a reader that can see any of a push's entries sees the repository, its refs, and its pull requests as the push left them. Opening, closing, reopening, and merging a pull request take the same per-repository lock, so the pull requests a push re-pins are the ones open on its branch when it lands.
 
 A commit's author and committer dates come from the client that made it, not from Orrery. A script that commits sets them from the world clock first (`orrery env`, `usage.md`), or replaying it produces different commit ids.
 

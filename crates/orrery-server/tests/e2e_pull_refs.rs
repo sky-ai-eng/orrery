@@ -8,10 +8,11 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use common::{boot, face_ok, git, git_output, mint_actor};
 use orrery_face_git::store;
-use orrery_world::LogEntry;
+use orrery_world::{LogEntry, Signal};
 
 /// Commit `file` with `contents` on the current branch and return the sha.
 fn commit(src: &Path, clock: i64, file: &str, contents: &str) -> String {
@@ -234,4 +235,86 @@ async fn pull_head_refs_follow_the_head_and_refuse_pushes() {
         ["refs/pull/1/head", "refs/pull/2/head"]
     );
     assert_eq!(refs_from_log(&log, "alice/webapp"), refs);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_moves_its_refs_before_its_entries_can_be_read() {
+    let inst = boot().await;
+    let base = inst.base.clone();
+    let token = mint_actor(&base, "alice", "user");
+    let repo = face_ok(
+        "POST",
+        &format!("{base}/api/v3/user/repos"),
+        &token,
+        serde_json::json!({ "name": "webapp" }),
+    );
+    let authed_url = repo["clone_url"]
+        .as_str()
+        .unwrap()
+        .replace("http://", &format!("http://x-access-token:{token}@"));
+    let bare = store::bare_dir(&inst.world.repos_dir(), "alice", "webapp");
+
+    // A listener runs as each entry is appended, before any reader can see
+    // it, so what it reads from the repository is the earliest view a reader
+    // woken by the entry could have. It runs git with the world's lock held,
+    // which only slows this test, and it records what git answered rather
+    // than panicking there, which would poison the world's lock and hide the
+    // cause.
+    // At each entry: where HEAD resolves, and where `refs/pull/1/head` points.
+    type Refs = (
+        Result<Option<String>, String>,
+        Result<Option<String>, String>,
+    );
+    let seen: Arc<Mutex<Vec<Refs>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let watched = bare.clone();
+    inst.world.listen(move |signal| {
+        if signal == Signal::LogMayHaveGrown {
+            let read = |rev: &str| store::rev_parse(&watched, rev).map_err(|e| e.to_string());
+            let refs = (read("HEAD"), read(&store::pull_head_ref(1)));
+            if let Ok(mut seen) = sink.lock() {
+                seen.push(refs);
+            }
+        }
+    });
+    let during = |push: &dyn Fn()| {
+        seen.lock().unwrap().clear();
+        push();
+        std::mem::take(&mut *seen.lock().unwrap())
+    };
+
+    // A first push of `trunk`: HEAD names it, and the repository holds no
+    // `main`, so HEAD resolves only once it has moved.
+    let clock = inst.world.clock().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    git(&src, clock, &["init", "-b", "trunk", "."]);
+    let trunk = commit(&src, clock, "README.md", "# webapp\n");
+    let first = during(&|| {
+        git(&src, clock, &["push", &authed_url, "trunk"]);
+    });
+    assert!(!first.is_empty());
+    for (head, _) in &first {
+        assert_eq!(head, &Ok(Some(trunk.clone())), "{first:?}");
+    }
+
+    // A push to an open pull request's head branch: its ref has moved.
+    git(&src, clock, &["checkout", "-b", "feature"]);
+    commit(&src, clock, "feature.txt", "v1\n");
+    git(&src, clock, &["push", &authed_url, "feature"]);
+    face_ok(
+        "POST",
+        &format!("{base}/api/v3/repos/alice/webapp/pulls"),
+        &token,
+        serde_json::json!({ "title": "Add feature", "head": "feature", "base": "trunk" }),
+    );
+    let feature_v2 = commit(&src, clock, "feature.txt", "v2\n");
+    let sync = during(&|| {
+        git(&src, clock, &["push", &authed_url, "feature"]);
+    });
+    assert!(!sync.is_empty());
+    for (_, pull) in &sync {
+        assert_eq!(pull, &Ok(Some(feature_v2.clone())), "{sync:?}");
+    }
 }

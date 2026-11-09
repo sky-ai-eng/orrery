@@ -5,7 +5,7 @@
 
 use orrery_world::{
     ActorKind, CheckConclusion, CheckRunPatch, CheckStatus, DEFAULT_T0_UNIX, NewCheckRun, NewPull,
-    Pull, PullState, ReviewState, TimelineKind, World, WorldError, WorldSecret,
+    Pull, PullState, RefMove, ReviewState, TimelineKind, World, WorldError, WorldSecret,
 };
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -179,6 +179,54 @@ fn sync_pull_heads_repins_open_pulls_only() {
         f.w.sync_pull_heads(f.repo, "feature", SHA_C).unwrap(),
         vec![] as Vec<i64>
     );
+}
+
+#[test]
+fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
+    let f = fixture();
+    let closed = open_pull(&f, "feature", SHA_B);
+    f.w.close_pull(closed.id, f.alice).unwrap();
+    let open = open_pull(&f, "feature", SHA_B);
+    let elsewhere = open_pull(&f, "other", SHA_B);
+
+    // What a move of `feature` re-pins: its open pulls, and none already at
+    // the new sha.
+    assert_eq!(
+        f.w.pulls_to_sync(f.repo, "feature", SHA_C).unwrap(),
+        vec![open.number]
+    );
+    assert_eq!(
+        f.w.pulls_to_sync(f.repo, "feature", SHA_B).unwrap(),
+        vec![] as Vec<i64>
+    );
+
+    let moves = [RefMove {
+        name: "refs/heads/feature",
+        old: SHA_B,
+        new: SHA_C,
+        repins: vec![open.number],
+    }];
+    f.w.record_push(f.repo, f.alice, &moves, None).unwrap();
+    let head = |n| f.w.pull_by_number(f.repo, n).unwrap().unwrap().head_sha;
+    assert_eq!(head(open.number), SHA_C);
+    assert_eq!(head(closed.number), SHA_B);
+    assert_eq!(head(elsewhere.number), SHA_B);
+
+    // Naming a pull that is not open refuses the whole push: no entry, and
+    // no pull moves.
+    let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
+    let stale = [RefMove {
+        name: "refs/heads/feature",
+        old: SHA_C,
+        new: SHA_A,
+        repins: vec![open.number, closed.number],
+    }];
+    assert!(matches!(
+        f.w.record_push(f.repo, f.alice, &stale, None),
+        Err(WorldError::InvalidTransition(_))
+    ));
+    assert_eq!(head(open.number), SHA_C);
+    assert!(f.w.log_after(mark, 1000).unwrap().is_empty());
 }
 
 #[test]
