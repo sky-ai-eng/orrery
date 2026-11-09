@@ -33,11 +33,16 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/diff", post(diff))
 }
 
-// TODO(ORR-38): the name is checked only at write time, after the write gate
-// is taken, so any other fault in the body hides it.
+/// The name is checked with the rest of the body, before the gate is taken,
+/// so a bad one is refused without waiting on a push in flight.
 async fn create(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let name: Option<String> = fields.required("name");
+    if let Some(name) = &name
+        && let Err(e) = orrery_snapshot::validate_name(name)
+    {
+        fields.fault(Fault::invalid(e.to_string(), "name"));
+    }
     let name = match fields.finish(name) {
         Ok(n) => n,
         Err(resp) => return *resp,
@@ -363,5 +368,30 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["items"], serde_json::json!([]));
+    }
+
+    /// The test holds the gate exclusively, as a push does. A create with a
+    /// bad name is refused meanwhile, and one with a good name waits.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bad_snapshot_name_does_not_wait_on_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(dir.path());
+
+        let held = state.git.gate().write_owned().await;
+        let bad = tokio::spawn(create(
+            State(state.clone()),
+            Bytes::from_static(br#"{"name": "../x"}"#),
+        ));
+        let good = tokio::spawn(create(
+            State(state.clone()),
+            Bytes::from_static(br#"{"name": "before"}"#),
+        ));
+        settle().await;
+        assert!(bad.is_finished(), "the bad name waited on the gate");
+        assert!(!good.is_finished(), "the good name did not wait");
+        assert_eq!(bad.await.unwrap().status(), StatusCode::BAD_REQUEST);
+
+        drop(held);
+        assert_eq!(good.await.unwrap().status(), StatusCode::CREATED);
     }
 }
