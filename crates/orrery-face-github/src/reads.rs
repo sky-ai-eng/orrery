@@ -433,13 +433,12 @@ pub(crate) async fn get_branch_ref(
         .expect("static response parts are valid")
 }
 
-/// A commit-ish as a commit id, or `None` when it names nothing. A leading
-/// `-` is never a revision, so it cannot reach git as an option.
+/// A commit-ish as a commit id, or `None` when it names nothing.
 fn resolve_commit(
     bare: &std::path::Path,
     rev: &str,
 ) -> Result<Option<String>, orrery_face_git::GitFaceError> {
-    if rev.is_empty() || rev.starts_with('-') {
+    if rev.is_empty() {
         return Ok(None);
     }
     store::rev_parse(bare, &format!("{rev}^{{commit}}"))

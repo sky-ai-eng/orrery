@@ -133,10 +133,13 @@ fn create_oauth_app_returns_the_stored_row_with_derived_credentials() {
         ("x", "ftp://auth.test/cb", "callback_url"),
         ("x", "http:///cb", "callback_url"),
     ] {
-        match w.create_oauth_app(name, url, sys.id) {
-            Err(WorldError::InvalidOAuthApp { field: f, .. }) => assert_eq!(f, field),
-            other => panic!("({name:?}, {url:?}) gave {other:?}"),
-        }
+        // The message names the case, not the result: an app created by
+        // mistake would print its client secret.
+        let refused = matches!(
+            w.create_oauth_app(name, url, sys.id),
+            Err(WorldError::InvalidOAuthApp { field: f, .. }) if f == field
+        );
+        assert!(refused, "({name:?}, {url:?}) was not refused on {field}");
     }
 }
 
@@ -247,7 +250,10 @@ fn an_issued_client_secret_exchanges_beside_the_registration_secret() {
         ))
     );
     let wire = serde_json::to_string(&log).unwrap();
-    for secret in [&first, &second] {
-        assert!(!wire.contains(secret.as_str()), "the log leaks {secret}");
+    for (which, secret) in [("first", &first), ("second", &second)] {
+        assert!(
+            !wire.contains(secret.as_str()),
+            "the log leaks the {which} issued secret"
+        );
     }
 }
