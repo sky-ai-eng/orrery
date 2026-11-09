@@ -464,6 +464,97 @@ fn a_push_records_its_events_pushed_at_and_default_branch() {
 }
 
 #[test]
+fn the_log_puts_each_ref_at_its_last_ref_event() {
+    let (_dir, w) = fresh();
+    let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+    let dots = w
+        .create_repo(alice.id, "dots", None, true, "main", by(alice.id))
+        .unwrap();
+    let other = w
+        .create_repo(alice.id, "other", None, false, "main", by(alice.id))
+        .unwrap();
+    w.create_repo(alice.id, "empty", None, false, "main", by(alice.id))
+        .unwrap();
+    w.record_push(dots.id, by(alice.id), &first_push(), Some("trunk"))
+        .unwrap();
+    let mv = |name, old, new, change| RefMove {
+        name,
+        old,
+        new,
+        repins: Vec::new(),
+        change,
+        forced: false,
+        commits: Vec::new(),
+        commit_count: 0,
+    };
+    w.record_push(
+        dots.id,
+        by(alice.id),
+        &[
+            mv("refs/heads/trunk", SHA_A, SHA_B, RefChange::Moved),
+            mv("refs/tags/v1", SHA_B, ABSENT, RefChange::Deleted),
+        ],
+        None,
+    )
+    .unwrap();
+    w.record_push(
+        other.id,
+        by(alice.id),
+        &[mv("refs/heads/main", ABSENT, SHA_A, RefChange::Created)],
+        None,
+    )
+    .unwrap();
+
+    let refs = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(name, sha)| (name.to_string(), sha.to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        w.logged_refs().unwrap(),
+        [
+            (dots.id, refs(&[("refs/heads/trunk", SHA_B)])),
+            (other.id, refs(&[("refs/heads/main", SHA_A)])),
+        ]
+        .into()
+    );
+}
+
+/// A world written before its log held events logged each ref a push or a
+/// merge moved as `ref.update`. The v9 fixture's log creates and moves
+/// `main`, deletes `experiment` and `release`, and creates `experiment`
+/// again.
+#[test]
+fn the_log_of_a_migrated_world_puts_refs_where_its_older_entries_did() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("world");
+    std::fs::create_dir_all(&root).unwrap();
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v9.db");
+    std::fs::copy(fixture, root.join("world.db")).unwrap();
+    let w = World::open(&root).unwrap();
+    let webapp = w.repo_by_owner_name("acme", "webapp").unwrap().unwrap();
+    assert_eq!(
+        w.logged_refs().unwrap(),
+        [(
+            webapp.id,
+            [
+                (
+                    "refs/heads/experiment".to_string(),
+                    "2222222222222222222222222222222222222222".to_string()
+                ),
+                (
+                    "refs/heads/main".to_string(),
+                    "3333333333333333333333333333333333333333".to_string()
+                ),
+            ]
+            .into()
+        )]
+        .into()
+    );
+}
+
+#[test]
 fn a_reader_sees_all_of_a_push_or_none_of_it() {
     let (dir, w) = fresh();
     let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();

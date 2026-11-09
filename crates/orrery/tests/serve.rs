@@ -257,3 +257,103 @@ fn an_unknown_secret_choice_is_refused() {
         "no world was created"
     );
 }
+
+/// Run git in `cwd` with no operator config and fixed commit dates; returns
+/// its stdout.
+fn git(cwd: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", "alice")
+        .env("GIT_AUTHOR_EMAIL", "alice@orrery.invalid")
+        .env("GIT_COMMITTER_NAME", "alice")
+        .env("GIT_COMMITTER_EMAIL", "alice@orrery.invalid")
+        .env("GIT_AUTHOR_DATE", "@1577836800 +0000")
+        .env("GIT_COMMITTER_DATE", "@1577836800 +0000")
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// A branch moved and another created in the bare repository while the
+/// world is stopped, as a push cut off by its process dying leaves them, are
+/// put back when the world is next served. The next push of the branch is
+/// recorded moving it from where the log left it.
+#[test]
+fn start_up_puts_back_refs_the_log_does_not_describe() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(dir.path(), "", "listen = \"127.0.0.1:0\"\n");
+    let (served, ready) = serve(&config, &[]);
+    let token = common::mint(&ready.control, "alice");
+    common::call(
+        &ready.listen,
+        "POST",
+        "/api/v3/user/repos",
+        Some(&token),
+        r#"{"name":"webapp"}"#,
+        201,
+    );
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    git(&src, &["init", "-q", "-b", "main", "."]);
+    git(&src, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    let first = git(&src, &["rev-parse", "HEAD"]);
+    let remote = format!(
+        "http://x-access-token:{token}@{}/alice/webapp.git",
+        ready.listen
+    );
+    git(&src, &["push", "-q", &remote, "main"]);
+    drop(served);
+
+    let bare = dir.path().join("instance/world/repos/alice/webapp.git");
+    let tree = git(&bare, &["rev-parse", "main^{tree}"]);
+    let unlogged = git(
+        &bare,
+        &["commit-tree", &tree, "-p", &first, "-m", "unlogged"],
+    );
+    git(&bare, &["update-ref", "refs/heads/main", &unlogged]);
+    git(&bare, &["update-ref", "refs/heads/stray", &unlogged]);
+
+    let (mut served, ready) = serve(&config, &[]);
+    let refs = git(
+        &bare,
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    assert_eq!(refs, format!("refs/heads/main {first}"));
+
+    git(&src, &["commit", "-q", "--allow-empty", "-m", "second"]);
+    let second = git(&src, &["rev-parse", "HEAD"]);
+    let remote = format!(
+        "http://x-access-token:{token}@{}/alice/webapp.git",
+        ready.listen
+    );
+    git(&src, &["push", "-q", &remote, "main"]);
+    let log = common::call(
+        &ready.control,
+        "POST",
+        "/_orrery/log/list",
+        None,
+        r#"{"sort_key":"seq","sort_dir":"desc"}"#,
+        200,
+    );
+    let moved = log["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "ref:updated")
+        .unwrap_or_else(|| panic!("{log}"));
+    assert_eq!(moved["subject"]["name"], "refs/heads/main");
+    assert_eq!(moved["changes"]["sha"]["from"], first.as_str());
+    assert_eq!(moved["changes"]["sha"]["to"], second.as_str());
+
+    let (_, stderr) = served.stop();
+    assert!(stderr.contains("refs/heads/stray"), "{stderr}");
+}
