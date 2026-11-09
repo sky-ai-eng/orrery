@@ -635,12 +635,7 @@ fn unwind_merge(face: &GithubFace, repo: &Repo, bare: &Path, base: &RefMove<'_>,
         tracing::error!(error = %e, git_ref = base.name, "merge unwind left a ref moved");
     }
     for &number in pinned {
-        let restored = match face.world.pull_by_number(repo.id, number) {
-            Ok(Some(p)) => face.git.pin_pull_ref(repo, number, &p.head_sha),
-            Ok(None) => Ok(()),
-            Err(e) => Err(e.into()),
-        };
-        if let Err(e) = restored {
+        if let Err(e) = face.git.restore_pull_ref(repo, number) {
             tracing::error!(
                 error = %e,
                 git_ref = store::pull_head_ref(number),

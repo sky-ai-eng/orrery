@@ -502,6 +502,107 @@ async fn a_merge_that_fails_puts_its_refs_back() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_push_that_fails_puts_its_refs_back() {
+    let inst = boot().await;
+    let base = inst.base.clone();
+    let token = mint_actor(&base, "alice", "user");
+    let repo = face_ok(
+        "POST",
+        &format!("{base}/api/v3/user/repos"),
+        &token,
+        serde_json::json!({ "name": "webapp" }),
+    );
+    let authed_url = repo["clone_url"]
+        .as_str()
+        .unwrap()
+        .replace("http://", &format!("http://x-access-token:{token}@"));
+    let api = format!("{base}/api/v3/repos/alice/webapp");
+    let bare = store::bare_dir(&inst.world.repos_dir(), "alice", "webapp");
+    let head_sha = |n: i64| {
+        face_ok(
+            "GET",
+            &format!("{api}/pulls/{n}"),
+            &token,
+            serde_json::json!(null),
+        )["head"]["sha"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    // main, release, and stale at one commit, feature one ahead of them,
+    // with a pull request into main and one into release.
+    let clock = inst.world.clock().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    git(&src, clock, &["init", "-b", "main", "."]);
+    commit(&src, clock, "README.md", "# webapp\n");
+    git(&src, clock, &["branch", "release"]);
+    git(&src, clock, &["branch", "stale"]);
+    git(&src, clock, &["checkout", "-b", "feature"]);
+    let feature_v1 = commit(&src, clock, "feature.txt", "v1\n");
+    git(
+        &src,
+        clock,
+        &["push", &authed_url, "main", "release", "stale", "feature"],
+    );
+    for into in ["main", "release"] {
+        face_ok(
+            "POST",
+            &format!("{api}/pulls"),
+            &token,
+            serde_json::json!({ "title": format!("feature into {into}"), "head": "feature", "base": into }),
+        );
+    }
+
+    // One push moves feature, creates topic, and deletes stale. A stale lock
+    // on #2's ref makes git refuse to move it, once receive-pack has moved
+    // the branches and the push has moved #1's ref.
+    let feature_v2 = commit(&src, clock, "feature.txt", "v2\n");
+    git(&src, clock, &["branch", "topic"]);
+    let push = ["push", authed_url.as_str(), "feature", "topic", ":stale"];
+    let lock = bare.join(format!("{}.lock", store::pull_head_ref(2)));
+    std::fs::write(&lock, "").unwrap();
+    let before = store::list_refs(&bare).unwrap();
+    let mark = inst.world.log_after(0, 10_000).unwrap().last().unwrap().seq;
+    let failed = git_output(&src, clock, &push);
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(stderr.contains("500"), "{stderr}");
+
+    // No entry, and every ref back where it was.
+    assert!(inst.world.log_after(mark, 10_000).unwrap().is_empty());
+    assert_eq!(store::list_refs(&bare).unwrap(), before);
+    assert_eq!(head_sha(1), feature_v1);
+    assert_eq!(head_sha(2), feature_v1);
+
+    // A retry lands as if the failed push had not happened: its entries
+    // start from the refs the failed push found, so the log rebuilds the
+    // repository.
+    std::fs::remove_file(&lock).unwrap();
+    git(&src, clock, &push);
+    let refs = store::list_refs(&bare).unwrap();
+    for r in [
+        "refs/heads/feature".to_string(),
+        "refs/heads/topic".to_string(),
+        store::pull_head_ref(1),
+        store::pull_head_ref(2),
+    ] {
+        assert_eq!(refs.get(&r), Some(&feature_v2), "{r}");
+    }
+    assert!(!refs.contains_key("refs/heads/stale"));
+    assert_eq!(head_sha(2), feature_v2);
+    let log = inst.world.log_after(0, 10_000).unwrap();
+    let retried = log
+        .iter()
+        .find(|e| e.seq > mark && e.details["ref"] == "refs/heads/feature")
+        .unwrap();
+    assert_eq!(retried.details["old"], feature_v1.as_str());
+    assert_eq!(refs_from_log(&log, "alice/webapp"), refs);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_reopened_pull_takes_its_head_branchs_tip() {
     let inst = boot().await;
     let base = inst.base.clone();

@@ -42,18 +42,18 @@ Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CO
 
 The entries and the state they describe land in one commit, after every ref the push moved is in place, so a reader that can see any of a push's entries sees the repository, its refs, and its pull requests as the push left them. Opening, closing, reopening, and merging a pull request take the same per-repository lock, so the pull requests a push re-pins are the ones open on its branch when it lands.
 
+A push whose record fails moves back every ref it moved, appends nothing, and answers `500`: each branch it moved, created, or deleted returns to where it was, `HEAD` to the default branch if the push set it, and each pull request ref it re-pinned to the head the pull request still has. A retry of the push then finds the refs the failed push found, and lands and is recorded as if the failed push had not happened. A ref that cannot be moved back is logged.
+
 A commit's author and committer dates come from the client that made it, not from Orrery. A script that commits sets them from the world clock first (`orrery env`, `usage.md`), or replaying it produces different commit ids.
 
 ## What a fetch sees
 
-Every other git request, a fetch's ref advertisement and pack in particular, holds the same per-repository lock for read. A push, a merge, opening a pull request, and every edit of one (an edit can close, reopen, or retarget it) hold it for write. A fetch request therefore sees the repository as it was before a write or after the write's record commits, never in between: not a write's refs ahead of its entries, and not a merge commit that a merge whose record failed moves back.
+Every other git request, a fetch's ref advertisement and pack in particular, holds the same per-repository lock for read. A push, a merge, opening a pull request, and every edit of one (an edit can close, reopen, or retarget it) hold it for write. A fetch request therefore sees the repository as it was before a write or after the write's record commits, never in between: not a write's refs ahead of its entries, and not the refs that a push or merge whose record failed moves back.
 
 - Fetch requests to a repository don't wait on each other.
 - A write waits for the fetch requests already running, and a fetch request that arrives while a write runs or waits waits for it.
 - The lock is held while `git http-backend` runs, not while its answer is sent, since the face buffers the answer whole.
 - A push that has started runs to its end, holding the lock and recording what it moved, even when its client goes away.
-
-A push whose record fails is the exception: `git-receive-pack` has already moved its refs, nothing moves them back, and the push answers `500`, so its refs stay ahead of the log.
 
 A fetch is several requests (the ref advertisement, then the pack, and with protocol v2, `ls-refs` and `fetch` as separate POSTs), and a write can land between two of them. `uploadpack.allowAnySHA1InWant` is on, so a fetch that asks for a commit a ref has since moved off still gets it.
 
