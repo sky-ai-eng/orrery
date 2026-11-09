@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -58,6 +58,24 @@ const REPOS_DIR: &str = "repos";
 pub struct World {
     root: PathBuf,
     conn: Mutex<Connection>,
+    listeners: RwLock<Vec<Listener>>,
+}
+
+type Listener = Box<dyn Fn(Signal) + Send + Sync>;
+
+/// What a [`World`] tells the listeners registered with [`World::listen`].
+/// A signal says only that something may have changed: the change itself is
+/// read through the `World`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// An entry was appended to the action log. It may be inside a
+    /// transaction that has not committed yet, and that may roll back, so a
+    /// read that follows sees the entry once it commits, or nothing.
+    LogMayHaveGrown,
+    /// The world's state was replaced by a snapshot's, and its action log
+    /// with it. `newest_seq` is the newest `seq` in the log the world holds
+    /// now, or 0 for an empty one.
+    StateReplaced { newest_seq: i64 },
 }
 
 impl World {
@@ -116,7 +134,32 @@ impl World {
         Ok(World {
             root: root.to_path_buf(),
             conn: Mutex::new(conn),
+            listeners: RwLock::new(Vec::new()),
         })
+    }
+
+    /// Call `listener` with every [`Signal`] this world raises from now on.
+    ///
+    /// A listener is called on the thread making the change, with the
+    /// connection lock held, so every query waits for it to return. It must
+    /// not block, and it must not call this `World` or register another
+    /// listener: either would deadlock.
+    pub fn listen(&self, listener: impl Fn(Signal) + Send + Sync + 'static) {
+        self.listeners
+            .write()
+            .expect("listener list poisoned")
+            .push(Box::new(listener));
+    }
+
+    fn signal(&self, signal: Signal) {
+        for listener in self
+            .listeners
+            .read()
+            .expect("listener list poisoned")
+            .iter()
+        {
+            listener(signal);
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -202,7 +245,7 @@ impl World {
             params![token, actor.id, credentials::TokenOrigin::Actor(0), clock],
         )?;
         identity::insert_email(&conn, actor.id, &identity::default_email(&actor.login))?;
-        log_locked(
+        self.log_locked(
             &conn,
             actor.id,
             "actor.create",
@@ -253,7 +296,7 @@ impl World {
             ],
             |r| r.get(0),
         )?;
-        log_locked(
+        self.log_locked(
             &tx,
             by,
             "actor.token.issue",
@@ -332,7 +375,7 @@ impl World {
                 queries::row_to_repo,
             )
             .map_err(WorldError::from)?;
-        log_locked(
+        self.log_locked(
             &tx,
             created_by,
             "repo.create",
@@ -418,11 +461,52 @@ impl World {
         details: &serde_json::Value,
     ) -> Result<LogEntry> {
         let conn = self.lock();
-        log_locked(&conn, actor_id, action, details)
+        self.log_locked(&conn, actor_id, action, details)
+    }
+
+    /// Append to the action log through an already-held connection (or an
+    /// open transaction — the clock subselect and the insert see the same
+    /// state), and signal [`Signal::LogMayHaveGrown`].
+    pub(crate) fn log_locked(
+        &self,
+        conn: &Connection,
+        actor_id: i64,
+        action: &str,
+        details: &serde_json::Value,
+    ) -> Result<LogEntry> {
+        let entry = conn.query_row(
+            "INSERT INTO action_log (clock_unix, actor_id, action, details)
+             VALUES ((SELECT clock_unix FROM world WHERE id = 1), ?1, ?2, ?3)
+             RETURNING seq, clock_unix, actor_id, action, details",
+            params![actor_id, action, details.to_string()],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        )?;
+        self.signal(Signal::LogMayHaveGrown);
+        let login: String = conn.query_row(
+            "SELECT login FROM actors WHERE id = ?1",
+            params![entry.2],
+            |r| r.get(0),
+        )?;
+        Ok(LogEntry {
+            seq: entry.0,
+            clock_unix: entry.1,
+            actor_login: login,
+            action: entry.3,
+            details: serde_json::from_str(&entry.4).unwrap_or(serde_json::Value::Null),
+        })
     }
 
     /// Log entries with `seq > after_seq`, oldest first, at most `limit`.
-    /// `seq` is a total order by construction, so pagination is stable.
+    /// `seq` is a total order by construction, so pagination is stable. It is
+    /// not contiguous: a restore leaves a gap (see [`World::swap_state`]).
     pub fn log_after(&self, after_seq: i64, limit: usize) -> Result<Vec<LogEntry>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -459,13 +543,24 @@ impl World {
     /// held throughout, so no query can observe the closed state. If `f`
     /// fails, the reopen still runs against whatever `f` left behind; the
     /// reopen error (world unusable) outranks `f`'s.
+    ///
+    /// A `seq` is issued once per world, so a position a caller holds from
+    /// before the swap never names a different entry after it: the reopened
+    /// database's next `seq` is raised past every one this world issued
+    /// before. The log then has a gap where the discarded entries were.
+    /// Once that is done, [`Signal::StateReplaced`] is raised.
     pub fn swap_state(&self, f: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
         let mut guard = self.lock();
         checkpoint(&guard)?;
+        let issued = issued_seq(&guard)?;
         let old = std::mem::replace(&mut *guard, Connection::open_in_memory()?);
         drop(old);
         let swap_result = f();
         *guard = open_conn(&self.root)?;
+        raise_issued_seq(&guard, issued)?;
+        self.signal(Signal::StateReplaced {
+            newest_seq: queries::last_seq(&guard)?,
+        });
         swap_result?;
         Ok(())
     }
@@ -492,41 +587,33 @@ fn checkpoint(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Append to the action log through an already-held connection (or an open
-/// transaction — the clock subselect and the insert see the same state).
-pub(crate) fn log_locked(
-    conn: &Connection,
-    actor_id: i64,
-    action: &str,
-    details: &serde_json::Value,
-) -> Result<LogEntry> {
-    let entry = conn.query_row(
-        "INSERT INTO action_log (clock_unix, actor_id, action, details)
-         VALUES ((SELECT clock_unix FROM world WHERE id = 1), ?1, ?2, ?3)
-         RETURNING seq, clock_unix, actor_id, action, details",
-        params![actor_id, action, details.to_string()],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-            ))
-        },
+/// The largest `seq` this database has issued, kept by SQLite for an
+/// `AUTOINCREMENT` key. It outlives the entries it numbered, which `MAX(seq)`
+/// does not.
+fn issued_seq(conn: &Connection) -> Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'action_log'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+/// Make the next `seq` this database issues greater than `issued`.
+fn raise_issued_seq(conn: &Connection, issued: i64) -> Result<()> {
+    let raised = conn.execute(
+        "UPDATE sqlite_sequence SET seq = MAX(seq, ?1) WHERE name = 'action_log'",
+        params![issued],
     )?;
-    let login: String = conn.query_row(
-        "SELECT login FROM actors WHERE id = ?1",
-        params![entry.2],
-        |r| r.get(0),
-    )?;
-    Ok(LogEntry {
-        seq: entry.0,
-        clock_unix: entry.1,
-        actor_login: login,
-        action: entry.3,
-        details: serde_json::from_str(&entry.4).unwrap_or(serde_json::Value::Null),
-    })
+    if raised == 0 {
+        conn.execute(
+            "INSERT INTO sqlite_sequence (name, seq) VALUES ('action_log', ?1)",
+            params![issued],
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn constraint_violation(e: &rusqlite::Error) -> bool {

@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::credentials::{self, TokenOrigin};
 use crate::{
     Actor, ActorEmail, ActorKind, ListedActor, ListedOAuthApp, OAuthApp, OAuthToken, Result, World,
-    WorldError, constraint_violation, log_locked, queries,
+    WorldError, constraint_violation, queries,
 };
 
 /// How long an authorization code stays exchangeable: GitHub's ten minutes,
@@ -106,7 +106,7 @@ impl World {
             .collect::<Result<Vec<_>>>()?;
         // The point read's order: primary first, then by address (NOCASE).
         stored.sort_by_key(|e| (!e.primary, e.email.to_ascii_lowercase()));
-        log_locked(
+        self.log_locked(
             &tx,
             by,
             "actor.emails.set",
@@ -144,7 +144,7 @@ impl World {
             ],
             row_to_oauth_app,
         )?;
-        log_locked(
+        self.log_locked(
             &tx,
             by,
             "oauth_app.create",
@@ -190,7 +190,7 @@ impl World {
             ],
             |r| r.get(0),
         )?;
-        log_locked(
+        self.log_locked(
             &tx,
             by,
             "oauth_app.secret.issue",
@@ -278,7 +278,7 @@ impl World {
             ],
             |r| r.get(0),
         )?;
-        log_locked(
+        self.log_locked(
             &tx,
             actor.id,
             "oauth.authorize",
@@ -353,7 +353,7 @@ impl World {
             params![actor_id],
             queries::row_to_actor,
         )?;
-        log_locked(
+        self.log_locked(
             &tx,
             actor.id,
             "oauth.token",

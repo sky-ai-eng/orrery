@@ -14,7 +14,7 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, 
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
-use crate::{Result, SYSTEM_ACTOR_LOGIN, World, log_locked, queries};
+use crate::{Result, SYSTEM_ACTOR_LOGIN, World, queries};
 
 /// The key behind every credential a world derives.
 #[derive(Clone)]
@@ -230,7 +230,7 @@ impl World {
             params![SYSTEM_ACTOR_LOGIN],
             |r| r.get(0),
         )?;
-        log_locked(
+        self.log_locked(
             &tx,
             system,
             "world.rekey",

@@ -29,6 +29,7 @@ axum = "0.8"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 form_urlencoded = "1"
+futures-util = { version = "0.3", default-features = false }
 getrandom = "0.4"
 hex = "0.4"
 hmac = "0.12"
