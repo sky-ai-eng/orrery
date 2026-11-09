@@ -109,11 +109,46 @@ impl GitFace {
         self.gate.clone()
     }
 
+    /// Put back the refs a write moved when recording it failed, so the
+    /// repository agrees with the world, which holds no trace of the write.
+    /// Each ref in `refs`, as `(name, old, new)`, returns to `old` by
+    /// compare-and-swap, which deletes a ref the write created and recreates
+    /// one it deleted. The ref of each pull request in `pinned`, the ones the
+    /// write re-pinned, returns to the head the world still pins it at. A
+    /// retry of the write then starts from the refs the failed one found. It
+    /// is best effort: a ref that cannot be put back is logged, and the rest
+    /// are still put back. The caller holds the repository's lock for write.
+    pub fn move_back(&self, repo: &Repo, refs: &[(&str, &str, &str)], pinned: &[i64]) {
+        let bare = store::bare_dir(&self.world.repos_dir(), &repo.owner_login, &repo.name);
+        for &(name, old, new) in refs {
+            if let Err(e) = store::update_ref_cas(&bare, name, old, new) {
+                tracing::error!(error = %e, git_ref = name, "unwind left a ref moved");
+            }
+        }
+        for &number in pinned {
+            let restored = match self.world.pull_by_number(repo.id, number) {
+                Ok(Some(p)) => self.pin_pull_ref(repo, number, &p.head_sha),
+                Ok(None) => Ok(()),
+                Err(e) => Err(e.into()),
+            };
+            if let Err(e) = restored {
+                tracing::error!(
+                    error = %e,
+                    git_ref = store::pull_head_ref(number),
+                    "unwind left a ref moved"
+                );
+            }
+        }
+    }
+
     /// Record a completed receive-pack: one `ref.update` log entry per changed
     /// ref (sorted, so replay order is stable), GitHub's "synchronize" for the
     /// pull requests on each pushed branch, a `pushed_at` bump, and GitHub's
     /// first-push rule — the first branch pushed into an empty repo becomes
-    /// the default branch. The caller holds the repository's lock for write.
+    /// the default branch. Receive-pack has already moved the pushed refs, so
+    /// a step that fails here moves them back ([`GitFace::move_back`]), and
+    /// `HEAD` if the push set it, before the error is returned. The caller
+    /// holds the repository's lock for write.
     fn observe_push(
         &self,
         repo: &Repo,
@@ -123,35 +158,15 @@ impl GitFace {
     ) -> Result<(), GitFaceError> {
         let names: std::collections::BTreeSet<&String> =
             before.keys().chain(after.keys()).collect();
-        let mut moves = Vec::new();
-        for name in names {
-            let old = before
-                .get(name)
-                .map(String::as_str)
-                .unwrap_or(store::ZERO_OID);
-            let new = after
-                .get(name)
-                .map(String::as_str)
-                .unwrap_or(store::ZERO_OID);
-            if old == new {
-                continue;
-            }
-            // A deleted branch leaves its pull requests pinned to the last
-            // sha, as GitHub does.
-            let repins = match name.strip_prefix("refs/heads/") {
-                Some(branch) if new != store::ZERO_OID => {
-                    self.world.pulls_to_sync(repo.id, branch, new)?
-                }
-                _ => Vec::new(),
-            };
-            moves.push(RefMove {
-                name,
-                old,
-                new,
-                repins,
-            });
-        }
-        if moves.is_empty() {
+        let changed: Vec<(&str, &str, &str)> = names
+            .into_iter()
+            .filter_map(|name| {
+                let old = before.get(name).map_or(store::ZERO_OID, String::as_str);
+                let new = after.get(name).map_or(store::ZERO_OID, String::as_str);
+                (old != new).then_some((name.as_str(), old, new))
+            })
+            .collect();
+        if changed.is_empty() {
             return Ok(());
         }
 
@@ -169,19 +184,53 @@ impl GitFace {
                 .or(new_branches.first().copied())
                 .filter(|b| *b != repo.default_branch)
         };
-        // Every ref the push moves is in place before the record commits, as
-        // receive-pack moved the pushed branches before this ran, so a reader
-        // that can see the push's entries also sees its refs.
         let bare = store::bare_dir(&self.world.repos_dir(), &repo.owner_login, &repo.name);
-        if let Some(branch) = adopted {
-            store::set_head_symref(&bare, branch)?;
-        }
-        for m in &moves {
-            for &number in &m.repins {
-                self.pin_pull_ref(repo, number, m.new)?;
+        let mut head_set = false;
+        let mut pinned = Vec::new();
+        let mut record = || -> Result<(), GitFaceError> {
+            let mut moves = Vec::with_capacity(changed.len());
+            for &(name, old, new) in &changed {
+                // A deleted branch leaves its pull requests pinned to the last
+                // sha, as GitHub does.
+                let repins = match name.strip_prefix("refs/heads/") {
+                    Some(branch) if new != store::ZERO_OID => {
+                        self.world.pulls_to_sync(repo.id, branch, new)?
+                    }
+                    _ => Vec::new(),
+                };
+                moves.push(RefMove {
+                    name,
+                    old,
+                    new,
+                    repins,
+                });
             }
+            // Every ref the push moves is in place before the record commits,
+            // as receive-pack moved the pushed branches before this ran, so a
+            // reader that can see the push's entries also sees its refs.
+            if let Some(branch) = adopted {
+                store::set_head_symref(&bare, branch)?;
+                head_set = true;
+            }
+            for m in &moves {
+                for &number in &m.repins {
+                    self.pin_pull_ref(repo, number, m.new)?;
+                    pinned.push(number);
+                }
+            }
+            self.world.record_push(repo.id, actor.id, &moves, adopted)?;
+            Ok(())
+        };
+        if let Err(e) = record() {
+            self.move_back(repo, &changed, &pinned);
+            // Only the first-push rule moves `HEAD`, and its record moves the
+            // default branch with it, so `HEAD` was at the default branch the
+            // world still has.
+            if head_set && let Err(head) = store::set_head_symref(&bare, &repo.default_branch) {
+                tracing::error!(error = %head, git_ref = "HEAD", "unwind left a ref moved");
+            }
+            return Err(e);
         }
-        self.world.record_push(repo.id, actor.id, &moves, adopted)?;
         Ok(())
     }
 }
@@ -288,6 +337,8 @@ async fn receive_pack(
     match push.await {
         Ok(resp) => resp,
         Err(e) => {
+            // TODO(ORR-74): a push that panics after receive-pack moved refs
+            // leaves them moved, ahead of the log.
             tracing::error!(error = %e, "push task failed");
             plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
         }
@@ -366,6 +417,9 @@ async fn serve(
     let cgi_resp = match cgi::run_http_backend(&face.world.repos_dir(), req).await {
         Ok(r) => r,
         Err(e) => {
+            // TODO(ORR-74): receive-pack may have moved refs before http-backend
+            // failed, and they stay moved, ahead of the log; this arm and a
+            // push answered with a status other than 200 move nothing back.
             tracing::error!(error = %e, "git http-backend failed");
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
         }
@@ -375,12 +429,11 @@ async fn serve(
         && cgi_resp.status == 200
     {
         let pusher = actor.expect("pushes are refused without an actor above");
+        // Refs that can't be listed after receive-pack can't be moved back
+        // either: which ones it moved is unknown.
         let observed = store::list_refs(&bare)
             .and_then(|after| face.observe_push(&repo, pusher, &before, &after));
         if let Err(e) = observed {
-            // TODO(ORR-70): the refs receive-pack moved stay moved, ahead of the
-            // log, and a retry of the push finds nothing to move; move them back,
-            // as a merge whose record fails does.
             tracing::error!(error = %e, "push observation failed");
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
         }
@@ -723,5 +776,51 @@ mod tests {
                 && e.details["new"] == topic.as_str()),
             "{log:?}"
         );
+    }
+
+    /// The first push into a repository with no branches sets `HEAD`, and a
+    /// record that fails then puts `HEAD` back with the branch. git refuses
+    /// to delete a repository's current branch, so a repository with no
+    /// branches never had any and has no pull request whose ref could fail
+    /// to move; the record fails here because the world holds no row for the
+    /// repository the push names. The test moves the refs itself, as
+    /// receive-pack would have.
+    #[test]
+    fn a_first_push_that_fails_puts_head_back() {
+        let f = fixture();
+        let head = || {
+            let out = store::hermetic_git(&f.bare)
+                .args(["symbolic-ref", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        store::update_ref_cas(&f.bare, "refs/heads/main", store::ZERO_OID, &f.main).unwrap();
+        let before = store::list_refs(&f.bare).unwrap();
+        let mark = f.face.world.log_after(0, 100).unwrap().last().unwrap().seq;
+
+        store::update_ref(&f.bare, "refs/heads/topic", &f.main).unwrap();
+        let after = store::list_refs(&f.bare).unwrap();
+        let unrecorded = Repo {
+            id: f.repo.id + 1,
+            ..f.repo.clone()
+        };
+        assert!(
+            f.face
+                .observe_push(&unrecorded, &f.alice, &before, &after)
+                .is_err()
+        );
+        assert_eq!(store::list_refs(&f.bare).unwrap(), before);
+        assert_eq!(head(), "refs/heads/main");
+        assert!(f.face.world.log_after(mark, 100).unwrap().is_empty());
+
+        // The same push, recorded, sets `HEAD` and the default branch.
+        store::update_ref(&f.bare, "refs/heads/topic", &f.main).unwrap();
+        f.face
+            .observe_push(&f.repo, &f.alice, &before, &after)
+            .unwrap();
+        assert_eq!(head(), "refs/heads/topic");
+        let repo = f.face.world.repo_by_owner_name("alice", "webapp").unwrap();
+        assert_eq!(repo.unwrap().default_branch, "topic");
     }
 }
