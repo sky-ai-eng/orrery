@@ -1,8 +1,8 @@
 //! End-to-end for organization membership, teams and review requests:
 //! the authoring writes a scenario uses to build them, the REST reads a
 //! consumer's poller and settings make (spec/surface-github.md §1.1 and
-//! §1.2), and a consumer's GraphQL selections over teams, pending requests and
-//! request timeline items, using the consumer's query texts verbatim.
+//! §1.2), and a consumer's GraphQL selections over teams, pending requests,
+//! and request timeline items, using the consumer's query texts verbatim.
 
 mod common;
 

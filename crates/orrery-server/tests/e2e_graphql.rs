@@ -231,9 +231,10 @@ fn open_pr(s: &Seeded) -> serde_json::Value {
     )
 }
 
-/// The consumer's batch refresh: `nodes(ids:)` with the full fragment, exactly
-/// as the consumer composes it. One live PR with reviews, CI, and a comment;
-/// one deleted id and one junk id resolving to null entries.
+/// The consumer's batch refresh, `RefreshPRsWithChecks`: `nodes(ids:)`
+/// selecting the full fragment, with `rateLimit` beside it. One live PR with
+/// reviews, CI, and a comment; one deleted id and one junk id resolving to
+/// null entries.
 #[tokio::test(flavor = "multi_thread")]
 async fn refresh_full_fragment_round_trip() {
     let s = seed().await;

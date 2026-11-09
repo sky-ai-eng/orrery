@@ -48,7 +48,7 @@ Name it here too, but the marker is what tracks it.
 
 <!--
 Required. The commands you ran and what passed, then what the new tests cover
-in a line or two. Baseline (CLAUDE.md, "Build, lint, test"):
+in a line or two. Baseline, the checks CI runs (.github/workflows/):
   cargo fmt --all --check
   cargo clippy --workspace --all-targets -- -D warnings
   cargo test --workspace          # E2E tests run the real `git`; it must be on PATH
