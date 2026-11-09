@@ -125,6 +125,8 @@ impl GitFace {
     /// are still put back. The caller holds the repository's lock for write.
     pub fn move_back(&self, repo: &Repo, refs: &[(&str, &str, &str)], pinned: &[i64]) {
         let bare = store::bare_dir(&self.world.repos_dir(), &repo.owner_login, &repo.name);
+        // TODO(ORR-79): refs go back in name order, so a push that replaced
+        // `a` with `a/b` leaves `a` deleted until the world is next served.
         for &(name, old, new) in refs {
             if let Err(e) = store::update_ref_cas(&bare, name, old, new) {
                 tracing::error!(error = %e, git_ref = name, "unwind left a ref moved");

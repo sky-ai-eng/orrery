@@ -67,6 +67,9 @@ pub async fn run_http_backend(
         cmd.env("HTTP_GIT_PROTOCOL", gp);
     }
 
+    // TODO(ORR-78): this http-backend, and the receive-pack it starts,
+    // outlive an `orrery serve` stopped by a signal to its process alone, and
+    // can still move refs after it exits.
     let mut child = cmd.spawn()?;
     let mut stdin = child.stdin.take().expect("stdin piped");
     let body = req.body.to_vec();
