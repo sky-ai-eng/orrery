@@ -95,7 +95,36 @@ enum Command {
         #[command(flatten)]
         world: control::Address,
     },
+    /// Read a served world's log of events.
+    Log {
+        #[command(subcommand)]
+        command: LogCommand,
+    },
 }
+
+#[derive(Subcommand)]
+enum LogCommand {
+    /// Print each entry after `--after-seq` in a world's log, then each one as
+    /// it is appended, as one line of JSON: the stream of
+    /// `GET /_orrery/log/stream`.
+    ///
+    /// It never exits 0, and never reconnects. A snapshot restore ends it with
+    /// status 3, naming the restored log's newest seq. An error answer, a
+    /// connection that can't be made or drops, or 45 seconds with nothing
+    /// received ends it with status 1, naming the seq to resume after.
+    Follow {
+        /// Print the entries after this position: 0, or the `seq` of an entry
+        /// in the log.
+        #[arg(long)]
+        after_seq: u64,
+        #[command(flatten)]
+        world: control::Address,
+    },
+}
+
+/// How `orrery log follow` exits when a restore ends the stream, distinct
+/// from every failure's 1 and a usage error's 2.
+const RESTORED: u8 = 3;
 
 /// An instance is one config file plus one seed (spec/README.md rule 7).
 /// Strictly parsed: unknown keys are rejected, not ignored.
@@ -349,6 +378,16 @@ async fn main() -> anyhow::Result<ExitCode> {
         Command::Env { world } => {
             env(&world)?;
             Ok(ExitCode::SUCCESS)
+        }
+        Command::Log {
+            command: LogCommand::Follow { after_seq, world },
+        } => {
+            let restored = world.follow_log(after_seq, &mut std::io::stdout().lock())?;
+            eprintln!(
+                "a snapshot restore ended the stream; the restored log's newest seq is {}",
+                restored.newest_seq
+            );
+            Ok(ExitCode::from(RESTORED))
         }
     }
 }
