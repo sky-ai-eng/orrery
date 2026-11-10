@@ -189,7 +189,7 @@ A selection naming a field, type, or argument Orrery lacks fails the whole docum
 `databaseId` on `User`, `Bot`, `Team`, and `Organization` is the id REST gives the same account or team. `fullDatabaseId` is GitHub's `BigInt`, a string on the wire. A pull request's `body` is `""` when unset, as GitHub's non-null `String!`.
 
 - `mergeable` is REST's `mergeable` (§1.0) in GraphQL's terms, from the same decision: `MERGEABLE` for `true`, `CONFLICTING` for `false`, and `UNKNOWN` for null. GitHub answers `UNKNOWN` until its own test merge finishes; Orrery never needs to.
-- `additions`, `deletions`, and `changedFiles` come from the same diff as REST pull request files, and a rename counts once. `files` lists `{path, changeType}` in path order; `changeType` is `ADDED`, `DELETED`, `RENAMED`, `COPIED`, `MODIFIED`, or `CHANGED`, and there is no previous path, as on GitHub.
+- `additions`, `deletions`, and `changedFiles` come from the same diff as REST pull request files, and a rename counts once. So does a type change, which REST lists as two files. `files` lists `{path, changeType}` in path order; `changeType` is `ADDED`, `DELETED`, `RENAMED`, `COPIED`, `MODIFIED`, or `CHANGED`, and there is no previous path, as on GitHub.
 - `reviewRequests` lists pending requests, users then teams, each in request order. A request's `requestedReviewer` is a `User` or a `Team`.
 - `latestReviews` is each author's newest review. `reviews` takes `states`, and its `totalCount` counts the filtered set.
 - `commits(last:)` has one node, the head commit.
@@ -221,7 +221,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - One push that deletes several branches, or a branch that is the head of some pull requests and the base of others, handles the branches in ref-name order, and each branch's head pull requests before its base pull requests.
 - The message for a negative `first` or `last` on a GraphQL connection: "`first` on the `X` connection cannot be less than zero."
 - The fields `GET /meta` answers on a GitHub Enterprise Server 3.17, which are from GitHub's published description of that release's REST API, not from a server's answer.
-- How a type change counts toward a pull request diff's 300 files: Orrery counts it as the two files the files list lists.
+- How a type change counts toward a pull request diff's 300 files, and in GraphQL's `changedFiles` and `files`. Orrery counts it as the two files REST lists toward the 300, and as one `CHANGED` file in GraphQL.
 - The 20,000-line limit on a page of a pull request's files. It was observed on a compare, where it also leaves out every file after the one that crosses it, and the 1 MiB limit was observed on both. Whether a response holding exactly 20,000 lines keeps the file that reaches it.
 - Whether the patch-size and response limits count bytes or characters: every patch observed was ASCII. Orrery counts the bytes of the patch it serves, after replacing invalid UTF-8.
 - Limits on a diff past those observed. GitHub served a pull request's diff of 87,234 lines and 2.9 MB, and a compare's of 3,985 files, 1.16 million changed lines, and 49.6 MB.

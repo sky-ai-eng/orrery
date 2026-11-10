@@ -369,6 +369,7 @@ async fn the_diff_media_type_and_the_files_carry_one_diff() {
         "application/vnd.github.v3.patch, application/vnd.github.v3.diff",
         "application/vnd.github.v3.full+json, application/vnd.github.diff",
         "application/vnd.github.v3.diff+json",
+        "Application/VND.GitHub.V3.DIFF",
     ] {
         let (status, _, body) = s.read(&pull, accept);
         assert_eq!(
