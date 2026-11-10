@@ -7,8 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orrery_snapshot::{DiffSide, SnapshotError, diff};
 use orrery_world::{
-    ActorEmail, ActorKind, Attribution, DEFAULT_T0_UNIX, Door, EventBody, NewPull, OrgRole, Pull,
-    RefChange, RefMove, ReviewState, TeamRole, World, WorldError, WorldSecret, WorldView,
+    ActorEmail, ActorKind, Attribution, DEFAULT_T0_UNIX, Door, EventBody, LogOrder, NewPull,
+    OrgRole, Pull, RefChange, RefMove, ReviewState, TeamRole, World, WorldError, WorldSecret,
+    WorldView,
 };
 
 /// A write by `actor_id` as the REST face makes it.
@@ -274,6 +275,48 @@ fn a_diffs_shared_seq_is_the_newest_entry_both_logs_hold() {
             );
         }
     }
+}
+
+/// The log's total with no `after_seq`, after checking it against a count of
+/// the entries the log holds.
+fn log_total(w: &World) -> i64 {
+    let total = w.log_page(0, LogOrder::NewestFirst, None, 0).unwrap().1;
+    assert_eq!(
+        total,
+        w.log_count_after(0).unwrap(),
+        "the total is the log's"
+    );
+    total
+}
+
+#[test]
+fn a_restored_or_forked_world_reports_the_count_of_its_own_log() {
+    let inst = Instance::new();
+    let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
+    inst.snapshot("seed");
+    let seed = log_total(&inst.world);
+    inst.world.advance_clock(60, by(alice.id)).unwrap();
+    inst.world.create_actor("bob", ActorKind::User).unwrap();
+    assert_eq!(log_total(&inst.world), seed + 2);
+
+    // A restore brings back the snapshot's log, and its count with it, and
+    // the world counts on from there.
+    orrery_snapshot::restore(&inst.world, &inst.snapshots(), "seed").unwrap();
+    assert_eq!(log_total(&inst.world), seed);
+    inst.world.create_actor("carol", ActorKind::User).unwrap();
+    assert_eq!(log_total(&inst.world), seed + 1);
+
+    // A fork's log is the snapshot's and its own world:rekeyed, and each
+    // world counts only its own writes after it.
+    let dest = tempfile::tempdir().unwrap();
+    let forked_root =
+        orrery_snapshot::fork(&inst.snapshots(), "seed", dest.path(), &SECRET).unwrap();
+    let fork = World::open(&forked_root).unwrap();
+    assert_eq!(log_total(&fork), seed + 1);
+    fork.create_actor("dave", ActorKind::User).unwrap();
+    fork.create_actor("erin", ActorKind::User).unwrap();
+    assert_eq!(log_total(&fork), seed + 3);
+    assert_eq!(log_total(&inst.world), seed + 1);
 }
 
 #[test]

@@ -43,7 +43,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 
 ## How the rules are checked
 
-- **Completeness.** In a test build, every write reads every table before and after it, and fails if it stored a value under no field of an event about that object (`crates/orrery-world/src/audit.rs`). A column the schema gains fails every write that stores it until the audit lists it.
+- **Completeness.** In a test build, every write reads every table before and after it, and fails if it stored a value under no field of an event about that object (`crates/orrery-world/src/audit.rs`). A column the schema gains fails every write that stores it until the audit lists it. The world also stores how many entries its log holds, so that the whole log's count reads no entries; no event carries that number, because it is the log's own length, and the check is instead that every write leaves it equal to the number of entries the log holds.
 - **Shape.** In a test build, every event a write appends is checked against the schema as the log serves it.
 - **Determinism.** Replay tests re-execute each write's operation through the door it came through, and require the same events, consequences included, and the same world (rule 5).
 
