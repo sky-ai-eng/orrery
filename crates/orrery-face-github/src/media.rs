@@ -2,9 +2,10 @@
 //! GitHub picks a rendering from a parameter in its own media type:
 //! `application/vnd.github.v3.full+json` asks for `body_text` and
 //! `body_html` beside `body`, and `application/vnd.github.v3.diff` for the
-//! diff instead of the object. The face renders JSON, so a GitHub media type
-//! asking for anything else is refused by name rather than answered with JSON
-//! that lacks what it asked for (rule 1).
+//! diff instead of the object. The face renders JSON, and the diff on the
+//! routes that list it, so a GitHub media type asking for anything else is
+//! refused by name rather than answered with JSON that lacks what it asked
+//! for (rule 1).
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Response, header};
@@ -14,9 +15,10 @@ use crate::orrery_unsupported_field;
 /// The not-mocked refusal naming `Accept`, when it lists a GitHub media type
 /// asking for a rendering of `resource` other than JSON.
 ///
-/// Every REST handler calls this, or [`refuse_unrendered_except`], once, as
-/// a statement of its own, after it has found what its path names and before
-/// it reads its body or writes anything. That is GitHub's order: something
+/// Every REST handler calls this, [`refuse_unrendered_except`], or
+/// [`refuse_unrendered_unless_diff`] once, as a statement of its own, after
+/// it has found what its path names and before it reads its body or writes
+/// anything. That is GitHub's order: something
 /// that doesn't exist is a `404` whatever the request accepts, and a refused
 /// write must land nothing.
 pub(crate) fn refuse_unrendered(headers: &HeaderMap, resource: &str) -> Option<Response<Body>> {
@@ -33,20 +35,54 @@ pub(crate) fn refuse_unrendered_except(
     unrendered(headers, renders).then(|| orrery_unsupported_field(resource, "Accept"))
 }
 
+/// As [`refuse_unrendered`], for a route that also answers in the diff media
+/// type. GitHub answers the diff whenever `Accept` lists it, whatever it
+/// lists beside it, so a request that lists it is never refused.
+pub(crate) fn refuse_unrendered_unless_diff(
+    headers: &HeaderMap,
+    resource: &str,
+) -> Option<Response<Body>> {
+    if diff_media(headers).is_some() {
+        return None;
+    }
+    refuse_unrendered(headers, resource)
+}
+
+/// The first diff media type `Accept` lists, lowercased, which the answer
+/// names as its content type; `None` when it lists none.
+pub(crate) fn diff_media(headers: &HeaderMap) -> Option<String> {
+    listed(headers)
+        .into_iter()
+        .find_map(|(media, param)| (param == "diff").then_some(media))
+}
+
 /// Whether any media type `Accept` lists is a GitHub media type asking for a
 /// rendering that is neither JSON nor one of `renders`.
 fn unrendered(headers: &HeaderMap, renders: &[&str]) -> bool {
+    listed(headers)
+        .iter()
+        .any(|(_, param)| !param.is_empty() && !renders.contains(&param.as_str()))
+}
+
+/// Each GitHub media type `Accept` lists, lowercased and without its
+/// parameters, with the rendering it asks for.
+fn listed(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
         .get_all(header::ACCEPT)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .map(str::to_ascii_lowercase)
-        .any(|value| {
+        .flat_map(|value| {
             value
                 .split(',')
-                .filter_map(|range| rendering_param(range.split(';').next().unwrap_or("").trim()))
-                .any(|param| !param.is_empty() && !renders.contains(&param))
+                .filter_map(|range| {
+                    let media = range.split(';').next().unwrap_or("").trim();
+                    let param = rendering_param(media)?;
+                    Some((media.to_string(), param.to_string()))
+                })
+                .collect::<Vec<_>>()
         })
+        .collect()
 }
 
 /// The rendering a lowercased GitHub media type asks for: its parameter

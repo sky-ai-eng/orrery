@@ -146,7 +146,7 @@ pub(crate) async fn get_pull(
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(resp) => return *resp,
     };
-    if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
+    if let Some(refused) = media::refuse_unrendered_unless_diff(&headers, "PullRequest") {
         return refused;
     }
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
@@ -155,6 +155,9 @@ pub(crate) async fn get_pull(
         Err(e) => return internal(e),
     };
     drop(held);
+    if let Some(media) = media::diff_media(&headers) {
+        return pull_diff(&bare, &refs.diff_base(&pull), &pull.head_sha, &media);
+    }
     let verdict = match mergeability(&bare, &pull, &refs) {
         Ok(v) => v,
         Err(e) => return internal(e),
@@ -163,6 +166,42 @@ pub(crate) async fn get_pull(
         StatusCode::OK,
         full_pull_json(&face, &repo, &owner_actor, &pull, verdict),
     )
+}
+
+/// A pull request's diff in the diff media type, or GitHub's 406 when it
+/// changes more files than GitHub renders a pull request's diff for.
+fn pull_diff(bare: &std::path::Path, base: &str, head: &str, media: &str) -> Response<Body> {
+    match store::changed_files(bare, base, head) {
+        Ok(files) if files.len() > PULL_DIFF_FILE_CAP => {
+            return json_response(
+                StatusCode::NOT_ACCEPTABLE,
+                serde_json::json!({
+                    "message": format!(
+                        "Sorry, the diff exceeded the maximum number of files ({PULL_DIFF_FILE_CAP}). \
+                         Consider using 'List pull requests files' API or locally cloning the \
+                         repository instead."
+                    ),
+                    "errors": [{ "resource": "PullRequest", "field": "diff", "code": "too_large" }],
+                }),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => return internal(e),
+    }
+    diff_response(bare, base, head, media)
+}
+
+/// The diff of `base...head`, its content type the diff media type the
+/// request listed.
+fn diff_response(bare: &std::path::Path, base: &str, head: &str, media: &str) -> Response<Body> {
+    match store::diff(bare, base, head) {
+        Ok(diff) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", format!("{media}; charset=utf-8"))
+            .body(Body::from(diff))
+            .expect("static response parts are valid"),
+        Err(e) => internal(e),
+    }
 }
 
 pub(crate) async fn list_reviews(
@@ -404,16 +443,51 @@ pub(crate) async fn list_branches(
 }
 
 /// GitHub's own limits on a compare: it lists at most this many files and,
-/// unpaginated, this many commits, however large the range.
+/// unpaginated, this many commits, however large the range. Its files carry
+/// patches until they would hold more than this many lines, and from that
+/// file on carry neither a patch nor line counts.
 const COMPARE_FILE_CAP: usize = 300;
 const COMPARE_COMMIT_CAP: usize = 250;
+const COMPARE_PATCH_LINE_CAP: usize = 20_000;
 
-fn changed_file_json(file: &store::ChangedFile) -> serde_json::Value {
-    let mut json = serde_json::json!({ "filename": file.path, "status": file.status.rest() });
+/// The most files a pull request's diff media type renders; past it GitHub
+/// answers 406.
+const PULL_DIFF_FILE_CAP: usize = 300;
+
+/// The largest `patch` a changed file carries; a larger one is left out and
+/// the file keeps its line counts.
+const PATCH_BYTE_CAP: usize = 100 * 1024;
+
+/// A changed file as GitHub lists it. A file past a compare's line budget is
+/// not `counted`: its counts read zero and it has no patch.
+fn changed_file_json(diff: &store::FileDiff, counted: bool) -> serde_json::Value {
+    let file = &diff.file;
+    let (additions, deletions) = if counted {
+        (diff.additions, diff.deletions)
+    } else {
+        (0, 0)
+    };
+    let mut json = serde_json::json!({
+        "filename": file.path,
+        "status": file.status.rest(),
+        "additions": additions,
+        "deletions": deletions,
+        "changes": additions + deletions,
+    });
+    if counted && let Some(patch) = shown_patch(diff) {
+        json["patch"] = serde_json::Value::String(patch.to_string());
+    }
     if let Some(previous) = &file.previous {
         json["previous_filename"] = serde_json::Value::String(previous.clone());
     }
     json
+}
+
+/// The patch a changed file carries, unless it is too large to.
+fn shown_patch(diff: &store::FileDiff) -> Option<&str> {
+    diff.patch
+        .as_deref()
+        .filter(|patch| patch.len() <= PATCH_BYTE_CAP)
 }
 
 /// The tip of a branch, with the tag a conditional read keys on. The tag is
@@ -499,10 +573,21 @@ fn compare_json(
         (0, _) => "behind",
         _ => "diverged",
     };
-    let files: Vec<serde_json::Value> = store::changed_files(bare, base, head)?
+    let mut budget = COMPARE_PATCH_LINE_CAP;
+    let mut counted = true;
+    let files: Vec<serde_json::Value> = store::file_diffs(bare, base, head)?
         .iter()
         .take(COMPARE_FILE_CAP)
-        .map(changed_file_json)
+        .map(|diff| {
+            if counted && let Some(patch) = shown_patch(diff) {
+                let lines = patch.split('\n').count();
+                match budget.checked_sub(lines) {
+                    Some(left) => budget = left,
+                    None => counted = false,
+                }
+            }
+            changed_file_json(diff, counted)
+        })
         .collect();
     let commits: Vec<serde_json::Value> = store::commits_between(bare, base, head)?
         .iter()
@@ -555,8 +640,11 @@ pub(crate) async fn compare(
         }
     }
     drop(refs);
-    if let Some(refused) = media::refuse_unrendered(&headers, "Comparison") {
+    if let Some(refused) = media::refuse_unrendered_unless_diff(&headers, "Comparison") {
         return refused;
+    }
+    if let Some(media) = media::diff_media(&headers) {
+        return diff_response(&bare, &ends[0], &ends[1], &media);
     }
     match compare_json(&bare, &ends[0], &ends[1]) {
         Ok(json) => json_response(StatusCode::OK, json),
@@ -564,9 +652,8 @@ pub(crate) async fn compare(
     }
 }
 
-/// The files a pull request changes, paged. The base is the base branch's
-/// tip while the pull is open and the pinned base sha once it is terminal,
-/// as for the pull's diff totals.
+/// The files a pull request changes, paged, compared as the pull's diff is
+/// ([`MergeRefs::diff_base`]).
 pub(crate) async fn list_pull_files(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
@@ -592,24 +679,19 @@ pub(crate) async fn list_pull_files(
         return refused;
     }
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    let base = if pull.state == PullState::Open {
-        match store::rev_parse(&bare, &format!("refs/heads/{}", pull.base_ref)) {
-            Ok(Some(tip)) => tip,
-            Ok(None) => pull.base_sha.clone(),
-            Err(e) => return internal(e),
-        }
-    } else {
-        pull.base_sha.clone()
+    let base = match MergeRefs::read(&bare, &pull) {
+        Ok(tips) => tips.diff_base(&pull),
+        Err(e) => return internal(e),
     };
     drop(refs);
-    let files = match store::changed_files(&bare, &base, &pull.head_sha) {
+    let files = match store::file_diffs(&bare, &base, &pull.head_sha) {
         Ok(f) => f,
         Err(e) => return internal(e),
     };
     let (per_page, page) = page_params(&query.unwrap_or_default());
     let items: Vec<serde_json::Value> = paginate(files, per_page, page)
         .iter()
-        .map(changed_file_json)
+        .map(|diff| changed_file_json(diff, true))
         .collect();
     json_response(StatusCode::OK, serde_json::Value::Array(items))
 }

@@ -185,6 +185,17 @@ impl MergeRefs {
             head_tip: tip(&pull.head_ref)?,
         })
     }
+
+    /// The commit a pull request's diff compares its head against: the base
+    /// branch's tip while the pull is open, as GitHub recomputes against the
+    /// moving base, and the pinned base once it is closed or its base branch
+    /// is gone, so a closed pull's diff stays frozen, as GitHub's does.
+    pub(crate) fn diff_base(&self, pull: &Pull) -> String {
+        match &self.base_tip {
+            Some(tip) if pull.state == PullState::Open => tip.clone(),
+            _ => pull.base_sha.clone(),
+        }
+    }
 }
 
 /// The mergeability GitHub reports for a pull request, from the tips read
