@@ -55,6 +55,13 @@ pub struct GitFace {
     /// snapshot create/restore hold it for write, so a copy of the world
     /// directory never races an in-flight push or merge.
     gate: Arc<tokio::sync::RwLock<()>>,
+    /// Set by [`GitFace::stop`] when its grace period runs out: every
+    /// `git http-backend` still running, and any started after, is killed
+    /// together with the processes it started ([`cgi::run_http_backend`]).
+    kill: tokio::sync::watch::Sender<bool>,
+    /// The gate, held for write from the moment [`GitFace::stop`] returns, so
+    /// no git work starts again.
+    stopped: std::sync::Mutex<Option<tokio::sync::OwnedRwLockWriteGuard<()>>>,
 }
 
 impl GitFace {
@@ -63,7 +70,34 @@ impl GitFace {
             world,
             repo_locks: std::sync::Mutex::new(BTreeMap::new()),
             gate: Arc::new(tokio::sync::RwLock::new(())),
+            kill: tokio::sync::watch::Sender::new(false),
+            stopped: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Stop the face's git work for good, as the process serving it stops.
+    /// It waits for every git operation already running, a push whose client
+    /// has gone away included, since its task outlives the request, and
+    /// keeps new ones from starting. One still running after `grace` has its
+    /// `git http-backend` killed, with the receive-pack or upload-pack and
+    /// hooks it started, and fails as any git request whose `git
+    /// http-backend` fails does: a push moves back what it moved. Returns once
+    /// none is running, so no git process the face started outlives the
+    /// caller's exit.
+    pub async fn stop(&self, grace: std::time::Duration) {
+        let mut gate = std::pin::pin!(self.gate.clone().write_owned());
+        let held = match tokio::time::timeout(grace, &mut gate).await {
+            Ok(held) => held,
+            Err(_) => {
+                tracing::warn!(
+                    grace_secs = grace.as_secs_f64(),
+                    "git requests still running after the grace period; killing them"
+                );
+                self.kill.send_replace(true);
+                gate.await
+            }
+        };
+        *self.stopped.lock().expect("stopped mutex poisoned") = Some(held);
     }
 
     pub fn world(&self) -> &Arc<World> {
@@ -620,13 +654,14 @@ async fn serve(
         remote_user: caller.map(|c| c.actor.login.as_str()),
         body,
     };
-    let cgi_resp = match cgi::run_http_backend(&face.world.repos_dir(), req).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "git http-backend failed");
-            return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
-        }
-    };
+    let cgi_resp =
+        match cgi::run_http_backend(&face.world.repos_dir(), req, face.kill.subscribe()).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, "git http-backend failed");
+                return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
+            }
+        };
 
     // http-backend writes its whole header block, with no `Status` line,
     // before it starts receive-pack, and closes its output once it has, so a

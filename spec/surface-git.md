@@ -108,7 +108,14 @@ A ref that cannot be moved back is named, with its repository, and `orrery serve
 
 A snapshot is a quiesced copy, so restoring one needs none of this. `orrery fork --world` copies a stopped world's directory as it is, refs that disagree with its log included, so a fork is put right the first time it is served.
 
-Start-up assumes nothing else moves the world's refs while it runs. A second `orrery serve` of an instance that is already served fails to bind its listeners before it reaches this step, unless both listen on port 0, which nothing prevents. But a signal sent only to the `orrery serve` process leaves its `git http-backend` children running, and receive-pack can still move refs after it exits. Stop a world by signaling its process group, as Ctrl-C in a terminal does, and wait for the group to exit before serving the world again.
+Start-up assumes nothing else moves the world's refs while it runs. A second `orrery serve` of an instance that is already served fails to bind its listeners before it reaches this step, unless both listen on port 0, which nothing prevents. A world stopped by SIGTERM or SIGINT leaves no git process running behind it (`usage.md`, "Stopping a world"):
+
+- Each `git http-backend` runs in a process group of its own, which the receive-pack or upload-pack it starts, and their hooks, join. A signal to `orrery serve`'s process group, as Ctrl-C in a terminal sends, reaches none of its git processes.
+- On the signal, `orrery serve` waits for every git request it is serving, and for a push whose client has gone away, which runs on without it.
+- A request still running 5 seconds after the signal has its `git http-backend`'s process group killed with SIGKILL, and fails as any request does whose `git http-backend` fails: a push moves back the refs receive-pack moved (above). receive-pack killed while it holds a ref's lock leaves that ref moved and the lock file in place, and start-up puts both right.
+- Then it exits, once no git process it started is running.
+
+SIGKILL, and a crash, run none of this. The world's git processes keep running, outside its process group, and start-up can race one that is still moving refs. A supervisor that kills a world this way runs it where every process it starts is stopped with it, such as a cgroup or a container, or waits for those processes to exit before serving the world again.
 
 ## Not served
 

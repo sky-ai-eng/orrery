@@ -9,6 +9,7 @@ description = "The git face: bare-repo store, smart-HTTP via CGI to real `git ht
 
 [dependencies]
 axum.workspace = true
+libc.workspace = true
 orrery-world.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -260,11 +260,36 @@ struct Ready<'a> {
     control: String,
 }
 
-async fn run(listener: Listener, app: axum::Router) -> std::io::Result<()> {
+async fn run(
+    listener: Listener,
+    app: axum::Router,
+    stop: &orrery_server::Stop,
+) -> std::io::Result<()> {
     match listener {
-        Listener::Tcp(listener, _) => orrery_server::run(listener, app).await,
-        Listener::Unix(listener, _) => orrery_server::run(listener, app).await,
+        Listener::Tcp(listener, _) => orrery_server::run(listener, app, stop.requested()).await,
+        Listener::Unix(listener, _) => orrery_server::run(listener, app, stop.requested()).await,
     }
+}
+
+/// How long a stopping world gives the requests it is serving, and its git
+/// processes, to finish (spec/surface-git.md, "Starting a world"). Short of
+/// the ten seconds a container runtime commonly waits before it sends
+/// SIGKILL, which no process can handle.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Resolves with the name of the first SIGTERM or SIGINT the process gets.
+/// The handlers are installed when this is called, not when it is awaited.
+fn stop_signal() -> anyhow::Result<impl Future<Output = &'static str>> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut term = signal(SignalKind::terminate()).context("handling SIGTERM")?;
+    let mut int = signal(SignalKind::interrupt()).context("handling SIGINT")?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = int.recv() => "SIGINT",
+        }
+    })
 }
 
 #[tokio::main]
@@ -537,16 +562,46 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
             anonymous_git_reads: config.server.anonymous_git_reads.unwrap_or(true),
         },
     );
+    let stop = routers.stop();
+    // Installed before the ready line, so a caller that signals the world as
+    // soon as it has read the line stops it the same way as any later.
+    let signal = stop_signal()?;
     let mut stdout = std::io::stdout();
     writeln!(stdout, "{ready}")
         .and_then(|()| stdout.flush())
         .context("writing the ready line to stdout")?;
-    match control {
-        None => run(listener, routers.combined()).await?,
-        Some(control) => {
-            let (faces, control_plane) = routers.split();
-            tokio::try_join!(run(listener, faces), run(control, control_plane))?;
+    let serving = async {
+        match control {
+            None => run(listener, routers.combined(), &stop).await,
+            Some(control) => {
+                let (faces, control_plane) = routers.split();
+                tokio::try_join!(
+                    run(listener, faces, &stop),
+                    run(control, control_plane, &stop)
+                )
+                .map(|_| ())
+            }
         }
+    };
+    let mut serving = std::pin::pin!(serving);
+    let signal = tokio::select! {
+        served = &mut serving => return served.context("serving"),
+        signal = signal => signal,
+    };
+
+    tracing::info!(signal, grace_secs = STOP_GRACE.as_secs(), "orrery stopping");
+    // Both start now, so both end within the grace period, except that git
+    // killed at its end still moves back the pushes it cut off. A connection
+    // still open then is dropped as the process exits.
+    let (_, drained) = tokio::join!(
+        stop.stop(STOP_GRACE),
+        tokio::time::timeout(STOP_GRACE, &mut serving)
+    );
+    match drained {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!(error = %e, "a listener failed while stopping"),
+        Err(_) => tracing::warn!("connections still open after the grace period were dropped"),
     }
+    tracing::info!("orrery stopped");
     Ok(())
 }

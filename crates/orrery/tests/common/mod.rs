@@ -46,6 +46,33 @@ impl Served {
     }
 }
 
+impl Served {
+    /// Send the process `signal`, named as `kill` takes it, such as `TERM`.
+    pub fn signal(&self, signal: &str) {
+        let sent = Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(self.child.id().to_string())
+            .status()
+            .unwrap();
+        assert!(sent.success(), "kill -{signal} failed");
+    }
+
+    pub fn running(&mut self) -> bool {
+        self.child.try_wait().unwrap().is_none()
+    }
+
+    /// Wait up to `within` for the process to exit on its own; return its
+    /// status, what it wrote to stdout after the ready line, and all it wrote
+    /// to stderr.
+    pub fn exited(&mut self, within: Duration) -> (std::process::ExitStatus, String, String) {
+        wait_until(within, "orrery serve exiting", || !self.running());
+        let status = self.child.wait().unwrap();
+        let stdout = self.rest_of_stdout.take().unwrap().join().unwrap();
+        let stderr = self.stderr.take().unwrap().join().unwrap();
+        (status, stdout, stderr)
+    }
+}
+
 impl Drop for Served {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -218,4 +245,46 @@ pub fn orrery_json(cwd: &Path, args: &[&str]) -> (i32, serde_json::Value) {
         )
     });
     (out.status.code().unwrap(), parsed)
+}
+
+/// Run git in `cwd` with no operator config and fixed commit dates; returns
+/// its stdout.
+pub fn git(cwd: &Path, args: &[&str]) -> String {
+    let out = git_command(cwd, args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// The command [`git`] runs, for a caller that starts it and carries on.
+pub fn git_command(cwd: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", "alice")
+        .env("GIT_AUTHOR_EMAIL", "alice@orrery.invalid")
+        .env("GIT_COMMITTER_NAME", "alice")
+        .env("GIT_COMMITTER_EMAIL", "alice@orrery.invalid")
+        .env("GIT_AUTHOR_DATE", "@1577836800 +0000")
+        .env("GIT_COMMITTER_DATE", "@1577836800 +0000")
+        .args(args);
+    cmd
+}
+
+/// Check `done` every 50ms until it holds, for up to `within`, then fail
+/// naming `what`.
+pub fn wait_until(within: Duration, what: &str, mut done: impl FnMut() -> bool) {
+    let tick = Duration::from_millis(50);
+    for _ in 0..=within.as_millis() / tick.as_millis() {
+        if done() {
+            return;
+        }
+        std::thread::sleep(tick);
+    }
+    panic!("{what} did not happen within {within:?}");
 }

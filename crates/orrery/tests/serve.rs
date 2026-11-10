@@ -6,7 +6,7 @@ mod common;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
-use common::{Ready, Served, orrery_serve, request, serve, write_config};
+use common::{Ready, Served, git, orrery_serve, request, serve, write_config};
 
 #[test]
 fn split_listeners_serve_over_unix_sockets() {
@@ -273,31 +273,6 @@ fn an_unknown_secret_choice_is_refused() {
         !dir.path().join("instance").exists(),
         "no world was created"
     );
-}
-
-/// Run git in `cwd` with no operator config and fixed commit dates; returns
-/// its stdout.
-fn git(cwd: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .current_dir(cwd)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_AUTHOR_NAME", "alice")
-        .env("GIT_AUTHOR_EMAIL", "alice@orrery.invalid")
-        .env("GIT_COMMITTER_NAME", "alice")
-        .env("GIT_COMMITTER_EMAIL", "alice@orrery.invalid")
-        .env("GIT_AUTHOR_DATE", "@1577836800 +0000")
-        .env("GIT_COMMITTER_DATE", "@1577836800 +0000")
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
 /// A branch moved and another created in the bare repository while the
