@@ -111,7 +111,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `team_membership:deleted` | removing a member, and a consequence of a team's deletion | `object`, as it was | none |
 | `ssh_signing_key:created` | registering a signing key | `object` | none |
 | `ssh_signing_key:deleted` | deleting one | `object`, as it was | none |
-| `commit:verified` | a consequence of a push: a commit it brought in whose signature verifies (`surface-github.md` §1.9) | `object`: the account that signed it, the key, and when | |
+| `commit:verified` | a consequence of a push: a commit it brought in whose signature verifies (`surface-github.md` §1.10) | `object`: the account that signed it, the key, and when | |
 
 ### What a push records
 
@@ -124,7 +124,7 @@ A push's ref events come first, then what the moves did to pull requests (`surfa
 
 A pull request whose `updated_unix` moves without another change gets a `pull:updated` before its item.
 
-Last come the verdicts the push stores: a `commit:verified` for each commit the ref events list, each once, in the order they list them, whose signature is `valid` and that has no stored verdict yet (`surface-github.md` §1.9).
+Last come the verdicts the push stores: a `commit:verified` for each commit the ref events list, each once, in the order they list them, whose signature is `valid` and that has no stored verdict yet (`surface-github.md` §1.10).
 
 ### Ref events
 

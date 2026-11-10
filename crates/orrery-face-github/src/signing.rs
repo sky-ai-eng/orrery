@@ -1,5 +1,5 @@
 //! Commit signing on the REST face: an account's SSH signing keys, and a
-//! commit with the verdict on its signature (spec/surface-github.md §1.9).
+//! commit with the verdict on its signature (spec/surface-github.md §1.10).
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, RawQuery, State};

@@ -15,7 +15,12 @@
 mod search;
 mod types;
 
-use async_graphql::{EmptySubscription, Schema, Variables};
+use std::collections::BTreeSet;
+
+use async_graphql::parser::types::{
+    BaseType, DocumentOperations, ExecutableDocument, OperationDefinition, Type,
+};
+use async_graphql::{EmptySubscription, Name, Schema, Value, Variables};
 use axum::body::Body;
 use axum::http::{Response, StatusCode};
 use orrery_world::Caller;
@@ -46,9 +51,16 @@ pub async fn handle(schema: &GithubSchema, caller: Caller, body: &[u8]) -> Respo
     let Ok(req) = serde_json::from_slice::<HttpRequest>(body) else {
         return crate::github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON");
     };
+    let parsed = async_graphql::parser::parse_query(&req.query);
     let mut greq = async_graphql::Request::new(req.query)
         .data(caller.actor.clone())
         .data(caller);
+    // A document that doesn't parse is left for `execute` to parse again and
+    // answer with its own error.
+    if let Ok(mut doc) = parsed {
+        empty_defaults_of_unknown_list_types(schema, &mut doc);
+        greq.set_parsed_query(doc);
+    }
     if let Some(vars) = req.variables {
         greq = greq.variables(Variables::from_json(vars));
     }
@@ -62,6 +74,46 @@ pub async fn handle(schema: &GithubSchema, caller: Caller, body: &[u8]) -> Respo
     };
     mark_unmocked_errors(&mut json);
     crate::json_response(StatusCode::OK, json)
+}
+
+/// The executor's default-value check panics on a list-typed variable whose
+/// item type the schema lacks (it guards only a variable whose type is a bare
+/// name), which drops the connection instead of answering. Each such default
+/// becomes `[]`, which is valid for every list type, so the check has no item
+/// to look up, and every other rule still sees a variable with a default. The
+/// document then fails validation on the unknown type, as it does without the
+/// default, so it never executes and the replaced value is never read.
+///
+/// `names()` holds every type name and also every field, argument, and enum
+/// value name, so a name it lacks is certainly not a type; a default whose
+/// type is known is never touched.
+fn empty_defaults_of_unknown_list_types(schema: &GithubSchema, doc: &mut ExecutableDocument) {
+    let operations: Vec<&mut OperationDefinition> = match &mut doc.operations {
+        DocumentOperations::Single(op) => vec![&mut op.node],
+        DocumentOperations::Multiple(ops) => ops.values_mut().map(|op| &mut op.node).collect(),
+    };
+    let mut names: Option<BTreeSet<String>> = None;
+    for op in operations {
+        for def in &mut op.variable_definitions {
+            let def = &mut def.node;
+            let (BaseType::List(item), Some(default)) =
+                (&def.var_type.node.base, &mut def.default_value)
+            else {
+                continue;
+            };
+            let names = names.get_or_insert_with(|| schema.names().into_iter().collect());
+            if !names.contains(item_type_name(item).as_str()) {
+                default.node = Value::List(Vec::new());
+            }
+        }
+    }
+}
+
+fn item_type_name(ty: &Type) -> &Name {
+    match &ty.base {
+        BaseType::Named(name) => name,
+        BaseType::List(item) => item_type_name(item),
+    }
 }
 
 /// Errors that mean "this query needs schema Orrery doesn't have" get the

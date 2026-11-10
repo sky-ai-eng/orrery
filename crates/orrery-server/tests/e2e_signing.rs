@@ -1,4 +1,4 @@
-//! End-to-end for commit signing (spec/surface-github.md §1.9): signing keys
+//! End-to-end for commit signing (spec/surface-github.md §1.10): signing keys
 //! registered through the face, commits signed by real `git` with real
 //! `ssh-keygen`, and the verdict GitHub's commit read gives each one. Every
 //! test needs `ssh-keygen` on `PATH`, as a world that verifies does.

@@ -40,7 +40,7 @@ Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CO
 - a deleted branch closes the open pull requests on it, and a deleted head branch pushed back is recorded on the closed ones (below);
 - the repository's `pushed_at` moves to the world clock; and
 - the first push of a branch into an empty repository sets the default branch, and `HEAD` with it, as on GitHub.
-- each signed commit the push's ref events list has its verdict reached, and stored when it is `valid` (`surface-github.md` §1.9).
+- each signed commit the push's ref events list has its verdict reached, and stored when it is `valid` (`surface-github.md` §1.10).
 
 The events and the state they describe land in one commit, after every ref the push moved is in place, so a reader that can see any of a push's events sees the repository, its refs, and its pull requests as the push left them. Opening, closing, reopening, and merging a pull request take the same per-repository lock, so the pull requests a push re-pins are the ones open on its branch when it lands.
 

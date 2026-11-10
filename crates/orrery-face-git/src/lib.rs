@@ -302,7 +302,7 @@ impl GitFace {
 
 /// What each signed commit the moves list says about itself, in the order
 /// the moves list them, each commit once. These are the commits a push
-/// reaches a verdict for (spec/surface-github.md §1.9). An SSH signature is
+/// reaches a verdict for (spec/surface-github.md §1.10). An SSH signature is
 /// verified here, before the record's write, since that answer depends on
 /// the commit alone.
 fn signed_commits(

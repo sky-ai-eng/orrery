@@ -26,6 +26,7 @@ use orrery_world::{Actor, ActorKind, Attribution, Caller, Door, Repo, World, Wor
 mod checks;
 pub mod graphql;
 mod media;
+mod meta;
 pub mod nodeid;
 pub mod oauth;
 mod orgs;
@@ -47,6 +48,7 @@ pub struct GithubFace {
 
 pub fn router(face: GithubFace) -> Router {
     Router::new()
+        .route("/meta", get(meta::get_meta))
         .route("/orgs/{org}", get(reads::get_org))
         .route("/orgs/{org}/repos", post(create_org_repo))
         .route(

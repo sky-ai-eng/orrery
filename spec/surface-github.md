@@ -25,7 +25,7 @@ Routes answer with these shapes. Fields GitHub sends that are not listed are abs
 | Label | `name, color` (`ededed`, what GitHub gives a label created on first use), `default` (false), `description` (null). No `id`. |
 | Check run | `id, node_id, name, head_sha, status, conclusion, external_id, details_url, url, html_url, started_at, completed_at, output, check_suite` (null), `app` (`slug` and `name`, the bot's bare login) |
 | SSH signing key | `id, key` (its type and base64 blob, without a comment), `title, created_at` |
-| Commit | `sha, url, html_url, commit, parents`. `commit` is `url, author, committer, message, tree, verification`: `author` and `committer` are `name, email, date` as the commit object holds them, `message` is the commit's without its final newlines, `tree` is `sha, url`, and `verification` is `verified, reason, signature, payload, verified_at` (§1.9). `parents` is `[{sha, url, html_url}]`. `files`, `stats`, and the accounts GitHub matches to the author and committer (the top-level `author` and `committer`) are absent. |
+| Commit | `sha, url, html_url, commit, parents`. `commit` is `url, author, committer, message, tree, verification`: `author` and `committer` are `name, email, date` as the commit object holds them, `message` is the commit's without its final newlines, `tree` is `sha, url`, and `verification` is `verified, reason, signature, payload, verified_at` (§1.10). `parents` is `[{sha, url, html_url}]`. `files`, `stats`, and the accounts GitHub matches to the author and committer (the top-level `author` and `committer`) are absent. |
 
 A pull request's `labels` are ordered by name, ignoring case, and its `requested_reviewers` and `requested_teams` are in request order. Its `head.repo` and `base.repo` are always the same repository.
 
@@ -127,7 +127,15 @@ Only a bot creates or updates check runs; any other actor gets a `403` naming th
 | `GET /repos/{o}/{r}/compare/{base}...{head}` | `{status, ahead_by, behind_by, total_commits, commits, files}`. Each end is anything `git rev-parse` resolves to a commit (a sha, a branch, a tag, a ref); `owner:branch`, the two-dot form, and an end that doesn't resolve are `404`. `status` is `identical`, `ahead`, `behind`, or `diverged`. `commits` is `[{sha, parents: [{sha}]}]` oldest first, at most 250; `files` is as on pull request files, renames detected, in path order, at most 300. |
 | `GET /repos/{o}/{r}/contents/{path}` | A file at `ref` (default `HEAD`): `{type: "file", encoding: "base64", name, path, sha, size, content, url, html_url, download_url: null}`. `content` is not line-wrapped. `application/vnd.github.object` answers the same object. A directory, a missing file, or an empty repository is `404`. |
 
-### 1.9 Commit signing
+### 1.9 Meta
+
+| Route | Behavior |
+| --- | --- |
+| `GET /meta` | `{verifiable_password_authentication: false, installed_version: "3.17.0"}`. No actor has a password to verify (rule 12). GitHub's description of 3.17 also lists `packages` and `domains`, the addresses of services Orrery does not run, so both are absent. |
+
+Clients read `installed_version` to decide which requests to send, so Orrery reports the release whose requests it serves. 3.17 is the first release without classic projects, which Orrery does not have, and the last before advanced issue search, whose syntax (parentheses and `OR`) the search in §3.2 does not parse. gh 2.89, for one, asks for a pull request's classic project cards below 3.17, and sends advanced search syntax from 3.18.
+
+### 1.10 Commit signing
 
 An account signs commits with an SSH key it registers as a signing key, and a commit read answers GitHub's verdict on its signature.
 
@@ -237,6 +245,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - GitHub storing a passing verdict at push and reaching a failing one again on every read.
 - A signing key one account holds is refused to every other account. The messages for a key already in use and for one that is not a key, and a `title` left out reading null.
 - `GET …/commits/{ref}` for a `ref` that names no commit is `422` "No commit found for SHA: {ref}".
+- The fields `GET /meta` answers on a GitHub Enterprise Server 3.17, which are from GitHub's published description of that release's REST API, not from a server's answer.
 
 **Deliberate differences:**
 
@@ -256,6 +265,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - A merge commit Orrery makes is unsigned, so it reads `unsigned`. GitHub signs the merges it makes with its own key, and they read `valid`.
 - Orrery parses no PGP signature, so a malformed one reads `unknown_key` where GitHub answers `malformed_signature`.
 - A verdict a read reaches as `valid` has a null `verified_at`. GitHub stores the verdict then.
+- `GET /meta` needs a token, as every REST route does, where github.com answers it without one (`grammar.md`).
 
 ## 5. Not served
 
