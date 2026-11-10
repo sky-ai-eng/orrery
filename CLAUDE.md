@@ -9,7 +9,7 @@ Guidance for Claude Code in this repository. Orrery is a deterministic mock of t
 ```bash
 cargo build --workspace
 cargo clippy --workspace --all-targets   # deny-level determinism tripwires live in clippy.toml
-cargo test --workspace                   # E2E tests exec the real `git` binary; git must be on PATH
+cargo test --workspace                   # E2E tests exec the real `git` binary, and the signing tests `ssh-keygen`; both must be on PATH
 cargo fmt --all
 ./scripts/license-check.sh               # the dependency license gate CI and every release run
 ```

@@ -354,7 +354,8 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
         commits: Vec::new(),
         commit_count: 0,
     }];
-    f.w.record_push(f.repo, by(f.alice), &moves, None).unwrap();
+    f.w.record_push(f.repo, by(f.alice), &moves, None, &[])
+        .unwrap();
     let head = |n| f.w.pull_by_number(f.repo, n).unwrap().unwrap().head_sha;
     assert_eq!(head(open.number), SHA_C);
     let repinned = f.w.pull_by_number(f.repo, open.number).unwrap().unwrap();
@@ -376,7 +377,7 @@ fn a_push_repins_the_pulls_it_names_and_only_open_ones() {
         commit_count: 0,
     }];
     assert!(matches!(
-        f.w.record_push(f.repo, by(f.alice), &stale, None),
+        f.w.record_push(f.repo, by(f.alice), &stale, None, &[]),
         Err(WorldError::InvalidTransition(_))
     ));
     assert_eq!(head(open.number), SHA_C);
@@ -400,7 +401,8 @@ fn a_base_move_stands_until_the_head_or_base_is_pinned_again() {
             commits: Vec::new(),
             commit_count: 0,
         }];
-        f.w.record_push(f.repo, by(f.alice), &moves, None).unwrap();
+        f.w.record_push(f.repo, by(f.alice), &moves, None, &[])
+            .unwrap();
     };
     assert!(!moved());
 

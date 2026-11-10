@@ -13,9 +13,9 @@
 use std::path::Path;
 
 use orrery_world::{
-    ActorEmail, ActorKind, Attribution, CheckConclusion, CheckRunPatch, CheckStatus,
-    DEFAULT_T0_UNIX, Door, NewCheckRun, NewPull, OrgRole, RefChange, RefMove, ReviewState,
-    SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, TeamRole, World, WorldSecret,
+    ActorEmail, ActorKind, Attribution, CheckConclusion, CheckRunPatch, CheckStatus, CommitFacts,
+    CommitSignature, DEFAULT_T0_UNIX, Door, NewCheckRun, NewPull, OrgRole, RefChange, RefMove,
+    ReviewState, SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, TeamRole, World, WorldSecret,
 };
 
 /// A write by `actor_id` as the REST face makes it.
@@ -28,6 +28,10 @@ const BASE_SHA: &str = "1111111111111111111111111111111111111111";
 const HEAD_SHA: &str = "2222222222222222222222222222222222222222";
 const MERGE_SHA: &str = "3333333333333333333333333333333333333333";
 const CALLBACK: &str = "https://auth.example.test/callback";
+const SIGNING_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF1ZZZ9YNYg8yl9pzBjnLU8mjxuB7NQXuUV2YGVC2wv3 alice@laptop";
+const RETIRED_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICXNiiZ0NcLB2s0gYXpNwyFmtzd28Zxng4mIlVSzlRIv";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dest = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -119,7 +123,21 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         commits: Vec::new(),
         commit_count: 0,
     };
-    w.record_push(repo.id, by(alice.id), &[first_push], None)?;
+    // A key alice signs with, and one she registered and deleted, so the
+    // first push's commit has a stored verdict and a deleted key's id is
+    // retired.
+    w.add_signing_key(by(alice.id), SIGNING_KEY, Some("laptop"))?;
+    let retired = w.add_signing_key(by(alice.id), RETIRED_KEY, None)?;
+    w.delete_signing_key(by(alice.id), retired.id)?;
+    let signed = CommitFacts {
+        sha: BASE_SHA.to_string(),
+        committer_email: "alice@acme.test".to_string(),
+        signature: CommitSignature::Ssh {
+            key: orrery_world::ssh_public_key(SIGNING_KEY).expect("the key parses"),
+            verifies: true,
+        },
+    };
+    w.record_push(repo.id, by(alice.id), &[first_push], None, &[signed])?;
     w.advance_clock(3600, by(system.id))?;
 
     let merged = w.create_pull(
@@ -248,6 +266,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
             branch_move("refs/heads/release", BASE_SHA, ZERO_SHA, RefChange::Deleted),
         ],
         None,
+        &[],
     )?;
     w.record_push(
         repo.id,
@@ -259,6 +278,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
             RefChange::Created,
         )],
         None,
+        &[],
     )?;
 
     let app = w.create_oauth_app("GoTrue", CALLBACK, by(alice.id))?;

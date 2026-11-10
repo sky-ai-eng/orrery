@@ -31,6 +31,7 @@ mod pulls;
 mod queries;
 mod reader;
 mod schema;
+mod signing;
 mod types;
 
 pub use checks::{CheckRunPatch, NewCheckRun};
@@ -45,6 +46,7 @@ pub use reader::{ViewMeta, WorldReader, WorldView};
 #[cfg(feature = "test-support")]
 pub use schema::test_support;
 pub use schema::{BASELINE_VERSION, SCHEMA_VERSION};
+pub use signing::{ssh_public_key, ssh_public_key_from_blob};
 pub use types::*;
 
 pub type Result<T> = std::result::Result<T, WorldError>;
@@ -379,6 +381,20 @@ impl World {
             .optional()?)
     }
 
+    pub fn actor_by_id(&self, id: i64) -> Result<Option<Actor>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM actors WHERE id = ?1",
+                    queries::ACTOR_COLUMNS
+                ),
+                params![id],
+                queries::row_to_actor,
+            )
+            .optional()?)
+    }
+
     /// The caller `token` authenticates: the actor it acts as, and the
     /// OAuth app whose authorization code was traded for it.
     pub fn caller_by_token(&self, token: &str) -> Result<Option<Caller>> {
@@ -523,6 +539,11 @@ impl World {
     /// repository and its pulls as the push left them. A push that moved no
     /// ref records nothing.
     ///
+    /// Last, it stores the verdict of each commit in `signed` that passes,
+    /// in order, unless one is stored for it already: `signed` is what the
+    /// commits the moves list say about themselves, and the verdict is
+    /// reached against the world as the write finds it.
+    ///
     /// A named pull that is not open refuses the whole record: the caller
     /// moved that pull's ref on the strength of it being open, and the world
     /// no longer agrees.
@@ -532,12 +553,14 @@ impl World {
         by: Attribution,
         moves: &[RefMove<'_>],
         default_branch: Option<&str>,
+        signed: &[CommitFacts],
     ) -> Result<()> {
         if moves.is_empty() {
             return Ok(());
         }
         self.write(by, |w| {
-            self.record_moves(w, repo_id, moves, default_branch, true)
+            self.record_moves(w, repo_id, moves, default_branch, true)?;
+            signing::record_verifications(w, repo_id, signed)
         })
     }
 

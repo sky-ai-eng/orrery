@@ -2,8 +2,8 @@
 //! every endpoint here exists because a consumer needs it, and is listed in
 //! `spec/surface-github.md`. Currently the authoring surface: repo
 //! creation, org membership and teams, pull requests (open/edit/merge),
-//! review requests, reviews, issue comments, labels, and check runs — the
-//! writes a scenario driver performs (spec/usage.md).
+//! review requests, reviews, issue comments, labels, check runs, and SSH
+//! signing keys — the writes a scenario driver performs (spec/usage.md).
 //!
 //! Face endpoints mimic real GitHub, including its lax body decoding: unknown
 //! request fields are ignored, exactly as GitHub ignores them. The exception
@@ -33,6 +33,7 @@ mod orgs;
 mod pulls;
 mod reads;
 mod render;
+mod signing;
 
 pub use render::repo_json;
 
@@ -64,13 +65,24 @@ pub fn router(face: GithubFace) -> Router {
             put(orgs::set_org_membership),
         )
         .route("/users/{username}", get(reads::get_user_by_login))
+        .route(
+            "/users/{username}/ssh_signing_keys",
+            get(signing::list_user_keys),
+        )
         .route("/user", get(reads::get_user))
+        .route("/user/{id}", get(reads::get_user_by_id))
+        .route(
+            "/user/ssh_signing_keys",
+            get(signing::list_own_keys).post(signing::create_key),
+        )
+        .route("/user/ssh_signing_keys/{id}", delete(signing::delete_key))
         .route("/user/emails", get(reads::get_user_emails))
         .route("/user/teams", get(reads::list_user_teams))
         .route(
             "/user/repos",
             get(reads::list_user_repos).post(create_user_repo),
         )
+        .route("/repositories/{id}", get(reads::get_repo_by_id))
         .route("/repos/{owner}/{repo}", get(reads::get_repo))
         .route(
             "/repos/{owner}/{repo}/pulls",
@@ -111,6 +123,10 @@ pub fn router(face: GithubFace) -> Router {
         .route(
             "/repos/{owner}/{repo}/issues/{number}/labels/{name}",
             delete(pulls::remove_label),
+        )
+        .route(
+            "/repos/{owner}/{repo}/commits/{sha}",
+            get(signing::get_commit),
         )
         .route(
             "/repos/{owner}/{repo}/commits/{sha}/check-runs",
@@ -386,6 +402,35 @@ pub(crate) fn orrery_unsupported_field(resource: &str, field: &str) -> Response<
     json_response(StatusCode::UNPROCESSABLE_ENTITY, body)
 }
 
+/// The loud refusal for surface Orrery does not implement: 501 with a
+/// self-describing envelope, deliberately unlike any real GitHub response, so
+/// it can never be mistaken for "the thing doesn't exist". `path` is the one
+/// the request arrived with, never a nested router's remainder, so a caller
+/// finds it in its own logs.
+pub fn not_mocked(method: &str, path: &str) -> Response<Body> {
+    tracing::warn!(%method, %path, "NOT MOCKED: unimplemented surface was called");
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        serde_json::json!({
+            "message": format!("orrery: {method} {path} is not mocked"),
+            "orrery": {
+                "not_mocked": true,
+                "method": method,
+                "path": path,
+                "hint": "If a consumer needs this endpoint, add it to the surface inventory (spec/surface-github.md) and implement it.",
+            },
+        }),
+    )
+}
+
+/// An empty `204 No Content`.
+pub(crate) fn no_content() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .expect("static response parts are valid")
+}
+
 pub(crate) fn github_error(status: StatusCode, message: &str) -> Response<Body> {
     json_response(status, serde_json::json!({ "message": message }))
 }
@@ -589,6 +634,10 @@ mod ref_read_tests {
                     path3("main...feature"),
                     HeaderMap::new(),
                 )),
+            ),
+            (
+                "GET commit",
+                unbudgeted(signing::get_commit(face(), path3("main"), HeaderMap::new())),
             ),
             (
                 "GET contents",

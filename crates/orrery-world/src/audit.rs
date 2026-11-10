@@ -244,6 +244,26 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
             ("created_clock_unix", Field("created_unix")),
         ],
     ),
+    (
+        "ssh_signing_keys",
+        &[
+            ("id", Identity),
+            ("actor_id", Identity),
+            ("public_key", Field("key")),
+            ("title", Field("title")),
+            ("created_clock_unix", Field("created_unix")),
+        ],
+    ),
+    (
+        "commit_verifications",
+        &[
+            ("repo_id", Identity),
+            ("sha", Identity),
+            ("signer_id", Field("signer")),
+            ("key_id", Field("signing_key")),
+            ("verified_clock_unix", Field("verified_unix")),
+        ],
+    ),
 ];
 
 /// Fail the test if an event, as the log serves it, does not match the
@@ -428,6 +448,10 @@ fn int(row: &Row, column: &str) -> String {
     row[column].to_string()
 }
 
+fn text<'a>(row: &'a Row, column: &str) -> &'a str {
+    row[column].as_str().unwrap_or_default()
+}
+
 /// The subject a row belongs to, and, for a row of a child table, the field
 /// of that subject the row is part of.
 fn subject_of(table: &str, row: &Row) -> (Subject, Option<String>) {
@@ -444,6 +468,14 @@ fn subject_of(table: &str, row: &Row) -> (Subject, Option<String>) {
         "reviews" => (s("review", int(row, "id")), None),
         "issue_comments" => (s("comment", int(row, "id")), None),
         "check_runs" => (s("check_run", int(row, "id")), None),
+        "ssh_signing_keys" => (s("ssh_signing_key", int(row, "id")), None),
+        "commit_verifications" => (
+            s(
+                "commit",
+                format!("{}:{}", int(row, "repo_id"), text(row, "sha")),
+            ),
+            None,
+        ),
         "org_members" => (
             s(
                 "org_membership",
@@ -539,6 +571,11 @@ fn subject_key(subject: &Value) -> Option<Subject> {
         "ref" => return None,
         "org_membership" => format!("{}:{}", subject["owner"]["id"], subject["member"]["id"]),
         "team_membership" => format!("{}:{}", subject["team"]["id"], subject["member"]["id"]),
+        "commit" => format!(
+            "{}:{}",
+            subject["repo"]["id"],
+            subject["sha"].as_str().unwrap_or_default()
+        ),
         _ => subject["id"].to_string(),
     };
     Some((kind, key))

@@ -325,21 +325,7 @@ fn bad_credentials() -> Response<Body> {
 /// one the request arrived with, never a nested router's remainder, so a
 /// caller finds it in its own logs.
 async fn not_mocked(method: Method, OriginalUri(uri): OriginalUri) -> Response<Body> {
-    let method = method.to_string();
-    let path = uri.path().to_string();
-    tracing::warn!(%method, %path, "NOT MOCKED: unimplemented surface was called");
-    json(
-        StatusCode::NOT_IMPLEMENTED,
-        serde_json::json!({
-            "message": format!("orrery: {method} {path} is not mocked"),
-            "orrery": {
-                "not_mocked": true,
-                "method": method,
-                "path": path,
-                "hint": "If a consumer needs this endpoint, add it to the surface inventory (spec/surface-github.md) and implement it.",
-            },
-        }),
-    )
+    orrery_face_github::not_mocked(method.as_str(), uri.path())
 }
 
 pub(crate) fn json(status: StatusCode, body: serde_json::Value) -> Response<Body> {

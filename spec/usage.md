@@ -170,4 +170,6 @@ A malformed command line (an unknown flag, a missing source, or a `--secret` tha
 
   A script runs `eval "$(orrery env)"` before each commit, and again after advancing the clock.
 
+- **A signature is part of its commit.** A signed commit's id covers its signature, so a replay makes the same commit only if the signature comes out the same. `ssh-keygen` signs the same payload with the same Ed25519 or RSA key the same way every time, and with an ECDSA or security key differently each time, so a scenario that signs commits uses an Ed25519 or RSA key. The verdict on a signature depends on the commit and the world alone (`surface-github.md` §1.10).
+
 - **An event records the real time it was appended at.** Beside `clock_unix`, the world's time, each event carries `wall_unix_ms`: the real time, in Unix milliseconds, at which its write was appended, so a caller showing a world's activity can say when something happened. Nothing in the world reads it, so it is not an input to replay (rule 5): a replay records the real time it re-executes each write at, and the diff does not compare it. Snapshots, restores, and forks copy the log whole, so an event a world inherits keeps the time it was first appended at.

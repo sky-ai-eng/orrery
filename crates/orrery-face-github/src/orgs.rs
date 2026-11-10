@@ -10,7 +10,7 @@ use orrery_world::{ActorKind, Caller, Door, OrgRole, Team, TeamRole, WorldError}
 
 use crate::render::{actor_json, org_json, team_full_json};
 use crate::{
-    GithubFace, github_error, internal, json_response, media, orrery_unsupported_field,
+    GithubFace, github_error, internal, json_response, media, no_content, orrery_unsupported_field,
     resolve_org, validation_custom, validation_invalid, validation_missing,
 };
 
@@ -50,13 +50,6 @@ fn resolve_user(face: &GithubFace, login: &str) -> Result<(), Box<Response<Body>
         Ok(_) => Err(Box::new(github_error(StatusCode::NOT_FOUND, "Not Found"))),
         Err(e) => Err(Box::new(internal(e))),
     }
-}
-
-fn no_content() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(Body::empty())
-        .expect("static response parts are valid")
 }
 
 #[derive(serde::Deserialize, Default)]

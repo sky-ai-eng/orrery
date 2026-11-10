@@ -192,6 +192,8 @@ subject_type! {
     OrgMembershipType = "org_membership",
     TeamType = "team",
     TeamMembershipType = "team_membership",
+    SshSigningKeyType = "ssh_signing_key",
+    CommitType = "commit",
 }
 
 /// The world itself, which a world has one of.
@@ -331,6 +333,27 @@ pub struct TeamMembershipSubject {
     pub member: ActorRef,
     pub team: TeamRef,
     /// The organization.
+    pub owner: ActorRef,
+}
+
+/// An SSH key an account holds for signing commits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SshSigningKeySubject {
+    #[serde(rename = "type")]
+    pub kind: SshSigningKeyType,
+    pub id: i64,
+    /// The account that holds it.
+    pub owner: ActorRef,
+}
+
+/// A commit in a repository. A commit has no id: it is its sha in its
+/// repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CommitSubject {
+    #[serde(rename = "type")]
+    pub kind: CommitType,
+    pub sha: String,
+    pub repo: RepoRef,
     pub owner: ActorRef,
 }
 
@@ -582,6 +605,32 @@ object! {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SshSigningKeyObject {
+    pub id: i64,
+    /// The key's type and base64 blob, as OpenSSH writes a public key,
+    /// without a comment.
+    pub key: String,
+    pub title: Option<String>,
+    pub created_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SshSigningKeyRef {
+    pub id: i64,
+}
+
+/// A commit's signature verified when a push brought the commit in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CommitVerificationObject {
+    /// The account whose signing key made the signature, and whose
+    /// verified address the commit's committer address is.
+    pub signer: ActorRef,
+    /// The key that made the signature.
+    pub signing_key: SshSigningKeyRef,
+    pub verified_unix: i64,
+}
+
 // ---- bodies ----
 
 /// What `world:rekeyed` derived again under the world's new secret.
@@ -671,6 +720,10 @@ bodies! {
     TeamMembershipChanged { subject: TeamMembershipSubject, changes: TeamMembershipChanges }
     /// The membership as it was.
     TeamMembershipDeleted { subject: TeamMembershipSubject, object: TeamMembershipObject }
+    SshSigningKeyCreated { subject: SshSigningKeySubject, object: SshSigningKeyObject }
+    /// The key as it was.
+    SshSigningKeyDeleted { subject: SshSigningKeySubject, object: SshSigningKeyObject }
+    CommitVerified { subject: CommitSubject, object: CommitVerificationObject }
 }
 
 macro_rules! event_types {
@@ -767,6 +820,15 @@ event_types! {
     TeamMembershipCreated(TeamMembershipCreated) = "team_membership:created",
     TeamMembershipUpdated(TeamMembershipChanged) = "team_membership:updated",
     TeamMembershipDeleted(TeamMembershipDeleted) = "team_membership:deleted",
+
+    /// An account registered an SSH key for signing commits.
+    SshSigningKeyCreated(SshSigningKeyCreated) = "ssh_signing_key:created",
+    SshSigningKeyDeleted(SshSigningKeyDeleted) = "ssh_signing_key:deleted",
+
+    /// A push brought in a commit whose signature verifies: an account's
+    /// signing key made it, and its committer address is a verified address
+    /// of that account.
+    CommitVerified(CommitVerified) = "commit:verified",
 }
 
 /// The JSON Schema of an [`Event`], as `GET /_orrery/log/schema` serves it

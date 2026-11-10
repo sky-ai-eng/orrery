@@ -24,6 +24,8 @@ Routes answer with these shapes. Fields GitHub sends that are not listed are abs
 | Issue comment | `id, node_id, user, body, html_url, url, issue_url, created_at, updated_at, author_association` (`NONE`) |
 | Label | `name, color` (`ededed`, what GitHub gives a label created on first use), `default` (false), `description` (null). No `id`. |
 | Check run | `id, node_id, name, head_sha, status, conclusion, external_id, details_url, url, html_url, started_at, completed_at, output, check_suite` (null), `app` (`slug` and `name`, the bot's bare login) |
+| SSH signing key | `id, key` (its type and base64 blob, without a comment), `title, created_at` |
+| Commit | `sha, url, html_url, commit, parents`. `commit` is `url, author, committer, message, tree, verification`: `author` and `committer` are `name, email, date` as the commit object holds them, `message` is the commit's without its final newlines, `tree` is `sha, url`, and `verification` is `verified, reason, signature, payload, verified_at` (§1.10). `parents` is `[{sha, url, html_url}]`. `files`, `stats`, and the accounts GitHub matches to the author and committer (the top-level `author` and `committer`) are absent. |
 
 A pull request's `labels` are ordered by name, ignoring case, and its `requested_reviewers` and `requested_teams` are in request order. Its `head.repo` and `base.repo` are always the same repository.
 
@@ -48,10 +50,11 @@ A list carries no test merge: `mergeable` stays null and the other two are absen
 | `GET /user` | The caller as a user object. An organization's token answers the organization. |
 | `GET /user/emails` | `[{email, primary, verified, visibility}]`, the primary first, then by address. `visibility` is `private` on the primary and null otherwise. Every actor starts with `<login>@orrery.invalid`, primary and verified; the control plane replaces the set. |
 | `GET /users/{username}` | A user or organization by login, or a bot as `<slug>[bot]`. A bot's bare slug, or a login nobody holds, is `404`. |
+| `GET /user/{account_id}` | An account by its id, answered as `GET /users/{username}` answers it under the login it holds now: a user, an organization, or a bot as `<slug>[bot]`. An id no account has is `404`. GitHub serves other endpoints beside an account id, such as `/user/keys`, so a segment that isn't an integer is surface Orrery doesn't serve, and answers `501`. |
 | `GET /user/teams` | The caller's teams in every organization, as full teams, paged. |
 | `GET /orgs/{org}` | The organization object, or `404` for any login that is not an organization. |
 
-A bot's token is refused on `GET /user`, `/user/emails`, `/user/teams`, and `/user/repos` with `403` `{"message": "Resource not accessible by integration", ...}`, as GitHub refuses an installation token.
+A bot's token is refused on `GET /user`, `/user/emails`, `/user/teams`, `/user/repos`, and `/user/ssh_signing_keys` with `403` `{"message": "Resource not accessible by integration", ...}`, as GitHub refuses an installation token.
 
 ### 1.2 Organization membership and teams
 
@@ -70,6 +73,7 @@ A bot's token is refused on `GET /user`, `/user/emails`, `/user/teams`, and `/us
 | --- | --- |
 | `POST /user/repos`, `POST /orgs/{org}/repos` | `{name, description?, private?, visibility?}`; `visibility` (`public` or `private`) overrides `private`. A name is 1 to 100 characters from `[A-Za-z0-9._-]`, not `.` or `..`, and not ending in `.git`; a missing or invalid name, or one the owner already has (ignoring case), is GitHub's `422` "Repository creation failed." envelope. `auto_init`, `gitignore_template`, `license_template`, `is_template`, and `team_id` are not mocked, whatever their value. The repository starts empty with `default_branch: main` until its first push (`surface-git.md`). Answers `201`. |
 | `GET /repos/{owner}/{repo}` | The repository, or `404`. |
+| `GET /repositories/{repository_id}` | The repository by its id, answered as `GET /repos/{owner}/{repo}` answers it, or `404`. A world neither renames nor deletes a repository (§4), so it answers every repository under the name it was created with. |
 | `GET /user/repos` | The repositories the caller owns, paged. `sort` is `pushed` (the default); any other `sort` is not mocked. `direction` is `desc` (the default) or `asc`, else `422`. Never-pushed repositories sort last. |
 
 ### 1.4 Pull requests
@@ -143,6 +147,36 @@ Only a bot creates or updates check runs; any other actor gets a `403` naming th
 | `GET /meta` | `{verifiable_password_authentication: false, installed_version: "3.17.0"}`. No actor has a password to verify (rule 12). GitHub's description of 3.17 also lists `packages` and `domains`, the addresses of services Orrery does not run, so both are absent. |
 
 Clients read `installed_version` to decide which requests to send, so Orrery reports the release whose requests it serves. 3.17 is the first release without classic projects, which Orrery does not have, and the last before advanced issue search, whose syntax (parentheses and `OR`) the search in §3.2 does not parse. gh 2.89, for one, asks for a pull request's classic project cards below 3.17, and sends advanced search syntax from 3.18.
+
+### 1.10 Commit signing
+
+An account signs commits with an SSH key it registers as a signing key, and a commit read answers GitHub's verdict on its signature.
+
+| Route | Behavior |
+| --- | --- |
+| `GET /users/{username}/ssh_signing_keys` | The account's signing keys, oldest first, paged. The account is found as `GET /users/{username}` finds it, so a login nobody holds, and a bot's bare slug, are `404`. A bot holds none, since its token is refused on `POST /user/ssh_signing_keys`. |
+| `GET /user/ssh_signing_keys` | The caller's signing keys, as above. |
+| `POST /user/ssh_signing_keys` | `{key, title?}`. `key` is an OpenSSH public key, `<type> <base64> [comment]`, of type `ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`, `sk-ssh-ed25519@openssh.com`, or `sk-ecdsa-sha2-nistp256@openssh.com`, and is stored without its comment. A missing, null, or blank `key` is `422 missing_field`. Any other string that is not such a key is a `custom` error on `key`, "key is invalid. You must supply a key in OpenSSH public key format", and so is a key any account already holds, "key is already in use". A `title` left out is null. Answers `201` with the key. |
+| `DELETE /user/ssh_signing_keys/{ssh_signing_key_id}` | `204`. A key the caller does not hold is `404`, whoever holds it. Key ids are never reused. A verdict a push stored for a commit the key signed stays. |
+| `GET /repos/{o}/{r}/commits/{ref}` | The commit (§1.0). `ref` is anything `git rev-parse` resolves to a commit, as a compare's ends are; anything else is `422` "No commit found for SHA: {ref}". |
+
+**The verdict.** `verification.verified` is true exactly when `reason` is `valid`. The first row that applies decides `reason`:
+
+| The commit | `reason` |
+| --- | --- |
+| has no signature | `unsigned` |
+| has a PGP or an X.509 signature. No account in a world holds a GPG key or a certificate, since nothing registers one. | `unknown_key` |
+| has an SSH signature that does not parse | `malformed_signature` |
+| has an SSH signature by a key no account holds as a signing key | `unknown_key` |
+| has one that does not verify with that key | `invalid` |
+| is committed under an address the key's account holds, verified | `valid` |
+| is committed under an address the key's account holds, unverified | `unverified_email` |
+| is committed under an address only other accounts hold | `bad_email` |
+| is committed under an address no account holds | `no_user` |
+
+Addresses compare ignoring case. Whether an SSH signature verifies is judged by `git verify-commit` (rule 2), which runs `ssh-keygen -Y verify` against an allowed-signers file holding only the key the signature names, and hands it the commit's own committer date as the time to verify at. So that answer depends on the commit alone, and which account holds the key is the world's. A world that verifies needs `ssh-keygen` on `PATH` (`docs/users/install.md`). Without it, a read of an SSH-signed commit whose verdict was not stored is `500`, and so is a push that brings one in, which moves back what it moved (`surface-git.md`, "What a push does").
+
+**When the verdict is reached.** A push reaches the verdict of each commit its ref events list (`events.md`, "Ref events") that carries a signature, against the world as its write finds it, and stores each one that is `valid` as a `commit:verified` event in its write. A stored verdict answers every later read: `valid`, with `verified_at` the world clock at the push, after the key is deleted or the address changes too. A failing verdict is not stored, so a read reaches it again from the world as it is then, and a commit whose fault has since been fixed, by registering its key or verifying its address, reads `valid` with `verified_at` null. A commit no push listed, such as one past a ref event's 2048, has its verdict reached on every read. `signature` is the armored signature and `payload` the commit without it, which is what the signature signs; both are null for an unsigned commit.
 
 ## 2. OAuth web flow
 
@@ -220,6 +254,10 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - A closed pull request whose head branch is deleted before its base branch moves has no mergeability once the base moves. It was observed only with the base moving first, or in the same push.
 - One push that deletes several branches, or a branch that is the head of some pull requests and the base of others, handles the branches in ref-name order, and each branch's head pull requests before its base pull requests.
 - The message for a negative `first` or `last` on a GraphQL connection: "`first` on the `X` connection cannot be less than zero."
+- The order of the verdict's checks when a commit has more than one fault, and `bad_email` for an SSH-signed commit whose committer address only accounts other than the key's hold.
+- GitHub storing a passing verdict at push and reaching a failing one again on every read.
+- A signing key one account holds is refused to every other account. The messages for a key already in use and for one that is not a key, and a `title` left out reading null.
+- `GET …/commits/{ref}` for a `ref` that names no commit is `422` "No commit found for SHA: {ref}".
 - The fields `GET /meta` answers on a GitHub Enterprise Server 3.17, which are from GitHub's published description of that release's REST API, not from a server's answer.
 - How a type change counts toward a pull request diff's 300 files, and in GraphQL's `changedFiles` and `files`. Orrery counts it as the two files REST lists toward the 300, and as one `CHANGED` file in GraphQL.
 - The 20,000-line limit on a page of a pull request's files. It was observed on a compare, where it also leaves out every file after the one that crosses it, and the 1 MiB limit was observed on both. Whether a response holding exactly 20,000 lines keeps the file that reaches it.
@@ -230,7 +268,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 
 - There are no permissions. Any authenticated actor may read any repository, create repositories in any organization, label, request reviews, review, and merge.
 - A repository name outside `[A-Za-z0-9._-]` is refused rather than slugified.
-- Repositories are never renamed, so nothing redirects.
+- Repositories are never renamed or deleted, so nothing redirects, and `GET /repositories/{repository_id}` never answers under a later name.
 - A file's `content` is not line-wrapped, and a directory's contents are `404`, not a listing.
 - `GET /user/repos` sorts by `pushed` by default (GitHub: `full_name`) and lists only the caller's own repositories.
 - `GET …/commits/{ref}/check-runs` lists every run on the commit; GitHub's default `filter=latest` keeps the newest run per name.
@@ -241,6 +279,9 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - A read of a repository's refs waits for a write under way (a push, a merge, opening a pull request, or an edit of one that sets its `state` or `base`), and sees the refs before it or after its record (`surface-git.md`, "What a fetch sees"). Two fields of one GraphQL query can still see two states.
 - Labels belong to a pull request, not to a repository.
 - A merge commit's author and committer address is `<login>@orrery.invalid`, not the actor's stored primary address.
+- A merge commit Orrery makes is unsigned, so it reads `unsigned`. GitHub signs the merges it makes with its own key, and they read `valid`.
+- Orrery parses no PGP signature, so a malformed one reads `unknown_key` where GitHub answers `malformed_signature`.
+- A verdict a read reaches as `valid` has a null `verified_at`. GitHub stores the verdict then.
 - `GET /meta` needs a token, as every REST route does, where github.com answers it without one (`grammar.md`).
 - A diff's `index` lines abbreviate object ids to 7 hex digits. GitHub's length grows with the repository, as git's default does (7 digits were observed on a small repository and 9 on a larger one), but git picks that length from how the repository's objects are packed, which a replayed world need not share.
 - A hunk header's trailing context is the one git picks, by default the nearest line above the hunk that starts with a letter, `_`, or `$`. GitHub picks it by the file's language, so in an HTML file it names the nearest heading.
@@ -256,7 +297,8 @@ Every route here answers `501` until a consumer needs it:
 - reading a single comment or review, dismissing a review, review comment replies, reactions, and editing or deleting a comment;
 - inline review comments (a review with `comments`, or `POST …/pulls/{n}/comments`);
 - repository labels, branch protection, `GET …/branches/{branch}`, tags, and refs other than branches;
-- commits, trees, and statuses;
+- listing commits, a commit's `files` and `stats`, trees, and statuses;
+- GPG keys and SSH authentication keys (`/user/gpg_keys`, `/user/keys`), and a single signing key (`GET /user/ssh_signing_keys/{id}`);
 - Actions: workflow runs, jobs, and logs;
 - GitHub Apps and installations (`/app`, `/app/installations`, installation tokens), and webhook delivery;
 - REST search, organization member listings, and `/rate_limit`.

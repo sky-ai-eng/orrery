@@ -36,7 +36,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 1. **Every event has the envelope.** `seq` is the event's position, which only grows and has a gap wherever a restore discarded events. `write` names the write: its first event's `seq` and how many events it appended. `clock_unix` is the world clock, and `wall_unix_ms` the real time the write was appended, which nothing in the world reads. `actor`, `door`, and `app` are rule 6's.
 2. **A type is `object:happening`,** lower snake case with a colon and the past tense: `pull:merged`, `review:submitted`. The object part is the subject's type. Outcomes and values are data, never part of a type: an approving review is `review:submitted` with `state: "approved"`. A type has one body shape, so an operation that sometimes creates and sometimes changes, such as setting a membership, has a type for each.
 3. **A write's operation comes first.** A write appends its operation's event, then one event for each consequence, in the order the engine made them, in one transaction. A reader holding `write.events` events from `write.seq` holds the whole write. A write that changes nothing appends nothing.
-4. **Every event has one subject:** the object it is about, by its stable id, its names at that moment, and the objects that contain it as top-level keys (`owner`, `repo`, `pull`, `team`). A reader can keep one repository's or one account's events without knowing every type, and an event still names its object after the object is renamed. A ref has no id, so it is named.
+4. **Every event has one subject:** the object it is about, by its stable id, its names at that moment, and the objects that contain it as top-level keys (`owner`, `repo`, `pull`, `team`). A reader can keep one repository's or one account's events without knowing every type, and an event still names its object after the object is renamed. A ref and a commit have no id, so a ref is named by its name and a commit by its sha.
 5. **Bodies carry values.** A create carries `object`, every stored field of the new object. A change carries `changes`, each field that changed as `{"from", "to"}`; a field holding a set, such as labels or requested reviewers, is its whole list before and after. A delete carries `object` as it was. Timestamps the engine sets, such as a pull's `updated_unix`, are fields like any other. Every value a write stores is in one of its events, so a reader learns each change from the log without knowing the engine's behavior. No event holds a credential: tokens, client secrets, and codes are derived from the world secret and the numbers the events carry.
 6. **Attribution** is who made the change (`actor`), how it reached the world (`door`: `rest`, `graphql`, `git`, `web` for the OAuth web flow, `control`, or `cli`), and the OAuth app the call came through (`app`, or `null`): the one whose token authenticated it, or whose authorize page or client credentials it used. Control-plane and CLI writes are the system actor's. A scenario driver is a client of the faces and the control plane, so it is not a door (`usage.md`).
 7. **Shapes only grow.** Once a type ships it keeps its meaning and its fields. New fields and types are added, and none are removed. A reader skips a type it does not know.
@@ -65,6 +65,8 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `org_membership` | `member` | `owner` (the organization) |
 | `team` | `id`, `slug` | `owner` (the organization) |
 | `team_membership` | `member` | `team`, `owner` |
+| `ssh_signing_key` | `id` | `owner` (the account that holds it) |
+| `commit` | `sha` | `repo`, `owner` |
 
 ## Types
 
@@ -81,7 +83,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `oauth_authorization:created` | authorizing an app | `object` | none |
 | `oauth_authorization:exchanged` | trading the code for a token | `changes` | none |
 | `repo:created` | creating a repository | `object` | none |
-| `repo:pushed` | a push, and a consequence of a merge | `changes` | for a push: a ref event per ref it moved, in ref-name order, then what [a push does to pull requests](#what-a-push-records) |
+| `repo:pushed` | a push, and a consequence of a merge | `changes` | for a push: a ref event per ref it moved, in ref-name order, then what [a push does to pull requests](#what-a-push-records), then a `commit:verified` per commit whose verdict it stores |
 | `ref:created` | a consequence of a push | `object`, `commits`, `commit_count` | |
 | `ref:updated` | a consequence of a push or a merge | `changes`, `forced`, `commits`, `commit_count` | |
 | `ref:deleted` | a consequence of a push | `object`, as it was | |
@@ -107,6 +109,9 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `team:deleted` | deleting a team | `object`, as it was | `pull:review_request_removed` per pending request, then `team_membership:deleted` per member |
 | `team_membership:created`, `team_membership:updated` | setting a team membership | `object`, or `changes` | none |
 | `team_membership:deleted` | removing a member, and a consequence of a team's deletion | `object`, as it was | none |
+| `ssh_signing_key:created` | registering a signing key | `object` | none |
+| `ssh_signing_key:deleted` | deleting one | `object`, as it was | none |
+| `commit:verified` | a consequence of a push: a commit it brought in whose signature verifies (`surface-github.md` §1.10) | `object`: the account that signed it, the key, and when | |
 
 ### What a push records
 
@@ -118,6 +123,8 @@ A push's ref events come first, then what the moves did to pull requests (`surfa
 - for a created branch, a `timeline_item:created` recording its restoration on each closed pull request whose head it is.
 
 A pull request whose `updated_unix` moves without another change gets a `pull:updated` before its item.
+
+Last come the verdicts the push stores: a `commit:verified` for each commit the ref events list, each once, in the order they list them, whose signature is `valid` and that has no stored verdict yet (`surface-github.md` §1.10).
 
 ### Ref events
 

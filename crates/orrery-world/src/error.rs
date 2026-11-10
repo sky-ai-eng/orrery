@@ -77,6 +77,12 @@ pub enum WorldError {
     OAuthBadCode,
     #[error("the redirect_uri does not match the one the code was issued for")]
     OAuthRedirectMismatch,
+    #[error("{0:?} is not an SSH public key in OpenSSH format")]
+    InvalidSigningKey(String),
+    #[error("the SSH key is already held as a signing key")]
+    SigningKeyExists,
+    #[error("no SSH signing key with id {0} held by the caller")]
+    NoSuchSigningKey(i64),
     /// A log position that is neither 0 nor the `seq` of an event the log
     /// holds: it was never issued, or a restore discarded it.
     #[error("seq {seq} is not in the log; the newest is {newest_seq}")]

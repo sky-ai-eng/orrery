@@ -83,6 +83,28 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE world ADD COLUMN log_entries INTEGER NOT NULL DEFAULT 0
          CHECK (log_entries >= 0);
      UPDATE world SET log_entries = (SELECT COUNT(*) FROM action_log);",
+    // 12: the SSH keys accounts sign commits with, and the verdicts a push
+    // stored for the commits it brought in. A key is held by one account,
+    // stored as its type and base64 blob with no comment. AUTOINCREMENT so a
+    // deleted key's id never comes back as another key's. A verification
+    // names the key that made it by id, not by reference, since the key can
+    // be deleted after it.
+    "CREATE TABLE ssh_signing_keys (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        actor_id           INTEGER NOT NULL REFERENCES actors(id),
+        public_key         TEXT NOT NULL UNIQUE,
+        title              TEXT,
+        created_clock_unix INTEGER NOT NULL
+     ) STRICT;
+     CREATE INDEX ssh_signing_keys_by_actor ON ssh_signing_keys (actor_id, id);
+     CREATE TABLE commit_verifications (
+        repo_id             INTEGER NOT NULL REFERENCES repos(id),
+        sha                 TEXT NOT NULL,
+        signer_id           INTEGER NOT NULL REFERENCES actors(id),
+        key_id              INTEGER NOT NULL,
+        verified_clock_unix INTEGER NOT NULL,
+        PRIMARY KEY (repo_id, sha)
+     ) STRICT;",
 ];
 
 /// The version this binary reads and writes.
