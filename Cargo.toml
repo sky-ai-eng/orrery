@@ -36,6 +36,7 @@ getrandom = "0.4"
 hex = "0.4"
 hmac = "0.12"
 jiff = "0.2"
+libc = "0.2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 schemars = "1.2"
 serde = { version = "1", features = ["derive"] }

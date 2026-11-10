@@ -57,6 +57,8 @@ pub struct AppState {
     pub anonymous_git_reads: bool,
     /// What the log's streams wait on.
     log_changes: Arc<tokio::sync::watch::Sender<log_stream::LogChanges>>,
+    /// True once [`Stop::stop`] has been called.
+    stopping: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 /// How a world process exposes its faces. The default is local `orrery serve`.
@@ -81,9 +83,16 @@ impl Default for Options {
 pub struct Routers {
     faces: Router,
     control: Router,
+    stop: Stop,
 }
 
 impl Routers {
+    /// What stops the server these routers make up. Taken before
+    /// [`Routers::combined`] or [`Routers::split`] consumes them.
+    pub fn stop(&self) -> Stop {
+        self.stop.clone()
+    }
+
     /// Both on one listener, the control plane at `/_orrery`.
     pub fn combined(self) -> Router {
         self.control.merge(self.faces).fallback(not_mocked)
@@ -101,6 +110,35 @@ impl Routers {
     }
 }
 
+/// Stops one world's server: its listeners, its log streams, and its git
+/// processes.
+#[derive(Clone)]
+pub struct Stop {
+    stopping: Arc<tokio::sync::watch::Sender<bool>>,
+    git: Arc<GitFace>,
+}
+
+impl Stop {
+    /// Resolves once [`Stop::stop`] has been called. Passed to [`run`], it
+    /// stops the listener accepting connections then.
+    pub fn requested(&self) -> impl Future<Output = ()> + Send + 'static {
+        let mut stopping = self.stopping.subscribe();
+        async move {
+            let _ = stopping.wait_for(|stopping| *stopping).await;
+        }
+    }
+
+    /// Stop the world's server: [`Stop::requested`] resolves, every log
+    /// stream ends, and the git face stops ([`GitFace::stop`]), which kills
+    /// git still running after `grace`. Returns once no git request is
+    /// running, and none can start again. Requests the listeners are still
+    /// answering are the caller's to wait for, by awaiting [`run`].
+    pub async fn stop(&self, grace: std::time::Duration) {
+        self.stopping.send_replace(true);
+        self.git.stop(grace).await;
+    }
+}
+
 /// Build the routers for one world instance.
 pub fn routers(
     world: Arc<World>,
@@ -114,6 +152,11 @@ pub fn routers(
         git: git.clone(),
         base_url: base_url.clone(),
     };
+    let stopping = Arc::new(tokio::sync::watch::Sender::new(false));
+    let stop = Stop {
+        stopping: stopping.clone(),
+        git: git.clone(),
+    };
     let state = AppState {
         world: world.clone(),
         base_url,
@@ -122,6 +165,7 @@ pub fn routers(
         schema: orrery_face_github::graphql::schema(github.clone()),
         anonymous_git_reads: options.anonymous_git_reads,
         log_changes: log_stream::follow(&world),
+        stopping,
     };
 
     // GraphQL mounts at the GHES address — `/api/graphql`, a sibling of
@@ -161,18 +205,26 @@ pub fn routers(
                 &format!("{CONTROL_PREFIX}/{{*rest}}"),
                 any(control::no_such_route),
             ),
+        stop,
     }
 }
 
-/// Serve until the listener is closed. The caller owns binding — a TCP port
-/// (tests bind an ephemeral one and read it back before starting) or a Unix
-/// socket.
-pub async fn run<L>(listener: L, app: Router) -> std::io::Result<()>
+/// Serve until `stop` resolves ([`Stop::requested`]), then stop accepting
+/// connections, and return once the ones being served have closed, each after
+/// the request it is answering. The caller owns binding — a TCP port (tests
+/// bind an ephemeral one and read it back before starting) or a Unix socket.
+pub async fn run<L>(
+    listener: L,
+    app: Router,
+    stop: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()>
 where
     L: axum::serve::Listener,
     L::Addr: std::fmt::Debug,
 {
-    axum::serve(listener, app).await
+    axum::serve(listener, app)
+        .with_graceful_shutdown(stop)
+        .await
 }
 
 /// Reads and writes alike hold the world write gate for read (the git face's

@@ -55,6 +55,13 @@ pub struct GitFace {
     /// snapshot create/restore hold it for write, so a copy of the world
     /// directory never races an in-flight push or merge.
     gate: Arc<tokio::sync::RwLock<()>>,
+    /// Set by [`GitFace::stop`] when its grace period runs out: every
+    /// `git http-backend` still running, and any started after, is killed
+    /// together with the processes it started ([`cgi::run_http_backend`]).
+    kill: tokio::sync::watch::Sender<bool>,
+    /// The gate, held for write from the moment [`GitFace::stop`] returns, so
+    /// no git work starts again.
+    stopped: std::sync::Mutex<Option<tokio::sync::OwnedRwLockWriteGuard<()>>>,
 }
 
 impl GitFace {
@@ -63,7 +70,34 @@ impl GitFace {
             world,
             repo_locks: std::sync::Mutex::new(BTreeMap::new()),
             gate: Arc::new(tokio::sync::RwLock::new(())),
+            kill: tokio::sync::watch::Sender::new(false),
+            stopped: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Stop the face's git work for good, as the process serving it stops.
+    /// It waits for every git operation already running, a push whose client
+    /// has gone away included, since its task outlives the request, and
+    /// keeps new ones from starting. One still running after `grace` has its
+    /// `git http-backend` killed, with the receive-pack or upload-pack and
+    /// hooks it started, and fails as any git request whose `git
+    /// http-backend` fails does: a push moves back what it moved. Returns once
+    /// none is running, so no git process the face started outlives the
+    /// caller's exit.
+    pub async fn stop(&self, grace: std::time::Duration) {
+        let mut gate = std::pin::pin!(self.gate.clone().write_owned());
+        let held = match tokio::time::timeout(grace, &mut gate).await {
+            Ok(held) => held,
+            Err(_) => {
+                tracing::warn!(
+                    grace_secs = grace.as_secs_f64(),
+                    "git requests still running after the grace period; killing them"
+                );
+                self.kill.send_replace(true);
+                gate.await
+            }
+        };
+        *self.stopped.lock().expect("stopped mutex poisoned") = Some(held);
     }
 
     pub fn world(&self) -> &Arc<World> {
@@ -622,13 +656,14 @@ async fn serve(
         remote_user: caller.map(|c| c.actor.login.as_str()),
         body,
     };
-    let cgi_resp = match cgi::run_http_backend(&face.world.repos_dir(), req).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "git http-backend failed");
-            return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
-        }
-    };
+    let cgi_resp =
+        match cgi::run_http_backend(&face.world.repos_dir(), req, face.kill.subscribe()).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, "git http-backend failed");
+                return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
+            }
+        };
 
     // http-backend writes its whole header block, with no `Status` line,
     // before it starts receive-pack, and closes its output once it has, so a
@@ -1209,5 +1244,133 @@ mod tests {
         assert_eq!(head(&f.bare), "refs/heads/main");
         let world = World::open(f.face.world.root()).unwrap();
         assert!(world.log_after(mark, 100).unwrap().is_empty());
+    }
+
+    /// Install `hooks/{name}` in `bare`: a hook that creates `started`, then
+    /// waits for `release` to exist, for at most 30 seconds, so a test that
+    /// fails partway leaves nothing running for long.
+    fn hold_in_hook(
+        bare: &std::path::Path,
+        name: &str,
+        started: &std::path::Path,
+        release: &std::path::Path,
+    ) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let hook = bare.join("hooks").join(name);
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\necho $$ > '{0}.new' && mv '{0}.new' '{0}'\ni=0\n\
+                 while [ ! -e '{1}' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\n",
+                started.display(),
+                release.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Wait, for up to 10 seconds, for the hook [`hold_in_hook`] installed to
+    /// start; returns its process id.
+    async fn hook_started(started: &std::path::Path) -> u32 {
+        for _ in 0..200 {
+            if let Ok(pid) = std::fs::read_to_string(started) {
+                return pid.trim().parse().unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("the hook did not start");
+    }
+
+    /// A request dropped before its `git http-backend` exits, as the server
+    /// drops one whose client has gone away, kills the processes it started:
+    /// here a pre-receive hook that would otherwise wait on. A process killed
+    /// with SIGKILL stays listed until it has finished exiting, and a zombie
+    /// waits for whoever reaps it, so both count as gone.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dropped_request_kills_the_git_it_started() {
+        let f = fixture();
+        let started = f._dir.path().join("started");
+        hold_in_hook(
+            &f.bare,
+            "pre-receive",
+            &started,
+            &f._dir.path().join("never"),
+        );
+        let (_, body) = push_topic();
+        let repos = f.face.world.repos_dir();
+        let (_kill, kill) = tokio::sync::watch::channel(false);
+        let request = tokio::spawn(async move {
+            let req = cgi::CgiRequest {
+                method: "POST",
+                path_info: "/alice/webapp.git/git-receive-pack".to_string(),
+                query: "",
+                content_type: Some("application/x-git-receive-pack-request"),
+                content_encoding: None,
+                git_protocol: None,
+                remote_user: Some("alice"),
+                body: &body,
+            };
+            cgi::run_http_backend(&repos, req, kill).await
+        });
+        let hook = hook_started(&started).await;
+
+        request.abort();
+        match request.await {
+            Err(e) => assert!(e.is_cancelled(), "{e}"),
+            Ok(_) => panic!("the request finished while its hook was waiting"),
+        }
+        let alive = || {
+            std::fs::read_to_string(format!("/proc/{hook}/stat")).is_ok_and(|stat| {
+                let state = stat.rsplit_once(") ").map(|(_, rest)| rest.as_bytes()[0]);
+                !matches!(state, Some(b'Z' | b'X'))
+            })
+        };
+        for _ in 0..40 {
+            if !alive() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("the hook outlived the request that started it");
+    }
+
+    /// A push whose handler is dropped runs on in its own task, holding no
+    /// connection, and [`GitFace::stop`] waits for it rather than returning
+    /// while its receive-pack runs. The push is then recorded.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_waits_for_a_push_whose_handler_was_dropped() {
+        let f = fixture();
+        let started = f._dir.path().join("started");
+        let release = f._dir.path().join("release");
+        hold_in_hook(&f.bare, "post-receive", &started, &release);
+        let (topic, body) = push_topic();
+        let mut push = push(&f, body);
+        // The first poll spawns the push's task.
+        assert!(poll_once(push.as_mut()).is_pending());
+        drop(push);
+        hook_started(&started).await;
+
+        let face = f.face.clone();
+        let stopped = tokio::spawn(async move {
+            face.stop(std::time::Duration::from_secs(30)).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!stopped.is_finished(), "stop returned with a push running");
+
+        std::fs::write(&release, "").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+            .await
+            .expect("stop did not return once the push finished")
+            .unwrap();
+        let log = f.face.world.log_after(0, 100).unwrap();
+        assert!(
+            log.iter().any(|e| matches!(&e.body,
+                orrery_world::EventBody::RefCreated(c)
+                    if c.subject.name == "refs/heads/topic" && c.object.sha == topic)),
+            "{log:?}"
+        );
     }
 }

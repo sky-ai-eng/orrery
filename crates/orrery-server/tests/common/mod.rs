@@ -122,7 +122,9 @@ fn spawn_server(
     app: axum::Router,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        orrery_server::run(listener, app).await.expect("server run");
+        orrery_server::run(listener, app, std::future::pending())
+            .await
+            .expect("server run");
     })
 }
 

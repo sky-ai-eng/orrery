@@ -4,7 +4,9 @@
 //! The kernel's [`Signal`]s only wake a stream; what a stream sends is always
 //! read through the `World`, so a signal for a write that never commits
 //! sends nothing. Between reads a stream holds neither the connection nor the
-//! world write gate, so it holds up no write, snapshot, or restore.
+//! world write gate, so it holds up no write, snapshot, or restore. A stream
+//! ends when the world stops ([`crate::Stop`]), since a server that is
+//! stopping waits for every response it is sending to end.
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
@@ -85,6 +87,7 @@ pub(crate) async fn stream(
     let follow = Follow {
         world: state.world.clone(),
         changes,
+        stopping: state.stopping.subscribe(),
         restores,
         after: position.seq,
         page: Vec::new().into_iter(),
@@ -249,6 +252,7 @@ fn parse_seq(text: &str) -> Result<i64, (&'static str, String)> {
 struct Follow {
     world: Arc<World>,
     changes: watch::Receiver<LogChanges>,
+    stopping: watch::Receiver<bool>,
     /// The restore count when the stream opened. Any other count means the
     /// log this stream was following no longer exists.
     restores: u64,
@@ -276,8 +280,16 @@ impl Follow {
                     .data(serde_json::json!(entry).to_string());
                 return Some((Ok(event), self));
             }
-            if !self.read_now && self.changes.changed().await.is_err() {
+            if *self.stopping.borrow() {
                 return None;
+            }
+            if !self.read_now {
+                tokio::select! {
+                    changed = self.changes.changed() => if changed.is_err() {
+                        return None;
+                    },
+                    _ = self.stopping.wait_for(|stopping| *stopping) => return None,
+                }
             }
             // Marked seen before the read, so an append that lands during
             // it wakes the stream again.
