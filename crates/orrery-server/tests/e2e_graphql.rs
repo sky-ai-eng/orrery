@@ -957,19 +957,20 @@ const GH_ISSUE_LIST: &str = "query IssueList($owner: String!, $repo: String!, $l
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_list_variable_type_with_default_marked_not_mocked() {
     let s = seed().await;
-    let resp = gql(
-        &s.inst.base,
-        &s.token,
+    for query in [
         "query($s:[IssueState!] = OPEN){rateLimit{remaining}}",
-        serde_json::json!({}),
-    );
-    assert!(resp["data"].is_null(), "{resp}");
-    let errors = resp["errors"].as_array().unwrap();
-    let err = errors
-        .iter()
-        .find(|e| e["message"] == r#"orrery (not mocked): Unknown type "IssueState""#)
-        .unwrap_or_else(|| panic!("names the type: {resp}"));
-    assert_eq!(err["extensions"]["orrery"]["not_mocked"], true, "{resp}");
+        "query($s:[IssueState!]! = [OPEN]){rateLimit{remaining}}",
+        "query($s:[[IssueState]] = [[OPEN]]){rateLimit{remaining}}",
+    ] {
+        let resp = gql(&s.inst.base, &s.token, query, serde_json::json!({}));
+        assert!(resp["data"].is_null(), "{query}: {resp}");
+        let errors = resp["errors"].as_array().unwrap();
+        let err = errors
+            .iter()
+            .find(|e| e["message"] == r#"orrery (not mocked): Unknown type "IssueState""#)
+            .unwrap_or_else(|| panic!("names the type: {query}: {resp}"));
+        assert_eq!(err["extensions"]["orrery"]["not_mocked"], true, "{resp}");
+    }
 
     let resp = gql(
         &s.inst.base,
