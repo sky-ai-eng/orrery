@@ -134,6 +134,14 @@ Only a bot creates or updates check runs; any other actor gets a `403` naming th
 | `GET /repos/{o}/{r}/compare/{base}...{head}` | `{status, ahead_by, behind_by, total_commits, commits, files}`. Each end is anything `git rev-parse` resolves to a commit (a sha, a branch, a tag, a ref); `owner:branch`, the two-dot form, and an end that doesn't resolve are `404`. `status` is `identical`, `ahead`, `behind`, or `diverged`. `commits` is `[{sha, parents: [{sha}]}]` oldest first, at most 250; `files` is as on pull request files, from `git diff -M base...head`, in path order, at most 300, with one more limit: once the next file's `patch` would take the patches before it past 20,000 lines, counting each patch's `@@` lines, that file and every file after it have no `patch` and read 0 for `additions`, `deletions`, and `changes`. A patch left out for its size counts toward nothing. The diff media type answers the comparison's diff, as on a pull request (§1.4), with no limit at all. |
 | `GET /repos/{o}/{r}/contents/{path}` | A file at `ref` (default `HEAD`): `{type: "file", encoding: "base64", name, path, sha, size, content, url, html_url, download_url: null}`. `content` is not line-wrapped. `application/vnd.github.object` answers the same object. A directory, a missing file, or an empty repository is `404`. |
 
+### 1.9 Meta
+
+| Route | Behavior |
+| --- | --- |
+| `GET /meta` | `{verifiable_password_authentication: false, installed_version: "3.17.0"}`. No actor has a password to verify (rule 12). GitHub's description of 3.17 also lists `packages` and `domains`, the addresses of services Orrery does not run, so both are absent. |
+
+Clients read `installed_version` to decide which requests to send, so Orrery reports the release whose requests it serves. 3.17 is the first release without classic projects, which Orrery does not have, and the last before advanced issue search, whose syntax (parentheses and `OR`) the search in §3.2 does not parse. gh 2.89, for one, asks for a pull request's classic project cards below 3.17, and sends advanced search syntax from 3.18.
+
 ## 2. OAuth web flow
 
 GitHub's OAuth web flow on the web host, without a token. An OAuth app is registered on the control plane (`POST /_orrery/oauth-apps`).
@@ -210,6 +218,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - A closed pull request whose head branch is deleted before its base branch moves has no mergeability once the base moves. It was observed only with the base moving first, or in the same push.
 - One push that deletes several branches, or a branch that is the head of some pull requests and the base of others, handles the branches in ref-name order, and each branch's head pull requests before its base pull requests.
 - The message for a negative `first` or `last` on a GraphQL connection: "`first` on the `X` connection cannot be less than zero."
+- The fields `GET /meta` answers on a GitHub Enterprise Server 3.17, which are from GitHub's published description of that release's REST API, not from a server's answer.
 - A mode change, an empty file, and a type change, in the diff media type and in files. A rename, a binary file, a binary rename, and a file with no trailing newline were observed, and the diff media type was git's own bytes for each. Orrery prints git's bytes for these too, lists a mode change and an empty file with no `patch` and zero counts, and a type change as one `changed` file.
 - The file limit on a pull request's diff at its boundary: 312 files were refused. Orrery serves 300 and refuses 301, as GitHub's message says.
 - The size past which a file's `patch` is left out: a patch of 100,453 bytes was kept and one of 104,382 left out. Orrery leaves out a patch larger than 102,400 bytes.
@@ -231,6 +240,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - A read of a repository's refs waits for a write under way (a push, a merge, opening a pull request, or an edit of one that sets its `state` or `base`), and sees the refs before it or after its record (`surface-git.md`, "What a fetch sees"). Two fields of one GraphQL query can still see two states.
 - Labels belong to a pull request, not to a repository.
 - A merge commit's author and committer address is `<login>@orrery.invalid`, not the actor's stored primary address.
+- `GET /meta` needs a token, as every REST route does, where github.com answers it without one (`grammar.md`).
 - A diff's `index` lines abbreviate object ids to 7 hex digits. GitHub's length grows with the repository, as git's default does (7 digits were observed on a small repository and 9 on a larger one), but git picks that length from how the repository's objects are packed, which a replayed world need not share.
 - A hunk header's trailing context is the one git picks, by default the nearest line above the hunk that starts with a letter, `_`, or `$`. GitHub picks it by the file's language, so in an HTML file it names the nearest heading.
 - `Accept` media types match ignoring case, and every `Accept` header counts. GitHub answers JSON to `application/vnd.github.v3.DIFF`, and reads only the first `Accept` header.

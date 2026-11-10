@@ -22,7 +22,7 @@ REST, GraphQL, and git need a token, in any of the spellings GitHub's clients se
 - `Authorization: Bearer <token>` or `Authorization: token <token>` (the scheme ignoring case), or
 - `Authorization: Basic base64(<anything>:<token>)`, git's `x-access-token:<token>` convention.
 
-A missing, malformed, or unknown token is `401` `{"message": "Bad credentials"}` with `WWW-Authenticate: Basic realm="orrery"`. The one exception is anonymous git fetch, described in `surface-git.md`. The OAuth web flow authenticates with client credentials and a login instead (`surface-github.md` §2).
+A missing, malformed, or unknown token is `401` `{"message": "Bad credentials"}` with `WWW-Authenticate: Basic realm="orrery"`. The one exception is anonymous git fetch, described in `surface-git.md`. `GET /api/v3/meta` is not one: github.com answers it without a token, but the clients that read it send theirs, and none has needed it without one (rule 1). The OAuth web flow authenticates with client credentials and a login instead (`surface-github.md` §2).
 
 Every token is fake, prefixed `orrfake_`, and derived from the world's secret, so a world holds no real credential (rule 12). Tokens carry no scopes, and no route checks permissions: a token is only an actor's identity.
 
@@ -36,7 +36,7 @@ Every token is fake, prefixed `orrfake_`, and derived from the world's secret, s
    "errors": [{"resource": "…", "code": "custom", "field": "F", "message": "not mocked by orrery"}]}
   ```
 
-  `resource` names what the route is about: `Repository`, `PullRequest`, `PullRequestReview`, `PullRequestReviewComment`, `IssueComment`, `Label`, `CheckRun`, `Organization`, `Membership`, `Team`, `TeamMember`, `User`, `UserEmail`, `Branch`, `Ref`, `Content`, `Comparison`, or `OauthAccess` for the OAuth token exchange.
+  `resource` names what the route is about: `Repository`, `PullRequest`, `PullRequestReview`, `PullRequestReviewComment`, `IssueComment`, `Label`, `CheckRun`, `Organization`, `Membership`, `Team`, `TeamMember`, `User`, `UserEmail`, `Branch`, `Ref`, `Content`, `Comparison`, `Meta`, or `OauthAccess` for the OAuth token exchange.
 
 - **REST answers JSON.** GitHub picks a rendering from its media type's parameter: `application/vnd.github.v3.full+json` adds `body_text` and `body_html` beside `body`, `.raw` answers a file's bytes, and `.diff` a diff. Every route answers JSON when `Accept` lists only `application/json`, `*/*`, `application/vnd.github+json`, `application/vnd.github.v3+json`, previews (`application/vnd.github.<name>-preview`, with or without `+json`), and media types that aren't GitHub's. Any other GitHub media type in `Accept`, even beside a JSON one, is refused with the not-mocked `422` above, with `field` `Accept`, unless the route lists it as served. A route that serves the diff answers it whenever `Accept` lists its media type, whatever it lists beside it, as GitHub does. As on GitHub, a route first finds what its path names, so something that doesn't exist is a `404` whatever the request accepts, and it refuses the media type before it reads the body or writes anything. The OAuth token exchange, which is not REST, refuses XML the same way.
 
