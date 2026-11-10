@@ -109,7 +109,7 @@ A ref that cannot be moved back is named, with its repository, and `orrery serve
 
 A snapshot is a quiesced copy, so restoring one needs none of this. `orrery fork --world` copies a stopped world's directory as it is, refs that disagree with its log included, so a fork is put right the first time it is served.
 
-Start-up assumes nothing else moves the world's refs while it runs. A second `orrery serve` of an instance that is already served fails to bind its listeners before it reaches this step, unless both listen on port 0, which nothing prevents. A world stopped by SIGTERM or SIGINT leaves no git process running behind it (`usage.md`, "Stopping a world"):
+Start-up assumes nothing else moves the world's refs while it runs. A second `orrery serve` of an instance that is already served fails to bind its listeners before it reaches this step, unless both listen on port 0 or on sockets passed to them (`usage.md`, "Where the doors are"), which nothing prevents. A supervisor that passes sockets runs one `orrery serve` per instance. A world stopped by SIGTERM or SIGINT leaves no git process running behind it (`usage.md`, "Stopping a world"):
 
 - Each `git http-backend` runs in a process group of its own, which the receive-pack or upload-pack it starts, and their hooks, join. A signal to `orrery serve`'s process group, as Ctrl-C in a terminal sends, reaches none of its git processes. A fetch the server stops answering partway, because its client has gone away, has its group killed then.
 - On the signal, `orrery serve` waits for every git request it is serving, and for a push whose client has gone away, which runs on without it.

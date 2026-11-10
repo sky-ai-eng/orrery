@@ -15,10 +15,23 @@ t0 = "2026-01-01T00:00:00Z"
 # secret = "local"
 
 [server]
-# host:port, or unix:/absolute/path for a Unix socket. A stale socket file left
-# at the path is removed before binding. Port 0, as in "127.0.0.1:0", picks a
-# free port. Once it is ready to serve, `orrery serve` prints one line of JSON
-# to stdout naming its bound addresses, the real port included:
+# host:port; unix:/absolute/path for a Unix socket; or fd:<name> for a
+# listening Unix socket a supervisor passed in, as systemd's socket activation
+# passes one (sd_listen_fds(3)). A stale socket file left at a unix: path is
+# removed before binding. Port 0, as in "127.0.0.1:0", picks a free port.
+#
+# fd:<name> takes descriptor 3 + i, where i is <name>'s place in LISTEN_FDNAMES,
+# when LISTEN_PID is this process and i is less than LISTEN_FDS. <name> is 1 to
+# 255 characters, with no ":" and no control characters, and must appear in
+# LISTEN_FDNAMES once. The descriptor must be a listening Unix stream socket
+# bound to an absolute path; anything else stops `orrery serve` before it is
+# ready. Its file is never bound, removed, or replaced: the supervisor made it,
+# and removes it. The socket stays open in the supervisor when the world stops,
+# so a connection made while no `orrery serve` runs waits for the next one.
+#
+# Once it is ready to serve, `orrery serve` prints one line of JSON to stdout
+# naming its addresses, the real port included, and a passed socket as
+# unix:<its path>:
 #   {"base_url":"http://127.0.0.1:43211","listen":"127.0.0.1:43211","control":"127.0.0.1:43211"}
 # Nothing else goes to stdout; logs go to stderr.
 listen = "127.0.0.1:4180"
@@ -26,7 +39,8 @@ listen = "127.0.0.1:4180"
 # Required when listen is a socket.
 # base_url = "http://127.0.0.1:4180"
 # Serve the control plane (/_orrery/*) only here, in listen's syntax; listen
-# then answers /_orrery/* as unmocked surface. Omit to keep it on listen.
+# then answers /_orrery/* as unmocked surface. Omit to keep it on listen. As
+# fd:<name>, it must name a different passed socket from listen's.
 # control_listen = "unix:/run/orrery/control.sock"
 # Clone and fetch without a token, as GitHub allows for public repos. A world
 # whose faces are on the public internet sets this to false.

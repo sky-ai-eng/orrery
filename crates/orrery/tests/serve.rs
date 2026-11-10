@@ -3,10 +3,17 @@
 
 mod common;
 
-use std::os::unix::net::UnixListener;
-use std::path::Path;
+use std::io::{Read as _, Write as _};
+use std::os::fd::AsRawFd as _;
+use std::os::unix::fs::FileTypeExt as _;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use common::{Ready, Served, git, orrery_serve, request, serve, write_config};
+use common::{
+    Ready, Served, git, orrery_serve, orrery_serve_passing, pass_sockets, refused, request, serve,
+    start, write_config,
+};
 
 #[test]
 fn split_listeners_serve_over_unix_sockets() {
@@ -57,6 +64,267 @@ fn split_listeners_serve_over_unix_sockets() {
     assert!(body.contains("\"login\":\"alice\""), "{body}");
     let (status, body) = request(control, "GET", "/api/v3/user", Some(token), "");
     assert_eq!(status, 501, "{body}");
+}
+
+/// Listening sockets bound at `dir/<name>.sock`, as a supervisor makes them
+/// to pass to `serve`, with their paths.
+fn bind_sockets(dir: &Path, names: &[&str]) -> Vec<(UnixListener, PathBuf)> {
+    names
+        .iter()
+        .map(|name| {
+            let path = dir.join(format!("{name}.sock"));
+            (UnixListener::bind(&path).unwrap(), path)
+        })
+        .collect()
+}
+
+/// A config whose faces and control plane listen on the passed sockets
+/// `faces` and `control`.
+fn passed_config(dir: &Path) -> PathBuf {
+    write_config(dir, "", PASSED_SERVER)
+}
+
+/// The `[server]` lines of [`passed_config`].
+const PASSED_SERVER: &str =
+    "listen = \"fd:faces\"\ncontrol_listen = \"fd:control\"\nbase_url = \"http://world.test\"\n";
+
+#[test]
+fn split_listeners_serve_over_passed_sockets() {
+    let dir = tempfile::tempdir().unwrap();
+    let sockets = bind_sockets(dir.path(), &["faces", "control"]);
+    let fds: Vec<_> = sockets.iter().map(|(s, _)| s.as_raw_fd()).collect();
+    let config = passed_config(dir.path());
+    let (_served, ready) = start(orrery_serve_passing(&config, &fds, "faces:control"));
+    assert_eq!(
+        ready,
+        Ready {
+            base_url: "http://world.test".to_string(),
+            listen: format!("unix:{}", sockets[0].1.display()),
+            control: format!("unix:{}", sockets[1].1.display()),
+        }
+    );
+
+    let (status, body) = request(&ready.control, "GET", "/_orrery/healthz", None, "");
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = request(&ready.listen, "GET", "/_orrery/healthz", None, "");
+    assert_eq!(status, 501, "{body}");
+    assert!(body.contains("\"not_mocked\":true"), "{body}");
+}
+
+/// A supervisor that holds a world's sockets keeps them open across its
+/// restart: a connection made while no `serve` runs waits in the socket's
+/// backlog, and the next `serve` answers it.
+#[test]
+fn a_passed_socket_holds_connections_while_no_serve_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let sockets = bind_sockets(dir.path(), &["faces", "control"]);
+    let fds: Vec<_> = sockets.iter().map(|(s, _)| s.as_raw_fd()).collect();
+    let config = passed_config(dir.path());
+    let (mut first, _) = start(orrery_serve_passing(&config, &fds, "faces:control"));
+    first.signal("TERM");
+    let (status, _, stderr) = first.exited(Duration::from_secs(10));
+    assert!(status.success(), "{status}: {stderr}");
+    for (_, path) in &sockets {
+        let meta =
+            std::fs::symlink_metadata(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert!(meta.file_type().is_socket(), "{}", path.display());
+    }
+
+    let mut waiting = UnixStream::connect(&sockets[1].1).unwrap();
+    waiting
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        waiting,
+        "GET /_orrery/healthz HTTP/1.1\r\nhost: world.test\r\nconnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let (_second, _) = start(orrery_serve_passing(&config, &fds, "faces:control"));
+    let mut response = String::new();
+    waiting.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+}
+
+/// A passed socket `serve` can't use, or two listeners on one socket, stops
+/// the world before its ready line, with an error naming the listener.
+#[test]
+fn an_unusable_passed_socket_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let sockets = bind_sockets(dir.path(), &["faces"]);
+    let faces = sockets[0].0.as_raw_fd();
+    let faces_path = format!("unix:{}", sockets[0].1.display());
+    let (connected, _peer) = UnixStream::pair().unwrap();
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    // Each case serves an instance of its own, so none reads another's config.
+    let config = |case: &str, server: &str| {
+        let case = dir.path().join(case);
+        std::fs::create_dir(&case).unwrap();
+        write_config(&case, "", server)
+    };
+    let faces_only = "listen = \"fd:faces\"\nbase_url = \"http://world.test\"\n";
+
+    let parent = std::process::id().to_string();
+    let mut another_pid = orrery_serve(
+        &config("another-pid", faces_only),
+        &[("LISTEN_PID", &parent)],
+    );
+    pass_sockets(&mut another_pid, &[faces], "faces");
+    // Each case: the command, the listener its error names, and the cause.
+    let cases = [
+        (another_pid, "fd:faces", "names another process"),
+        (
+            orrery_serve_passing(&config("unnamed", faces_only), &[faces], "other"),
+            "fd:faces",
+            "does not name it",
+        ),
+        (
+            orrery_serve_passing(
+                &config("named-twice", faces_only),
+                &[faces, faces],
+                "faces:faces",
+            ),
+            "fd:faces",
+            "names more than one descriptor",
+        ),
+        (
+            orrery_serve_passing(&config("past-count", faces_only), &[faces], "other:faces"),
+            "fd:faces",
+            "names it in position 2, but LISTEN_FDS is 1",
+        ),
+        (
+            orrery_serve_passing(&config("tcp", faces_only), &[tcp.as_raw_fd()], "faces"),
+            "fd:faces",
+            "is not a Unix socket",
+        ),
+        (
+            orrery_serve_passing(
+                &config("not-listening", faces_only),
+                &[connected.as_raw_fd()],
+                "faces",
+            ),
+            "fd:faces",
+            "is not listening",
+        ),
+        (
+            orrery_serve_passing(
+                &config(
+                    "one-socket",
+                    "listen = \"fd:faces\"\ncontrol_listen = \"fd:faces\"\nbase_url = \"http://world.test\"\n",
+                ),
+                &[faces],
+                "faces",
+            ),
+            "fd:faces",
+            "both name fd:faces",
+        ),
+        (
+            orrery_serve_passing(
+                &config("passed-twice", PASSED_SERVER),
+                &[faces, faces],
+                "faces:control",
+            ),
+            &faces_path,
+            "each needs a socket of its own",
+        ),
+        (
+            orrery_serve_passing(
+                &config(
+                    "empty-name",
+                    "listen = \"fd:\"\nbase_url = \"http://world.test\"\n",
+                ),
+                &[faces],
+                "faces",
+            ),
+            "\"fd:\"",
+            "a passed socket's name is 1 to 255 characters",
+        ),
+        (
+            orrery_serve_passing(
+                &config(
+                    "colon",
+                    "listen = \"fd:faces:control\"\nbase_url = \"http://world.test\"\n",
+                ),
+                &[faces],
+                "faces",
+            ),
+            "\"fd:faces:control\"",
+            "a passed socket's name is 1 to 255 characters",
+        ),
+    ];
+    for (cmd, listener, cause) in cases {
+        let out = refused(cmd);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{cause}: {stderr}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{cause}");
+        assert!(stderr.contains(listener), "{cause}: {stderr}");
+        assert!(stderr.contains(cause), "{cause}: {stderr}");
+    }
+}
+
+/// A git process holding a passed socket would keep it open after the world
+/// stops, and anything it runs could accept the connections meant for the
+/// world's next `serve`. So every passed descriptor is marked close-on-exec,
+/// the ones the config doesn't name and the unnamed one among them. The faces
+/// listen on TCP, since git cannot push over a Unix socket.
+#[cfg(target_os = "linux")]
+#[test]
+fn no_git_process_holds_a_passed_socket() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sockets = bind_sockets(dir.path(), &["control", "spare", "unnamed"]);
+    let fds: Vec<_> = sockets.iter().map(|(s, _)| s.as_raw_fd()).collect();
+    let config = write_config(
+        dir.path(),
+        "",
+        "listen = \"127.0.0.1:0\"\ncontrol_listen = \"fd:control\"\n",
+    );
+    let (_served, ready) = start(orrery_serve_passing(&config, &fds, "control:spare"));
+    let token = common::mint(&ready.control, "alice");
+    common::call(
+        &ready.listen,
+        "POST",
+        "/api/v3/user/repos",
+        Some(&token),
+        r#"{"name":"webapp"}"#,
+        201,
+    );
+
+    let held = dir.path().join("held");
+    let hook = dir
+        .path()
+        .join("instance/world/repos/alice/webapp.git/hooks/post-receive");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nfor fd in /proc/$$/fd/*; do readlink \"$fd\"; done > '{}'\n",
+            held.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    git(&src, &["init", "-q", "-b", "main", "."]);
+    git(&src, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    let remote = format!(
+        "http://x-access-token:{token}@{}/alice/webapp.git",
+        ready.listen
+    );
+    git(&src, &["push", "-q", &remote, "main"]);
+
+    let held = std::fs::read_to_string(&held).unwrap();
+    assert!(!held.is_empty(), "the hook listed no descriptors");
+    for (socket, path) in &sockets {
+        let target = std::fs::read_link(format!("/proc/self/fd/{}", socket.as_raw_fd())).unwrap();
+        let target = target.to_str().unwrap();
+        assert!(target.starts_with("socket:["), "{target}");
+        assert!(
+            !held.lines().any(|line| line == target),
+            "the hook holds {} ({target}):\n{held}",
+            path.display()
+        );
+    }
 }
 
 /// Port 0 lets a caller start many worlds without picking free ports
