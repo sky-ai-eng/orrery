@@ -110,7 +110,7 @@ A snapshot is a quiesced copy, so restoring one needs none of this. `orrery fork
 
 Start-up assumes nothing else moves the world's refs while it runs. A second `orrery serve` of an instance that is already served fails to bind its listeners before it reaches this step, unless both listen on port 0, which nothing prevents. A world stopped by SIGTERM or SIGINT leaves no git process running behind it (`usage.md`, "Stopping a world"):
 
-- Each `git http-backend` runs in a process group of its own, which the receive-pack or upload-pack it starts, and their hooks, join. A signal to `orrery serve`'s process group, as Ctrl-C in a terminal sends, reaches none of its git processes.
+- Each `git http-backend` runs in a process group of its own, which the receive-pack or upload-pack it starts, and their hooks, join. A signal to `orrery serve`'s process group, as Ctrl-C in a terminal sends, reaches none of its git processes. A fetch the server stops answering partway, because its client has gone away, has its group killed then.
 - On the signal, `orrery serve` waits for every git request it is serving, and for a push whose client has gone away, which runs on without it.
 - A request still running 5 seconds after the signal has its `git http-backend`'s process group killed with SIGKILL, and fails as any request does whose `git http-backend` fails: a push moves back the refs receive-pack moved (above). receive-pack killed while it holds a ref's lock leaves that ref moved and the lock file in place, and start-up puts both right.
 - Then it exits, once no git process it started is running.

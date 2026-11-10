@@ -47,7 +47,7 @@ Namespaced away from the face (its own path prefix/port) so it can never be mist
 
 `listen` and `control` are the bound addresses, `host:port` with the real port or `unix:/absolute/path`. `control` is `listen` unless `server.control_listen` is set; either way the control plane is under `/_orrery` on it. `base_url` is the configured one, or the one derived from `listen`. So `listen = "127.0.0.1:0"` gets a free port and reports it, and a caller starting many worlds never picks ports in advance. Nothing else is written to stdout; logs go to stderr.
 
-**Stopping a world.** SIGTERM or SIGINT stops `orrery serve`, sent to its process alone or to its process group, as Ctrl-C in a terminal sends it. It stops accepting connections, ends every log stream, and gives the requests it is answering, and the git processes it started, 5 seconds to finish. Git still running then is killed, and a push it cut off moves back what it moved (`surface-git.md`, "Starting a world"). Then the process exits with status 0, dropping any connection still open. A push in flight when the signal arrives is therefore recorded, or moved back.
+**Stopping a world.** SIGTERM or SIGINT stops `orrery serve`, sent to its process alone or to its process group, as Ctrl-C in a terminal sends it. It stops accepting connections, ends every log stream, and gives the requests it is answering, and the git processes it started, 5 seconds to finish. A git request still running then is killed, and a push it cut off moves back what it moved (`surface-git.md`, "Starting a world"). Then the process exits with status 0, dropping any connection still open. A push in flight when the signal arrives is therefore recorded, or moved back.
 
 ## Scenarios and scripts
 

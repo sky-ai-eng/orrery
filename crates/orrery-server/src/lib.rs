@@ -124,17 +124,15 @@ impl Stop {
     pub fn requested(&self) -> impl Future<Output = ()> + Send + 'static {
         let mut stopping = self.stopping.subscribe();
         async move {
-            // The router being served holds the sender in its state, so the
-            // sender outlives the wait.
             let _ = stopping.wait_for(|stopping| *stopping).await;
         }
     }
 
     /// Stop the world's server: [`Stop::requested`] resolves, every log
     /// stream ends, and the git face stops ([`GitFace::stop`]), which kills
-    /// git still running after `grace`. Returns once no git process the world
-    /// started is running, and none can start again. Requests the listeners
-    /// are still answering are the caller's to wait for, by awaiting [`run`].
+    /// git still running after `grace`. Returns once no git request is
+    /// running, and none can start again. Requests the listeners are still
+    /// answering are the caller's to wait for, by awaiting [`run`].
     pub async fn stop(&self, grace: std::time::Duration) {
         self.stopping.send_replace(true);
         self.git.stop(grace).await;

@@ -284,12 +284,11 @@ impl Follow {
                 return None;
             }
             if !self.read_now {
-                // `stopping` only ever changes to true.
                 tokio::select! {
                     changed = self.changes.changed() => if changed.is_err() {
                         return None;
                     },
-                    _ = self.stopping.changed() => return None,
+                    _ = self.stopping.wait_for(|stopping| *stopping) => return None,
                 }
             }
             // Marked seen before the read, so an append that lands during

@@ -79,14 +79,17 @@ impl World {
 
     /// Start a push of a new commit on `main` whose receive-pack holds in
     /// its post-receive hook until `release` exists, and return once it
-    /// holds there, with `main` moved and the push not yet recorded.
+    /// holds there, with `main` moved and the push not yet recorded. The hook
+    /// gives up after 30 seconds, so a test that fails partway leaves nothing
+    /// running for long.
     fn push_held(&self, release: &Path) -> (std::process::Child, String) {
         let started = self.dir.path().join("post-receive-started");
         let hook = self.bare.join("hooks/post-receive");
         std::fs::write(
             &hook,
             format!(
-                "#!/bin/sh\n: > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.05; done\n",
+                "#!/bin/sh\n: > '{}'\ni=0\n\
+                 while [ ! -e '{}' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\n",
                 started.display(),
                 release.display()
             ),

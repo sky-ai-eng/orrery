@@ -35,10 +35,12 @@ pub struct CgiResponse {
 
 /// Run one request through `git http-backend`. It runs in a process group of
 /// its own, which the receive-pack or upload-pack it starts, and their hooks,
-/// join. Once `kill` reads true, that whole group is killed, so nothing the
-/// request started outlives it. Because the group is not the server's, a
-/// signal sent to the server's group, as Ctrl-C in a terminal sends, reaches
-/// none of these processes, and the server decides when they stop.
+/// join. Once `kill` reads true, or if the request is dropped before the
+/// child exits, as the server drops one whose client has gone away, that whole
+/// group is killed, so nothing the request started outlives it. Because the
+/// group is not the server's, a signal sent to the server's group, as Ctrl-C
+/// in a terminal sends, reaches none of these processes, and the server
+/// decides when they stop.
 pub async fn run_http_backend(
     repos_dir: &Path,
     req: CgiRequest<'_>,
@@ -77,6 +79,9 @@ pub async fn run_http_backend(
     }
 
     let mut child = cmd.spawn()?;
+    // Declared after `child`, so it is dropped first: dropping an unreaped
+    // child can reap it, and the group's id is then free for reuse.
+    let mut group = Group(child.id());
     let mut stdin = child.stdin.take().expect("stdin piped");
     let mut stdout = child.stdout.take().expect("stdout piped");
     let mut stderr = child.stderr.take().expect("stderr piped");
@@ -88,17 +93,15 @@ pub async fn run_http_backend(
         // Dropping stdin closes it, signalling EOF to the CGI.
     });
     let exited = async {
-        tokio::select! {
+        let status = tokio::select! {
             status = child.wait() => status,
             () = killed(kill) => {
-                // The group is killed before the child is reaped, so its id
-                // still names this group and no other.
-                if let Some(pgid) = child.id() {
-                    kill_group(pgid);
-                }
+                group.kill();
                 child.wait().await
             }
-        }
+        };
+        group.0 = None;
+        status
     };
     let mut out = Vec::new();
     let mut err = Vec::new();
@@ -125,6 +128,25 @@ pub async fn run_http_backend(
 async fn killed(mut kill: watch::Receiver<bool>) {
     if kill.wait_for(|kill| *kill).await.is_err() {
         std::future::pending::<()>().await;
+    }
+}
+
+/// A `git http-backend`'s process group, killed when this is dropped still
+/// holding its id. The id is cleared once the child is reaped, since it can
+/// then name another process.
+struct Group(Option<u32>);
+
+impl Group {
+    fn kill(&mut self) {
+        if let Some(pgid) = self.0.take() {
+            kill_group(pgid);
+        }
+    }
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
