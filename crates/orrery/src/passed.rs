@@ -8,15 +8,23 @@
 //! process, so no child takes them for its own, and removing them needs
 //! `std::env::remove_var`, which is unsafe once the runtime's threads run.
 
+use std::collections::BTreeSet;
 use std::os::fd::{FromRawFd as _, RawFd};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use anyhow::Context as _;
 
 /// The first descriptor passed under the protocol.
 const FIRST: RawFd = 3;
 
-/// A name as systemd's `FileDescriptorName=` allows it.
+/// The descriptors [`take`] has handed out. A descriptor has one owner, so a
+/// second take of one is refused rather than handed to a second listener,
+/// which would close it twice.
+static TAKEN: Mutex<BTreeSet<RawFd>> = Mutex::new(BTreeSet::new());
+
+/// A name is 1 to 255 characters, with no `:`, which separates names in
+/// `LISTEN_FDNAMES`, and no control characters.
 pub fn name_is_valid(name: &str) -> bool {
     (1..=255).contains(&name.chars().count()) && !name.chars().any(|c| c == ':' || c.is_control())
 }
@@ -47,12 +55,15 @@ pub fn close_on_exec() {
         return;
     };
     for fd in FIRST..FIRST + count {
-        // A descriptor that is not open has nothing to mark, and fails with
-        // EBADF; FD_CLOEXEC is the only descriptor flag, so setting it alone
-        // clears nothing.
-        // SAFETY: fcntl with F_SETFD takes no pointers and changes only the
-        // descriptor's flags.
-        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        // SAFETY: fcntl with F_GETFD and F_SETFD takes no pointers and
+        // changes only the descriptor's flags.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            // A descriptor that is not open has nothing to mark.
+            if flags != -1 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
     }
 }
 
@@ -80,15 +91,19 @@ pub fn take(name: &str) -> anyhow::Result<(tokio::net::UnixListener, PathBuf)> {
         .map(|i| FIRST + i)
         .with_context(|| {
             format!(
-                "LISTEN_FDNAMES names it in position {}, past the {count} descriptors LISTEN_FDS passes",
+                "LISTEN_FDNAMES names it in position {}, but LISTEN_FDS is {count}",
                 position + 1
             )
         })?;
     check_listening_unix_stream(fd)?;
+    let first_take = TAKEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(fd);
+    anyhow::ensure!(first_take, "descriptor {fd} is already another listener's");
     // SAFETY: the descriptor was passed to this process to listen on, the
-    // check above found it a listening Unix stream socket, and nothing else
-    // here takes it: `listen` and `control_listen` naming one socket is a
-    // config error.
+    // check above found it a listening Unix stream socket, and `TAKEN` makes
+    // this its only owner.
     let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(fd) };
     let addr = listener
         .local_addr()

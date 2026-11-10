@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::{
-    Ready, Served, git, orrery_serve, orrery_serve_passing, pass_sockets, request, serve, start,
-    write_config,
+    Ready, Served, git, orrery_serve, orrery_serve_passing, pass_sockets, refused, request, serve,
+    start, write_config,
 };
 
 #[test]
@@ -81,12 +81,12 @@ fn bind_sockets(dir: &Path, names: &[&str]) -> Vec<(UnixListener, PathBuf)> {
 /// A config whose faces and control plane listen on the passed sockets
 /// `faces` and `control`.
 fn passed_config(dir: &Path) -> PathBuf {
-    write_config(
-        dir,
-        "",
-        "listen = \"fd:faces\"\ncontrol_listen = \"fd:control\"\nbase_url = \"http://world.test\"\n",
-    )
+    write_config(dir, "", PASSED_SERVER)
 }
+
+/// The `[server]` lines of [`passed_config`].
+const PASSED_SERVER: &str =
+    "listen = \"fd:faces\"\ncontrol_listen = \"fd:control\"\nbase_url = \"http://world.test\"\n";
 
 #[test]
 fn split_listeners_serve_over_passed_sockets() {
@@ -145,14 +145,16 @@ fn a_passed_socket_holds_connections_while_no_serve_runs() {
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 }
 
-/// Each way a passed socket can be unusable stops the world before its ready
-/// line, naming the listener.
+/// A passed socket `serve` can't use, or two listeners on one socket, stops
+/// the world before its ready line, with an error naming the listener.
 #[test]
 fn an_unusable_passed_socket_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let sockets = bind_sockets(dir.path(), &["faces"]);
     let faces = sockets[0].0.as_raw_fd();
+    let faces_path = format!("unix:{}", sockets[0].1.display());
     let (connected, _peer) = UnixStream::pair().unwrap();
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     // Each case serves an instance of its own, so none reads another's config.
     let config = |case: &str, server: &str| {
         let case = dir.path().join(case);
@@ -177,6 +179,25 @@ fn an_unusable_passed_socket_is_refused() {
         ),
         (
             orrery_serve_passing(
+                &config("named-twice", faces_only),
+                &[faces, faces],
+                "faces:faces",
+            ),
+            "fd:faces",
+            "names more than one descriptor",
+        ),
+        (
+            orrery_serve_passing(&config("past-count", faces_only), &[faces], "other:faces"),
+            "fd:faces",
+            "names it in position 2, but LISTEN_FDS is 1",
+        ),
+        (
+            orrery_serve_passing(&config("tcp", faces_only), &[tcp.as_raw_fd()], "faces"),
+            "fd:faces",
+            "is not a Unix socket",
+        ),
+        (
+            orrery_serve_passing(
                 &config("not-listening", faces_only),
                 &[connected.as_raw_fd()],
                 "faces",
@@ -195,6 +216,15 @@ fn an_unusable_passed_socket_is_refused() {
             ),
             "fd:faces",
             "both name fd:faces",
+        ),
+        (
+            orrery_serve_passing(
+                &config("passed-twice", PASSED_SERVER),
+                &[faces, faces],
+                "faces:control",
+            ),
+            &faces_path,
+            "each needs a socket of its own",
         ),
         (
             orrery_serve_passing(
@@ -221,8 +251,8 @@ fn an_unusable_passed_socket_is_refused() {
             "a passed socket's name is 1 to 255 characters",
         ),
     ];
-    for (mut cmd, listener, cause) in cases {
-        let out = cmd.output().unwrap();
+    for (cmd, listener, cause) in cases {
+        let out = refused(cmd);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{cause}: {stderr}");
         assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{cause}");

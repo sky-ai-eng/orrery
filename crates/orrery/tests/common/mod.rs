@@ -165,6 +165,25 @@ pub fn orrery_serve_passing(config: &Path, sockets: &[RawFd], names: &str) -> Co
     cmd
 }
 
+/// Run `cmd`, an `orrery serve` that should refuse to start, and return its
+/// output. One that starts instead is killed and fails the test, which would
+/// otherwise wait on it forever.
+pub fn refused(mut cmd: Command) -> std::process::Output {
+    let child = cmd.spawn().unwrap();
+    let pid = child.id().to_string();
+    let (output, output_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = output.send(child.wait_with_output());
+    });
+    match output_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(out) => out.unwrap(),
+        Err(_) => {
+            let _ = Command::new("kill").args(["-KILL", &pid]).status();
+            panic!("orrery serve started instead of refusing");
+        }
+    }
+}
+
 /// Start `orrery serve` and read its ready line. Every listener is bound by
 /// then, so nothing needs to poll for it.
 pub fn serve(config: &Path, envs: &[(&str, &str)]) -> (Served, Ready) {

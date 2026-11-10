@@ -579,10 +579,12 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
     passed::close_on_exec();
     let raw = std::fs::read_to_string(config_path)
         .with_context(|| format!("reading config {}", config_path.display()))?;
-    let config = toml::from_str::<Config>(&raw)
-        .map_err(anyhow::Error::from)
-        .and_then(|config| config.server.check().map(|()| config))
+    let config: Config = toml::from_str(&raw)
         .with_context(|| format!("parsing config {}", config_path.display()))?;
+    config
+        .server
+        .check()
+        .with_context(|| format!("checking config {}", config_path.display()))?;
 
     let t0_unix = t0_unix(config.instance.t0.as_deref(), "instance.t0")?;
     let world_root = config.instance.dir.join("world");
@@ -608,6 +610,15 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         Some(control_listen) => Some(control_listen.bind().await?),
         None => None,
     };
+    // Two passed descriptors can be one socket, and the faces and the
+    // control plane would then accept from one queue.
+    if let (Listener::Unix(_, listen), Some(Listener::Unix(_, control))) = (&listener, &control) {
+        anyhow::ensure!(
+            listen != control,
+            "server.listen and server.control_listen are both unix:{}: each needs a socket of its own",
+            listen.display()
+        );
+    }
     // A push is recorded only by the process serving it, so a process that
     // died mid-push can have left refs its log does not describe. This runs
     // once every listener is bound, because a second `serve` of an instance
