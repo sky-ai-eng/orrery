@@ -1261,6 +1261,7 @@ dependencies = [
  "clap",
  "getrandom 0.4.3",
  "jiff",
+ "libc",
  "orrery-face-git",
  "orrery-server",
  "orrery-snapshot",

@@ -10,7 +10,9 @@
 
 use std::io::{BufRead as _, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::os::fd::RawFd;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread::JoinHandle;
@@ -103,10 +105,75 @@ pub fn orrery_serve(config: &Path, envs: &[(&str, &str)]) -> Command {
     cmd
 }
 
+/// The most sockets [`pass_sockets`] passes: its `pre_exec` runs between
+/// fork and exec, where it must not allocate.
+const MAX_PASSED: usize = 8;
+
+/// Pass `sockets` to the process `cmd` starts as a supervisor does under
+/// `sd_listen_fds(3)`: at descriptors 3 onward, with `LISTEN_FDS` their
+/// count and `LISTEN_FDNAMES` `names`. `LISTEN_PID` is the caller's to set.
+pub fn pass_sockets(cmd: &mut Command, sockets: &[RawFd], names: &str) {
+    assert!(sockets.len() <= MAX_PASSED);
+    let n = sockets.len();
+    let mut fds = [-1; MAX_PASSED];
+    fds[..n].copy_from_slice(sockets);
+    let first_free = 3 + RawFd::try_from(n).unwrap();
+    cmd.env("LISTEN_FDS", n.to_string())
+        .env("LISTEN_FDNAMES", names);
+    let ok = |got: libc::c_int| {
+        if got == -1 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(got)
+        }
+    };
+    // SAFETY: the closure calls only fcntl and dup2, which are
+    // async-signal-safe, and allocates nothing.
+    unsafe {
+        cmd.pre_exec(move || {
+            // Each socket is copied above every target before any is moved,
+            // so no dup2 overwrites a socket a later one still needs. The
+            // copies are close-on-exec and the descriptors dup2 makes are
+            // not, so only the targets reach the new process, even one whose
+            // socket already sat at its target.
+            let mut copies = [-1; MAX_PASSED];
+            for i in 0..n {
+                copies[i] = ok(libc::fcntl(fds[i], libc::F_DUPFD_CLOEXEC, first_free))?;
+            }
+            for (target, &copy) in (3..).zip(&copies[..n]) {
+                ok(libc::dup2(copy, target))?;
+            }
+            Ok(())
+        });
+    }
+}
+
+/// `orrery serve` started as a supervisor that passes it `sockets`, named
+/// `names`, starts it: through a shell that sets `LISTEN_PID` to its own pid
+/// and then execs the binary, which keeps that pid.
+pub fn orrery_serve_passing(config: &Path, sockets: &[RawFd], names: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.args([
+        "-c",
+        r#"export LISTEN_PID=$$; exec "$0" serve --config "$1""#,
+    ])
+    .arg(env!("CARGO_BIN_EXE_orrery"))
+    .arg(config)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    pass_sockets(&mut cmd, sockets, names);
+    cmd
+}
+
 /// Start `orrery serve` and read its ready line. Every listener is bound by
 /// then, so nothing needs to poll for it.
 pub fn serve(config: &Path, envs: &[(&str, &str)]) -> (Served, Ready) {
-    let mut child = orrery_serve(config, envs).spawn().unwrap();
+    start(orrery_serve(config, envs))
+}
+
+/// Run `cmd`, which starts `orrery serve`, and read its ready line.
+pub fn start(mut cmd: Command) -> (Served, Ready) {
+    let mut child = cmd.spawn().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut stderr = child.stderr.take().unwrap();
     let stderr = std::thread::spawn(move || {

@@ -18,6 +18,7 @@ static VERSION: LazyLock<String> = LazyLock::new(|| {
 });
 
 mod control;
+mod passed;
 
 #[derive(Parser)]
 #[command(
@@ -194,19 +195,44 @@ struct ServerConfig {
     anonymous_git_reads: Option<bool>,
 }
 
-/// A listener address: `host:port`, or `unix:/absolute/path` for a Unix
-/// socket, which needs no port.
+impl ServerConfig {
+    /// The rules that span fields, which serde checks none of.
+    fn check(&self) -> anyhow::Result<()> {
+        if let (Some(Listen::Fd(listen)), Some(Listen::Fd(control))) =
+            (&self.listen, &self.control_listen)
+        {
+            anyhow::ensure!(
+                listen != control,
+                "server.listen and server.control_listen both name fd:{listen}: each needs a socket of its own"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// A listener address: `host:port`; `unix:/absolute/path` for a Unix socket
+/// `serve` binds, which needs no port; or `fd:<name>` for a listening Unix
+/// socket a supervisor passed to the process (`passed`).
 #[derive(serde::Deserialize)]
 #[serde(try_from = "String")]
 enum Listen {
     Tcp(String),
     Unix(PathBuf),
+    Fd(String),
 }
 
 impl TryFrom<String> for Listen {
     type Error = String;
 
     fn try_from(raw: String) -> Result<Self, Self::Error> {
+        if let Some(name) = raw.strip_prefix("fd:") {
+            if !passed::name_is_valid(name) {
+                return Err(format!(
+                    "{raw:?}: a passed socket's name is 1 to 255 characters, with no `:` and no control characters, as in fd:faces"
+                ));
+            }
+            return Ok(Listen::Fd(name.to_string()));
+        }
         let Some(path) = raw.strip_prefix("unix:") else {
             return Ok(Listen::Tcp(raw));
         };
@@ -249,6 +275,11 @@ impl Listen {
                 let listener = tokio::net::UnixListener::bind(path)
                     .with_context(|| format!("binding unix:{}", path.display()))?;
                 Ok(Listener::Unix(listener, path.clone()))
+            }
+            Listen::Fd(name) => {
+                let (listener, path) =
+                    passed::take(name).with_context(|| format!("listening on fd:{name}"))?;
+                Ok(Listener::Unix(listener, path))
             }
         }
     }
@@ -543,9 +574,14 @@ fn rfc3339(clock_unix: i64) -> String {
 }
 
 async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
+    // Before anything starts a process, which would inherit the passed
+    // sockets.
+    passed::close_on_exec();
     let raw = std::fs::read_to_string(config_path)
         .with_context(|| format!("reading config {}", config_path.display()))?;
-    let config: Config = toml::from_str(&raw)
+    let config = toml::from_str::<Config>(&raw)
+        .map_err(anyhow::Error::from)
+        .and_then(|config| config.server.check().map(|()| config))
         .with_context(|| format!("parsing config {}", config_path.display()))?;
 
     let t0_unix = t0_unix(config.instance.t0.as_deref(), "instance.t0")?;
@@ -575,8 +611,9 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
     // A push is recorded only by the process serving it, so a process that
     // died mid-push can have left refs its log does not describe. This runs
     // once every listener is bound, because a second `serve` of an instance
-    // that is already served fails to bind, and it must fail before it moves
-    // a ref the serving process has moved and not yet recorded.
+    // that is already served fails to bind a port or socket path the first
+    // holds, and it must fail before it moves a ref the serving process has
+    // moved and not yet recorded.
     orrery_face_git::restore_refs(&world)
         .context("putting the world's refs where its log puts them")?;
 
