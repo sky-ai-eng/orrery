@@ -667,6 +667,21 @@ async fn a_push_that_fails_puts_its_refs_back() {
     p.moved_nothing_and_retry_lands(mark);
 }
 
+/// The push also creates `stale/b`, which takes the path `stale` needs, so
+/// `stale` can be put back only once `stale/b` is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_that_fails_puts_back_a_branch_it_replaced_with_one_beneath_it() {
+    let mut p = push_that_fails().await;
+    p.push.push("feature:stale/b".to_string());
+    let lock = p.bare.join(format!("{}.lock", store::pull_head_ref(2)));
+    std::fs::write(&lock, "").unwrap();
+    let mark = p.send_and_fail();
+    std::fs::remove_file(&lock).unwrap();
+    p.moved_nothing_and_retry_lands(mark);
+    let refs = store::list_refs(&p.bare).unwrap();
+    assert_eq!(refs.get("refs/heads/stale/b"), Some(&p.feature_v2));
+}
+
 /// A `post-receive` hook runs once receive-pack has moved the pushed refs.
 /// This one kills receive-pack, its parent, so `git http-backend` fails
 /// with the refs moved and the push is never observed.

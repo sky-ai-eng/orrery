@@ -118,16 +118,18 @@ impl GitFace {
     /// repository agrees with the world, which holds no trace of the write.
     /// Each ref in `refs`, as `(name, old, new)`, returns to `old` by
     /// compare-and-swap, which deletes a ref the write created and recreates
-    /// one it deleted. The ref of each pull request in `pinned`, the ones the
+    /// one it deleted. The refs it created go first, since one it deleted can
+    /// need a path they hold, as `refs/heads/a` does while `refs/heads/a/b`
+    /// exists. The ref of each pull request in `pinned`, the ones the
     /// write re-pinned, returns to the head the world still pins it at. A
     /// retry of the write then starts from the refs the failed one found. It
     /// is best effort: a ref that cannot be put back is logged, and the rest
     /// are still put back. The caller holds the repository's lock for write.
     pub fn move_back(&self, repo: &Repo, refs: &[(&str, &str, &str)], pinned: &[i64]) {
         let bare = store::bare_dir(&self.world.repos_dir(), &repo.owner_login, &repo.name);
-        // TODO(ORR-79): refs go back in name order, so a push that replaced
-        // `a` with `a/b` leaves `a` deleted until the world is next served.
-        for &(name, old, new) in refs {
+        let mut refs = refs.to_vec();
+        refs.sort_by_key(|&(_, old, _)| old != store::ZERO_OID);
+        for (name, old, new) in refs {
             if let Err(e) = store::update_ref_cas(&bare, name, old, new) {
                 tracing::error!(error = %e, git_ref = name, "unwind left a ref moved");
             }
