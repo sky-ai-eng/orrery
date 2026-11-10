@@ -27,6 +27,8 @@ fn serve_tcp(dir: &std::path::Path) -> (Served, String, String) {
 struct Following {
     child: Child,
     lines: mpsc::Receiver<String>,
+    /// Sends stdout's lines to `lines`, and ends when the command exits.
+    stdout: Option<JoinHandle<()>>,
     /// Reads stderr as it is written, so the logs never fill the pipe.
     stderr: Option<JoinHandle<String>>,
 }
@@ -58,7 +60,7 @@ fn follow(control_url: &str, after_seq: i64) -> Following {
     });
     let stdout = BufReader::new(child.stdout.take().unwrap());
     let (tx, lines) = mpsc::channel();
-    std::thread::spawn(move || {
+    let stdout = std::thread::spawn(move || {
         for line in stdout.lines() {
             if tx.send(line.unwrap()).is_err() {
                 return;
@@ -68,6 +70,7 @@ fn follow(control_url: &str, after_seq: i64) -> Following {
     Following {
         child,
         lines,
+        stdout: Some(stdout),
         stderr: Some(stderr),
     }
 }
@@ -91,6 +94,9 @@ impl Following {
         });
         let status = self.child.wait().unwrap();
         let stderr = self.stderr.take().unwrap().join().unwrap();
+        // Joined first, so every line the command printed before it exited
+        // is in `lines`.
+        self.stdout.take().unwrap().join().unwrap();
         let rest = self.lines.try_iter().collect();
         (status, rest, stderr)
     }

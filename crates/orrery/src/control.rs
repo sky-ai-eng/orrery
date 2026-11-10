@@ -98,6 +98,19 @@ impl Address {
                 .with_context(|| format!("reading the answer from {url}"))?;
             anyhow::bail!("GET {url} answered {status}: {body}");
         }
+        // A server that answers 200 to any path, such as a web app's, is not
+        // a world, and resuming against it would only repeat the mistake.
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        let media_type = content_type.split(';').next().unwrap_or_default().trim();
+        anyhow::ensure!(
+            media_type.eq_ignore_ascii_case("text/event-stream"),
+            "GET {url} answered {status} with content-type {content_type:?}, not an event stream; \
+             is --control-url a world's control listener?"
+        );
         let body = Watched::new(response.into_body().into_reader());
         read_stream(BufReader::new(body), out, &mut last).with_context(|| resume(&last))
     }
