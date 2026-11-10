@@ -944,6 +944,64 @@ async fn unknown_field_marked_not_mocked() {
     }
 }
 
+/// `gh issue list`'s query, verbatim (gh 2.89). It declares `$states` as a
+/// list of `IssueState`, a type Orrery lacks, with a default.
+const GH_ISSUE_LIST: &str = "query IssueList($owner: String!, $repo: String!, $limit: Int, $endCursor: String, $states: [IssueState!] = OPEN, $assignee: String, $author: String, $mention: String) {
+  repository(owner: $owner, name: $repo) { hasIssuesEnabled issues(first: $limit, after: $endCursor, orderBy: {field: CREATED_AT, direction: DESC}, states: $states, filterBy: {assignee: $assignee, createdBy: $author, mentioned: $mention}) { totalCount nodes { number } pageInfo { hasNextPage endCursor } } }
+}";
+
+/// A list-typed variable of a type Orrery lacks, declared with a default, is
+/// an unknown type like any other: the document fails, marked not mocked,
+/// rather than the connection dropping. A list of a known type keeps its
+/// default.
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_list_variable_type_with_default_marked_not_mocked() {
+    let s = seed().await;
+    let resp = gql(
+        &s.inst.base,
+        &s.token,
+        "query($s:[IssueState!] = OPEN){rateLimit{remaining}}",
+        serde_json::json!({}),
+    );
+    assert!(resp["data"].is_null(), "{resp}");
+    let errors = resp["errors"].as_array().unwrap();
+    let err = errors
+        .iter()
+        .find(|e| e["message"] == r#"orrery (not mocked): Unknown type "IssueState""#)
+        .unwrap_or_else(|| panic!("names the type: {resp}"));
+    assert_eq!(err["extensions"]["orrery"]["not_mocked"], true, "{resp}");
+
+    let resp = gql(
+        &s.inst.base,
+        &s.token,
+        GH_ISSUE_LIST,
+        serde_json::json!({ "owner": "alice", "repo": "webapp", "limit": 30 }),
+    );
+    assert!(resp["data"].is_null(), "{resp}");
+    let errors = resp["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["message"] == r#"orrery (not mocked): Unknown type "IssueState""#),
+        "names the type: {resp}"
+    );
+    for err in errors {
+        assert_eq!(err["extensions"]["orrery"]["not_mocked"], true, "{resp}");
+    }
+
+    let resp = gql(
+        &s.inst.base,
+        &s.token,
+        r#"query($ids: [ID!] = ["nope"]) { nodes(ids: $ids) { __typename } }"#,
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        resp,
+        serde_json::json!({ "data": { "nodes": [null] } }),
+        "a known type's default is used"
+    );
+}
+
 /// A bot actor stands for a GitHub App: REST spells its login with the
 /// `[bot]` suffix and types it `Bot`, GraphQL types its author `Bot` with the
 /// bare slug, and the authenticated-user routes refuse its token, as GitHub
