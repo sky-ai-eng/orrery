@@ -205,6 +205,15 @@ pub(crate) fn last_seq(conn: &Connection) -> Result<i64> {
     )
 }
 
+/// How many entries the log holds, as the append keeps it.
+pub(crate) fn log_entries(conn: &Connection) -> Result<i64> {
+    Ok(
+        conn.query_row("SELECT log_entries FROM world WHERE id = 1", [], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
 pub(crate) fn log_count_after(conn: &Connection, after_seq: i64) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT count(*) FROM action_log WHERE seq > ?1",

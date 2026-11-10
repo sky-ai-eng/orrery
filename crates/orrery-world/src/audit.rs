@@ -30,9 +30,12 @@ enum Column {
     /// A credential, derived from the world secret and numbers the events
     /// carry. Only a re-key changes one.
     Credential,
+    /// How many entries the log holds: the log's own length, which no event
+    /// carries. [`Audit::end`] checks it against the log instead.
+    LogLength,
 }
 
-use Column::{Credential, Field, Identity};
+use Column::{Credential, Field, Identity, LogLength};
 
 /// Every table but the log, and what each of its columns is.
 const TABLES: &[(&str, &[(&str, Column)])] = &[
@@ -42,6 +45,7 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
             ("id", Identity),
             ("clock_unix", Field("clock_unix")),
             ("secret", Credential),
+            ("log_entries", LogLength),
         ],
     ),
     (
@@ -282,8 +286,18 @@ impl Audit {
         Ok(Audit { before: read(tx)? })
     }
 
-    /// Fail the test if the write stored a value none of `events` carries.
+    /// Fail the test if the write stored a value none of `events` carries,
+    /// or left the log's count other than the number of entries it holds.
     pub(crate) fn end(self, tx: &Connection, events: &[EventBody]) -> Result<()> {
+        let (kept, counted): (i64, i64) = tx.query_row(
+            "SELECT log_entries, (SELECT COUNT(*) FROM action_log) FROM world WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        assert_eq!(
+            kept, counted,
+            "the log's count is not the number of entries it holds"
+        );
         let after = read(tx)?;
         let carried = Carried::of(events);
         let mut missing = Vec::new();
@@ -306,6 +320,7 @@ impl Audit {
                         continue;
                     }
                     let field = match (kind, &child_field) {
+                        (LogLength, _) => continue,
                         (Credential, _) if added_or_removed => continue,
                         (Credential, _) if carried.rekeyed => continue,
                         (Credential, _) => "credential".to_string(),

@@ -76,6 +76,13 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE action_log ADD COLUMN door TEXT
          CHECK (door IN ('rest', 'graphql', 'git', 'web', 'control', 'cli'));
      ALTER TABLE action_log ADD COLUMN app_id INTEGER REFERENCES oauth_apps(id);",
+    // 11: how many entries the action log holds, so the whole log's count is
+    // read without reading the log. The append adds to it in the transaction
+    // that adds the entries; a world migrated here starts from one count of
+    // the log it holds.
+    "ALTER TABLE world ADD COLUMN log_entries INTEGER NOT NULL DEFAULT 0
+         CHECK (log_entries >= 0);
+     UPDATE world SET log_entries = (SELECT COUNT(*) FROM action_log);",
 ];
 
 /// The version this binary reads and writes.

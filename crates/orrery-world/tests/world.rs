@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use orrery_world::{
-    ActorKind, Attribution, DEFAULT_T0_UNIX, Door, Event, RefChange, RefMove, Signal, World,
-    WorldError, WorldReader, WorldSecret, WorldView, WriteSpan,
+    ActorKind, Attribution, DEFAULT_T0_UNIX, Door, Event, LogOrder, RefChange, RefMove, Signal,
+    World, WorldError, WorldReader, WorldSecret, WorldView, WriteSpan,
 };
 use sha2::{Digest, Sha256};
 
@@ -636,6 +636,96 @@ fn log_is_ordered_and_keyset_paginated() {
         all.iter()
             .all(|e| !e.actor.login.is_empty() && e.clock_unix >= DEFAULT_T0_UNIX)
     );
+}
+
+/// How many entries the log of the world at `root` holds, counted by a
+/// connection of its own.
+fn count_log(root: &std::path::Path) -> i64 {
+    rusqlite::Connection::open_with_flags(
+        root.join("world.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row("SELECT COUNT(*) FROM action_log", [], |r| r.get(0))
+    .unwrap()
+}
+
+/// The log's total with no `after_seq`, in each order, read alone as
+/// `page_size: 0` reads it.
+fn totals(w: &World) -> [i64; 2] {
+    [LogOrder::OldestFirst, LogOrder::NewestFirst]
+        .map(|order| w.log_page(0, order, None, 0).unwrap().1)
+}
+
+#[test]
+fn the_logs_total_is_the_number_of_entries_it_holds_after_every_write() {
+    let (dir, w) = fresh();
+    let root = dir.path().join("world");
+    let holds = |w: &World| {
+        let n = count_log(&root);
+        assert_eq!(totals(w), [n, n]);
+        n
+    };
+    let created = holds(&w);
+    assert_eq!(
+        created, 2,
+        "world:created and the system actor's actor:created"
+    );
+
+    let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+    let repo = w
+        .create_repo(alice.id, "dots", None, true, "main", by(alice.id))
+        .unwrap();
+    let before_push = holds(&w);
+    // One write, three entries: repo:pushed and a ref:created per ref.
+    w.record_push(repo.id, by(alice.id), &first_push(), None)
+        .unwrap();
+    let pushed = holds(&w);
+    assert_eq!(pushed, before_push + 3);
+
+    // A write that fails, and one that changes nothing, append nothing and
+    // count nothing.
+    assert!(matches!(
+        w.create_actor("alice", ActorKind::User),
+        Err(WorldError::ActorExists(_))
+    ));
+    w.record_push(repo.id, by(alice.id), &[], None).unwrap();
+    assert_eq!(holds(&w), pushed);
+
+    w.advance_clock(60, by(alice.id)).unwrap();
+    let n = holds(&w);
+    drop(w);
+    let w = World::open(&root).unwrap();
+    assert_eq!(holds(&w), n, "a reopened world reports the count it kept");
+}
+
+/// Every fixture is a world written at an older version, so opening a copy
+/// migrates it and sets its count from the log it holds.
+#[test]
+fn a_migrated_world_reports_the_count_of_its_log() {
+    let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+    let mut seen = 0;
+    for entry in std::fs::read_dir(fixtures).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "db") {
+            continue;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("world");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::copy(&path, root.join("world.db")).unwrap();
+        let fixture_log = count_log(&root);
+        assert!(fixture_log > 0, "{}", path.display());
+
+        let w = World::open(&root).unwrap();
+        assert_eq!(totals(&w), [fixture_log; 2], "{}", path.display());
+        let (actor, _) = w.create_actor("after-migration", ActorKind::User).unwrap();
+        w.advance_clock(1, by(actor.id)).unwrap();
+        assert_eq!(totals(&w), [fixture_log + 2; 2], "{}", path.display());
+        assert_eq!(count_log(&root), fixture_log + 2);
+        seen += 1;
+    }
+    assert!(seen > 0, "no fixtures in {fixtures}");
 }
 
 #[test]

@@ -230,14 +230,13 @@ impl World {
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?,
         };
-        // TODO(ORR-59): this count reads every entry above `after_seq` while
-        // holding the world's connection, about 60 ms at a million entries;
-        // the whole-log total should come from a count kept with the log.
-        let total = conn.query_row(
-            "SELECT COUNT(*) FROM action_log WHERE seq > ?1",
-            params![after_seq],
-            |r| r.get(0),
-        )?;
+        // Counting reads every entry it counts, with the world's connection
+        // held, so the whole log's total is the number the append keeps. A
+        // total above `after_seq` reads only the span the caller asked about.
+        let total = match after_seq {
+            0 => queries::log_entries(&conn)?,
+            _ => queries::log_count_after(&conn, after_seq)?,
+        };
         Ok((events, total))
     }
 
@@ -320,8 +319,8 @@ struct LegacyRefUpdate {
 }
 
 /// Append a write's events, numbered from the next `seq` this database
-/// issues, each stamped with the current clock and the one real time, and
-/// return the first event's `seq`.
+/// issues, each stamped with the current clock and the one real time, add
+/// them to the log's count, and return the first event's `seq`.
 fn append(tx: &Connection, by: Attribution, events: &[EventBody]) -> Result<i64> {
     let first = issued_seq(tx)? + 1;
     let wall = wall_unix_ms();
@@ -348,6 +347,10 @@ fn append(tx: &Connection, by: Attribution, events: &[EventBody]) -> Result<i64>
             body.to_string(),
         ])?;
     }
+    tx.execute(
+        "UPDATE world SET log_entries = log_entries + ?1 WHERE id = 1",
+        params![events.len() as i64],
+    )?;
     Ok(first)
 }
 
@@ -442,5 +445,35 @@ pub(crate) fn wall_unix_ms() -> i64 {
     match now.duration_since(std::time::UNIX_EPOCH) {
         Ok(since) => since.as_millis() as i64,
         Err(before) => -(before.duration().as_millis() as i64),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{ActorKind, DEFAULT_T0_UNIX, LogOrder, World, WorldSecret};
+
+    // A total counted from the log is the log's size, and one read from the
+    // kept number is whatever that number says, so a world whose number is
+    // set wrong shows which one each total reads.
+    #[test]
+    fn the_whole_logs_total_reads_the_kept_number_and_a_narrowed_one_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = World::create(
+            &dir.path().join("world"),
+            DEFAULT_T0_UNIX,
+            &WorldSecret::LOCAL,
+        )
+        .unwrap();
+        w.create_actor("alice", ActorKind::User).unwrap();
+        w.create_actor("bob", ActorKind::User).unwrap();
+        let log = w.log_after(0, 100).unwrap();
+        let held = log.len() as i64;
+
+        w.with_conn(|conn| Ok(conn.execute("UPDATE world SET log_entries = 1000", [])?))
+            .unwrap();
+        for order in [LogOrder::OldestFirst, LogOrder::NewestFirst] {
+            assert_eq!(w.log_page(0, order, None, 1).unwrap().1, 1000);
+            assert_eq!(w.log_page(log[0].seq, order, None, 1).unwrap().1, held - 1);
+        }
     }
 }
