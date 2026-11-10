@@ -127,7 +127,7 @@ Only a bot creates or updates check runs; any other actor gets a `403` naming th
 
 | Route | Behavior |
 | --- | --- |
-| `GET /meta` | `{verifiable_password_authentication: false, installed_version: "3.17.0"}`. No actor has a password to verify (rule 12). A GitHub Enterprise Server 3.17 also answers `packages` and `domains`, the addresses of services Orrery does not run, so both are absent. |
+| `GET /meta` | `{verifiable_password_authentication: false, installed_version: "3.17.0"}`. No actor has a password to verify (rule 12). GitHub's description of 3.17 also lists `packages` and `domains`, the addresses of services Orrery does not run, so both are absent. |
 
 Clients read `installed_version` to decide which requests to send, so Orrery reports the release whose requests it serves. 3.17 is the first release without classic projects, which Orrery does not have, and the last before advanced issue search, whose syntax (parentheses and `OR`) the search in §3.2 does not parse. gh 2.89, for one, asks for a pull request's classic project cards below 3.17, and sends advanced search syntax from 3.18.
 
