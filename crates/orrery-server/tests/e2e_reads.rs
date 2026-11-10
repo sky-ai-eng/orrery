@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{boot, face, face_ok, git, mint_actor};
+use common::{boot, face, face_answer, face_ok, git, mint_actor};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn poll_path_reads() {
@@ -509,4 +509,45 @@ async fn accounts_by_login() {
             "{login}"
         );
     }
+}
+
+/// `GET /meta` names the GitHub Enterprise Server release whose requests the
+/// face serves, and the fields it can answer truthfully. It needs a token, as
+/// every REST route does, and refuses a rendering by name.
+#[tokio::test(flavor = "multi_thread")]
+async fn meta_names_the_release_the_face_serves() {
+    let inst = boot().await;
+    let alice = mint_actor(&inst.base, "alice", "user");
+    let url = format!("{}/api/v3/meta", inst.base);
+
+    assert_eq!(
+        face_ok("GET", &url, &alice, serde_json::json!(null)),
+        serde_json::json!({
+            "verifiable_password_authentication": false,
+            "installed_version": "3.17.0",
+        })
+    );
+
+    let full = [("accept", "application/vnd.github.v3.full+json")];
+    let (status, body) = face_answer("GET", &url, &alice, &full, None);
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["orrery"]["not_mocked"], true, "{body}");
+    assert_eq!(
+        (&body["errors"][0]["field"], &body["errors"][0]["resource"]),
+        (&"Accept".into(), &"Meta".into()),
+    );
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut anonymous = agent.get(&url).call().unwrap();
+    assert_eq!(anonymous.status().as_u16(), 401);
+    assert_eq!(
+        anonymous
+            .body_mut()
+            .read_json::<serde_json::Value>()
+            .unwrap(),
+        serde_json::json!({ "message": "Bad credentials" })
+    );
 }
