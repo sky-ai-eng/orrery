@@ -382,16 +382,16 @@ pub struct FileDiff {
     pub patch: Option<String>,
 }
 
-/// Every file `git diff -M base...head` changes, in path order, each with
-/// its part of [`diff`].
+/// Every file `git diff -M base...head` changes, in path order, as GitHub
+/// lists them, each with its part of [`diff`]. A type change prints as a
+/// deletion and a creation of one path, two chunks under one header, and is
+/// two files: the one removed, then the one added.
 pub fn file_diffs(bare: &Path, base: &str, head: &str) -> Result<Vec<FileDiff>, GitFaceError> {
     let files = changed_files(bare, base, head)?;
     let diff = diff(bare, base, head)?;
     let mut sections: Vec<(&[u8], Vec<&[u8]>)> = Vec::new();
     for chunk in file_chunks(&diff) {
         let header = chunk.split(|&b| b == b'\n').next().unwrap_or_default();
-        // A type change prints as a deletion and a creation of one path,
-        // two chunks under one header, where `changed_files` lists one file.
         match sections.last_mut() {
             Some((last, chunks)) if *last == header => chunks.push(chunk),
             _ => sections.push((header, vec![chunk])),
@@ -404,37 +404,55 @@ pub fn file_diffs(bare: &Path, base: &str, head: &str) -> Result<Vec<FileDiff>, 
             files.len()
         )));
     }
-    Ok(files
-        .into_iter()
-        .zip(sections)
-        .map(|(file, (_, chunks))| {
-            let mut hunks = Vec::new();
-            for chunk in chunks {
-                if let Some(start) = hunk_start(chunk) {
-                    hunks.extend_from_slice(&chunk[start..]);
-                }
+    let mut diffs = Vec::new();
+    for (file, (_, chunks)) in files.into_iter().zip(sections) {
+        match chunks[..] {
+            [removed, added] if file.status == FileStatus::Changed => {
+                let as_status = |status| ChangedFile {
+                    status,
+                    ..file.clone()
+                };
+                diffs.push(file_diff(as_status(FileStatus::Removed), &[removed]));
+                diffs.push(file_diff(as_status(FileStatus::Added), &[added]));
             }
-            let mut additions = 0;
-            let mut deletions = 0;
-            for line in hunks.split(|&b| b == b'\n') {
-                match line.first() {
-                    Some(b'+') => additions += 1,
-                    Some(b'-') => deletions += 1,
-                    _ => {}
-                }
-            }
-            let patch = (!hunks.is_empty()).then(|| {
-                let text = hunks.strip_suffix(b"\n").unwrap_or(&hunks);
-                String::from_utf8_lossy(text).into_owned()
-            });
-            FileDiff {
-                file,
-                additions,
-                deletions,
-                patch,
-            }
-        })
-        .collect())
+            _ => diffs.push(file_diff(file, &chunks)),
+        }
+    }
+    Ok(diffs)
+}
+
+/// How many files a [`diff`] prints, as [`file_diffs`] lists them.
+pub fn file_count(diff: &[u8]) -> usize {
+    file_chunks(diff).len()
+}
+
+/// A file's counts and patch, from its chunks of a diff.
+fn file_diff(file: ChangedFile, chunks: &[&[u8]]) -> FileDiff {
+    let mut hunks = Vec::new();
+    for chunk in chunks {
+        if let Some(start) = hunk_start(chunk) {
+            hunks.extend_from_slice(&chunk[start..]);
+        }
+    }
+    let mut additions = 0;
+    let mut deletions = 0;
+    for line in hunks.split(|&b| b == b'\n') {
+        match line.first() {
+            Some(b'+') => additions += 1,
+            Some(b'-') => deletions += 1,
+            _ => {}
+        }
+    }
+    let patch = (!hunks.is_empty()).then(|| {
+        let text = hunks.strip_suffix(b"\n").unwrap_or(&hunks);
+        String::from_utf8_lossy(text).into_owned()
+    });
+    FileDiff {
+        file,
+        additions,
+        deletions,
+        patch,
+    }
 }
 
 /// A diff's chunks, each from a `diff --git` line up to the next one. A

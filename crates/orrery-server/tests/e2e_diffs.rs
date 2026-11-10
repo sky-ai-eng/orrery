@@ -105,16 +105,24 @@ impl Seeded {
 
     /// Every changed file a pull request's files list, page by page.
     fn pull_files(&self, number: u64) -> Vec<serde_json::Value> {
+        self.pull_files_paged(number, 100)
+    }
+
+    /// [`Self::pull_files`], `per_page` to a page.
+    fn pull_files_paged(&self, number: u64, per_page: usize) -> Vec<serde_json::Value> {
         let mut files = Vec::new();
         for page in 1.. {
             let listed = face_ok(
                 "GET",
-                &format!("{}/pulls/{number}/files?per_page=100&page={page}", self.api),
+                &format!(
+                    "{}/pulls/{number}/files?per_page={per_page}&page={page}",
+                    self.api
+                ),
                 &self.token,
                 serde_json::json!(null),
             );
             let listed = listed.as_array().unwrap().clone();
-            let short = listed.len() < 100;
+            let short = listed.len() < per_page;
             files.extend(listed);
             if short {
                 return files;
@@ -191,16 +199,15 @@ fn diff_hunks(diff: &str) -> Hunks {
 
 /// The hunks a consumer rebuilds from a files list's patches.
 fn files_hunks(files: &[serde_json::Value]) -> Hunks {
-    files
-        .iter()
-        .map(|f| {
-            let patch = f["patch"].as_str().unwrap_or("");
-            (
-                f["filename"].as_str().unwrap().to_string(),
-                patch_hunks(patch),
-            )
-        })
-        .collect()
+    let mut hunks = Hunks::new();
+    for f in files {
+        let patch = f["patch"].as_str().unwrap_or("");
+        hunks
+            .entry(f["filename"].as_str().unwrap().to_string())
+            .or_default()
+            .extend(patch_hunks(patch));
+    }
+    hunks
 }
 
 /// A pull request and a compare answer the diff media type with the diff git
@@ -310,18 +317,36 @@ async fn the_diff_media_type_and_the_files_carry_one_diff() {
         by_name("added.txt"),
         ("added", 2, 0, 2, Some("@@ -0,0 +1,2 @@\n+new\n+file"))
     );
-    // A type change is one file, whose patch holds both of git's hunks.
-    assert_eq!(
-        by_name("link"),
-        (
-            "changed",
-            1,
-            1,
-            2,
-            Some(
-                "@@ -1 +0,0 @@\n-a file that becomes a link\n@@ -0,0 +1 @@\n+new.txt\n\\ No newline at end of file"
+    // A type change is two files of one name: the one removed, then the one
+    // added.
+    let link: Vec<(&str, i64, i64, Option<&str>)> = files
+        .iter()
+        .filter(|f| f["filename"] == "link")
+        .map(|f| {
+            (
+                f["status"].as_str().unwrap(),
+                f["additions"].as_i64().unwrap(),
+                f["deletions"].as_i64().unwrap(),
+                f.get("patch").and_then(|p| p.as_str()),
             )
-        )
+        })
+        .collect();
+    assert_eq!(
+        link,
+        vec![
+            (
+                "removed",
+                0,
+                1,
+                Some("@@ -1 +0,0 @@\n-a file that becomes a link")
+            ),
+            (
+                "added",
+                1,
+                0,
+                Some("@@ -0,0 +1 @@\n+new.txt\n\\ No newline at end of file")
+            ),
+        ]
     );
     assert_eq!(
         files.iter().find(|f| f["filename"] == "new.txt").unwrap()["previous_filename"],
@@ -447,11 +472,11 @@ async fn a_pull_diff_past_300_files_is_not_acceptable() {
     assert_eq!(files_hunks(&files), diff_hunks(&diff));
 }
 
-/// The content of an added file whose patch is exactly `bytes` long: 1,000
-/// lines, the last one sized to fit.
+/// The content of an added file whose patch is exactly `bytes` long, at
+/// least 51,968: 1,000 lines, the last one sized to fit.
 fn added_with_patch_of(bytes: usize) -> String {
     let header = "@@ -0,0 +1,1000 @@\n".len();
-    let line = "x".repeat(99);
+    let line = "x".repeat(50);
     let last = bytes - header - 999 * (1 + line.len() + 1) - 1;
     let mut body: String = (0..999).map(|_| format!("{line}\n")).collect();
     body.push_str(&"y".repeat(last));
@@ -464,25 +489,39 @@ fn numbered(lines: usize) -> String {
     (1..=lines).map(|n| format!("{n}\n")).collect()
 }
 
-/// A patch larger than 100 KiB is left out, the file keeping its line
-/// counts. A compare's files carry patches until the next one would take
-/// them past 20,000 lines, and from that file on carry neither patches nor
-/// counts; a pull request's files have no such limit.
+/// Each file's name, additions, and patch length, in the order listed.
+fn summary(files: &[serde_json::Value]) -> Vec<(String, i64, Option<usize>)> {
+    files
+        .iter()
+        .map(|f| {
+            (
+                f["filename"].as_str().unwrap().to_string(),
+                f["additions"].as_i64().unwrap(),
+                f.get("patch").map(|p| p.as_str().unwrap().len()),
+            )
+        })
+        .collect()
+}
+
+/// A patch of 100 KiB or more is left out, the file keeping its line counts.
+/// A response's files carry patches until the next one would take them past
+/// 20,000 lines, and from that file on carry neither patches nor counts. The
+/// limit is per response, so a page of a pull request's files holds its own.
 #[tokio::test(flavor = "multi_thread")]
-async fn patches_are_left_out_past_githubs_limits() {
+async fn patches_are_left_out_past_githubs_line_limits() {
     let s = seed(&[]).await;
     s.git(&["checkout", "-b", "big"]);
+    write(
+        &s.src,
+        "a/below-limit.txt",
+        added_with_patch_of(100 * 1024 - 1).as_bytes(),
+    );
     write(
         &s.src,
         "a/at-limit.txt",
         added_with_patch_of(100 * 1024).as_bytes(),
     );
-    write(
-        &s.src,
-        "a/past-limit.txt",
-        added_with_patch_of(100 * 1024 + 1).as_bytes(),
-    );
-    // 5,001 patch lines each: the fourth takes the compare past 20,000.
+    // 5,001 patch lines each: the fourth takes a response past 20,000.
     for n in 1..=4 {
         write(&s.src, &format!("b/{n}.txt"), numbered(5_000).as_bytes());
     }
@@ -490,45 +529,33 @@ async fn patches_are_left_out_past_githubs_limits() {
     s.push("big", "big files");
     let number = s.open_pull("big");
 
+    let five = "@@ -0,0 +1,5000 @@\n".len() + 5_000 + numbered(5_000).len() - 1;
+    let capped = vec![
+        ("a/at-limit.txt".to_string(), 1000, None),
+        ("a/below-limit.txt".to_string(), 1000, Some(100 * 1024 - 1)),
+        ("b/1.txt".to_string(), 5000, Some(five)),
+        ("b/2.txt".to_string(), 5000, Some(five)),
+        ("b/3.txt".to_string(), 5000, Some(five)),
+        ("b/4.txt".to_string(), 0, None),
+        ("c/small.txt".to_string(), 0, None),
+    ];
     let compare = face_ok(
         "GET",
         &format!("{}/compare/main...big", s.api),
         &s.token,
         serde_json::json!(null),
     );
-    let summary = |files: &[serde_json::Value]| -> Vec<(String, i64, Option<usize>)> {
-        files
-            .iter()
-            .map(|f| {
-                (
-                    f["filename"].as_str().unwrap().to_string(),
-                    f["additions"].as_i64().unwrap(),
-                    f.get("patch").map(|p| p.as_str().unwrap().len()),
-                )
-            })
-            .collect()
-    };
-    let five = "@@ -0,0 +1,5000 @@\n".len() + 5_000 + numbered(5_000).len() - 1;
-    assert_eq!(
-        summary(compare["files"].as_array().unwrap()),
-        vec![
-            ("a/at-limit.txt".to_string(), 1000, Some(100 * 1024)),
-            ("a/past-limit.txt".to_string(), 1000, None),
-            ("b/1.txt".to_string(), 5000, Some(five)),
-            ("b/2.txt".to_string(), 5000, Some(five)),
-            ("b/3.txt".to_string(), 5000, Some(five)),
-            ("b/4.txt".to_string(), 0, None),
-            ("c/small.txt".to_string(), 0, None),
-        ]
-    );
+    assert_eq!(summary(compare["files"].as_array().unwrap()), capped);
     assert_eq!(compare["files"][5]["changes"], 0);
+    assert_eq!(summary(&s.pull_files(number)), capped);
 
-    let files = s.pull_files(number);
+    // Four files to a page, neither page reaches the limit.
+    let files = s.pull_files_paged(number, 4);
     assert_eq!(
         summary(&files),
         vec![
-            ("a/at-limit.txt".to_string(), 1000, Some(100 * 1024)),
-            ("a/past-limit.txt".to_string(), 1000, None),
+            ("a/at-limit.txt".to_string(), 1000, None),
+            ("a/below-limit.txt".to_string(), 1000, Some(100 * 1024 - 1)),
             ("b/1.txt".to_string(), 5000, Some(five)),
             ("b/2.txt".to_string(), 5000, Some(five)),
             ("b/3.txt".to_string(), 5000, Some(five)),
@@ -547,8 +574,58 @@ async fn patches_are_left_out_past_githubs_limits() {
     );
     assert_eq!(status, 200);
     let diff = diff_hunks(&String::from_utf8(body).unwrap());
-    assert_eq!(diff["a/past-limit.txt"], vec![(1, 1000)]);
+    assert_eq!(diff["a/at-limit.txt"], vec![(1, 1000)]);
     let mut rebuilt = files_hunks(&files);
-    rebuilt.insert("a/past-limit.txt".to_string(), vec![(1, 1000)]);
+    rebuilt.insert("a/at-limit.txt".to_string(), vec![(1, 1000)]);
     assert_eq!(rebuilt, diff);
+}
+
+/// A response's files carry patches until the next one would take them past
+/// 1 MiB, each patch counting one byte more than its length, and from that
+/// file on carry neither patches nor counts.
+#[tokio::test(flavor = "multi_thread")]
+async fn patches_are_left_out_past_githubs_byte_limit() {
+    let s = seed(&[]).await;
+    // Ten patches of 95,000 bytes, then one that brings the total to exactly
+    // 1 MiB on `full` and one byte past it on `over`, then a small one.
+    let last_fits = (1 << 20) - 10 * 95_001 - 1;
+    for (branch, last) in [("full", last_fits), ("over", last_fits + 1)] {
+        s.git(&["checkout", "-q", "-b", branch, "main"]);
+        for n in 1..=10 {
+            write(
+                &s.src,
+                &format!("h{n:02}.txt"),
+                added_with_patch_of(95_000).as_bytes(),
+            );
+        }
+        write(&s.src, "h11.txt", added_with_patch_of(last).as_bytes());
+        write(&s.src, "h12.txt", b"small\n");
+        s.push(branch, branch);
+    }
+    let ten = || (1..=10).map(|n| (format!("h{n:02}.txt"), 1000, Some(95_000)));
+    let compare = |branch: &str| {
+        let compare = face_ok(
+            "GET",
+            &format!("{}/compare/main...{branch}", s.api),
+            &s.token,
+            serde_json::json!(null),
+        );
+        summary(compare["files"].as_array().unwrap())
+    };
+    let full: Vec<_> = ten()
+        .chain([
+            ("h11.txt".to_string(), 1000, Some(last_fits)),
+            ("h12.txt".to_string(), 0, None),
+        ])
+        .collect();
+    assert_eq!(compare("full"), full);
+    let over: Vec<_> = ten()
+        .chain([
+            ("h11.txt".to_string(), 0, None),
+            ("h12.txt".to_string(), 0, None),
+        ])
+        .collect();
+    assert_eq!(compare("over"), over);
+    let number = s.open_pull("full");
+    assert_eq!(summary(&s.pull_files(number)), full);
 }
