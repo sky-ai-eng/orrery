@@ -2,8 +2,8 @@
 //! every endpoint here exists because a consumer needs it, and is listed in
 //! `spec/surface-github.md`. Currently the authoring surface: repo
 //! creation, org membership and teams, pull requests (open/edit/merge),
-//! review requests, reviews, issue comments, labels, and check runs — the
-//! writes a scenario driver performs (spec/usage.md).
+//! review requests, reviews, issue comments, labels, check runs, and SSH
+//! signing keys — the writes a scenario driver performs (spec/usage.md).
 //!
 //! Face endpoints mimic real GitHub, including its lax body decoding: unknown
 //! request fields are ignored, exactly as GitHub ignores them. The exception
@@ -32,6 +32,7 @@ mod orgs;
 mod pulls;
 mod reads;
 mod render;
+mod signing;
 
 pub use render::repo_json;
 
@@ -62,13 +63,24 @@ pub fn router(face: GithubFace) -> Router {
             put(orgs::set_org_membership),
         )
         .route("/users/{username}", get(reads::get_user_by_login))
+        .route(
+            "/users/{username}/ssh_signing_keys",
+            get(signing::list_user_keys),
+        )
         .route("/user", get(reads::get_user))
+        .route("/user/{id}", get(reads::get_user_by_id))
+        .route(
+            "/user/ssh_signing_keys",
+            get(signing::list_own_keys).post(signing::create_key),
+        )
+        .route("/user/ssh_signing_keys/{id}", delete(signing::delete_key))
         .route("/user/emails", get(reads::get_user_emails))
         .route("/user/teams", get(reads::list_user_teams))
         .route(
             "/user/repos",
             get(reads::list_user_repos).post(create_user_repo),
         )
+        .route("/repositories/{id}", get(reads::get_repo_by_id))
         .route("/repos/{owner}/{repo}", get(reads::get_repo))
         .route(
             "/repos/{owner}/{repo}/pulls",
@@ -109,6 +121,10 @@ pub fn router(face: GithubFace) -> Router {
         .route(
             "/repos/{owner}/{repo}/issues/{number}/labels/{name}",
             delete(pulls::remove_label),
+        )
+        .route(
+            "/repos/{owner}/{repo}/commits/{sha}",
+            get(signing::get_commit),
         )
         .route(
             "/repos/{owner}/{repo}/commits/{sha}/check-runs",
@@ -587,6 +603,10 @@ mod ref_read_tests {
                     path3("main...feature"),
                     HeaderMap::new(),
                 )),
+            ),
+            (
+                "GET commit",
+                unbudgeted(signing::get_commit(face(), path3("main"), HeaderMap::new())),
             ),
             (
                 "GET contents",

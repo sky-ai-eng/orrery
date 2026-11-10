@@ -385,7 +385,7 @@ fn a_push_records_its_events_pushed_at_and_default_branch() {
     w.advance_clock(60, by(sys.id)).unwrap();
     let mark = w.log_after(0, 1000).unwrap().last().unwrap().seq;
 
-    w.record_push(repo.id, by(alice.id), &first_push(), Some("trunk"))
+    w.record_push(repo.id, by(alice.id), &first_push(), Some("trunk"), &[])
         .unwrap();
     let read = w.repo_by_id(repo.id).unwrap().unwrap();
     assert_eq!(read.pushed_at_clock_unix, Some(DEFAULT_T0_UNIX + 60));
@@ -442,7 +442,8 @@ fn a_push_records_its_events_pushed_at_and_default_branch() {
         commits: vec![SHA_B.to_string()],
         commit_count: 1,
     }];
-    w.record_push(repo.id, by(alice.id), &later, None).unwrap();
+    w.record_push(repo.id, by(alice.id), &later, None, &[])
+        .unwrap();
     let read = w.repo_by_id(repo.id).unwrap().unwrap();
     assert_eq!(read.pushed_at_clock_unix, Some(DEFAULT_T0_UNIX + 120));
     assert_eq!(read.default_branch, "trunk");
@@ -450,14 +451,14 @@ fn a_push_records_its_events_pushed_at_and_default_branch() {
     // A push that moved nothing records nothing, and a push into a
     // repository the world does not hold records none of its events.
     let mark = w.log_after(0, 1000).unwrap().last().unwrap().seq;
-    w.record_push(repo.id, by(alice.id), &[], Some("main"))
+    w.record_push(repo.id, by(alice.id), &[], Some("main"), &[])
         .unwrap();
     assert_eq!(
         w.repo_by_id(repo.id).unwrap().unwrap().default_branch,
         "trunk"
     );
     assert!(matches!(
-        w.record_push(999, by(alice.id), &first_push(), None),
+        w.record_push(999, by(alice.id), &first_push(), None, &[]),
         Err(WorldError::NoSuchRepo(999))
     ));
     assert!(w.log_after(mark, 1000).unwrap().is_empty());
@@ -475,7 +476,7 @@ fn the_log_puts_each_ref_at_its_last_ref_event() {
         .unwrap();
     w.create_repo(alice.id, "empty", None, false, "main", by(alice.id))
         .unwrap();
-    w.record_push(dots.id, by(alice.id), &first_push(), Some("trunk"))
+    w.record_push(dots.id, by(alice.id), &first_push(), Some("trunk"), &[])
         .unwrap();
     let mv = |name, old, new, change| RefMove {
         name,
@@ -495,6 +496,7 @@ fn the_log_puts_each_ref_at_its_last_ref_event() {
             mv("refs/tags/v1", SHA_B, ABSENT, RefChange::Deleted),
         ],
         None,
+        &[],
     )
     .unwrap();
     w.record_push(
@@ -502,6 +504,7 @@ fn the_log_puts_each_ref_at_its_last_ref_event() {
         by(alice.id),
         &[mv("refs/heads/main", ABSENT, SHA_A, RefChange::Created)],
         None,
+        &[],
     )
     .unwrap();
 
@@ -598,7 +601,7 @@ fn a_reader_sees_all_of_a_push_or_none_of_it() {
         }
     });
 
-    w.record_push(repo.id, by(alice.id), &first_push(), Some("trunk"))
+    w.record_push(repo.id, by(alice.id), &first_push(), Some("trunk"), &[])
         .unwrap();
 
     let none = (0, None, "main".to_string());
@@ -678,7 +681,7 @@ fn the_logs_total_is_the_number_of_entries_it_holds_after_every_write() {
         .unwrap();
     let before_push = holds(&w);
     // One write, three entries: repo:pushed and a ref:created per ref.
-    w.record_push(repo.id, by(alice.id), &first_push(), None)
+    w.record_push(repo.id, by(alice.id), &first_push(), None, &[])
         .unwrap();
     let pushed = holds(&w);
     assert_eq!(pushed, before_push + 3);
@@ -689,7 +692,8 @@ fn the_logs_total_is_the_number_of_entries_it_holds_after_every_write() {
         w.create_actor("alice", ActorKind::User),
         Err(WorldError::ActorExists(_))
     ));
-    w.record_push(repo.id, by(alice.id), &[], None).unwrap();
+    w.record_push(repo.id, by(alice.id), &[], None, &[])
+        .unwrap();
     assert_eq!(holds(&w), pushed);
 
     w.advance_clock(60, by(alice.id)).unwrap();

@@ -186,7 +186,7 @@ pub(crate) fn oauth_authorization_object(
 }
 
 /// A repository's ref and its owner's.
-fn repo_refs(conn: &Connection, repo_id: i64) -> Result<(RepoRef, ActorRef)> {
+pub(crate) fn repo_refs(conn: &Connection, repo_id: i64) -> Result<(RepoRef, ActorRef)> {
     conn.query_row(
         "SELECT r.id, r.name, a.id, a.login FROM repos r JOIN actors a ON a.id = r.owner_id
          WHERE r.id = ?1",

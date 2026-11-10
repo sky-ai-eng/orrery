@@ -792,6 +792,74 @@
       ],
       "type": "string"
     },
+    "CommitSubject": {
+      "description": "A commit in a repository. A commit has no id: it is its sha in its\nrepository.",
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "sha": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/CommitType"
+        }
+      },
+      "required": [
+        "type",
+        "sha",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "CommitType": {
+      "enum": [
+        "commit"
+      ],
+      "type": "string"
+    },
+    "CommitVerificationObject": {
+      "description": "A commit's signature verified when a push brought the commit in.",
+      "properties": {
+        "signer": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "The account whose signing key made the signature, and whose\nverified address the commit's committer address is."
+        },
+        "signing_key": {
+          "$ref": "#/$defs/SshSigningKeyRef",
+          "description": "The key that made the signature."
+        },
+        "verified_unix": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "signer",
+        "signing_key",
+        "verified_unix"
+      ],
+      "type": "object"
+    },
+    "CommitVerified": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/CommitVerificationObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/CommitSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
     "Door": {
       "description": "How a write reached the world.",
       "oneOf": [
@@ -2539,6 +2607,105 @@
       ],
       "type": "string"
     },
+    "SshSigningKeyCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/SshSigningKeyObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/SshSigningKeySubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "SshSigningKeyDeleted": {
+      "description": "The key as it was.",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/SshSigningKeyObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/SshSigningKeySubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "SshSigningKeyObject": {
+      "properties": {
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "key": {
+          "description": "The key's type and base64 blob, as OpenSSH writes a public key,\nwithout a comment.",
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "key",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "SshSigningKeyRef": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "SshSigningKeySubject": {
+      "description": "An SSH key an account holds for signing commits.",
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "The account that holds it."
+        },
+        "type": {
+          "$ref": "#/$defs/SshSigningKeyType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "SshSigningKeyType": {
+      "enum": [
+        "ssh_signing_key"
+      ],
+      "type": "string"
+    },
     "TeamCreated": {
       "properties": {
         "object": {
@@ -3614,6 +3781,47 @@
       "properties": {
         "type": {
           "const": "team_membership:deleted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/SshSigningKeyCreated",
+      "description": "An account registered an SSH key for signing commits.",
+      "properties": {
+        "type": {
+          "const": "ssh_signing_key:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/SshSigningKeyDeleted",
+      "properties": {
+        "type": {
+          "const": "ssh_signing_key:deleted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CommitVerified",
+      "description": "A push brought in a commit whose signature verifies: an account's\nsigning key made it, and its committer address is a verified address\nof that account.",
+      "properties": {
+        "type": {
+          "const": "commit:verified",
           "type": "string"
         }
       },

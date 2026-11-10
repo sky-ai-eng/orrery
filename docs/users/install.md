@@ -9,7 +9,7 @@ Each [release](https://github.com/sky-ai-eng/orrery/releases) carries an `orrery
 | macOS, Intel | `orrery_<version>_darwin_amd64.tar.gz` |
 | macOS, Apple silicon | `orrery_<version>_darwin_arm64.tar.gz` |
 
-The Linux binaries are static, so they run on any distribution. `git` must be on `PATH` wherever Orrery runs, because it serves git with the real `git http-backend`.
+The Linux binaries are static, so they run on any distribution. `git` must be on `PATH` wherever Orrery runs, because it serves git with the real `git http-backend`. A world that is pushed SSH-signed commits also needs `ssh-keygen` from OpenSSH 8.2p1 or later on `PATH`, because it verifies each signature with `git verify-commit`, which runs `ssh-keygen`. Without it, such a push fails with `500` and moves nothing, and so does a read of such a commit that its push stored no verdict for. On Debian and Ubuntu it is in `openssh-client`; macOS ships it.
 
 ```bash
 gh release download --repo sky-ai-eng/orrery \

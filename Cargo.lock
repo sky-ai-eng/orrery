@@ -1291,6 +1291,7 @@ name = "orrery-face-git"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "libc",
  "orrery-world",
  "serde_json",
@@ -1361,6 +1362,7 @@ dependencies = [
 name = "orrery-world"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "boon",
  "hex",
  "hmac",

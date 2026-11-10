@@ -15,6 +15,7 @@ use axum::routing::{get, post};
 use orrery_world::{Caller, Door, REF_EVENT_COMMITS, RefChange, RefMove, Repo, World};
 
 pub mod cgi;
+pub mod signature;
 pub mod store;
 
 /// Upper bound on a single git request body (a push's pack). Requests and CGI
@@ -32,6 +33,9 @@ pub enum GitFaceError {
     World(#[from] orrery_world::WorldError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// Verifying an SSH signature runs `ssh-keygen`, and `PATH` holds none.
+    #[error("verifying an SSH signature needs ssh-keygen on PATH, and there is none")]
+    NoSshKeygen,
     /// Refs that disagree with the world and could not be put back, one
     /// line each naming the repository and the ref.
     #[error("refs disagree with the world and could not be moved back: {}", .0.join("; "))]
@@ -271,6 +275,7 @@ impl GitFace {
                 store::set_head_symref(&bare, branch)?;
                 head_set = true;
             }
+            let signed = signed_commits(&bare, &moves)?;
             for m in &moves {
                 for &number in &m.repins {
                     self.pin_pull_ref(repo, number, m.new)?;
@@ -278,7 +283,7 @@ impl GitFace {
                 }
             }
             self.world
-                .record_push(repo.id, pusher.via(Door::Git), &moves, adopted)?;
+                .record_push(repo.id, pusher.via(Door::Git), &moves, adopted, &signed)?;
             Ok(())
         };
         if let Err(e) = record() {
@@ -293,6 +298,28 @@ impl GitFace {
         }
         Ok(())
     }
+}
+
+/// What each signed commit the moves list says about itself, in the order
+/// the moves list them, each commit once. These are the commits a push
+/// reaches a verdict for (spec/surface-github.md §1.9). An SSH signature is
+/// verified here, before the record's write, since that answer depends on
+/// the commit alone.
+fn signed_commits(
+    bare: &std::path::Path,
+    moves: &[RefMove<'_>],
+) -> Result<Vec<orrery_world::CommitFacts>, GitFaceError> {
+    let mut seen = std::collections::BTreeSet::new();
+    let listed: Vec<&str> = moves
+        .iter()
+        .flat_map(|m| m.commits.iter().map(String::as_str))
+        .filter(|sha| seen.insert(*sha))
+        .collect();
+    signature::read_commits(bare, &listed)?
+        .iter()
+        .filter(|commit| commit.signature.is_some())
+        .map(|commit| signature::commit_facts(bare, commit))
+        .collect()
 }
 
 /// The refs that differ between `before` and `after`, as `(name, old, new)`
@@ -1147,6 +1174,7 @@ mod tests {
                     commit_count: 1,
                 }],
                 None,
+                &[],
             )
             .unwrap();
         store::update_ref(&f.bare, "refs/heads/topic", &f.main).unwrap();

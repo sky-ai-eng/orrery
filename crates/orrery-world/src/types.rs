@@ -484,3 +484,74 @@ pub struct ReviewRequest {
     pub pull_id: i64,
     pub reviewer: RequestedReviewer,
 }
+
+/// An SSH key an account holds for signing commits.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SigningKey {
+    pub id: i64,
+    pub owner_id: i64,
+    /// The key's type and base64 blob, as OpenSSH writes a public key,
+    /// without a comment.
+    pub key: String,
+    pub title: Option<String>,
+    pub created_clock_unix: i64,
+}
+
+/// What a commit's signature is, read from the commit alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitSignature {
+    Unsigned,
+    /// An SSH signature: the key that made it, spelled as
+    /// [`SigningKey::key`] spells one, and whether the signature verifies
+    /// over the commit with that key.
+    Ssh {
+        key: String,
+        verifies: bool,
+    },
+    /// An SSH signature that does not parse.
+    MalformedSsh,
+    /// A PGP or X.509 signature. No account in a world holds a key of
+    /// either kind, since nothing registers one.
+    Other,
+}
+
+/// A commit as the verdict on its signature reads it: what the commit
+/// itself says, which no write changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitFacts {
+    pub sha: String,
+    pub committer_email: String,
+    pub signature: CommitSignature,
+}
+
+/// The verdict on a commit's signature ([`World::commit_verification`]).
+///
+/// [`World::commit_verification`]: crate::World::commit_verification
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Unsigned,
+    /// A PGP or X.509 signature, or an SSH signature whose key no account
+    /// holds as a signing key.
+    UnknownKey,
+    /// An SSH signature that does not parse.
+    Malformed,
+    /// The signature does not verify with the key that made it.
+    BadSignature,
+    /// The key's account holds the committer address, and has verified it.
+    Verified,
+    /// The key's account holds the committer address, unverified.
+    UnverifiedAddress,
+    /// Other accounts hold the committer address, and the key's does not.
+    OtherAccountsAddress,
+    /// No account holds the committer address.
+    NoAccount,
+}
+
+/// A verdict, and when a push stored it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitVerification {
+    pub verdict: Verdict,
+    /// When the push that brought the commit in stored its verdict, or
+    /// `None` for a verdict reached on this read.
+    pub stored_clock_unix: Option<i64>,
+}

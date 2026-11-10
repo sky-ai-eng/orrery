@@ -40,10 +40,11 @@ Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CO
 - a deleted branch closes the open pull requests on it, and a deleted head branch pushed back is recorded on the closed ones (below);
 - the repository's `pushed_at` moves to the world clock; and
 - the first push of a branch into an empty repository sets the default branch, and `HEAD` with it, as on GitHub.
+- each signed commit the push's ref events list has its verdict reached, and stored when it is `valid` (`surface-github.md` §1.9).
 
 The events and the state they describe land in one commit, after every ref the push moved is in place, so a reader that can see any of a push's events sees the repository, its refs, and its pull requests as the push left them. Opening, closing, reopening, and merging a pull request take the same per-repository lock, so the pull requests a push re-pins are the ones open on its branch when it lands.
 
-A push that fails before it is recorded moves back every ref it moved, appends nothing, and answers `500`, whether its record fails, `git http-backend` fails after `git-receive-pack` moved refs (it exits with an error, or its output has no CGI header block), or Orrery panics while serving the push. Each branch the push moved, created, or deleted returns to where it was, `HEAD` to the default branch if the push set it, and each pull request ref it re-pinned to the head the pull request still has. A retry of the push then finds the refs the failed push found, and lands and is recorded as if the failed push had not happened. A panic while Orrery holds the world's database connection leaves the world unable to answer any request until Orrery restarts, so the retry lands only after a restart. A ref that cannot be moved back is logged. So is a push whose refs cannot be read after `git-receive-pack` runs, which moves nothing back, because which refs it moved is unknown.
+A push that fails before it is recorded moves back every ref it moved, appends nothing, and answers `500`, whether its record fails, it brings in an SSH-signed commit and `ssh-keygen` is not on `PATH` to verify it, `git http-backend` fails after `git-receive-pack` moved refs (it exits with an error, or its output has no CGI header block), or Orrery panics while serving the push. Each branch the push moved, created, or deleted returns to where it was, `HEAD` to the default branch if the push set it, and each pull request ref it re-pinned to the head the pull request still has. A retry of the push then finds the refs the failed push found, and lands and is recorded as if the failed push had not happened. A panic while Orrery holds the world's database connection leaves the world unable to answer any request until Orrery restarts, so the retry lands only after a restart. A ref that cannot be moved back is logged. So is a push whose refs cannot be read after `git-receive-pack` runs, which moves nothing back, because which refs it moved is unknown.
 
 A push that `git http-backend` answers with a status other than `200` is passed through and not recorded. http-backend sends its status before it starts `git-receive-pack`, so such a push never reached it and moved nothing.
 
@@ -62,7 +63,7 @@ A fetch is several requests (the ref advertisement, then the pack, and with prot
 
 The GitHub face's reads of a repository's refs hold the same lock for read, and see the refs the same way. They are:
 
-- the REST reads of branches, a branch's ref, a compare, contents, check runs for a branch name, a pull request, and a pull request's files; and
+- the REST reads of branches, a branch's ref, a compare, a commit, contents, check runs for a branch name, a pull request, and a pull request's files; and
 - the GraphQL fields `Repository.ref`, and a pull request's `mergeable`, `additions`, `deletions`, `changedFiles`, and `files`.
 
 A REST read and a GraphQL query also hold the world write gate for read for the whole request, as git traffic does, so a snapshot restore never replaces the repository under one. A read that also reads a pull request reads it under the same hold as the branch tips it uses, so they come from one state: the REST pull request, its files, and each of those pull request fields. A GraphQL field holds the lock only for its own reads, so a write can land between two fields of one query, as between two requests of a fetch.
