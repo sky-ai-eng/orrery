@@ -187,23 +187,18 @@ async fn branch_tip_compare_and_changed_files() {
         Err(404),
         "an old tip that no longer exists is a 404"
     );
-    // The diff and patch media are refused by name, never answered with JSON.
-    for accept in [
-        "application/vnd.github.v3.diff",
-        "application/vnd.github.PATCH",
-    ] {
-        let (status, refused) = face_answer(
-            "GET",
-            &format!("{api}/compare/{first}...{second}"),
-            &alice,
-            &[("accept", accept)],
-            None,
-        );
-        assert_eq!(status, 422, "{accept}: {refused}");
-        assert_eq!(refused["orrery"]["not_mocked"], true, "{refused}");
-        assert_eq!(refused["errors"][0]["field"], "Accept", "{refused}");
-        assert_eq!(refused["errors"][0]["resource"], "Comparison", "{refused}");
-    }
+    // The patch media type is refused by name, never answered with JSON.
+    let (status, refused) = face_answer(
+        "GET",
+        &format!("{api}/compare/{first}...{second}"),
+        &alice,
+        &[("accept", "application/vnd.github.PATCH")],
+        None,
+    );
+    assert_eq!(status, 422, "{refused}");
+    assert_eq!(refused["orrery"]["not_mocked"], true, "{refused}");
+    assert_eq!(refused["errors"][0]["field"], "Accept", "{refused}");
+    assert_eq!(refused["errors"][0]["resource"], "Comparison", "{refused}");
 
     // The pull's files over REST: only what the pull changes, against the
     // moved base.

@@ -5,8 +5,8 @@
 //! or writes. So each handler makes the check itself, and this test reads the
 //! face's source to hold every handler the route table names to three rules:
 //!
-//! - it calls `media::refuse_unrendered` or `media::refuse_unrendered_except`
-//!   exactly once, as `if let Some(refused) = media::… { return refused; }`,
+//! - it calls `media::refuse_unrendered`, `media::refuse_unrendered_except`,
+//!   or `media::refuse_unrendered_unless_diff` exactly once, as `if let Some(refused) = media::… { return refused; }`,
 //!   a statement of its own in the handler's body, so no branch skips it;
 //! - the call names its resource with a string literal that spec/grammar.md
 //!   lists; and
@@ -20,7 +20,11 @@ use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, FnArg, Item, ItemFn, Lit, Pa
 
 /// The axum method-router constructors and builders that take a handler.
 const METHODS: &[&str] = &["get", "post", "put", "patch", "delete"];
-const CHECKS: &[&str] = &["refuse_unrendered", "refuse_unrendered_except"];
+const CHECKS: &[&str] = &[
+    "refuse_unrendered",
+    "refuse_unrendered_except",
+    "refuse_unrendered_unless_diff",
+];
 
 fn src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

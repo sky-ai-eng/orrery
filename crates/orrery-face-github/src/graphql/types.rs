@@ -877,17 +877,6 @@ impl PullRequest {
         Ok((pull, refs))
     }
 
-    /// The comparison base for diff stats and files: the base branch's tip
-    /// from [`Self::current`] while the pull is open (GitHub recomputes
-    /// against the moving base), else the pinned base sha, so a terminal
-    /// pull's numbers stay frozen, as GitHub's do.
-    fn diff_base(pull: &world::Pull, refs: MergeRefs) -> String {
-        match refs.base_tip {
-            Some(tip) if pull.state == world::PullState::Open => tip,
-            _ => pull.base_sha.clone(),
-        }
-    }
-
     async fn diff_stats(&self, face: &GithubFace) -> Result<store::DiffStats, Error> {
         let stats = match self.diff.get() {
             Some(stats) => stats,
@@ -897,7 +886,7 @@ impl PullRequest {
                 // have filled it already, and then this computes nothing.
                 self.diff.get_or_init(|| {
                     let (pull, refs) = ends.map_err(|e| e.message)?;
-                    let base = Self::diff_base(&pull, refs);
+                    let base = refs.diff_base(&pull);
                     store::diff_stats(&self.bare(face), &base, &pull.head_sha)
                         .map_err(|e| e.to_string())
                 })
@@ -1037,7 +1026,7 @@ impl PullRequest {
             skip = consumed.max(0) as usize;
         }
         let (pull, refs) = self.current(face).await?;
-        let base = Self::diff_base(&pull, refs);
+        let base = refs.diff_base(&pull);
         let files =
             store::changed_files(&self.bare(face), &base, &pull.head_sha).map_err(internal)?;
         let rest: Vec<PullRequestChangedFile> = files

@@ -349,6 +349,148 @@ pub fn changed_files(
     Ok(files)
 }
 
+/// The shortest object id an `index` line of a diff abbreviates to. Git
+/// otherwise picks the length from how many objects the repository's packs
+/// hold, which a replayed world need not pack the same way, so the diff of
+/// one comparison could change length between a world and its replay.
+const DIFF_ABBREV: &str = "--abbrev=7";
+
+/// The output of `git diff -M base...head`, as git prints it: the diff GitHub
+/// serves as its diff media type.
+pub fn diff(bare: &Path, base: &str, head: &str) -> Result<Vec<u8>, GitFaceError> {
+    let args = ["diff", "-M", DIFF_ABBREV, &format!("{base}...{head}")];
+    let out = hermetic_git(bare).args(args).output()?;
+    if !out.status.success() {
+        return Err(GitFaceError::Git {
+            args: args.join(" "),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
+    }
+    Ok(out.stdout)
+}
+
+/// One file's part of a comparison: the file as [`changed_files`] lists it,
+/// with its line counts and its hunks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDiff {
+    pub file: ChangedFile,
+    pub additions: i64,
+    pub deletions: i64,
+    /// The file's part of the diff from its first `@@` line, without the
+    /// final newline, as GitHub's `patch`. `None` when it has no hunk: a
+    /// binary file, a pure rename, a mode change, or an empty file.
+    pub patch: Option<String>,
+}
+
+/// Every file `git diff -M base...head` changes, in path order, as GitHub
+/// lists them, each with its part of [`diff`]. A type change prints as a
+/// deletion and a creation of one path, two chunks under one header, and is
+/// two files: the one removed, then the one added.
+pub fn file_diffs(bare: &Path, base: &str, head: &str) -> Result<Vec<FileDiff>, GitFaceError> {
+    let files = changed_files(bare, base, head)?;
+    let diff = diff(bare, base, head)?;
+    let mut sections: Vec<(&[u8], Vec<&[u8]>)> = Vec::new();
+    for chunk in file_chunks(&diff) {
+        let header = chunk.split(|&b| b == b'\n').next().unwrap_or_default();
+        match sections.last_mut() {
+            Some((last, chunks)) if *last == header => chunks.push(chunk),
+            _ => sections.push((header, vec![chunk])),
+        }
+    }
+    if sections.len() != files.len() {
+        return Err(GitFaceError::Cgi(format!(
+            "diff {base}...{head} prints {} files where its name-status lists {}",
+            sections.len(),
+            files.len()
+        )));
+    }
+    let mut diffs = Vec::new();
+    for (file, (_, chunks)) in files.into_iter().zip(sections) {
+        match chunks[..] {
+            [removed, added] if file.status == FileStatus::Changed => {
+                let as_status = |status| ChangedFile {
+                    status,
+                    ..file.clone()
+                };
+                diffs.push(file_diff(as_status(FileStatus::Removed), &[removed]));
+                diffs.push(file_diff(as_status(FileStatus::Added), &[added]));
+            }
+            _ => diffs.push(file_diff(file, &chunks)),
+        }
+    }
+    Ok(diffs)
+}
+
+/// How many files a [`diff`] prints, as [`file_diffs`] lists them.
+pub fn file_count(diff: &[u8]) -> usize {
+    file_chunks(diff).len()
+}
+
+/// A file's counts and patch, from its chunks of a diff.
+fn file_diff(file: ChangedFile, chunks: &[&[u8]]) -> FileDiff {
+    let mut hunks = Vec::new();
+    for chunk in chunks {
+        if let Some(start) = hunk_start(chunk) {
+            hunks.extend_from_slice(&chunk[start..]);
+        }
+    }
+    let mut additions = 0;
+    let mut deletions = 0;
+    for line in hunks.split(|&b| b == b'\n') {
+        match line.first() {
+            Some(b'+') => additions += 1,
+            Some(b'-') => deletions += 1,
+            _ => {}
+        }
+    }
+    let patch = (!hunks.is_empty()).then(|| {
+        let text = hunks.strip_suffix(b"\n").unwrap_or(&hunks);
+        String::from_utf8_lossy(text).into_owned()
+    });
+    FileDiff {
+        file,
+        additions,
+        deletions,
+        patch,
+    }
+}
+
+/// A diff's chunks, each from a `diff --git` line up to the next one. A
+/// line of a hunk starts with ` `, `+`, `-`, `\`, or `@`, so a line that
+/// starts `diff --git ` is always a header.
+fn file_chunks(diff: &[u8]) -> Vec<&[u8]> {
+    const HEADER: &[u8] = b"diff --git ";
+    let mut starts: Vec<usize> = Vec::new();
+    let mut at = 0;
+    while at < diff.len() {
+        if diff[at..].starts_with(HEADER) {
+            starts.push(at);
+        }
+        at = match diff[at..].iter().position(|&b| b == b'\n') {
+            Some(newline) => at + newline + 1,
+            None => diff.len(),
+        };
+    }
+    starts
+        .iter()
+        .enumerate()
+        .map(|(i, &start)| &diff[start..starts.get(i + 1).copied().unwrap_or(diff.len())])
+        .collect()
+}
+
+/// Where a chunk's first hunk starts: its first line that starts `@@`. No
+/// header line does.
+fn hunk_start(chunk: &[u8]) -> Option<usize> {
+    let mut at = 0;
+    while at < chunk.len() {
+        if chunk[at..].starts_with(b"@@") {
+            return Some(at);
+        }
+        at += chunk[at..].iter().position(|&b| b == b'\n')? + 1;
+    }
+    None
+}
+
 /// A commit and its parents' ids, first parent first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitParents {

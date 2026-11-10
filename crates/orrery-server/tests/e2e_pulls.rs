@@ -869,9 +869,8 @@ async fn unrendered_media_types_are_not_mocked() {
         "application/vnd.github.v3.raw+json",
         "application/vnd.github.text+json",
         "application/vnd.github.html+json",
-        "application/vnd.github.v3.diff",
         "application/vnd.github.v3.patch",
-        "Application/VND.GitHub.DIFF",
+        "Application/VND.GitHub.PATCH",
         // One unrendered type among JSON ones is enough.
         "application/json, application/vnd.github.v3.full+json;q=0.9",
     ] {
