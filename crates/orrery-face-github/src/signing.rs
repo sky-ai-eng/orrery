@@ -6,15 +6,14 @@ use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use orrery_face_git::signature::{self, Commit};
 use orrery_face_git::store;
-use orrery_world::{Actor, ActorKind, Caller, Door, Repo, SigningKey, Verdict, WorldError};
+use orrery_world::{Actor, Caller, Door, Repo, SigningKey, Verdict, WorldError};
 
-use crate::reads::{page_params, paginate, refuse_integration, resolve_commit};
+use crate::reads::{page_params, paginate, refuse_integration, resolve_account, resolve_commit};
 use crate::render::rfc3339;
 use crate::{
-    GithubFace, github_error, internal, json_response, media, resolve_repo, validation_missing,
+    GithubFace, github_error, internal, json_response, media, no_content, resolve_repo,
+    validation_missing,
 };
-
-const KEY_RESOURCE: &str = "SshSigningKey";
 
 fn key_json(key: &SigningKey) -> serde_json::Value {
     serde_json::json!({
@@ -47,14 +46,9 @@ pub(crate) async fn list_user_keys(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
-    let (login, bot) = match username.strip_suffix("[bot]") {
-        Some(slug) => (slug, true),
-        None => (username.as_str(), false),
-    };
-    let account = match face.world.actor_by_login(login) {
-        Ok(Some(a)) if (a.kind == ActorKind::Bot) == bot && a.kind != ActorKind::System => a,
-        Ok(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(e) => return internal(e),
+    let account = match resolve_account(&face, &username) {
+        Ok(a) => a,
+        Err(resp) => return *resp,
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "SshSigningKey") {
         return refused;
@@ -79,7 +73,7 @@ pub(crate) async fn list_own_keys(
     keys_page(&face, &actor, query)
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize)]
 struct CreateKeyBody {
     title: Option<String>,
     key: Option<String>,
@@ -91,7 +85,7 @@ fn key_refused(message: &str) -> Response<Body> {
         StatusCode::UNPROCESSABLE_ENTITY,
         serde_json::json!({
             "message": "Validation Failed",
-            "errors": [{ "resource": KEY_RESOURCE, "code": "custom", "field": "key",
+            "errors": [{ "resource": "SshSigningKey", "code": "custom", "field": "key",
                          "message": message }],
         }),
     )
@@ -115,7 +109,7 @@ pub(crate) async fn create_key(
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
     };
     let Some(key) = parsed.key.as_deref().filter(|k| !k.trim().is_empty()) else {
-        return validation_missing(KEY_RESOURCE, "key");
+        return validation_missing("SshSigningKey", "key");
     };
     match face
         .world
@@ -153,10 +147,7 @@ pub(crate) async fn delete_key(
         return refused;
     }
     match face.world.delete_signing_key(caller.via(Door::Rest), id) {
-        Ok(()) => Response::builder()
-            .status(StatusCode::NO_CONTENT)
-            .body(Body::empty())
-            .expect("static response parts are valid"),
+        Ok(()) => no_content(),
         Err(WorldError::NoSuchSigningKey(_)) => github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(e) => internal(e),
     }

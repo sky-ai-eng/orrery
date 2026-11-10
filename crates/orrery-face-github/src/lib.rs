@@ -400,6 +400,35 @@ pub(crate) fn orrery_unsupported_field(resource: &str, field: &str) -> Response<
     json_response(StatusCode::UNPROCESSABLE_ENTITY, body)
 }
 
+/// The loud refusal for surface Orrery does not implement: 501 with a
+/// self-describing envelope, deliberately unlike any real GitHub response, so
+/// it can never be mistaken for "the thing doesn't exist". `path` is the one
+/// the request arrived with, never a nested router's remainder, so a caller
+/// finds it in its own logs.
+pub fn not_mocked(method: &str, path: &str) -> Response<Body> {
+    tracing::warn!(%method, %path, "NOT MOCKED: unimplemented surface was called");
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        serde_json::json!({
+            "message": format!("orrery: {method} {path} is not mocked"),
+            "orrery": {
+                "not_mocked": true,
+                "method": method,
+                "path": path,
+                "hint": "If a consumer needs this endpoint, add it to the surface inventory (spec/surface-github.md) and implement it.",
+            },
+        }),
+    )
+}
+
+/// An empty `204 No Content`.
+pub(crate) fn no_content() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .expect("static response parts are valid")
+}
+
 pub(crate) fn github_error(status: StatusCode, message: &str) -> Response<Body> {
     json_response(status, serde_json::json!({ "message": message }))
 }

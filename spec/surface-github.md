@@ -50,7 +50,7 @@ A list carries no test merge: `mergeable` stays null and the other two are absen
 | `GET /user` | The caller as a user object. An organization's token answers the organization. |
 | `GET /user/emails` | `[{email, primary, verified, visibility}]`, the primary first, then by address. `visibility` is `private` on the primary and null otherwise. Every actor starts with `<login>@orrery.invalid`, primary and verified; the control plane replaces the set. |
 | `GET /users/{username}` | A user or organization by login, or a bot as `<slug>[bot]`. A bot's bare slug, or a login nobody holds, is `404`. |
-| `GET /user/{account_id}` | An account by its id, answered as `GET /users/{username}` answers it under the login it holds now: a user, an organization, or a bot as `<slug>[bot]`. An id no account has, or one that isn't an integer, is `404`. |
+| `GET /user/{account_id}` | An account by its id, answered as `GET /users/{username}` answers it under the login it holds now: a user, an organization, or a bot as `<slug>[bot]`. An id no account has is `404`. GitHub serves other endpoints beside an account id, such as `/user/keys`, so a segment that isn't an integer is surface Orrery doesn't serve, and answers `501`. |
 | `GET /user/teams` | The caller's teams in every organization, as full teams, paged. |
 | `GET /orgs/{org}` | The organization object, or `404` for any login that is not an organization. |
 
@@ -133,9 +133,9 @@ An account signs commits with an SSH key it registers as a signing key, and a co
 
 | Route | Behavior |
 | --- | --- |
-| `GET /users/{username}/ssh_signing_keys` | The account's signing keys, oldest first, paged. The account is found as `GET /users/{username}` finds it, so a login nobody holds, and a bot's bare slug, are `404`. A bot and an organization hold none, since only their own token could register one. |
+| `GET /users/{username}/ssh_signing_keys` | The account's signing keys, oldest first, paged. The account is found as `GET /users/{username}` finds it, so a login nobody holds, and a bot's bare slug, are `404`. A bot holds none, since its token is refused on `POST /user/ssh_signing_keys`. |
 | `GET /user/ssh_signing_keys` | The caller's signing keys, as above. |
-| `POST /user/ssh_signing_keys` | `{key, title?}`. `key` is an OpenSSH public key, `<type> <base64> [comment]`, of type `ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`, `sk-ssh-ed25519@openssh.com`, or `sk-ecdsa-sha2-nistp256@openssh.com`, and is stored without its comment. A missing, null, or blank `key` is `422 missing_field`. Any other value that is not such a key is a `custom` error on `key`, "key is invalid. You must supply a key in OpenSSH public key format", and so is a key any account already holds, "key is already in use". A `title` left out is null. Answers `201` with the key. |
+| `POST /user/ssh_signing_keys` | `{key, title?}`. `key` is an OpenSSH public key, `<type> <base64> [comment]`, of type `ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`, `sk-ssh-ed25519@openssh.com`, or `sk-ecdsa-sha2-nistp256@openssh.com`, and is stored without its comment. A missing, null, or blank `key` is `422 missing_field`. Any other string that is not such a key is a `custom` error on `key`, "key is invalid. You must supply a key in OpenSSH public key format", and so is a key any account already holds, "key is already in use". A `title` left out is null. Answers `201` with the key. |
 | `DELETE /user/ssh_signing_keys/{ssh_signing_key_id}` | `204`. A key the caller does not hold is `404`, whoever holds it. Key ids are never reused. A verdict a push stored for a commit the key signed stays. |
 | `GET /repos/{o}/{r}/commits/{ref}` | The commit (§1.0). `ref` is anything `git rev-parse` resolves to a commit, as a compare's ends are; anything else is `422` "No commit found for SHA: {ref}". |
 

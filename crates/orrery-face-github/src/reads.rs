@@ -11,7 +11,7 @@
 //! leaves its budget state untouched.
 
 use axum::body::Body;
-use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
+use axum::extract::{Extension, OriginalUri, Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use base64::Engine as _;
 use orrery_face_git::store;
@@ -654,21 +654,33 @@ pub(crate) async fn get_user(
     json_response(StatusCode::OK, user_full_json(&face, &actor))
 }
 
-/// An account by the login REST spells it with: a user's, an organization's,
-/// or an App's bot as `<slug>[bot]`. Any other login is GitHub's 404.
+/// The account `username` names, as REST spells a login: a user's, an
+/// organization's, or an App's bot as `<slug>[bot]`. Any other login is
+/// GitHub's 404.
+pub(crate) fn resolve_account(
+    face: &GithubFace,
+    username: &str,
+) -> Result<Actor, Box<Response<Body>>> {
+    let (login, bot) = match username.strip_suffix("[bot]") {
+        Some(slug) => (slug, true),
+        None => (username, false),
+    };
+    match face.world.actor_by_login(login) {
+        Ok(Some(a)) if (a.kind == ActorKind::Bot) == bot && a.kind != ActorKind::System => Ok(a),
+        Ok(_) => Err(Box::new(github_error(StatusCode::NOT_FOUND, "Not Found"))),
+        Err(e) => Err(Box::new(internal(e))),
+    }
+}
+
+/// An account by the login REST spells it with ([`resolve_account`]).
 pub(crate) async fn get_user_by_login(
     State(face): State<GithubFace>,
     UrlPath(username): UrlPath<String>,
     headers: HeaderMap,
 ) -> Response<Body> {
-    let (login, bot) = match username.strip_suffix("[bot]") {
-        Some(slug) => (slug, true),
-        None => (username.as_str(), false),
-    };
-    let account = match face.world.actor_by_login(login) {
-        Ok(Some(a)) if (a.kind == ActorKind::Bot) == bot && a.kind != ActorKind::System => a,
-        Ok(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(e) => return internal(e),
+    let account = match resolve_account(&face, &username) {
+        Ok(a) => a,
+        Err(resp) => return *resp,
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "User") {
         return refused;
@@ -680,15 +692,23 @@ pub(crate) async fn get_user_by_login(
 /// user, an organization, or an App's bot, answered as
 /// `GET /users/{username}` answers it. The system actor, and an id no
 /// account has, are GitHub's 404.
+///
+/// The route takes every `GET /user/<segment>`, and GitHub serves other
+/// endpoints there (`/user/keys`, `/user/orgs`, ...), so a segment that is
+/// not an id is surface Orrery does not serve, never a plausible 404.
 pub(crate) async fn get_user_by_id(
     State(face): State<GithubFace>,
     UrlPath(id): UrlPath<String>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Response<Body> {
-    let account = match id.parse::<i64>().map(|id| face.world.actor_by_id(id)) {
-        Ok(Ok(Some(a))) if a.kind != ActorKind::System => a,
-        Ok(Ok(_)) | Err(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Ok(Err(e)) => return internal(e),
+    let Ok(id) = id.parse::<i64>() else {
+        return crate::not_mocked("GET", uri.path());
+    };
+    let account = match face.world.actor_by_id(id) {
+        Ok(Some(a)) if a.kind != ActorKind::System => a,
+        Ok(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => return internal(e),
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "User") {
         return refused;

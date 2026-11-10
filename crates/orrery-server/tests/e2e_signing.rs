@@ -659,8 +659,20 @@ async fn repositories_and_accounts_read_by_id() {
         );
     }
     assert_eq!(get("/user/1"), Err(404), "the system actor");
-    for missing in ["/user/999", "/user/x"] {
-        assert_eq!(get(missing), Err(404), "{missing}");
+    assert_eq!(get("/user/999"), Err(404));
+
+    // GitHub serves other endpoints beside an account id, so a segment that
+    // is not one is surface Orrery does not serve, not a missing account.
+    for unserved in ["keys", "gpg_keys", "orgs"] {
+        let (status, body) = face_answer(
+            "GET",
+            &format!("{api}/user/{unserved}"),
+            &f.alice,
+            &[],
+            None,
+        );
+        assert_eq!(status, 501, "{unserved}");
+        assert_eq!(body["orrery"]["path"], format!("/api/v3/user/{unserved}"));
     }
 }
 
