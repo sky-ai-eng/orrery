@@ -14,6 +14,7 @@ use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::{get, post};
 use orrery_world::{Caller, Door, REF_EVENT_COMMITS, RefChange, RefMove, Repo, World};
 
+mod cache;
 pub mod cgi;
 pub mod signature;
 pub mod store;
@@ -66,6 +67,8 @@ pub struct GitFace {
     /// The gate, held for write from the moment [`GitFace::stop`] returns, so
     /// no git work starts again.
     stopped: std::sync::Mutex<Option<tokio::sync::OwnedRwLockWriteGuard<()>>>,
+    /// Answers worked out from commits, which never go stale ([`cache`]).
+    answers: cache::Answers,
 }
 
 impl GitFace {
@@ -76,6 +79,7 @@ impl GitFace {
             gate: Arc::new(tokio::sync::RwLock::new(())),
             kill: tokio::sync::watch::Sender::new(false),
             stopped: std::sync::Mutex::new(None),
+            answers: cache::Answers::new(),
         })
     }
 

@@ -46,7 +46,11 @@ fn query_param(query: &str, name: &str) -> Option<String> {
     parse_form(query.as_bytes()).remove(name)
 }
 
-pub(crate) fn paginate<T>(items: Vec<T>, per_page: usize, page: usize) -> Vec<T> {
+pub(crate) fn paginate<T>(
+    items: impl IntoIterator<Item = T>,
+    per_page: usize,
+    page: usize,
+) -> Vec<T> {
     items
         .into_iter()
         .skip((page - 1) * per_page)
@@ -184,7 +188,7 @@ pub(crate) async fn get_pull(
     if let Some(media) = media::diff_media(&headers) {
         return pull_diff(&bare, &refs.diff_base(&pull), &pull.head_sha, &media);
     }
-    let verdict = match mergeability(&bare, &pull, &refs) {
+    let verdict = match mergeability(&face, &repo, &pull, &refs) {
         Ok(v) => v,
         Err(e) => return internal(e),
     };
@@ -719,12 +723,12 @@ pub(crate) async fn list_pull_files(
         Err(e) => return internal(e),
     };
     drop(refs);
-    let files = match store::file_diffs(&bare, &base, &pull.head_sha) {
+    let files = match face.git.file_diffs(&repo, &base, &pull.head_sha) {
         Ok(f) => f,
         Err(e) => return internal(e),
     };
     let (per_page, page) = page_params(&query.unwrap_or_default());
-    let items = changed_files_json(&paginate(files, per_page, page));
+    let items = changed_files_json(&paginate(files.iter().cloned(), per_page, page));
     json_response(StatusCode::OK, serde_json::Value::Array(items))
 }
 

@@ -8,7 +8,8 @@
 //! error as a coverage gap (`graphql::mark_unmocked_errors`) so it can never
 //! read as "GitHub doesn't have this".
 
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_graphql::{
     Context, Enum, Error, ID, InputObject, InputValueError, InputValueResult, Interface, Object,
@@ -20,7 +21,7 @@ use orrery_world as world;
 
 use crate::GithubFace;
 use crate::nodeid::{self, NodeRef};
-use crate::render::{MergeRefs, Mergeability, mergeability, rfc3339};
+use crate::render::{MergeCheck, MergeRefs, Mergeability, merge_check, merged_cleanly, rfc3339};
 
 use super::search;
 
@@ -769,6 +770,9 @@ impl StatusCheckRollup {
 pub struct Commit {
     pub repo: world::Repo,
     pub sha: String,
+    /// The batch of the pull request this commit heads, which works out its
+    /// date with the other members' heads.
+    batch: Arc<PullBatch>,
 }
 
 #[Object]
@@ -778,21 +782,10 @@ impl Commit {
     }
 
     async fn committed_date(&self, ctx: &Context<'_>) -> Result<String, Error> {
-        let face = face(ctx);
-        let bare = store::bare_dir(
-            &face.world.repos_dir(),
-            &self.repo.owner_login,
-            &self.repo.name,
-        );
-        let unix = store::commit_date_unix(&bare, &self.sha)
-            .map_err(internal)?
-            .ok_or_else(|| {
-                internal(format!(
-                    "commit {} not found in {}",
-                    self.sha,
-                    self.repo.full_name()
-                ))
-            })?;
+        let unix = self
+            .batch
+            .commit_date(face(ctx), &self.repo, &self.sha)
+            .await?;
         Ok(rfc3339(unix))
     }
 
@@ -839,60 +832,28 @@ pub struct PullRequestCommitConnection {
 pub struct PullRequest {
     pub pull: world::Pull,
     pub repo: world::Repo,
-    /// Lazily computed diff totals, shared by the additions / deletions /
-    /// changedFiles resolvers so one selection costs one `git diff`.
-    diff: OnceLock<Result<store::DiffStats, String>>,
+    batch: Arc<PullBatch>,
 }
 
 impl PullRequest {
     pub fn new(pull: world::Pull, repo: world::Repo) -> PullRequest {
-        PullRequest {
-            pull,
-            repo,
-            diff: OnceLock::new(),
-        }
+        PullRequest::batch(vec![(pull, repo)])
+            .pop()
+            .expect("one pull request for one pull")
     }
 
-    fn bare(&self, face: &GithubFace) -> std::path::PathBuf {
-        store::bare_dir(
-            &face.world.repos_dir(),
-            &self.repo.owner_login,
-            &self.repo.name,
-        )
-    }
-
-    /// The pull as it is now, and the branch tips its diff and mergeability
-    /// are computed from, read together under the repository's lock. The row
-    /// this object was built from can be older than the refs: an open row
-    /// read before a merge, with the base's tip read after it, would compare
-    /// the head against the commit that merged it.
-    async fn current(&self, face: &GithubFace) -> Result<(world::Pull, MergeRefs), Error> {
-        let _refs = face.git.read_lock(self.repo.id).await;
-        let pull = face
-            .world
-            .pull_by_number(self.repo.id, self.pull.number)
-            .map_err(internal)?
-            .ok_or_else(|| internal(format!("pull request {} is gone", self.pull.id)))?;
-        let refs = MergeRefs::read(&self.bare(face), &pull).map_err(internal)?;
-        Ok((pull, refs))
-    }
-
-    async fn diff_stats(&self, face: &GithubFace) -> Result<store::DiffStats, Error> {
-        let stats = match self.diff.get() {
-            Some(stats) => stats,
-            None => {
-                let ends = self.current(face).await;
-                // A sibling field that waited for the lock beside this one may
-                // have filled it already, and then this computes nothing.
-                self.diff.get_or_init(|| {
-                    let (pull, refs) = ends.map_err(|e| e.message)?;
-                    let base = refs.diff_base(&pull);
-                    store::diff_stats(&self.bare(face), &base, &pull.head_sha)
-                        .map_err(|e| e.to_string())
-                })
-            }
-        };
-        stats.clone().map_err(Error::new)
+    /// The pull requests of one list, sharing one [`PullBatch`].
+    pub fn batch(members: Vec<(world::Pull, world::Repo)>) -> Vec<PullRequest> {
+        let batch = Arc::new(PullBatch::new(members));
+        batch
+            .members
+            .iter()
+            .map(|(pull, repo)| PullRequest {
+                pull: pull.clone(),
+                repo: repo.clone(),
+                batch: batch.clone(),
+            })
+            .collect()
     }
 
     fn load_reviews(&self, face: &GithubFace) -> Result<Vec<world::Review>, Error> {
@@ -900,6 +861,248 @@ impl PullRequest {
             .list_reviews_for_pull(self.pull.id)
             .map_err(internal)
     }
+}
+
+/// The pull requests one field resolves to, such as the nodes of one `nodes`
+/// or `search`. GraphQL asks each of them for the same fields, so the first
+/// to resolve a field that git answers works it out for all of them, with a
+/// few git processes for each repository among them rather than a few for
+/// each pull request. Each answer is kept by pull id, so a pull listed twice
+/// is worked out once.
+pub struct PullBatch {
+    members: Vec<(world::Pull, world::Repo)>,
+    current: tokio::sync::OnceCell<Answers<i64, (world::Pull, MergeRefs)>>,
+    mergeability: tokio::sync::OnceCell<Answers<i64, Mergeability>>,
+    diff_stats: tokio::sync::OnceCell<Answers<i64, store::DiffStats>>,
+    files: tokio::sync::OnceCell<Answers<i64, Arc<[store::ChangedFile]>>>,
+    commit_dates: tokio::sync::OnceCell<Answers<(i64, String), i64>>,
+}
+
+/// A batch's answers to one question, each an answer or the error message
+/// its field reports.
+type Answers<K, T> = BTreeMap<K, Result<T, String>>;
+
+impl PullBatch {
+    fn new(members: Vec<(world::Pull, world::Repo)>) -> PullBatch {
+        PullBatch {
+            members,
+            current: Default::default(),
+            mergeability: Default::default(),
+            diff_stats: Default::default(),
+            files: Default::default(),
+            commit_dates: Default::default(),
+        }
+    }
+
+    /// The members by repository, each pull once.
+    // TODO(ORR-107): each repository's git work runs after the last one's,
+    // blocking the request's thread; run up to four repositories' work at
+    // once on the blocking pool.
+    fn by_repo(&self) -> BTreeMap<i64, (&world::Repo, Vec<&world::Pull>)> {
+        let mut by_repo: BTreeMap<i64, (&world::Repo, Vec<&world::Pull>)> = BTreeMap::new();
+        for (pull, repo) in &self.members {
+            let (_, pulls) = by_repo.entry(repo.id).or_insert((repo, Vec::new()));
+            if !pulls.iter().any(|p| p.id == pull.id) {
+                pulls.push(pull);
+            }
+        }
+        by_repo
+    }
+
+    /// Each pull as it is now, and the branch tips its diff and mergeability
+    /// are computed from, read together under its repository's lock. The row
+    /// a member was built from can be older than the refs: an open row read
+    /// before a merge, with the base's tip read after it, would compare the
+    /// head against the commit that merged it. Each repository's lock is let
+    /// go before the next one's is taken.
+    async fn current(&self, face: &GithubFace) -> &Answers<i64, (world::Pull, MergeRefs)> {
+        self.current
+            .get_or_init(|| async {
+                let mut current = BTreeMap::new();
+                for (repo, pulls) in self.by_repo().into_values() {
+                    let _refs = face.git.read_lock(repo.id).await;
+                    let mut found = Vec::new();
+                    for pull in pulls {
+                        match face.world.pull_by_number(repo.id, pull.number) {
+                            Ok(Some(now)) => found.push(now),
+                            Ok(None) => {
+                                let gone = format!("pull request {} is gone", pull.id);
+                                current.insert(pull.id, Err(internal(gone).message));
+                            }
+                            Err(e) => {
+                                current.insert(pull.id, Err(internal(e).message));
+                            }
+                        }
+                    }
+                    let now: Vec<&world::Pull> = found.iter().collect();
+                    match MergeRefs::read_many(&bare(face, repo), &now) {
+                        Ok(refs) => {
+                            for (pull, refs) in found.into_iter().zip(refs) {
+                                current.insert(pull.id, Ok((pull, refs)));
+                            }
+                        }
+                        Err(e) => {
+                            let e = internal(e).message;
+                            for pull in found {
+                                current.insert(pull.id, Err(e.clone()));
+                            }
+                        }
+                    }
+                }
+                current
+            })
+            .await
+    }
+
+    async fn mergeability(&self, face: &GithubFace, pull_id: i64) -> Result<Mergeability, Error> {
+        let verdicts = self
+            .mergeability
+            .get_or_init(|| async {
+                let current = self.current(face).await;
+                let mut verdicts = BTreeMap::new();
+                for (repo, pulls) in self.by_repo().into_values() {
+                    let mut merges: Vec<(i64, &str, &str)> = Vec::new();
+                    for pull in pulls {
+                        match &current[&pull.id] {
+                            Err(e) => {
+                                verdicts.insert(pull.id, Err(e.clone()));
+                            }
+                            Ok((now, refs)) => match merge_check(now, refs) {
+                                MergeCheck::Known(verdict) => {
+                                    verdicts.insert(pull.id, Ok(verdict));
+                                }
+                                MergeCheck::TestMerge { base, head } => {
+                                    merges.push((pull.id, base, head));
+                                }
+                            },
+                        }
+                    }
+                    let pairs: Vec<(&str, &str)> =
+                        merges.iter().map(|(_, b, h)| (*b, *h)).collect();
+                    let clean = face.git.merges_clean(repo, &pairs);
+                    for ((id, _, _), clean) in merges.iter().zip(clean) {
+                        let verdict = clean.map(merged_cleanly).map_err(|e| internal(e).message);
+                        verdicts.insert(*id, verdict);
+                    }
+                }
+                verdicts
+            })
+            .await;
+        answer(verdicts, &pull_id)
+    }
+
+    /// For each member, the answer `compare` gives for its diff's ends: the
+    /// base it compares its head against ([`MergeRefs::diff_base`]), and its
+    /// head. `compare` is asked once for each repository, with every member
+    /// of it whose ends were read.
+    async fn compare_each<T>(
+        &self,
+        face: &GithubFace,
+        compare: impl Fn(&world::Repo, &[(&str, &str)]) -> Vec<Result<T, String>>,
+    ) -> Answers<i64, T> {
+        let current = self.current(face).await;
+        let mut answers = BTreeMap::new();
+        for (repo, pulls) in self.by_repo().into_values() {
+            let mut asked: Vec<(i64, String, &str)> = Vec::new();
+            for pull in pulls {
+                match &current[&pull.id] {
+                    Ok((now, refs)) => asked.push((pull.id, refs.diff_base(now), &now.head_sha)),
+                    Err(e) => {
+                        answers.insert(pull.id, Err(e.clone()));
+                    }
+                }
+            }
+            let pairs: Vec<(&str, &str)> = asked.iter().map(|(_, b, h)| (b.as_str(), *h)).collect();
+            for ((id, _, _), answer) in asked.iter().zip(compare(repo, &pairs)) {
+                answers.insert(*id, answer);
+            }
+        }
+        answers
+    }
+
+    async fn diff_stats(&self, face: &GithubFace, pull_id: i64) -> Result<store::DiffStats, Error> {
+        let stats = self
+            .diff_stats
+            .get_or_init(|| async {
+                self.compare_each(face, |repo, pairs| {
+                    face.git
+                        .diff_stats(repo, pairs)
+                        .into_iter()
+                        .map(|stats| stats.map_err(|e| e.to_string()))
+                        .collect()
+                })
+                .await
+            })
+            .await;
+        answer(stats, &pull_id)
+    }
+
+    async fn files(
+        &self,
+        face: &GithubFace,
+        pull_id: i64,
+    ) -> Result<Arc<[store::ChangedFile]>, Error> {
+        let files = self
+            .files
+            .get_or_init(|| async {
+                self.compare_each(face, |repo, pairs| {
+                    face.git
+                        .changed_files(repo, pairs)
+                        .into_iter()
+                        .map(|files| files.map_err(|e| internal(e).message))
+                        .collect()
+                })
+                .await
+            })
+            .await;
+        answer(files, &pull_id)
+    }
+
+    /// The committer date of `sha`, which heads the commits of a member in
+    /// `repo`. The dates of every member's head are worked out together.
+    async fn commit_date(
+        &self,
+        face: &GithubFace,
+        repo: &world::Repo,
+        sha: &str,
+    ) -> Result<i64, Error> {
+        let dates = self
+            .commit_dates
+            .get_or_init(|| async {
+                let mut dates = BTreeMap::new();
+                for (repo, pulls) in self.by_repo().into_values() {
+                    let shas: Vec<&str> = pulls.iter().map(|p| p.head_sha.as_str()).collect();
+                    for (sha, date) in shas.iter().zip(face.git.commit_dates(repo, &shas)) {
+                        let date = match date {
+                            Ok(Some(date)) => Ok(date),
+                            Ok(None) => Err(internal(format!(
+                                "commit {sha} not found in {}",
+                                repo.full_name()
+                            ))
+                            .message),
+                            Err(e) => Err(internal(e).message),
+                        };
+                        dates.insert((repo.id, sha.to_string()), date);
+                    }
+                }
+                dates
+            })
+            .await;
+        answer(dates, &(repo.id, sha.to_string()))
+    }
+}
+
+/// The answer a batch keeps for `key`.
+fn answer<K: Ord, T: Clone>(answers: &Answers<K, T>, key: &K) -> Result<T, Error> {
+    match answers.get(key) {
+        Some(Ok(value)) => Ok(value.clone()),
+        Some(Err(e)) => Err(Error::new(e.clone())),
+        None => Err(internal("the batch worked out no answer for this")),
+    }
+}
+
+fn bare(face: &GithubFace, repo: &world::Repo) -> std::path::PathBuf {
+    store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name)
 }
 
 #[Object]
@@ -950,10 +1153,8 @@ impl PullRequest {
     }
 
     async fn mergeable(&self, ctx: &Context<'_>) -> Result<MergeableState, Error> {
-        let face = face(ctx);
-        let (pull, refs) = self.current(face).await?;
         Ok(
-            match mergeability(&self.bare(face), &pull, &refs).map_err(internal)? {
+            match self.batch.mergeability(face(ctx), self.pull.id).await? {
                 Mergeability::Clean => MergeableState::Mergeable,
                 Mergeability::Conflicting => MergeableState::Conflicting,
                 Mergeability::Unknown => MergeableState::Unknown,
@@ -997,15 +1198,27 @@ impl PullRequest {
     }
 
     async fn additions(&self, ctx: &Context<'_>) -> Result<i64, Error> {
-        Ok(self.diff_stats(face(ctx)).await?.additions)
+        Ok(self
+            .batch
+            .diff_stats(face(ctx), self.pull.id)
+            .await?
+            .additions)
     }
 
     async fn deletions(&self, ctx: &Context<'_>) -> Result<i64, Error> {
-        Ok(self.diff_stats(face(ctx)).await?.deletions)
+        Ok(self
+            .batch
+            .diff_stats(face(ctx), self.pull.id)
+            .await?
+            .deletions)
     }
 
     async fn changed_files(&self, ctx: &Context<'_>) -> Result<i64, Error> {
-        Ok(self.diff_stats(face(ctx)).await?.changed_files)
+        Ok(self
+            .batch
+            .diff_stats(face(ctx), self.pull.id)
+            .await?
+            .changed_files)
     }
 
     /// The files the pull changes, in path order, paged by `first`/`after`.
@@ -1025,15 +1238,12 @@ impl PullRequest {
             })?;
             skip = consumed.max(0) as usize;
         }
-        let (pull, refs) = self.current(face).await?;
-        let base = refs.diff_base(&pull);
-        let files =
-            store::changed_files(&self.bare(face), &base, &pull.head_sha).map_err(internal)?;
+        let files = self.batch.files(face, self.pull.id).await?;
         let rest: Vec<PullRequestChangedFile> = files
-            .into_iter()
+            .iter()
             .skip(skip)
             .map(|f| PullRequestChangedFile {
-                path: f.path,
+                path: f.path.clone(),
                 change_type: match f.status {
                     store::FileStatus::Added => PatchStatus::Added,
                     store::FileStatus::Removed => PatchStatus::Deleted,
@@ -1133,6 +1343,7 @@ impl PullRequest {
                 commit: Commit {
                     repo: self.repo.clone(),
                     sha: self.pull.head_sha.clone(),
+                    batch: self.batch.clone(),
                 },
             }],
         }
@@ -1322,7 +1533,15 @@ pub struct SearchResultItemConnection {
     pub nodes: Vec<SearchResultItem>,
 }
 
-fn resolve_node(face: &GithubFace, id: &str) -> Result<Option<Node>, Error> {
+/// What a node id names. One exists for each id of one `nodes` call, only
+/// until its node is built.
+#[allow(clippy::large_enum_variant)]
+enum Found {
+    Pull(world::Pull, world::Repo),
+    Review(world::Review),
+}
+
+fn find_node(face: &GithubFace, id: &str) -> Result<Option<Found>, Error> {
     match nodeid::parse(id) {
         Some(NodeRef::Pull(pull_id)) => {
             let Some(pull) = face.world.pull_by_id(pull_id).map_err(internal)? else {
@@ -1333,16 +1552,41 @@ fn resolve_node(face: &GithubFace, id: &str) -> Result<Option<Node>, Error> {
                 .repo_by_id(pull.repo_id)
                 .map_err(internal)?
                 .ok_or_else(|| internal("pull's repo row missing"))?;
-            Ok(Some(Node::PullRequest(PullRequest::new(pull, repo))))
+            Ok(Some(Found::Pull(pull, repo)))
         }
         Some(NodeRef::Review(review_id)) => {
             let Some(review) = face.world.review_by_id(review_id).map_err(internal)? else {
                 return Ok(None);
             };
-            Ok(Some(Node::PullRequestReview(PullRequestReview { review })))
+            Ok(Some(Found::Review(review)))
         }
         None => Ok(None),
     }
+}
+
+/// The nodes `ids` name, in order, their pull requests sharing one batch.
+fn resolve_nodes(face: &GithubFace, ids: &[ID]) -> Result<Vec<Option<Node>>, Error> {
+    let found: Vec<Option<Found>> = ids
+        .iter()
+        .map(|id| find_node(face, id))
+        .collect::<Result<_, Error>>()?;
+    let pulls: Vec<(world::Pull, world::Repo)> = found
+        .iter()
+        .filter_map(|f| match f {
+            Some(Found::Pull(pull, repo)) => Some((pull.clone(), repo.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut pulls = PullRequest::batch(pulls).into_iter();
+    Ok(found
+        .into_iter()
+        .map(|f| {
+            f.map(|f| match f {
+                Found::Pull(..) => Node::PullRequest(pulls.next().expect("one per pull found")),
+                Found::Review(review) => Node::PullRequestReview(PullRequestReview { review }),
+            })
+        })
+        .collect())
 }
 
 pub struct QueryRoot;
@@ -1352,12 +1596,11 @@ impl QueryRoot {
     /// Batch node lookup. An id that doesn't resolve yields a null entry —
     /// GitHub's shape, which a consumer refreshing a batch of ids skips.
     async fn nodes(&self, ctx: &Context<'_>, ids: Vec<ID>) -> Result<Vec<Option<Node>>, Error> {
-        let face = face(ctx);
-        ids.iter().map(|id| resolve_node(face, id)).collect()
+        resolve_nodes(face(ctx), &ids)
     }
 
     async fn node(&self, ctx: &Context<'_>, id: ID) -> Result<Option<Node>, Error> {
-        resolve_node(face(ctx), &id)
+        Ok(resolve_nodes(face(ctx), &[id])?.pop().flatten())
     }
 
     /// Null: rate limiting is off, as on a GHES configured without it.
@@ -1382,9 +1625,9 @@ impl QueryRoot {
         let (matches, page_info) = take_first("search", matches, first)?;
         Ok(SearchResultItemConnection {
             page_info,
-            nodes: matches
+            nodes: PullRequest::batch(matches)
                 .into_iter()
-                .map(|(pull, repo)| SearchResultItem::PullRequest(PullRequest::new(pull, repo)))
+                .map(SearchResultItem::PullRequest)
                 .collect(),
         })
     }

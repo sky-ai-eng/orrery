@@ -138,6 +138,56 @@ pub fn rev_parse(bare: &Path, rev: &str) -> Result<Option<String>, GitFaceError>
     Ok(Some(stdout.trim().to_string()))
 }
 
+/// Each of `revs` resolved as [`rev_parse`] resolves it, by one `git cat-file
+/// --batch-check` for all of them.
+pub fn rev_parse_many(bare: &Path, revs: &[&str]) -> Result<Vec<Option<String>>, GitFaceError> {
+    // A rev that is empty, or that git would read as an option, resolves to
+    // nothing, as rev_parse has it; one holding a newline would be two lines
+    // of input, and names no ref.
+    let askable = |rev: &str| !rev.is_empty() && !rev.starts_with('-') && !rev.contains('\n');
+    let input: String = revs
+        .iter()
+        .filter(|rev| askable(rev))
+        .map(|rev| format!("{rev}\n"))
+        .collect();
+    if input.is_empty() {
+        return Ok(vec![None; revs.len()]);
+    }
+    let args = ["cat-file", "--batch-check=%(objectname)", "--buffer"];
+    let out = run_with_input(hermetic_git(bare).args(args), input.as_bytes())?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        return Err(GitFaceError::Git {
+            args: args.join(" "),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
+    }
+    let mut lines = stdout.lines();
+    let mut oids = Vec::with_capacity(revs.len());
+    for rev in revs {
+        if !askable(rev) {
+            oids.push(None);
+            continue;
+        }
+        let line = lines.next().unwrap_or_default();
+        if line == format!("{rev} missing") || line == format!("{rev} ambiguous") {
+            oids.push(None);
+        } else if is_oid(line) {
+            oids.push(Some(line.to_string()));
+        } else {
+            return Err(GitFaceError::Cgi(format!(
+                "cat-file --batch-check answered {line:?} for {rev:?}"
+            )));
+        }
+    }
+    Ok(oids)
+}
+
+/// Whether `s` is a full object id, SHA-1 or SHA-256, as git prints one.
+pub fn is_oid(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Raw bytes of the blob at `spec` (e.g. `HEAD:README.md`); `None` when the
 /// path doesn't resolve to a blob — a missing file, a directory, or an empty
 /// repo all read as absent, which is the 404 the contents endpoint owes. A
@@ -317,15 +367,10 @@ pub fn changed_files(
     let mut fields = out.split('\0');
     let mut files = Vec::new();
     while let Some(code) = fields.next() {
-        let status = match code.chars().next() {
-            None => continue,
-            Some('A') => FileStatus::Added,
-            Some('D') => FileStatus::Removed,
-            Some('M') => FileStatus::Modified,
-            Some('R') => FileStatus::Renamed,
-            Some('C') => FileStatus::Copied,
-            Some(_) => FileStatus::Changed,
-        };
+        if code.is_empty() {
+            continue;
+        }
+        let status = file_status(code);
         let (previous, path) = match status {
             FileStatus::Renamed | FileStatus::Copied => {
                 let (Some(from), Some(to)) = (fields.next(), fields.next()) else {
@@ -347,6 +392,202 @@ pub fn changed_files(
         });
     }
     Ok(files)
+}
+
+/// [`diff_stats`] for each `(base, head)`, from as few git processes as can
+/// work them out together ([`three_dot_many`]).
+pub fn diff_stats_many(
+    bare: &Path,
+    pairs: &[(&str, &str)],
+) -> Vec<Result<DiffStats, GitFaceError>> {
+    three_dot_many(bare, pairs, "--numstat", numstat_z, |base, head| {
+        diff_stats(bare, base, head)
+    })
+}
+
+/// [`changed_files`] for each `(base, head)`, from as few git processes as
+/// can work them out together ([`three_dot_many`]).
+pub fn changed_files_many(
+    bare: &Path,
+    pairs: &[(&str, &str)],
+) -> Vec<Result<Vec<ChangedFile>, GitFaceError>> {
+    three_dot_many(bare, pairs, "--name-status", name_status_z, |base, head| {
+        changed_files(bare, base, head)
+    })
+}
+
+/// Each `(base, head)`'s three-dot comparison, as `single` works one out:
+/// one `git rev-parse` lists every pair's merge bases, and one `git diff-tree
+/// --stdin`, printing `format`, compares the head of every pair with exactly
+/// one to that merge base, which is the comparison `base...head` makes. A pair
+/// with no merge base or with several, every pair when a batch fails, and a
+/// lone pair, which a batch would take more processes for, go to `single`, so
+/// each answer and each error is the one `single` gives.
+fn three_dot_many<T>(
+    bare: &Path,
+    pairs: &[(&str, &str)],
+    format: &str,
+    parse: fn(&mut Fields<'_>) -> Option<T>,
+    single: impl Fn(&str, &str) -> Result<T, GitFaceError>,
+) -> Vec<Result<T, GitFaceError>> {
+    let mut answers: Vec<Option<T>> = std::iter::repeat_with(|| None).take(pairs.len()).collect();
+    if pairs.len() > 1
+        && let Some(bases) = merge_bases(bare, pairs)
+    {
+        let (batched, comparisons): (Vec<usize>, Vec<(&str, &str)>) = pairs
+            .iter()
+            .zip(&bases)
+            .enumerate()
+            .filter_map(|(i, ((_, head), bases))| match &bases[..] {
+                [base] => Some((i, (*head, base.as_str()))),
+                _ => None,
+            })
+            .unzip();
+        if let Some(found) = diff_tree_many(bare, &comparisons, format, parse) {
+            for (i, answer) in batched.into_iter().zip(found) {
+                answers[i] = Some(answer);
+            }
+        }
+    }
+    answers
+        .into_iter()
+        .zip(pairs)
+        .map(|(answer, (base, head))| answer.map(Ok).unwrap_or_else(|| single(base, head)))
+        .collect()
+}
+
+/// The merge bases of each `(base, head)`, from one `git rev-parse` per
+/// [`MERGE_BASE_CHUNK`] of them; `None` when git fails, as it does when a
+/// side names no commit, or prints what this does not expect.
+fn merge_bases(bare: &Path, pairs: &[(&str, &str)]) -> Option<Vec<Vec<String>>> {
+    let mut all = Vec::with_capacity(pairs.len());
+    for chunk in pairs.chunks(MERGE_BASE_CHUNK) {
+        let args: Vec<String> = chunk.iter().map(|(b, h)| format!("{b}...{h}")).collect();
+        let (status, stdout, _) = run_raw(hermetic_git(bare).arg("rev-parse").args(&args)).ok()?;
+        if !status.success() {
+            return None;
+        }
+        // `rev-parse base...head` prints head, then base, then each merge
+        // base with a `^` before it.
+        let mut lines = stdout.lines().peekable();
+        for (base, head) in chunk {
+            if lines.next()? != *head || lines.next()? != *base {
+                return None;
+            }
+            let mut bases = Vec::new();
+            while let Some(line) = lines.next_if(|l| l.starts_with('^')) {
+                bases.push(line[1..].to_string());
+            }
+            all.push(bases);
+        }
+        if lines.next().is_some() {
+            return None;
+        }
+    }
+    Some(all)
+}
+
+/// How many pairs one `git rev-parse` is given, which keeps its command line
+/// far below any system's limit.
+const MERGE_BASE_CHUNK: usize = 256;
+
+type Fields<'a> = std::iter::Peekable<std::str::Split<'a, char>>;
+
+/// `git diff-tree --stdin` printing `format` for each `(head, base)`,
+/// comparing `base` to `head`, each comparison read by `parse`; `None` when
+/// git fails or prints what this does not expect.
+fn diff_tree_many<T>(
+    bare: &Path,
+    comparisons: &[(&str, &str)],
+    format: &str,
+    parse: fn(&mut Fields<'_>) -> Option<T>,
+) -> Option<Vec<T>> {
+    if comparisons.is_empty() {
+        return Some(Vec::new());
+    }
+    // A line of a commit and others is the diff from the others, read as the
+    // commit's parents, to the commit.
+    let input: String = comparisons
+        .iter()
+        .map(|(head, base)| format!("{head} {base}\n"))
+        .collect();
+    let args = ["diff-tree", "--stdin", "--always", "-r", "-M", "-z", format];
+    let out = run_with_input(hermetic_git(bare).args(args), input.as_bytes()).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut fields = stdout.split('\0').peekable();
+    let mut found = Vec::with_capacity(comparisons.len());
+    for (head, _) in comparisons {
+        // Each comparison starts with its commit's id, which `--always`
+        // prints for an empty one too.
+        if fields.next()? != *head {
+            return None;
+        }
+        found.push(parse(&mut fields)?);
+    }
+    // All that is left is the empty field after the last NUL.
+    match (fields.next(), fields.next()) {
+        (Some(""), None) => Some(found),
+        _ => None,
+    }
+}
+
+/// One comparison's `--numstat -z` records, as [`diff_stats`] totals them. A
+/// record is `<added>\t<deleted>\t<path>`, or, for a rename, the counts with
+/// an empty path and then the two paths as fields of their own; the commit id
+/// that starts the next comparison has no tab.
+fn numstat_z(fields: &mut Fields<'_>) -> Option<DiffStats> {
+    let mut stats = DiffStats::default();
+    while let Some(record) = fields.next_if(|f| f.contains('\t')) {
+        let mut parts = record.splitn(3, '\t');
+        let (add, del, path) = (parts.next()?, parts.next()?, parts.next()?);
+        if path.is_empty() {
+            fields.next()?;
+            fields.next()?;
+        }
+        stats.changed_files += 1;
+        stats.additions += add.parse::<i64>().unwrap_or(0);
+        stats.deletions += del.parse::<i64>().unwrap_or(0);
+    }
+    Some(stats)
+}
+
+/// One comparison's `--name-status -z` records, as [`changed_files`] lists
+/// them. A record starts with its status, a capital letter and for a rename
+/// or copy its score; the commit id that starts the next comparison does not.
+fn name_status_z(fields: &mut Fields<'_>) -> Option<Vec<ChangedFile>> {
+    let is_status = |f: &&str| {
+        let mut chars = f.chars();
+        chars.next().is_some_and(|c| c.is_ascii_uppercase()) && chars.all(|c| c.is_ascii_digit())
+    };
+    let mut files = Vec::new();
+    while let Some(code) = fields.next_if(is_status) {
+        let status = file_status(code);
+        let previous = match status {
+            FileStatus::Renamed | FileStatus::Copied => Some(fields.next()?.to_string()),
+            _ => None,
+        };
+        files.push(ChangedFile {
+            path: fields.next()?.to_string(),
+            status,
+            previous,
+        });
+    }
+    Some(files)
+}
+
+/// The status a `--name-status` code gives a file.
+fn file_status(code: &str) -> FileStatus {
+    match code.chars().next() {
+        Some('A') => FileStatus::Added,
+        Some('D') => FileStatus::Removed,
+        Some('M') => FileStatus::Modified,
+        Some('R') => FileStatus::Renamed,
+        Some('C') => FileStatus::Copied,
+        _ => FileStatus::Changed,
+    }
 }
 
 /// The shortest object id an `index` line of a diff abbreviates to. Git
@@ -540,6 +781,106 @@ pub fn commit_date_unix(bare: &Path, sha: &str) -> Result<Option<i64>, GitFaceEr
     Ok(stdout.trim().parse().ok())
 }
 
+/// [`commit_date_unix`] for each of `shas`, from one `git log --no-walk
+/// --stdin` printing each one's `%ct`. A sha that `git log` would read as an
+/// option, and every sha when the batch fails, as it does when one names no
+/// commit, go to [`commit_date_unix`], so each answer and each error is the
+/// one it gives.
+pub fn commit_dates_unix(bare: &Path, shas: &[&str]) -> Vec<Result<Option<i64>, GitFaceError>> {
+    let mut asked: Vec<&str> = Vec::new();
+    for sha in shas {
+        if !sha.is_empty() && !sha.starts_with('-') && !sha.contains('\n') && !asked.contains(sha) {
+            asked.push(sha);
+        }
+    }
+    let mut dates: BTreeMap<&str, i64> = BTreeMap::new();
+    if asked.len() > 1 {
+        let input: String = asked
+            .iter()
+            .map(|sha| format!("{sha}^{{commit}}\n"))
+            .collect();
+        let args = ["log", "--no-walk=unsorted", "--stdin", "--format=%ct"];
+        if let Ok(out) = run_with_input(hermetic_git(bare).args(args), input.as_bytes())
+            && out.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let printed: Vec<&str> = stdout.lines().collect();
+            // `log` prints a commit once however many shas name it, so a
+            // count that differs leaves the lines unmatched to the shas.
+            if printed.len() == asked.len() {
+                for (sha, line) in asked.iter().zip(printed) {
+                    if let Ok(date) = line.parse() {
+                        dates.insert(sha, date);
+                    }
+                }
+            }
+        }
+    }
+    shas.iter()
+        .map(|sha| match dates.get(sha) {
+            Some(date) => Ok(Some(*date)),
+            None => commit_date_unix(bare, sha),
+        })
+        .collect()
+}
+
+/// Whether the merge of each `(base, head)` is clean, as [`merge_tree`] finds
+/// it, from one `git merge-tree --stdin` for all of them. `--stdin` came in
+/// git 2.40, and a pair git cannot merge at all, such as two unrelated
+/// histories, stops the batch; in either case, and for a lone pair, each pair
+/// is merged on its own, so each answer and each error is [`merge_tree`]'s.
+/// The batch is asked only of full object ids: a line of `--stdin` reads a
+/// name holding a space as more than one argument, and can then name a
+/// different merge.
+pub fn merges_clean(bare: &Path, pairs: &[(&str, &str)]) -> Vec<Result<bool, GitFaceError>> {
+    if pairs.len() > 1
+        && pairs
+            .iter()
+            .all(|(base, head)| is_oid(base) && is_oid(head))
+        && let Some(clean) = merges_clean_batch(bare, pairs)
+    {
+        return clean.into_iter().map(Ok).collect();
+    }
+    pairs
+        .iter()
+        .map(|(base, head)| merge_tree(bare, base, head).map(|tree| tree.is_some()))
+        .collect()
+}
+
+fn merges_clean_batch(bare: &Path, pairs: &[(&str, &str)]) -> Option<Vec<bool>> {
+    let input: String = pairs.iter().map(|(b, h)| format!("{b} {h}\n")).collect();
+    let args = [
+        "merge-tree",
+        "--write-tree",
+        "--stdin",
+        "--name-only",
+        "--no-messages",
+    ];
+    let out = run_with_input(hermetic_git(bare).args(args), input.as_bytes()).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // Each merge prints its status, 1 when clean and 0 when it conflicts,
+    // then its tree, the paths that conflict, and an empty field.
+    let mut fields = out.stdout.split(|&b| b == 0);
+    let mut clean = Vec::with_capacity(pairs.len());
+    for _ in pairs {
+        let status = fields.next()?;
+        fields.next()?;
+        while !fields.next()?.is_empty() {}
+        clean.push(match status {
+            b"1" => true,
+            b"0" => false,
+            _ => return None,
+        });
+    }
+    // All that is left is the empty field after the last NUL.
+    match (fields.next(), fields.next()) {
+        (Some([]), None) => Some(clean),
+        _ => None,
+    }
+}
+
 /// Compute the merge of two commits without a worktree. `Ok(Some(tree))` on a
 /// clean merge, `Ok(None)` on content conflicts — git's exit code 1.
 pub fn merge_tree(bare: &Path, base: &str, head: &str) -> Result<Option<String>, GitFaceError> {
@@ -623,6 +964,29 @@ fn run(cmd: &mut Command) -> Result<String, GitFaceError> {
         });
     }
     Ok(stdout)
+}
+
+/// Run `cmd` with `input` on its stdin. The input is written from a thread of
+/// its own: a git that prints as it reads fills its stdout pipe, and would
+/// wait on it while this waited on its stdin.
+fn run_with_input(cmd: &mut Command, input: &[u8]) -> Result<std::process::Output, GitFaceError> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let out = std::thread::scope(|s| {
+        // A git that stops early, on a bad line, closes its stdin and the
+        // write fails; its exit status says what happened.
+        s.spawn(move || {
+            let _ = stdin.write_all(input);
+        });
+        child.wait_with_output()
+    })?;
+    Ok(out)
 }
 
 fn run_raw(cmd: &mut Command) -> Result<(std::process::ExitStatus, String, String), GitFaceError> {
