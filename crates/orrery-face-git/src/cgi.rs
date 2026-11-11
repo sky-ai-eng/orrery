@@ -9,6 +9,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::watch;
 
 use crate::GitFaceError;
+use crate::store;
 
 /// One request's worth of CGI input, already normalized by the handler.
 pub struct CgiRequest<'a> {
@@ -46,14 +47,11 @@ pub async fn run_http_backend(
     req: CgiRequest<'_>,
     kill: watch::Receiver<bool>,
 ) -> Result<CgiResponse, GitFaceError> {
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = tokio::process::Command::from(store::git_command());
     cmd.arg("http-backend")
         .env("GIT_PROJECT_ROOT", repos_dir)
         .env("GIT_HTTP_EXPORT_ALL", "1")
         .env("GIT_HTTP_MAX_REQUEST_BUFFER", "100M")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
         .env("REQUEST_METHOD", req.method)
         .env("PATH_INFO", &req.path_info)
         .env("QUERY_STRING", req.query)

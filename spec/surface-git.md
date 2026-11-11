@@ -20,7 +20,7 @@ An actor authenticates with HTTP Basic, its token as the password, the way GitHu
 
 ## The bare repository recipe
 
-Each repository is a bare repository at `<world>/repos/<owner>/<repo>.git`, created with its default branch as `HEAD` and configured with:
+Each repository is a bare repository at `<world>/repos/<owner>/<repo>.git`, created with its default branch as `HEAD` and an empty template (`git init --template=`), so it holds no hooks, `description`, or `info/` from the host's template directory, and configured with:
 
 | Setting | Why |
 | --- | --- |
@@ -30,7 +30,17 @@ Each repository is a bare repository at `<world>/repos/<owner>/<repo>.git`, crea
 | `receive.hideRefs = refs/pull` | A push to a pull request's ref is refused, as on GitHub ("Pull request refs") |
 | `gc.auto = 0` | Object files are never rewritten, so a snapshot can share them with the live world |
 
-Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`, and `GIT_TERMINAL_PROMPT=0`, so the operator's own git configuration never changes a world.
+Every `git` the engine runs, `http-backend` included, runs hermetically, so nothing of the operator's git setup changes a world. Its environment starts empty and holds only:
+
+- `PATH`, copied from the engine's own, since git finds the programs it runs through it, `ssh-keygen` among them;
+- `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null`, so git reads no config file outside the repository;
+- `GIT_ATTR_NOSYSTEM=1`, so git reads no system attributes file;
+- `GIT_TERMINAL_PROMPT=0`; and
+- what the one command needs: `http-backend`'s CGI variables, or a commit's author and committer.
+
+No other variable in the engine's environment reaches git. Config set through the environment (`GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`) and variables such as `GIT_EXTERNAL_DIFF` are not seen. With no `HOME` or `XDG_CONFIG_HOME`, git reads no user attributes file, and with no `LANG` or `LC_*`, its messages, which an error can carry, are untranslated.
+
+A repository created by an earlier release keeps the files its host's template gave it. Its sample hooks are inactive, and nothing reads its `description` or `info/exclude`.
 
 ## What a push does
 

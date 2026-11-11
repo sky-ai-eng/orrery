@@ -688,7 +688,9 @@ async fn a_push_that_fails_puts_back_a_branch_it_replaced_with_one_beneath_it() 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_whose_http_backend_fails_puts_its_refs_back() {
     let p = push_that_fails().await;
-    let hook = p.bare.join("hooks").join("post-receive");
+    let hooks = p.bare.join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("post-receive");
     std::fs::write(&hook, "#!/bin/sh\nkill -9 $PPID\n").unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mark = p.send_and_fail();

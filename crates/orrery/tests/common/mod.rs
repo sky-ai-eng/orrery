@@ -251,31 +251,54 @@ pub fn request(
     token: Option<&str>,
     body: &str,
 ) -> (u16, String) {
+    request_accepting(addr, method, path, token, None, body)
+}
+
+/// [`request`], asking for the media type `accept` when it is given.
+pub fn request_accepting(
+    addr: &str,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    accept: Option<&str>,
+    body: &str,
+) -> (u16, String) {
+    let mut headers = String::new();
+    if let Some(token) = token {
+        headers.push_str(&format!("authorization: token {token}\r\n"));
+    }
+    if let Some(accept) = accept {
+        headers.push_str(&format!("accept: {accept}\r\n"));
+    }
     match addr.strip_prefix("unix:") {
         Some(socket) => exchange(
             UnixStream::connect(socket).unwrap(),
             method,
             path,
-            token,
+            &headers,
             body,
         ),
-        None => exchange(TcpStream::connect(addr).unwrap(), method, path, token, body),
+        None => exchange(
+            TcpStream::connect(addr).unwrap(),
+            method,
+            path,
+            &headers,
+            body,
+        ),
     }
 }
 
+/// `headers` are whole header lines, each ending in CRLF.
 fn exchange(
     mut stream: impl Read + Write,
     method: &str,
     path: &str,
-    token: Option<&str>,
+    headers: &str,
     body: &str,
 ) -> (u16, String) {
-    let auth = token
-        .map(|t| format!("authorization: token {t}\r\n"))
-        .unwrap_or_default();
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nhost: world.test\r\n{auth}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nhost: world.test\r\n{headers}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     )
     .unwrap();

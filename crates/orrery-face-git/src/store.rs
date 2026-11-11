@@ -1,6 +1,8 @@
 //! On-disk bare-repo store. All server-side git subprocesses run hermetically:
-//! the operator's global/system git config must never leak into world behavior
-//! (a `credential.helper` or `url.insteadOf` there would be a hidden input).
+//! nothing of the operator's git setup may reach world behavior. A
+//! `credential.helper` or `url.insteadOf` in their config, a
+//! `GIT_CONFIG_COUNT` or `GIT_EXTERNAL_DIFF` in the engine's environment, or
+//! an attributes file under their home would each be a hidden input.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,11 +13,31 @@ use crate::GitFaceError;
 /// All-zeros object id, the wire spelling for "ref did not exist / was deleted".
 pub const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 
+/// `git`, run in `cwd` with only the environment [`git_command`] gives it.
 pub fn hermetic_git(cwd: &Path) -> Command {
+    let mut cmd = git_command();
+    cmd.current_dir(cwd);
+    cmd
+}
+
+/// `git` with an environment of its own, not the engine's. The variables are
+/// an allowlist because git reads more of them with each release, and any
+/// one it inherits can change what a world serves: `GIT_CONFIG_COUNT` adds
+/// config, `GIT_EXTERNAL_DIFF` replaces a diff, `HOME` locates a user
+/// attributes file, and `LANG` translates the messages an error carries.
+/// `PATH` is the one copied from the engine, since git finds the programs it
+/// runs through it, `ssh-keygen` and a hook's commands among them.
+/// `GIT_ATTR_NOSYSTEM` is set because git reads the host's system attributes
+/// file with no config pointing at it.
+pub fn git_command() -> Command {
     let mut cmd = Command::new("git");
-    cmd.current_dir(cwd)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+    cmd.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        cmd.env("PATH", path);
+    }
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0");
     cmd
 }
@@ -31,6 +53,8 @@ pub fn bare_dir(repos_dir: &Path, owner_login: &str, name: &str) -> PathBuf {
 /// allowAnySHA1InWant, pushes over http-backend need http.receivepack,
 /// receive.hideRefs refuses pushes to the pull request refs the engine moves,
 /// and gc.auto=0 keeps object files append-only so snapshots can share them.
+/// An empty `--template` keeps the host's template directory, and the hooks
+/// it would install, out of the repository.
 ///
 /// Idempotent: re-applying to an existing bare repo only re-asserts the
 /// recipe, so a crash between the kernel row insert and disk init heals on
@@ -44,7 +68,14 @@ pub fn init_bare(
     let dir = bare_dir(repos_dir, owner_login, name);
     if !dir.join("HEAD").exists() {
         std::fs::create_dir_all(&dir)?;
-        run(hermetic_git(&dir).args(["init", "--bare", "--initial-branch", default_branch, "."]))?;
+        run(hermetic_git(&dir).args([
+            "init",
+            "--bare",
+            "--template=",
+            "--initial-branch",
+            default_branch,
+            ".",
+        ]))?;
     }
     for (key, value) in [
         ("uploadpack.allowFilter", "true"),
@@ -996,4 +1027,21 @@ fn run_raw(cmd: &mut Command) -> Result<(std::process::ExitStatus, String, Strin
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::init_bare;
+
+    /// A host's template directory would give every world repository the
+    /// hooks, `description`, and `info/exclude` that host ships.
+    #[test]
+    fn a_new_repository_takes_nothing_from_the_host_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = init_bare(dir.path(), "alice", "webapp", "main").unwrap();
+        assert!(bare.join("HEAD").is_file());
+        for absent in ["hooks", "description", "info"] {
+            assert!(!bare.join(absent).exists(), "the repository holds {absent}");
+        }
+    }
 }

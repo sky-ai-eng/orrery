@@ -84,7 +84,9 @@ impl World {
     /// running for long.
     fn push_held(&self, release: &Path) -> (std::process::Child, String) {
         let started = self.dir.path().join("post-receive-started");
-        let hook = self.bare.join("hooks/post-receive");
+        let hooks = self.bare.join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("post-receive");
         std::fs::write(
             &hook,
             format!(

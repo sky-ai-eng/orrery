@@ -1289,7 +1289,9 @@ mod tests {
     ) {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let hook = bare.join("hooks").join(name);
+        let hooks = bare.join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join(name);
         std::fs::write(
             &hook,
             format!(
