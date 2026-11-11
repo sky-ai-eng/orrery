@@ -580,8 +580,8 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
     passed::close_on_exec();
     let raw = std::fs::read_to_string(config_path)
         .with_context(|| format!("reading config {}", config_path.display()))?;
-    // Of the bytes parsed here and never of the file again, so it names the
-    // settings this process runs with however the file changes later.
+    // Of the bytes parsed here and never of the file again, so it identifies
+    // what this process read however the file changes later.
     let config_sha256 = format!("{:x}", Sha256::digest(raw.as_bytes()));
     let config: Config = toml::from_str(&raw)
         .with_context(|| format!("parsing config {}", config_path.display()))?;
