@@ -17,6 +17,10 @@
 //! answered it, since a failure such as a missing object can be followed by
 //! a push that supplies it.
 
+// TODO(ORR-108): a kept answer misses a pushed replace ref, and on git 2.43
+// to 2.45 a pushed `.gitattributes`; git stops reading both, so an answer is
+// one of its commits alone.
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
