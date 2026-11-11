@@ -55,6 +55,8 @@ pub struct AppState {
     pub schema: orrery_face_github::graphql::GithubSchema,
     /// See [`Options::anonymous_git_reads`].
     pub anonymous_git_reads: bool,
+    /// See [`Options::config_sha256`].
+    pub config_sha256: Option<String>,
     /// What the log's streams wait on.
     log_changes: Arc<tokio::sync::watch::Sender<log_stream::LogChanges>>,
     /// True once [`Stop::stop`] has been called.
@@ -62,18 +64,25 @@ pub struct AppState {
 }
 
 /// How a world process exposes its faces. The default is local `orrery serve`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Options {
     /// Let fetch-side git traffic through without a token, as GitHub does for
     /// public repos. A world whose faces are on the public internet turns this
     /// off, since its host and repository names can be guessed.
     pub anonymous_git_reads: bool,
+    /// The SHA-256 of the config file this world was started from, as 64
+    /// lowercase hex characters, reported by `GET /_orrery/healthz`. A
+    /// supervisor that rewrites a world's config compares it with the digest
+    /// of the file it holds to learn whether the running process has read
+    /// that file. `None` for a world started from no file.
+    pub config_sha256: Option<String>,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
             anonymous_git_reads: true,
+            config_sha256: None,
         }
     }
 }
@@ -164,6 +173,7 @@ pub fn routers(
         snapshots_dir,
         schema: orrery_face_github::graphql::schema(github.clone()),
         anonymous_git_reads: options.anonymous_git_reads,
+        config_sha256: options.config_sha256,
         log_changes: log_stream::follow(&world),
         stopping,
     };

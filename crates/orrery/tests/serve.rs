@@ -14,6 +14,7 @@ use common::{
     Ready, Served, git, orrery_serve, orrery_serve_passing, pass_sockets, refused, request, serve,
     start, write_config,
 };
+use sha2::{Digest as _, Sha256};
 
 #[test]
 fn split_listeners_serve_over_unix_sockets() {
@@ -347,6 +348,42 @@ fn the_ready_line_reports_the_port_bound_for_port_zero() {
     let host = ready.base_url.strip_prefix("http://").unwrap();
     let (status, body) = request(host, "GET", "/_orrery/healthz", None, "");
     assert_eq!(status, 200, "{body}");
+}
+
+/// `serve` reads its config once, so a supervisor that rewrites a world's
+/// config learns whether the running process has read the new file by
+/// comparing healthz's digest with the file's.
+#[test]
+fn healthz_reports_the_digest_of_the_config_serve_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "",
+        "# a comment is part of the file's bytes\nlisten = \"127.0.0.1:0\"\n",
+    );
+    let read = std::fs::read(&config).unwrap();
+    let digest = format!("{:x}", Sha256::digest(&read));
+    let (_served, ready) = serve(&config, &[]);
+    let health = |control: &str| {
+        let (status, body) = request(control, "GET", "/_orrery/healthz", None, "");
+        assert_eq!(status, 200, "{body}");
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["config_sha256"].clone()
+    };
+    assert_eq!(health(&ready.control), digest.as_str());
+    assert_eq!(digest.len(), 64);
+    assert!(
+        digest
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+        "{digest}"
+    );
+
+    std::fs::write(&config, [&read[..], b"# rewritten\n"].concat()).unwrap();
+    assert_ne!(
+        format!("{:x}", Sha256::digest(std::fs::read(&config).unwrap())),
+        digest
+    );
+    assert_eq!(health(&ready.control), digest.as_str());
 }
 
 #[test]

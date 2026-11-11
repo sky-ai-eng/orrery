@@ -336,6 +336,7 @@ async fn anonymous_git_reads_follow_github_rules() {
 async fn worlds_can_refuse_anonymous_git_reads() {
     let inst = boot_with(orrery_server::Options {
         anonymous_git_reads: false,
+        ..Default::default()
     })
     .await;
     let base = &inst.base;

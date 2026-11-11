@@ -319,6 +319,7 @@ mod tests {
             snapshots_dir: dir.join("snapshots"),
             schema: orrery_face_github::graphql::schema(github),
             anonymous_git_reads: true,
+            config_sha256: None,
             stopping: Arc::new(tokio::sync::watch::Sender::new(false)),
         }
     }
