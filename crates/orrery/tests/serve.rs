@@ -794,5 +794,10 @@ fn the_worlds_git_takes_nothing_from_the_environment_serve_runs_in() {
         cmd.env_remove(var);
     }
     let (_served, ready) = start(cmd);
-    assert_eq!(reads, pull_reads(&ready.listen, &token, number));
+    let clean = pull_reads(&ready.listen, &token, number);
+    assert_eq!(
+        clean.counts,
+        serde_json::json!({ "additions": 2, "deletions": 1, "changedFiles": 2 })
+    );
+    assert_eq!(reads, clean);
 }

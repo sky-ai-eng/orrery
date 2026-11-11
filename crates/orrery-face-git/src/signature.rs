@@ -8,7 +8,7 @@
 //! say, under the write or read that asks.
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 
 use base64::Engine as _;
@@ -16,7 +16,7 @@ use base64::engine::general_purpose::STANDARD;
 use orrery_world::{CommitFacts, CommitSignature};
 
 use crate::GitFaceError;
-use crate::store::hermetic_git;
+use crate::store::{find_on_path, hermetic_git};
 
 const SSH_ARMOR_BEGIN: &str = "-----BEGIN SSH SIGNATURE-----";
 const SSH_ARMOR_END: &str = "-----END SSH SIGNATURE-----";
@@ -234,7 +234,9 @@ fn ssh_signature_key(armored: &str) -> Option<String> {
 /// date as the time to verify at, and the file gives the key no validity
 /// window, so the answer does not depend on when it is asked.
 fn verifies_with(bare: &Path, sha: &str, key: &str) -> Result<bool, GitFaceError> {
-    let ssh_keygen = find_ssh_keygen().ok_or(GitFaceError::NoSshKeygen)?;
+    // git is handed the path rather than the bare name, so a missing program
+    // is this error and never a signature that fails to verify.
+    let ssh_keygen = find_on_path("ssh-keygen").ok_or(GitFaceError::NoSshKeygen)?;
     let mut allowed = tempfile::NamedTempFile::new()?;
     writeln!(allowed, "signer {key}")?;
     allowed.flush()?;
@@ -257,21 +259,6 @@ fn verifies_with(bare: &Path, sha: &str, key: &str) -> Result<bool, GitFaceError
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         }),
     }
-}
-
-/// `ssh-keygen` as `PATH` finds it. git is handed this path rather than the
-/// bare name, so a missing program is this error and never a signature that
-/// fails to verify.
-fn find_ssh_keygen() -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("ssh-keygen"))
-        .find(|candidate| {
-            candidate
-                .metadata()
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
 }
 
 #[cfg(test)]

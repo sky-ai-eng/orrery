@@ -29,8 +29,16 @@ pub fn hermetic_git(cwd: &Path) -> Command {
 /// runs through it, `ssh-keygen` and a hook's commands among them.
 /// `GIT_ATTR_NOSYSTEM` is set because git reads the host's system attributes
 /// file with no config pointing at it.
+///
+/// git is started by its path on `PATH`, not its name: std spawns a program
+/// it must look up on a `PATH` the child's environment changed with a full
+/// `fork`, which costs time in proportion to the engine's memory, rather than
+/// with `posix_spawn`.
 pub fn git_command() -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = match find_on_path("git") {
+        Some(git) => Command::new(git),
+        None => Command::new("git"),
+    };
     cmd.env_clear();
     if let Some(path) = std::env::var_os("PATH") {
         cmd.env("PATH", path);
@@ -40,6 +48,22 @@ pub fn git_command() -> Command {
         .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0");
     cmd
+}
+
+/// The first executable `name` in a directory of the engine's `PATH`. A
+/// relative directory is skipped, since it would name another file once a
+/// command's working directory is set.
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| {
+            candidate
+                .metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
 }
 
 /// The path of a repo's bare directory, from the row's canonical casing —
