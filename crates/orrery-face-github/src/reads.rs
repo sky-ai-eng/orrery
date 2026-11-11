@@ -184,7 +184,7 @@ pub(crate) async fn get_pull(
     if let Some(media) = media::diff_media(&headers) {
         return pull_diff(&bare, &refs.diff_base(&pull), &pull.head_sha, &media);
     }
-    let verdict = match mergeability(&bare, &pull, &refs) {
+    let verdict = match mergeability(&face, &repo, &pull, &refs) {
         Ok(v) => v,
         Err(e) => return internal(e),
     };
@@ -719,12 +719,18 @@ pub(crate) async fn list_pull_files(
         Err(e) => return internal(e),
     };
     drop(refs);
-    let files = match store::file_diffs(&bare, &base, &pull.head_sha) {
+    let files = match face.git.file_diffs(&repo, &base, &pull.head_sha) {
         Ok(f) => f,
         Err(e) => return internal(e),
     };
     let (per_page, page) = page_params(&query.unwrap_or_default());
-    let items = changed_files_json(&paginate(files, per_page, page));
+    let shown: Vec<store::FileDiff> = files
+        .iter()
+        .skip((page - 1) * per_page)
+        .take(per_page)
+        .cloned()
+        .collect();
+    let items = changed_files_json(&shown);
     json_response(StatusCode::OK, serde_json::Value::Array(items))
 }
 

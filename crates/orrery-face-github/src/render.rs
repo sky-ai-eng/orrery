@@ -179,11 +179,28 @@ pub(crate) struct MergeRefs {
 
 impl MergeRefs {
     pub(crate) fn read(bare: &Path, pull: &Pull) -> Result<MergeRefs, GitFaceError> {
-        let tip = |branch: &str| store::rev_parse(bare, &format!("refs/heads/{branch}"));
-        Ok(MergeRefs {
-            base_tip: tip(&pull.base_ref)?,
-            head_tip: tip(&pull.head_ref)?,
-        })
+        Ok(MergeRefs::read_many(bare, &[pull])?
+            .pop()
+            .expect("tips for one pull"))
+    }
+
+    /// The tips for each of `pulls`, all of one repository, from one git
+    /// process.
+    pub(crate) fn read_many(bare: &Path, pulls: &[&Pull]) -> Result<Vec<MergeRefs>, GitFaceError> {
+        let names: Vec<String> = pulls
+            .iter()
+            .flat_map(|p| [&p.base_ref, &p.head_ref])
+            .map(|branch| format!("refs/heads/{branch}"))
+            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut tips = store::rev_parse_many(bare, &names)?.into_iter();
+        Ok(pulls
+            .iter()
+            .map(|_| MergeRefs {
+                base_tip: tips.next().flatten(),
+                head_tip: tips.next().flatten(),
+            })
+            .collect())
     }
 
     /// The commit a pull request's diff compares its head against: the base
@@ -198,29 +215,60 @@ impl MergeRefs {
     }
 }
 
+/// What decides a pull request's mergeability, from the tips read with it. A
+/// merged one has none. A closed one whose head branch is gone keeps the test
+/// merge GitHub made when its head or base was last pinned and cannot make
+/// another, so it has none once its base branch has moved since.
+pub(crate) enum MergeCheck<'a> {
+    /// The pull's state decides it.
+    Known(Mergeability),
+    /// The test merge of `head` onto `base` decides it.
+    TestMerge { base: &'a str, head: &'a str },
+}
+
+pub(crate) fn merge_check<'a>(pull: &'a Pull, refs: &'a MergeRefs) -> MergeCheck<'a> {
+    if pull.merged {
+        return MergeCheck::Known(Mergeability::Unknown);
+    }
+    let Some(base_tip) = &refs.base_tip else {
+        return MergeCheck::Known(Mergeability::Conflicting);
+    };
+    if pull.state != PullState::Open && pull.base_moved && refs.head_tip.is_none() {
+        return MergeCheck::Known(Mergeability::Unknown);
+    }
+    MergeCheck::TestMerge {
+        base: base_tip,
+        head: &pull.head_sha,
+    }
+}
+
+/// The mergeability a test merge's answer gives.
+pub(crate) fn merged_cleanly(clean: bool) -> Mergeability {
+    if clean {
+        Mergeability::Clean
+    } else {
+        Mergeability::Conflicting
+    }
+}
+
 /// The mergeability GitHub reports for a pull request, from the tips read
-/// with it. A merged one has none. A closed one whose head branch is gone
-/// keeps the test merge GitHub made when its head or base was last pinned
-/// and cannot make another, so it has none once its base branch has moved
-/// since. The test merge reads only objects, so it needs no lock.
+/// with it ([`merge_check`]). The test merge reads only objects, so it needs
+/// no lock.
 pub(crate) fn mergeability(
-    bare: &Path,
+    face: &GithubFace,
+    repo: &Repo,
     pull: &Pull,
     refs: &MergeRefs,
 ) -> Result<Mergeability, GitFaceError> {
-    if pull.merged {
-        return Ok(Mergeability::Unknown);
+    match merge_check(pull, refs) {
+        MergeCheck::Known(verdict) => Ok(verdict),
+        MergeCheck::TestMerge { base, head } => face
+            .git
+            .merges_clean(repo, &[(base, head)])
+            .pop()
+            .expect("one answer for one pair")
+            .map(merged_cleanly),
     }
-    let Some(base_tip) = &refs.base_tip else {
-        return Ok(Mergeability::Conflicting);
-    };
-    if pull.state != PullState::Open && pull.base_moved && refs.head_tip.is_none() {
-        return Ok(Mergeability::Unknown);
-    }
-    Ok(match store::merge_tree(bare, base_tip, &pull.head_sha)? {
-        Some(_) => Mergeability::Clean,
-        None => Mergeability::Conflicting,
-    })
 }
 
 /// The mergeability a write route answers with, read under the lock it still
@@ -229,7 +277,7 @@ pub(crate) fn mergeability(
 pub(crate) fn landed_mergeability(face: &GithubFace, repo: &Repo, pull: &Pull) -> Mergeability {
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
     MergeRefs::read(&bare, pull)
-        .and_then(|refs| mergeability(&bare, pull, &refs))
+        .and_then(|refs| mergeability(face, repo, pull, &refs))
         .unwrap_or_else(|e| {
             tracing::error!(error = %e, number = pull.number, "computing mergeability failed");
             Mergeability::Unknown
