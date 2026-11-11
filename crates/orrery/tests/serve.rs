@@ -292,9 +292,11 @@ fn no_git_process_holds_a_passed_socket() {
     );
 
     let held = dir.path().join("held");
-    let hook = dir
+    let hooks = dir
         .path()
-        .join("instance/world/repos/alice/webapp.git/hooks/post-receive");
+        .join("instance/world/repos/alice/webapp.git/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("post-receive");
     std::fs::write(
         &hook,
         format!(
@@ -653,4 +655,149 @@ fn start_up_puts_back_refs_the_log_does_not_describe() {
 
     let (_, stderr) = served.stop();
     assert!(stderr.contains("refs/heads/stray"), "{stderr}");
+}
+
+/// What a world answers for pull request `number` that its git works out:
+/// the diff media type, the line and file counts GraphQL serves, and the
+/// REST files with theirs.
+#[derive(Debug, PartialEq)]
+struct PullReads {
+    diff: String,
+    counts: serde_json::Value,
+    files: serde_json::Value,
+}
+
+fn pull_reads(addr: &str, token: &str, number: u64) -> PullReads {
+    let path = format!("/api/v3/repos/alice/webapp/pulls/{number}");
+    let (status, diff) = common::request_accepting(
+        addr,
+        "GET",
+        &path,
+        Some(token),
+        Some("application/vnd.github.v3.diff"),
+        "",
+    );
+    assert_eq!(status, 200, "{diff}");
+    let pull = common::call(addr, "GET", &path, Some(token), "", 200);
+    let query = serde_json::json!({
+        "query": "query($id: ID!) { node(id: $id) { ... on PullRequest { additions deletions changedFiles } } }",
+        "variables": { "id": pull["node_id"] },
+    });
+    let answer = common::call(
+        addr,
+        "POST",
+        "/api/graphql",
+        Some(token),
+        &query.to_string(),
+        200,
+    );
+    assert!(answer.get("errors").is_none(), "{answer}");
+    PullReads {
+        diff,
+        counts: answer["data"]["node"].clone(),
+        files: common::call(addr, "GET", &format!("{path}/files"), Some(token), "", 200),
+    }
+}
+
+/// The variables an operator's shell can carry that would each change a
+/// world's answers if its git saw them: config hiding every branch from a
+/// fetch, an external diff, and a home whose attributes file marks every
+/// file binary.
+const HOSTILE_ENV: [&str; 5] = [
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_KEY_0",
+    "GIT_CONFIG_VALUE_0",
+    "GIT_EXTERNAL_DIFF",
+    "HOME",
+];
+
+/// The world's git sees only the environment the engine gives it, so a
+/// world answers alike whatever environment `serve` was started in: a clone
+/// sees the branches, the diff is git's own, and the counts and files are
+/// those the same world gives when served without those variables.
+#[test]
+fn the_worlds_git_takes_nothing_from_the_environment_serve_runs_in() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(dir.path(), "", "listen = \"127.0.0.1:0\"\n");
+    let marker = "an external diff ran";
+    let external_diff = dir.path().join("external-diff");
+    std::fs::write(&external_diff, format!("#!/bin/sh\necho '{marker}'\n")).unwrap();
+    std::fs::set_permissions(&external_diff, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join(".config/git")).unwrap();
+    std::fs::write(home.join(".config/git/attributes"), "* -diff\n").unwrap();
+    let values = [
+        "1",
+        "uploadpack.hideRefs",
+        "refs/heads",
+        external_diff.to_str().unwrap(),
+        home.to_str().unwrap(),
+    ];
+    let hostile: Vec<_> = HOSTILE_ENV.into_iter().zip(values).collect();
+    let mut cmd = orrery_serve(&config, &hostile);
+    // Unset, so git would look for the attributes file under `HOME`.
+    cmd.env_remove("XDG_CONFIG_HOME");
+    let (served, ready) = start(cmd);
+
+    let token = common::mint(&ready.control, "alice");
+    common::call(
+        &ready.listen,
+        "POST",
+        "/api/v3/user/repos",
+        Some(&token),
+        r#"{"name":"webapp"}"#,
+        201,
+    );
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    git(&src, &["init", "-q", "-b", "main", "."]);
+    std::fs::write(src.join("a.txt"), "one\ntwo\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-q", "-m", "first"]);
+    git(&src, &["checkout", "-q", "-b", "topic"]);
+    std::fs::write(src.join("a.txt"), "one\nthree\n").unwrap();
+    std::fs::write(src.join("b.txt"), "new\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-q", "-m", "change"]);
+    let remote = format!(
+        "http://x-access-token:{token}@{}/alice/webapp.git",
+        ready.listen
+    );
+    git(&src, &["push", "-q", &remote, "main", "topic"]);
+    let pull = common::call(
+        &ready.listen,
+        "POST",
+        "/api/v3/repos/alice/webapp/pulls",
+        Some(&token),
+        r#"{"title":"topic","head":"topic","base":"main"}"#,
+        201,
+    );
+    let number = pull["number"].as_u64().unwrap();
+
+    git(dir.path(), &["clone", "-q", &remote, "clone"]);
+    let branches = git(
+        &dir.path().join("clone"),
+        &["for-each-ref", "--format=%(refname)", "refs/remotes/origin"],
+    );
+    for branch in ["main", "topic"] {
+        let name = format!("refs/remotes/origin/{branch}");
+        assert!(branches.lines().any(|b| b == name), "{branches}");
+    }
+    let reads = pull_reads(&ready.listen, &token, number);
+    assert!(!reads.diff.contains(marker), "{}", reads.diff);
+    drop(served);
+
+    let mut cmd = orrery_serve(&config, &[]);
+    for var in HOSTILE_ENV {
+        cmd.env_remove(var);
+    }
+    let (_served, ready) = start(cmd);
+    let clean = pull_reads(&ready.listen, &token, number);
+    assert_eq!(
+        clean.counts,
+        serde_json::json!({ "additions": 2, "deletions": 1, "changedFiles": 2 })
+    );
+    assert_eq!(reads, clean);
 }

@@ -1,6 +1,8 @@
 //! On-disk bare-repo store. All server-side git subprocesses run hermetically:
-//! the operator's global/system git config must never leak into world behavior
-//! (a `credential.helper` or `url.insteadOf` there would be a hidden input).
+//! nothing of the operator's git setup may reach world behavior. A
+//! `credential.helper` or `url.insteadOf` in their config, a
+//! `GIT_CONFIG_COUNT` or `GIT_EXTERNAL_DIFF` in the engine's environment, or
+//! an attributes file under their home would each be a hidden input.
 //! Git also answers from the commits alone: it follows no replace ref, which
 //! a client can push, and reads no attributes from a repository's trees,
 //! which git 2.43 to 2.45 read in a bare repository from the tree `HEAD`
@@ -19,20 +21,63 @@ pub const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 /// repository is SHA-1, since [`init_bare`] passes no `--object-format`, and
 /// git knows the empty tree whether or not a repository stores it. A git
 /// older than 2.43 ignores the key, and reads no tree's attributes anyway.
-/// `GIT_ATTR_SOURCE` would take precedence over the key, so
-/// [`hermetic_git`] removes it.
+/// `GIT_ATTR_SOURCE` would take precedence over the key, and the environment
+/// [`git_command`] builds holds none.
 const NO_TREE_ATTRIBUTES: &str = "attr.tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+/// `git`, run in `cwd` with only the environment [`git_command`] gives it,
+/// and reading no tree's attributes.
 pub fn hermetic_git(cwd: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.current_dir(cwd)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .env_remove("GIT_ATTR_SOURCE")
-        .args(["-c", NO_TREE_ATTRIBUTES]);
+    let mut cmd = git_command();
+    cmd.current_dir(cwd).args(["-c", NO_TREE_ATTRIBUTES]);
     cmd
+}
+
+/// `git` with an environment of its own, not the engine's. The variables are
+/// an allowlist because git reads more of them with each release, and any
+/// one it inherits can change what a world serves: `GIT_CONFIG_COUNT` adds
+/// config, `GIT_EXTERNAL_DIFF` replaces a diff, `HOME` locates a user
+/// attributes file, and `LANG` translates the messages an error carries.
+/// `PATH` is the one copied from the engine, since git finds the programs it
+/// runs through it, `ssh-keygen` and a hook's commands among them.
+/// `GIT_ATTR_NOSYSTEM` is set because git reads the host's system attributes
+/// file with no config pointing at it.
+///
+/// git is started by its path on `PATH`, not its name: std spawns a program
+/// it must look up on a `PATH` the child's environment changed with a full
+/// `fork`, which costs time in proportion to the engine's memory, rather than
+/// with `posix_spawn`.
+pub fn git_command() -> Command {
+    let mut cmd = match find_on_path("git") {
+        Some(git) => Command::new(git),
+        None => Command::new("git"),
+    };
+    cmd.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        cmd.env("PATH", path);
+    }
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
+    cmd
+}
+
+/// The first executable `name` in a directory of the engine's `PATH`. A
+/// relative directory is skipped, since it would name another file once a
+/// command's working directory is set.
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| {
+            candidate
+                .metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
 }
 
 /// The path of a repo's bare directory, from the row's canonical casing —
@@ -46,6 +91,8 @@ pub fn bare_dir(repos_dir: &Path, owner_login: &str, name: &str) -> PathBuf {
 /// allowAnySHA1InWant, pushes over http-backend need http.receivepack,
 /// receive.hideRefs refuses pushes to the pull request refs the engine moves,
 /// and gc.auto=0 keeps object files append-only so snapshots can share them.
+/// An empty `--template` keeps the host's template directory, and the hooks
+/// it would install, out of the repository.
 ///
 /// Idempotent: re-applying to an existing bare repo only re-asserts the
 /// recipe, so a crash between the kernel row insert and disk init heals on
@@ -59,7 +106,14 @@ pub fn init_bare(
     let dir = bare_dir(repos_dir, owner_login, name);
     if !dir.join("HEAD").exists() {
         std::fs::create_dir_all(&dir)?;
-        run(hermetic_git(&dir).args(["init", "--bare", "--initial-branch", default_branch, "."]))?;
+        run(hermetic_git(&dir).args([
+            "init",
+            "--bare",
+            "--template=",
+            "--initial-branch",
+            default_branch,
+            ".",
+        ]))?;
     }
     for (key, value) in [
         ("uploadpack.allowFilter", "true"),
@@ -1011,4 +1065,21 @@ fn run_raw(cmd: &mut Command) -> Result<(std::process::ExitStatus, String, Strin
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::init_bare;
+
+    /// A host's template directory would give every world repository the
+    /// hooks, `description`, and `info/exclude` that host ships.
+    #[test]
+    fn a_new_repository_takes_nothing_from_the_host_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = init_bare(dir.path(), "alice", "webapp", "main").unwrap();
+        assert!(bare.join("HEAD").is_file());
+        for absent in ["hooks", "description", "info"] {
+            assert!(!bare.join(absent).exists(), "the repository holds {absent}");
+        }
+    }
 }
