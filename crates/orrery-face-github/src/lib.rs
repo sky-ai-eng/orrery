@@ -466,6 +466,7 @@ mod ref_read_tests {
     use std::pin::Pin;
     use std::process::Stdio;
     use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
 
     use axum::body::Bytes;
     use axum::extract::RawQuery;
@@ -522,16 +523,50 @@ mod ref_read_tests {
             base_url: "http://world.test".to_string(),
         };
         let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
+        let Proposal {
+            repo,
+            bare,
+            main,
+            feature,
+            pull,
+        } = proposal(&face, &alice, "widgets");
+        Fixture {
+            schema: graphql::schema(face.clone()),
+            face,
+            alice,
+            repo,
+            bare,
+            main,
+            feature,
+            pull_node: nodeid::pull(pull.id),
+            pull,
+            _dir: dir,
+        }
+    }
+
+    /// A public repository of alice's whose `main` holds a README, and whose
+    /// pull request #1 proposes `feature`, which adds a file.
+    struct Proposal {
+        repo: Repo,
+        bare: std::path::PathBuf,
+        main: String,
+        feature: String,
+        pull: Pull,
+    }
+
+    fn proposal(face: &GithubFace, alice: &Actor, name: &str) -> Proposal {
+        let world = &face.world;
         let repo = world
-            .create_repo(alice.id, "widgets", None, false, "main", by(alice.id))
+            .create_repo(alice.id, name, None, false, "main", by(alice.id))
             .unwrap();
         face.git.init_repo_dir(&repo).unwrap();
-        let bare = store::bare_dir(&world.repos_dir(), "alice", "widgets");
-        let main = commit(&bare, &[], &[("README.md", "# widgets\n")]);
+        let bare = store::bare_dir(&world.repos_dir(), "alice", name);
+        let readme = format!("# {name}\n");
+        let main = commit(&bare, &[], &[("README.md", &readme)]);
         let feature = commit(
             &bare,
             &[&main],
-            &[("README.md", "# widgets\n"), ("feature.txt", "v1\n")],
+            &[("README.md", &readme), ("feature.txt", "v1\n")],
         );
         store::update_ref(&bare, "refs/heads/main", &main).unwrap();
         store::update_ref(&bare, "refs/heads/feature", &feature).unwrap();
@@ -550,17 +585,12 @@ mod ref_read_tests {
                 },
             )
             .unwrap();
-        Fixture {
-            schema: graphql::schema(face.clone()),
-            face,
-            alice,
+        Proposal {
             repo,
             bare,
             main,
             feature,
-            pull_node: nodeid::pull(pull.id),
             pull,
-            _dir: dir,
         }
     }
 
@@ -676,7 +706,10 @@ mod ref_read_tests {
     /// One GraphQL query, as alice.
     fn graphql(f: &Fixture, query: String) -> Read<'_> {
         let body = serde_json::to_vec(&serde_json::json!({ "query": query })).unwrap();
-        unbudgeted(async move { graphql::handle(&f.schema, caller(&f.alice), &body).await })
+        unbudgeted(async move {
+            let gate = Arc::new(f.face.git.gate().read_owned().await);
+            graphql::handle(&f.schema, gate, caller(&f.alice), &body).await
+        })
     }
 
     /// A query selecting `selection` on pull request #1.
@@ -735,9 +768,10 @@ mod ref_read_tests {
         body
     }
 
-    /// The test holds the repository's lock for write, as a merge does. Each
-    /// read's git calls run inside its first poll unless it waits for the
-    /// lock, so one still pending after that poll had not read the refs yet.
+    /// The test holds the repository's lock for write, as a merge does. A
+    /// read that has not answered after it has been driven for longer than
+    /// its git work takes, some of it on the blocking pool, had not read the
+    /// refs yet.
     #[tokio::test]
     async fn ref_reads_wait_out_a_write() {
         let f = fixture();
@@ -745,7 +779,9 @@ mod ref_read_tests {
         for (what, mut read) in ref_reads(&f) {
             let write = lock.clone().write_owned().await;
             assert!(
-                poll_once(read.as_mut()).is_pending(),
+                tokio::time::timeout(Duration::from_millis(300), &mut read)
+                    .await
+                    .is_err(),
                 "{what}: read the refs during a write"
             );
             drop(write);
@@ -754,15 +790,15 @@ mod ref_read_tests {
     }
 
     /// The test holds the repository's lock for read, as a fetch in progress
-    /// does. Each read is answered on its first poll.
+    /// does. Each read is answered while it is held.
     #[tokio::test]
     async fn ref_reads_do_not_wait_on_each_other() {
         let f = fixture();
         let _read = f.face.git.read_lock(f.repo.id).await;
-        for (what, mut read) in ref_reads(&f) {
-            match poll_once(read.as_mut()) {
-                Poll::Ready(resp) => drop(answer(what, resp).await),
-                Poll::Pending => panic!("{what}: waited for another read"),
+        for (what, read) in ref_reads(&f) {
+            match tokio::time::timeout(Duration::from_secs(10), read).await {
+                Ok(resp) => drop(answer(what, resp).await),
+                Err(_) => panic!("{what}: waited for another read"),
             }
         }
     }
@@ -834,6 +870,68 @@ mod ref_read_tests {
                 "mergeable": "UNKNOWN",
                 "files": { "nodes": [{ "path": "feature.txt" }] },
             })
+        );
+    }
+
+    /// A query reads pull requests in three repositories while a merge in
+    /// the second waits for its lock behind a fetch, so the query's read of
+    /// that repository waits behind the merge, and the other two are read
+    /// meanwhile. Once the fetch ends the merge lands, and the query answers
+    /// with the pull it merged as it is after the merge.
+    #[tokio::test]
+    async fn a_batch_answers_while_a_write_waits_on_one_of_its_repositories() {
+        let f = fixture();
+        let gadgets = proposal(&f.face, &f.alice, "gadgets");
+        let gizmos = proposal(&f.face, &f.alice, "gizmos");
+        let fetch = f.face.git.read_lock(gadgets.repo.id).await;
+        let mut merge = unbudgeted(pulls::merge_pull(
+            State(f.face.clone()),
+            UrlPath((
+                "alice".to_string(),
+                "gadgets".to_string(),
+                gadgets.pull.number.to_string(),
+            )),
+            Extension(caller(&f.alice)),
+            HeaderMap::new(),
+            Bytes::new(),
+        ));
+        assert!(
+            poll_once(merge.as_mut()).is_pending(),
+            "merged during a fetch"
+        );
+        let ids: Vec<String> = [&f.pull, &gadgets.pull, &gizmos.pull]
+            .iter()
+            .map(|p| format!("{:?}", nodeid::pull(p.id)))
+            .collect();
+        let mut read = graphql(
+            &f,
+            format!(
+                "{{ nodes(ids: [{}]) {{ ... on PullRequest {{ mergeable additions files(first: 10) {{ nodes {{ path }} }} }} }} }}",
+                ids.join(", ")
+            ),
+        );
+        assert!(poll_once(read.as_mut()).is_pending());
+
+        drop(fetch);
+        let (merged, read) =
+            tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(merge, read) })
+                .await
+                .expect("the merge and the query wait on each other");
+        answer("the merge", merged).await;
+        let body = answer("the query", read).await;
+        let clean = serde_json::json!({
+            "mergeable": "MERGEABLE",
+            "additions": 1,
+            "files": { "nodes": [{ "path": "feature.txt" }] },
+        });
+        let merged = serde_json::json!({
+            "mergeable": "UNKNOWN",
+            "additions": 1,
+            "files": { "nodes": [{ "path": "feature.txt" }] },
+        });
+        assert_eq!(
+            body["data"]["nodes"],
+            serde_json::json!([clean, merged, clean])
         );
     }
 

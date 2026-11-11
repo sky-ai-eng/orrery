@@ -245,8 +245,8 @@ async fn graphql_handler(
     axum::extract::Extension(caller): axum::extract::Extension<orrery_world::Caller>,
     body: axum::body::Bytes,
 ) -> Response<Body> {
-    let _gate = state.git.gate().read_owned().await;
-    orrery_face_github::graphql::handle(&state.schema, caller, &body).await
+    let gate = Arc::new(state.git.gate().read_owned().await);
+    orrery_face_github::graphql::handle(&state.schema, gate, caller, &body).await
 }
 
 /// Face auth: resolve the caller's token to its actor and the OAuth app it

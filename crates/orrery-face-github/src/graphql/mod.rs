@@ -23,6 +23,7 @@ use async_graphql::parser::types::{
 use async_graphql::{EmptySubscription, Name, Schema, Value, Variables};
 use axum::body::Body;
 use axum::http::{Response, StatusCode};
+use orrery_face_git::GateHold;
 use orrery_world::Caller;
 
 use crate::GithubFace;
@@ -44,15 +45,23 @@ struct HttpRequest {
     operation_name: Option<String>,
 }
 
-/// Execute one GraphQL POST body for `caller`. Always 200 with the standard
-/// `{data, errors}` envelope (GitHub's behavior for query-level failures);
-/// only an unparseable request body is an HTTP-level 400.
-pub async fn handle(schema: &GithubSchema, caller: Caller, body: &[u8]) -> Response<Body> {
+/// Execute one GraphQL POST body for `caller`, holding the world write gate
+/// for read by `gate` (resolution reads the bare repositories). Always 200
+/// with the standard `{data, errors}` envelope (GitHub's behavior for
+/// query-level failures); only an unparseable request body is an HTTP-level
+/// 400.
+pub async fn handle(
+    schema: &GithubSchema,
+    gate: GateHold,
+    caller: Caller,
+    body: &[u8],
+) -> Response<Body> {
     let Ok(req) = serde_json::from_slice::<HttpRequest>(body) else {
         return crate::github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON");
     };
     let parsed = async_graphql::parser::parse_query(&req.query);
     let mut greq = async_graphql::Request::new(req.query)
+        .data(gate)
         .data(caller.actor.clone())
         .data(caller);
     // A document that doesn't parse is left for `execute` to parse again and
