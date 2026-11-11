@@ -54,6 +54,10 @@ pub async fn run_http_backend(
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
+        // Upload-pack already follows no replace ref. Receive-pack's
+        // connectivity check does, and it must read the same objects as
+        // every other git the world runs.
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("REQUEST_METHOD", req.method)
         .env("PATH_INFO", &req.path_info)
         .env("QUERY_STRING", req.query)

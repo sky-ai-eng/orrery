@@ -32,6 +32,11 @@ Each repository is a bare repository at `<world>/repos/<owner>/<repo>.git`, crea
 
 Every `git` the engine runs, `http-backend` included, runs hermetically: `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`, and `GIT_TERMINAL_PROMPT=0`, so the operator's own git configuration never changes a world.
 
+What the engine works out from git, such as a test merge, a diff, a commit's date, or what a push brought in, depends on the commits alone:
+
+- The world's git does not follow replace refs: it runs with `GIT_NO_REPLACE_OBJECTS=1`. GitHub's web interface does not follow them either. A client can push a ref under `refs/replace/`, and it is stored and served like any other ref, but the engine never reads its commit in place of the one it names.
+- The world's git reads no attributes from a repository's trees: it runs with `attr.tree` set to the empty tree. A pushed `.gitattributes` changes no answer, so a file it marks `-diff` still counts its lines. Git 2.43 to 2.45 otherwise read a bare repository's attributes from the tree `HEAD` names, so the host's git version would change a world. Attributes in `$GIT_DIR/info/attributes` still apply; the engine writes none, and a client cannot push one.
+
 ## What a push does
 
 `git-receive-pack` runs under a per-repository lock, and Orrery compares the repository's refs before and after it. A push that changed a ref is one write in the log, attributed to the pushing actor through the `git` door: a `repo:pushed` event, then a `ref:created`, `ref:updated`, or `ref:deleted` event for each ref that changed, in ref-name order, with the commits it brought in, then an event for each change to a pull request (`events.md`). With them:
