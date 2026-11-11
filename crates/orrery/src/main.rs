@@ -8,6 +8,7 @@ use anyhow::Context;
 use clap::{ArgGroup, Parser, Subcommand};
 use orrery_snapshot::SnapshotError;
 use orrery_world::{World, WorldError, WorldSecret};
+use sha2::{Digest as _, Sha256};
 
 static VERSION: LazyLock<String> = LazyLock::new(|| {
     format!(
@@ -579,6 +580,9 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
     passed::close_on_exec();
     let raw = std::fs::read_to_string(config_path)
         .with_context(|| format!("reading config {}", config_path.display()))?;
+    // Of the bytes parsed here and never of the file again, so it identifies
+    // what this process read however the file changes later.
+    let config_sha256 = format!("{:x}", Sha256::digest(raw.as_bytes()));
     let config: Config = toml::from_str(&raw)
         .with_context(|| format!("parsing config {}", config_path.display()))?;
     config
@@ -647,6 +651,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         config.instance.dir.join("snapshots"),
         orrery_server::Options {
             anonymous_git_reads: config.server.anonymous_git_reads.unwrap_or(true),
+            config_sha256: Some(config_sha256),
         },
     );
     let stop = routers.stop();
