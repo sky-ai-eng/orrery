@@ -895,6 +895,9 @@ impl PullBatch {
     }
 
     /// The members by repository, each pull once.
+    // TODO(ORR-107): each repository's git work runs after the last one's,
+    // blocking the request's thread; run up to four repositories' work at
+    // once on the blocking pool.
     fn by_repo(&self) -> BTreeMap<i64, (&world::Repo, Vec<&world::Pull>)> {
         let mut by_repo: BTreeMap<i64, (&world::Repo, Vec<&world::Pull>)> = BTreeMap::new();
         for (pull, repo) in &self.members {

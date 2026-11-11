@@ -829,8 +829,14 @@ pub fn commit_dates_unix(bare: &Path, shas: &[&str]) -> Vec<Result<Option<i64>, 
 /// git 2.40, and a pair git cannot merge at all, such as two unrelated
 /// histories, stops the batch; in either case, and for a lone pair, each pair
 /// is merged on its own, so each answer and each error is [`merge_tree`]'s.
+/// The batch is asked only of full object ids: a line of `--stdin` reads a
+/// name holding a space as more than one argument, and can then name a
+/// different merge.
 pub fn merges_clean(bare: &Path, pairs: &[(&str, &str)]) -> Vec<Result<bool, GitFaceError>> {
     if pairs.len() > 1
+        && pairs
+            .iter()
+            .all(|(base, head)| is_oid(base) && is_oid(head))
         && let Some(clean) = merges_clean_batch(bare, pairs)
     {
         return clean.into_iter().map(Ok).collect();

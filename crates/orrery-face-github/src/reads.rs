@@ -46,7 +46,11 @@ fn query_param(query: &str, name: &str) -> Option<String> {
     parse_form(query.as_bytes()).remove(name)
 }
 
-pub(crate) fn paginate<T>(items: Vec<T>, per_page: usize, page: usize) -> Vec<T> {
+pub(crate) fn paginate<T>(
+    items: impl IntoIterator<Item = T>,
+    per_page: usize,
+    page: usize,
+) -> Vec<T> {
     items
         .into_iter()
         .skip((page - 1) * per_page)
@@ -724,13 +728,7 @@ pub(crate) async fn list_pull_files(
         Err(e) => return internal(e),
     };
     let (per_page, page) = page_params(&query.unwrap_or_default());
-    let shown: Vec<store::FileDiff> = files
-        .iter()
-        .skip((page - 1) * per_page)
-        .take(per_page)
-        .cloned()
-        .collect();
-    let items = changed_files_json(&shown);
+    let items = changed_files_json(&paginate(files.iter().cloned(), per_page, page));
     json_response(StatusCode::OK, serde_json::Value::Array(items))
 }
 

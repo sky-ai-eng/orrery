@@ -274,6 +274,13 @@ fn test_merges_answer_as_one_process_each_does() {
     let all = pairs(&first, &tips);
     let batched = store::merges_clean(&bare, &borrowed(&all));
     assert_same("merges_clean", &all, batched, single);
+    // A line of `merge-tree --stdin` would read this name as a merge base and
+    // a side, making a clean merge of the name's commits that the name alone
+    // does not ask for; it is answered as it is alone.
+    let mut named = related.clone();
+    named.push((format!("{first} -- {first}"), main.clone()));
+    let batched = store::merges_clean(&bare, &borrowed(&named));
+    assert_same("merges_clean", &named, batched, single);
 }
 
 #[test]

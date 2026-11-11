@@ -352,6 +352,47 @@ mod tests {
     }
 
     #[test]
+    fn only_what_git_answered_for_full_ids_is_kept() {
+        let cache = Mutex::new(Lru::new(1 << 20));
+        let (answered, failed) = ("a".repeat(40), "b".repeat(40));
+        let questions = [answered.as_str(), failed.as_str(), "main"];
+        let ask = || {
+            let mut missed = Vec::new();
+            let answers: Vec<Option<usize>> = through(
+                &cache,
+                &questions,
+                |q| store::is_oid(q).then(|| (1, q.to_string())),
+                |_| Some(0),
+                |asked: &[&str]| {
+                    missed = asked.iter().map(|q| q.to_string()).collect();
+                    asked
+                        .iter()
+                        .map(|q| {
+                            if *q == failed {
+                                Err(GitFaceError::Cgi("no such commit".into()))
+                            } else {
+                                Ok(q.len())
+                            }
+                        })
+                        .collect()
+                },
+            )
+            .into_iter()
+            .map(Result::ok)
+            .collect();
+            (answers, missed)
+        };
+        let (answers, missed) = ask();
+        assert_eq!(answers, [Some(40), None, Some(4)]);
+        assert_eq!(missed, questions);
+        // A failure can be followed by a push that supplies the commit, and a
+        // name can come to mean another commit, so both are asked again.
+        let (answers, missed) = ask();
+        assert_eq!(answers, [Some(40), None, Some(4)]);
+        assert_eq!(missed, [failed.as_str(), "main"]);
+    }
+
+    #[test]
     fn replacing_an_entry_frees_what_it_held() {
         let mut lru: Lru<u32, u32> = Lru::new(2 * (ENTRY_BYTES + 10));
         lru.insert(1, 1, 10);
