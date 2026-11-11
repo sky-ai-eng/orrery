@@ -3,6 +3,10 @@
 //! `credential.helper` or `url.insteadOf` in their config, a
 //! `GIT_CONFIG_COUNT` or `GIT_EXTERNAL_DIFF` in the engine's environment, or
 //! an attributes file under their home would each be a hidden input.
+//! Git also answers from the commits alone: it follows no replace ref, which
+//! a client can push, and reads no attributes from a repository's trees,
+//! which git 2.43 to 2.45 read in a bare repository from the tree `HEAD`
+//! names.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,10 +17,19 @@ use crate::GitFaceError;
 /// All-zeros object id, the wire spelling for "ref did not exist / was deleted".
 pub const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 
-/// `git`, run in `cwd` with only the environment [`git_command`] gives it.
+/// `attr.tree` set to the empty tree, as a `-c` argument: every world
+/// repository is SHA-1, since [`init_bare`] passes no `--object-format`, and
+/// git knows the empty tree whether or not a repository stores it. A git
+/// older than 2.43 ignores the key, and reads no tree's attributes anyway.
+/// `GIT_ATTR_SOURCE` would take precedence over the key, and the environment
+/// [`git_command`] builds holds none.
+const NO_TREE_ATTRIBUTES: &str = "attr.tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// `git`, run in `cwd` with only the environment [`git_command`] gives it,
+/// and reading no tree's attributes.
 pub fn hermetic_git(cwd: &Path) -> Command {
     let mut cmd = git_command();
-    cmd.current_dir(cwd);
+    cmd.current_dir(cwd).args(["-c", NO_TREE_ATTRIBUTES]);
     cmd
 }
 
@@ -46,7 +59,8 @@ pub fn git_command() -> Command {
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_ATTR_NOSYSTEM", "1")
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
     cmd
 }
 

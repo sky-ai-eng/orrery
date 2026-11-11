@@ -24,6 +24,18 @@ pub mod store;
 /// streaming is a deliberate non-feature until a real consumer needs it.
 pub const MAX_GIT_BODY_BYTES: usize = 256 * 1024 * 1024;
 
+/// How many repositories' shares of the batches of reads in one world
+/// ([`GitFace::batch_read`]) run at once, every batch in the world together.
+/// It is fixed rather than read from the CPU count: on a host running many
+/// worlds, a count per CPU would be multiplied by the number of worlds, and
+/// nothing caps a world's CPU. On 4 CPUs, more at once is no faster.
+pub const BATCH_SLOTS: usize = 4;
+
+/// The world write gate, held for read by one request and shared with the
+/// work it hands the blocking pool, so the gate is let go only once the last
+/// of them ends ([`GitFace::batch_read`]).
+pub type GateHold = Arc<tokio::sync::OwnedRwLockReadGuard<()>>;
+
 #[derive(Debug, thiserror::Error)]
 pub enum GitFaceError {
     #[error("git {args}: {stderr}")]
@@ -34,6 +46,10 @@ pub enum GitFaceError {
     World(#[from] orrery_world::WorldError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// Work handed to the blocking pool panicked, or never ran because the
+    /// runtime shut down.
+    #[error("blocking task failed: {0}")]
+    Blocking(#[from] tokio::task::JoinError),
     /// Verifying an SSH signature runs `ssh-keygen`, and `PATH` holds none.
     #[error("verifying an SSH signature needs ssh-keygen on PATH, and there is none")]
     NoSshKeygen,
@@ -69,6 +85,8 @@ pub struct GitFace {
     stopped: std::sync::Mutex<Option<tokio::sync::OwnedRwLockWriteGuard<()>>>,
     /// Answers worked out from commits, which never go stale ([`cache`]).
     answers: cache::Answers,
+    /// The [`BATCH_SLOTS`] slots a batch's per-repository work runs in.
+    batch_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl GitFace {
@@ -80,6 +98,7 @@ impl GitFace {
             kill: tokio::sync::watch::Sender::new(false),
             stopped: std::sync::Mutex::new(None),
             answers: cache::Answers::new(),
+            batch_slots: Arc::new(tokio::sync::Semaphore::new(BATCH_SLOTS)),
         })
     }
 
@@ -144,12 +163,59 @@ impl GitFace {
 
     /// The repository's lock, held for read, for a read of its refs outside
     /// git traffic. The caller already holds the world write gate for read,
-    /// as git traffic does. It holds this lock only while it reads, never
-    /// across an await for another repository's lock: a waiting write lets no
-    /// new read in, so two reads each holding one repository and waiting on
-    /// the other could each wait on the other's writer forever.
+    /// as git traffic does. One query may hold several repositories' locks at
+    /// once, but each holder holds one, and while it holds it waits on
+    /// nothing but its own read: never on another repository's lock, and
+    /// never on a batch slot, which [`GitFace::batch_read`] takes before the
+    /// lock and lets go after it. A waiting write lets no new read in, so a
+    /// holder waiting on something another holder has could wait on that
+    /// one's writer forever; and a write waiting on a repository waits only
+    /// for reads that are running, never for a slot to come free.
     pub async fn read_lock(&self, repo_id: i64) -> tokio::sync::OwnedRwLockReadGuard<()> {
         self.repo_lock(repo_id).read_owned().await
+    }
+
+    /// Run `work`, one repository's share of a batch of reads, on the
+    /// blocking pool, holding that repository's lock for read
+    /// ([`GitFace::read_lock`]). It waits for one of the world's
+    /// [`BATCH_SLOTS`] slots, then for the lock, and once `work` returns lets
+    /// go of the lock, then the slot. `gate` is the request's hold on the
+    /// world write gate, which `work` keeps until it returns, so a snapshot
+    /// and [`GitFace::stop`] wait for its git processes even when the request
+    /// is dropped first.
+    pub async fn batch_read<T, F>(
+        &self,
+        gate: &GateHold,
+        repo_id: i64,
+        work: F,
+    ) -> Result<T, GitFaceError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let slot = self.batch_slot().await;
+        let refs = self.read_lock(repo_id).await;
+        on_blocking_pool(gate.clone(), slot, Some(refs), work).await
+    }
+
+    /// [`GitFace::batch_read`] for work that reads no refs, only commits
+    /// named by their full ids, which no write changes, so it holds no
+    /// repository's lock.
+    pub async fn batch_work<T, F>(&self, gate: &GateHold, work: F) -> Result<T, GitFaceError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let slot = self.batch_slot().await;
+        on_blocking_pool(gate.clone(), slot, None, work).await
+    }
+
+    async fn batch_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.batch_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the batch slots are never closed")
     }
 
     pub fn gate(&self) -> Arc<tokio::sync::RwLock<()>> {
@@ -302,6 +368,30 @@ impl GitFace {
         }
         Ok(())
     }
+}
+
+/// Run `work` on the blocking pool. The lock is let go before the slot, so
+/// a write waiting on the repository goes ahead of the next unit to take the
+/// slot, and the gate last, after every git process `work` ran has exited.
+async fn on_blocking_pool<T, F>(
+    gate: GateHold,
+    slot: tokio::sync::OwnedSemaphorePermit,
+    refs: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    work: F,
+) -> Result<T, GitFaceError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let worked = tokio::task::spawn_blocking(move || {
+        let answer = work();
+        drop(refs);
+        drop(slot);
+        drop(gate);
+        answer
+    })
+    .await?;
+    Ok(worked)
 }
 
 /// What each signed commit the moves list says about itself, in the order
@@ -1406,5 +1496,130 @@ mod tests {
                     if c.subject.name == "refs/heads/topic" && c.object.sha == topic)),
             "{log:?}"
         );
+    }
+
+    /// Work handed to the blocking pool that waits until the test lets it
+    /// end, counting how much of it is running. Dropping it lets the work
+    /// end, so a test that fails does not leave the runtime waiting on work
+    /// that never ends.
+    #[derive(Default)]
+    struct Held {
+        shared: Arc<HeldState>,
+    }
+
+    #[derive(Default)]
+    struct HeldState {
+        running: std::sync::atomic::AtomicUsize,
+        released: std::sync::Mutex<bool>,
+        wake: std::sync::Condvar,
+    }
+
+    impl Held {
+        fn work(&self) -> impl FnOnce() + Send + 'static {
+            let held = self.shared.clone();
+            move || {
+                held.running
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut released = held.released.lock().unwrap();
+                while !*released {
+                    released = held.wake.wait(released).unwrap();
+                }
+                held.running
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        fn running(&self) -> usize {
+            self.shared
+                .running
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        async fn running_reaches(&self, n: usize) {
+            for _ in 0..200 {
+                if self.running() == n {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("{} running, never {n}", self.running());
+        }
+
+        fn release(&self) {
+            *self.shared.released.lock().unwrap() = true;
+            self.shared.wake.notify_all();
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    /// Three queries, each holding the gate, hand the blocking pool four
+    /// units each, half of them holding a repository's lock. As many run as
+    /// there are slots, and no more until one ends.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_batch_in_a_world_shares_its_slots() {
+        let f = fixture();
+        let held = Held::default();
+        let mut units = Vec::new();
+        for query in 0..3 {
+            let gate = Arc::new(f.face.gate().read_owned().await);
+            for unit in 0..4 {
+                let (face, gate, work) = (f.face.clone(), gate.clone(), held.work());
+                let repo_id = query * 4 + unit;
+                units.push(tokio::spawn(async move {
+                    if unit % 2 == 0 {
+                        face.batch_read(&gate, repo_id, work).await
+                    } else {
+                        face.batch_work(&gate, work).await
+                    }
+                }));
+            }
+        }
+        held.running_reaches(BATCH_SLOTS).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(held.running(), BATCH_SLOTS, "ran past the slots");
+
+        held.release();
+        for unit in units {
+            tokio::time::timeout(std::time::Duration::from_secs(10), unit)
+                .await
+                .expect("a unit never ran")
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    /// A unit whose request is dropped while it runs keeps the request's
+    /// hold on the gate until it ends, so a snapshot cannot start while its
+    /// git might still be writing objects.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_unit_keeps_the_gate_after_its_request_is_dropped() {
+        let f = fixture();
+        let held = Held::default();
+        let (face, work) = (f.face.clone(), held.work());
+        let request = tokio::spawn(async move {
+            let gate = Arc::new(face.gate().read_owned().await);
+            face.batch_work(&gate, work).await
+        });
+        held.running_reaches(1).await;
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+
+        assert!(
+            f.face.gate().try_write_owned().is_err(),
+            "the gate was let go while the unit ran"
+        );
+        held.release();
+        held.running_reaches(0).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            f.face.gate().write_owned(),
+        )
+        .await
+        .expect("the gate stayed held after the unit ended");
     }
 }

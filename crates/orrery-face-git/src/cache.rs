@@ -3,12 +3,7 @@
 //!
 //! A merge of two commits, a comparison of two, and one commit's date depend
 //! on nothing but the commits, and a commit never changes, so an answer kept
-//! here is never stale and is never invalidated. Two inputs git reads beside
-//! the commits are not looked at again once an answer is kept: a replace ref,
-//! which a client can push to `refs/replace/` to make git read another commit
-//! in a commit's place, and, on a git that reads a bare repository's
-//! attributes from the tree `HEAD` names, as git 2.43 does, a `.gitattributes`
-//! pushed to the default branch, which can mark a file binary.
+//! here is never stale and is never invalidated.
 //!
 //! What is kept is derived from the world, not part of it: it lives in no
 //! file, so a snapshot never copies it and a restart works it out again. An
@@ -16,10 +11,6 @@
 //! name such as a branch can come to mean another commit, and only when git
 //! answered it, since a failure such as a missing object can be followed by
 //! a push that supplies it.
-
-// TODO(ORR-108): a kept answer misses a pushed replace ref, and on git 2.43
-// to 2.45 a pushed `.gitattributes`; git stops reading both, so an answer is
-// one of its commits alone.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

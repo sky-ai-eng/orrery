@@ -35,12 +35,18 @@ Every `git` the engine runs, `http-backend` included, runs hermetically, so noth
 - `PATH`, copied from the engine's own, since git finds the programs it runs through it, `ssh-keygen` among them;
 - `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null`, so git reads no config file outside the repository;
 - `GIT_ATTR_NOSYSTEM=1`, so git reads no system attributes file;
+- `GIT_NO_REPLACE_OBJECTS=1`, so git follows no replace ref (below);
 - `GIT_TERMINAL_PROMPT=0`; and
 - what the one command needs: `http-backend`'s CGI variables, or a commit's author and committer.
 
 No other variable in the engine's environment reaches git. Config set through the environment (`GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`) and variables such as `GIT_EXTERNAL_DIFF` are not seen. With no `HOME` or `XDG_CONFIG_HOME`, git reads no user attributes file, and with no `LANG` or `LC_*`, its messages, which an error can carry, are untranslated.
 
 A repository created by an earlier release keeps the files its host's template gave it. Its sample hooks are inactive, and nothing reads its `description` or `info/exclude`.
+
+What the engine works out from git, such as a test merge, a diff, a commit's date, or what a push brought in, depends on the commits alone:
+
+- The world's git does not follow replace refs: it runs with `GIT_NO_REPLACE_OBJECTS=1`. GitHub's web interface does not follow them either. A client can push a ref under `refs/replace/`, and it is stored and served like any other ref, but the engine never reads its commit in place of the one it names.
+- The world's git reads no attributes from a repository's trees: it runs with `attr.tree` set to the empty tree. A pushed `.gitattributes` changes no answer, so a file it marks `-diff` still counts its lines. Git 2.43 to 2.45 otherwise read a bare repository's attributes from the tree `HEAD` names, so the host's git version would change a world. Attributes in `$GIT_DIR/info/attributes` still apply; the engine writes none, and a client cannot push one.
 
 ## What a push does
 

@@ -105,6 +105,14 @@ const MIGRATIONS: &[&str] = &[
         verified_clock_unix INTEGER NOT NULL,
         PRIMARY KEY (repo_id, sha)
      ) STRICT;",
+    // 13: indexes for the reads made per pull and per commit: a commit's
+    // check runs, and a pull's reviews, comments, and timeline. Without them
+    // each read scans its whole table. Every index entry ends in its row's
+    // id, so these reads, which all order by `id`, need no sort.
+    "CREATE INDEX check_runs_by_commit ON check_runs (repo_id, head_sha);
+     CREATE INDEX reviews_by_pull ON reviews (pull_id);
+     CREATE INDEX issue_comments_by_pull ON issue_comments (pull_id);
+     CREATE INDEX pull_timeline_by_pull ON pull_timeline (pull_id);",
 ];
 
 /// The version this binary reads and writes.
