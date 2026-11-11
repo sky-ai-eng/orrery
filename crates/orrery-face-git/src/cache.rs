@@ -2,10 +2,8 @@
 //! looked up by the commits they were worked out from.
 //!
 //! A merge of two commits, a comparison of two, and one commit's date depend
-//! on nothing but the commits, since the world's git follows no replace ref
-//! and reads no attributes from a repository's trees ([`store::hermetic_git`]),
-//! and a commit never changes, so an answer kept here is never stale and is
-//! never invalidated.
+//! on nothing but the commits, and a commit never changes, so an answer kept
+//! here is never stale and is never invalidated.
 //!
 //! What is kept is derived from the world, not part of it: it lives in no
 //! file, so a snapshot never copies it and a restart works it out again. An

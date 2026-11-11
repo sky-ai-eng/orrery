@@ -19,6 +19,8 @@ pub const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 /// repository is SHA-1, since [`init_bare`] passes no `--object-format`, and
 /// git knows the empty tree whether or not a repository stores it. A git
 /// older than 2.43 ignores the key, and reads no tree's attributes anyway.
+/// `GIT_ATTR_SOURCE` would take precedence over the key, so
+/// [`hermetic_git`] removes it.
 const NO_TREE_ATTRIBUTES: &str = "attr.tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 pub fn hermetic_git(cwd: &Path) -> Command {
@@ -28,6 +30,7 @@ pub fn hermetic_git(cwd: &Path) -> Command {
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env_remove("GIT_ATTR_SOURCE")
         .args(["-c", NO_TREE_ATTRIBUTES]);
     cmd
 }
