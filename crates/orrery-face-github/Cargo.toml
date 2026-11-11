@@ -12,6 +12,7 @@ async-graphql.workspace = true
 axum.workspace = true
 base64.workspace = true
 form_urlencoded.workspace = true
+futures-util = { workspace = true, features = ["alloc"] }
 hex.workspace = true
 jiff.workspace = true
 orrery-face-git.workspace = true
