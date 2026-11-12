@@ -801,3 +801,54 @@ fn the_worlds_git_takes_nothing_from_the_environment_serve_runs_in() {
     );
     assert_eq!(reads, clean);
 }
+
+/// A world given egress through a proxy starts as any other: the proxy is
+/// reached only when there is something to send, so it need not be up yet.
+#[test]
+fn a_world_starts_with_egress_through_a_proxy() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "",
+        &format!(
+            "listen = \"127.0.0.1:0\"\n[outbound]\negress = \"unix:{}\"\n",
+            dir.path().join("egress.sock").display()
+        ),
+    );
+    let (_served, ready) = serve(&config, &[]);
+    let (status, _) = request(&ready.listen, "GET", "/_orrery/healthz", None, "");
+    assert_eq!(status, 200);
+}
+
+/// An outbound setting the client can't use stops `serve` before it makes
+/// the world, so fixing the config and starting again is all it takes.
+#[test]
+fn an_unusable_outbound_setting_stops_serve_before_the_world_is_made() {
+    for (case, outbound, expected) in [
+        ("name", "egress = \"localhost:3128\"", "\"localhost:3128\""),
+        (
+            "relative",
+            "egress = \"unix:egress.sock\"",
+            "must be absolute",
+        ),
+        (
+            "missing",
+            "extra_ca_certs = \"/nonexistent/ca.pem\"",
+            "/nonexistent/ca.pem",
+        ),
+        ("unknown", "egres = \"direct\"", "unknown field `egres`"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_config(
+            dir.path(),
+            "",
+            &format!("listen = \"127.0.0.1:0\"\n[outbound]\n{outbound}\n"),
+        );
+        let out = orrery_serve(&config, &[]).output().unwrap();
+        assert!(!out.status.success(), "{case}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(expected), "{case}: {stderr}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{case}");
+        assert!(!dir.path().join("instance/world").exists(), "{case}");
+    }
+}
