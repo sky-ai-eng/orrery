@@ -173,6 +173,8 @@ How the connection leaves the machine is `outbound.egress` in the instance confi
 - `direct`, the default: the engine looks up the receiver's host name and connects to it.
 - The address of an HTTP `CONNECT` proxy: an IP address and port, as in `127.0.0.1:3128`, or `unix:/absolute/path` for a Unix socket. The engine connects to the proxy and sends `CONNECT <host>:<port>`, naming the receiver as its URL does. It looks up no name itself, so the proxy does the lookup and can refuse an address, and for the same reason the proxy's own address is never a host name. A `2xx` answer opens the tunnel and any other answer refuses it. TLS and the request then run through the tunnel, end to end with the receiver. A supervisor that runs a world with no network of its own gives it egress this way.
 
+The egress is the config's alone: proxy variables in `serve`'s environment, such as `HTTPS_PROXY` and `NO_PROXY`, change nothing.
+
 `outbound.extra_ca_certs` names a PEM file of certificate authorities to trust as well, such as the one that issued a local receiver's self-signed certificate. `serve` reads both settings when it starts. An egress it can't parse, or a certificate file it can't read or that holds no certificate, stops it before it opens or creates the world. A proxy is reached only when there is something to send, so it need not be listening when the world starts.
 
 ## Determinism addenda (discovered via this model)

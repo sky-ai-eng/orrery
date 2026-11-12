@@ -511,10 +511,15 @@ async fn a_plain_http_post_goes_through_the_proxy() {
 async fn a_name_only_the_proxy_knows_does_not_resolve_directly() {
     let ca = Authority::new();
     let url = "https://receiver.test:4443/hook".to_string();
-    assert!(matches!(
-        failed(ca.client(Egress::Direct).post(hook(url)).await),
-        Failure::Connect(_)
-    ));
+    match failed(ca.client(Egress::Direct).post(hook(url)).await) {
+        Failure::Connect(message) => {
+            assert!(
+                message.starts_with("looking up receiver.test:"),
+                "{message}"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -534,17 +539,19 @@ async fn a_tunnel_the_proxy_refuses_is_its_own_failure() {
 #[tokio::test]
 async fn a_refused_connection_is_a_connect_failure() {
     let ca = Authority::new();
-    let port = {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    };
-    let url = format!("https://127.0.0.1:{port}/hook");
+    // Bound and never listening, so a connection to it is refused, and the
+    // port stays this test's: no other test can take it while it runs.
+    let closed = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    closed
+        .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
+        .unwrap();
+    let gone = closed.local_addr().unwrap().as_socket().unwrap();
+    let url = format!("https://{gone}/hook");
     match failed(ca.client(Egress::Direct).post(hook(url)).await) {
         Failure::Connect(message) => assert!(message.contains("refused"), "{message}"),
         other => panic!("{other:?}"),
     }
 
-    let gone: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let dir = tempfile::tempdir().unwrap();
     for proxy in [
         ProxyAddress::Tcp(gone),

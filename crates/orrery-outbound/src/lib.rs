@@ -27,7 +27,7 @@ pub use ureq::http;
 
 mod transport;
 
-use transport::{Deadline, EgressConnector, Lookup, Stage, TlsConnector};
+use transport::{Deadline, EgressConnector, Lookup, TlsConnector};
 
 /// How long an attempt may take, from when it starts to look up or connect
 /// to when it has read the last byte of the answer it keeps.
@@ -266,6 +266,9 @@ impl Client {
         // An agent per attempt, so no connection outlives the attempt that
         // made it and the connectors bound their waits by its deadline.
         let config = ureq::Agent::config_builder()
+            // The egress is the client's alone: proxy variables in the
+            // process's environment must not reroute a world's deliveries.
+            .proxy(None)
             .http_status_as_error(false)
             .max_redirects(0)
             .timeout_global(Some(ATTEMPT_LIMIT))
@@ -325,22 +328,15 @@ fn target(url: &str) -> Result<http::Uri, Failure> {
     Ok(uri)
 }
 
-/// Which step `e` failed at. A connector reports its own step as a
-/// [`Stage`]; what fails after the connectors is the exchange.
+/// Which step `e` failed at. The lookup and the connectors report their own
+/// step as a [`Failure`]; what fails after them is the exchange.
 fn failure(e: ureq::Error) -> Failure {
     match e {
         ureq::Error::Timeout(_) => Failure::Timeout,
-        ureq::Error::Other(other) => match other.downcast::<Stage>() {
-            Ok(stage) => match *stage {
-                Stage::Connect(message) => Failure::Connect(message),
-                Stage::Proxy(message) => Failure::Proxy(message),
-                Stage::Tls(message) => Failure::Tls(message),
-            },
+        ureq::Error::Other(other) => match other.downcast::<Failure>() {
+            Ok(failure) => *failure,
             Err(other) => Failure::Exchange(other.to_string()),
         },
-        ureq::Error::HostNotFound => {
-            Failure::Connect("the receiver's host name did not resolve".to_string())
-        }
         e => Failure::Exchange(transport::describe(&e)),
     }
 }

@@ -24,7 +24,7 @@ use ureq::unversioned::transport::{
     TransportAdapter,
 };
 
-use crate::{ATTEMPT_LIMIT, Egress, HEAD_LIMIT, ProxyAddress};
+use crate::{ATTEMPT_LIMIT, Egress, Failure, HEAD_LIMIT, ProxyAddress};
 
 /// The real time an attempt started at. It bounds every wait the attempt
 /// makes, and says how long the attempt took.
@@ -64,34 +64,15 @@ impl Deadline {
     }
 }
 
-/// The step a connector failed at, carried through ureq as
-/// `ureq::Error::Other` so the attempt can say which it was.
-#[derive(Debug)]
-pub(crate) enum Stage {
-    Connect(String),
-    Proxy(String),
-    Tls(String),
-}
-
-impl fmt::Display for Stage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Stage::Connect(message) | Stage::Proxy(message) | Stage::Tls(message) => {
-                f.write_str(message)
-            }
-        }
-    }
-}
-
-impl std::error::Error for Stage {}
-
-fn failed(stage: Stage) -> ureq::Error {
-    ureq::Error::Other(Box::new(stage))
+/// A failure at a step before the exchange, carried through ureq as
+/// `ureq::Error::Other` so the attempt can say which step it was.
+fn failed(failure: Failure) -> ureq::Error {
+    ureq::Error::Other(Box::new(failure))
 }
 
 /// `e` reported at `stage`, unless it is the deadline running out, which is
 /// a timeout whichever step it ran out in.
-fn at(stage: impl FnOnce(String) -> Stage, e: ureq::Error) -> ureq::Error {
+fn at(stage: impl FnOnce(String) -> Failure, e: ureq::Error) -> ureq::Error {
     match e {
         ureq::Error::Timeout(_) => e,
         e => failed(stage(describe(&e))),
@@ -122,7 +103,13 @@ impl Resolver for Lookup {
         timeout: NextTimeout,
     ) -> Result<ResolvedSocketAddrs, ureq::Error> {
         match self {
-            Lookup::System(resolver) => resolver.resolve(uri, config, timeout),
+            Lookup::System(resolver) => resolver.resolve(uri, config, timeout).map_err(|e| {
+                let host = uri.host().expect("a target has a host");
+                at(
+                    |message| Failure::Connect(format!("looking up {host}: {message}")),
+                    e,
+                )
+            }),
             Lookup::Proxy => Ok(self.empty()),
         }
     }
@@ -156,7 +143,7 @@ impl Connector<()> for EgressConnector {
                         let receiver = details.uri.authority().expect("a target has a host");
                         at(
                             |message| {
-                                Stage::Connect(format!("connecting to {receiver}: {message}"))
+                                Failure::Connect(format!("connecting to {receiver}: {message}"))
                             },
                             e,
                         )
@@ -171,7 +158,7 @@ impl Connector<()> for EgressConnector {
         let socket = open(address, self.deadline).map_err(|e| {
             at(
                 |message| {
-                    Stage::Connect(format!("reaching the egress proxy at {address}: {message}"))
+                    Failure::Connect(format!("reaching the egress proxy at {address}: {message}"))
                 },
                 e,
             )
@@ -229,12 +216,12 @@ fn tunnel(proxy: &mut Bounded, uri: &Uri) -> Result<(), ureq::Error> {
     });
     // `host()` keeps an IPv6 address's brackets, as the authority form needs.
     let authority = format!("{host}:{port}");
-    let no_tunnel = |message: String| failed(Stage::Proxy(message));
+    let no_tunnel = |message: String| failed(Failure::Proxy(message));
     proxy
         .send(format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes())
-        .map_err(|e| at(Stage::Proxy, e))?;
+        .map_err(|e| at(Failure::Proxy, e))?;
     loop {
-        let more = proxy.fill().map_err(|e| at(Stage::Proxy, e))?;
+        let more = proxy.fill().map_err(|e| at(Failure::Proxy, e))?;
         let input = proxy.buffers().input();
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut answer = httparse::Response::new(&mut headers);
@@ -306,12 +293,12 @@ impl Connector<Bounded> for TlsConnector {
             .and_then(|h| h.strip_suffix(']'))
             .unwrap_or(host);
         let name = ServerName::try_from(bare.to_string()).map_err(|e| {
-            failed(Stage::Tls(format!(
+            failed(Failure::Tls(format!(
                 "{host:?} can't be a TLS server name: {e}"
             )))
         })?;
         let conn = ClientConnection::new(self.config.clone(), name)
-            .map_err(|e| failed(Stage::Tls(e.to_string())))?;
+            .map_err(|e| failed(Failure::Tls(e.to_string())))?;
         let mut stream = StreamOwned::new(conn, TransportAdapter::new(connection));
         // Done here rather than on the first write, so that a failure in it
         // is the TLS step's and not the exchange's.
@@ -319,7 +306,7 @@ impl Connector<Bounded> for TlsConnector {
             stream
                 .conn
                 .complete_io(&mut stream.sock)
-                .map_err(|e| at(Stage::Tls, e.into()))?;
+                .map_err(|e| at(Failure::Tls, e.into()))?;
         }
         Ok(Some(
             TlsTransport {
