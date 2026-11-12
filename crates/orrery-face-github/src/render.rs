@@ -5,7 +5,10 @@
 use std::path::Path;
 
 use orrery_face_git::{GitFaceError, store};
-use orrery_world::{Actor, ActorKind, CheckRun, IssueComment, Pull, PullState, Repo, Review, Team};
+use orrery_world::{
+    Actor, ActorKind, Attribution, CheckRun, IssueComment, Pull, PullState, Repo, Review, Team,
+    World, WorldError,
+};
 
 use crate::GithubFace;
 
@@ -216,12 +219,14 @@ impl MergeRefs {
 }
 
 /// What decides a pull request's mergeability, from the tips read with it. A
-/// merged one has none. A closed one whose head branch is gone keeps the test
-/// merge GitHub made when its head or base was last pinned and cannot make
-/// another, so it has none once its base branch has moved since.
+/// merged one has none. A closed one whose head branch is gone cannot make
+/// another test merge, so it has none once its last one is stale.
 pub(crate) enum MergeCheck<'a> {
     /// The pull's state decides it.
     Known(Mergeability),
+    /// The pull's last test merge is stale, so a read that carries
+    /// mergeability starts one ([`merge_read`]).
+    Stale,
     /// The test merge of `head` onto `base` decides it.
     TestMerge { base: &'a str, head: &'a str },
 }
@@ -230,16 +235,65 @@ pub(crate) fn merge_check<'a>(pull: &'a Pull, refs: &'a MergeRefs) -> MergeCheck
     if pull.merged {
         return MergeCheck::Known(Mergeability::Unknown);
     }
-    let Some(base_tip) = &refs.base_tip else {
+    let Some(base) = refs.base_tip.as_deref() else {
         return MergeCheck::Known(Mergeability::Conflicting);
     };
-    if pull.state != PullState::Open && pull.base_moved && refs.head_tip.is_none() {
+    if !pull.test_merge_stale {
+        let head = pull.head_sha.as_str();
+        return MergeCheck::TestMerge { base, head };
+    }
+    if pull.state != PullState::Open && refs.head_tip.is_none() {
         return MergeCheck::Known(Mergeability::Unknown);
     }
-    MergeCheck::TestMerge {
-        base: base_tip,
-        head: &pull.head_sha,
-    }
+    MergeCheck::Stale
+}
+
+/// What a read that carries mergeability answers with.
+pub(crate) enum MergeRead<'a> {
+    Known(Mergeability),
+    /// The test merge of `head` onto `base` decides it ([`test_merge`]).
+    TestMerge {
+        base: &'a str,
+        head: &'a str,
+    },
+}
+
+/// [`merge_check`] for a read by `by` that carries mergeability: a stale
+/// test merge starts one, which is a write to the world, and the read has no
+/// answer, as the read that starts one has none on GitHub. The caller holds
+/// the repository's lock under which it read `pull` and `refs`, so no push
+/// lands between that read and the start. A read that finds the pull stale
+/// answers `Unknown` whether or not another read started the test merge
+/// first, so two reads of one state give one answer.
+pub(crate) fn merge_read<'a>(
+    world: &World,
+    pull: &'a Pull,
+    refs: &'a MergeRefs,
+    by: Attribution,
+) -> Result<MergeRead<'a>, WorldError> {
+    Ok(match merge_check(pull, refs) {
+        MergeCheck::Known(verdict) => MergeRead::Known(verdict),
+        MergeCheck::Stale => {
+            world.start_test_merge(pull.id, by)?;
+            MergeRead::Known(Mergeability::Unknown)
+        }
+        MergeCheck::TestMerge { base, head } => MergeRead::TestMerge { base, head },
+    })
+}
+
+/// The mergeability the test merge of `head` onto `base` gives. It reads
+/// only objects, so it needs no lock.
+pub(crate) fn test_merge(
+    face: &GithubFace,
+    repo: &Repo,
+    base: &str,
+    head: &str,
+) -> Result<Mergeability, GitFaceError> {
+    face.git
+        .merges_clean(repo, &[(base, head)])
+        .pop()
+        .expect("one answer for one pair")
+        .map(merged_cleanly)
 }
 
 /// The mergeability a test merge's answer gives.
@@ -251,37 +305,29 @@ pub(crate) fn merged_cleanly(clean: bool) -> Mergeability {
     }
 }
 
-/// The mergeability GitHub reports for a pull request, from the tips read
-/// with it ([`merge_check`]). The test merge reads only objects, so it needs
-/// no lock.
-pub(crate) fn mergeability(
+/// The mergeability a write route answers with when its write started no
+/// test merge: a read of the pull by `by` ([`merge_read`]), under the
+/// lock the route still holds. A failure answers `Unknown`, GitHub's "not
+/// computed yet", rather than failing a response whose write has already
+/// landed.
+pub(crate) fn landed_mergeability(
     face: &GithubFace,
     repo: &Repo,
     pull: &Pull,
-    refs: &MergeRefs,
-) -> Result<Mergeability, GitFaceError> {
-    match merge_check(pull, refs) {
-        MergeCheck::Known(verdict) => Ok(verdict),
-        MergeCheck::TestMerge { base, head } => face
-            .git
-            .merges_clean(repo, &[(base, head)])
-            .pop()
-            .expect("one answer for one pair")
-            .map(merged_cleanly),
-    }
-}
-
-/// The mergeability a write route answers with, read under the lock it still
-/// holds. A git failure answers `Unknown`, GitHub's "not computed yet",
-/// rather than failing a response whose write has already landed.
-pub(crate) fn landed_mergeability(face: &GithubFace, repo: &Repo, pull: &Pull) -> Mergeability {
+    by: Attribution,
+) -> Mergeability {
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    MergeRefs::read(&bare, pull)
-        .and_then(|refs| mergeability(face, repo, pull, &refs))
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, number = pull.number, "computing mergeability failed");
-            Mergeability::Unknown
-        })
+    let read = || -> Result<Mergeability, GitFaceError> {
+        let refs = MergeRefs::read(&bare, pull)?;
+        match merge_read(&face.world, pull, &refs, by)? {
+            MergeRead::Known(verdict) => Ok(verdict),
+            MergeRead::TestMerge { base, head } => test_merge(face, repo, base, head),
+        }
+    };
+    read().unwrap_or_else(|e| {
+        tracing::error!(error = %e, number = pull.number, "computing mergeability failed");
+        Mergeability::Unknown
+    })
 }
 
 /// The GitHub review object. Wire state is the neutral store state in

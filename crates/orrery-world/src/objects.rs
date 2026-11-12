@@ -288,7 +288,8 @@ pub(crate) fn pull_object(conn: &Connection, pull_id: i64) -> Result<PullObject>
             "SELECT p.id, p.number, p.title, p.body, a.id, a.login, p.state, p.draft,
                     p.head_ref, p.head_sha, p.base_ref, p.base_sha, p.merged,
                     p.merge_commit_sha, m.id, m.login, p.created_clock_unix,
-                    p.updated_clock_unix, p.closed_clock_unix, p.base_moved
+                    p.updated_clock_unix, p.closed_clock_unix, p.base_moved,
+                    p.test_merge_stale
              FROM pulls p JOIN actors a ON a.id = p.author_id
              LEFT JOIN actors m ON m.id = p.merged_by_id
              WHERE p.id = ?1",
@@ -320,6 +321,7 @@ pub(crate) fn pull_object(conn: &Connection, pull_id: i64) -> Result<PullObject>
                     requested_reviewers: Vec::new(),
                     requested_teams: Vec::new(),
                     base_moved: r.get(19)?,
+                    test_merge_stale: r.get(20)?,
                 })
             },
         )

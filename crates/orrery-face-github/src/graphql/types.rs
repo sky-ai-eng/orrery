@@ -22,7 +22,10 @@ use orrery_world as world;
 
 use crate::GithubFace;
 use crate::nodeid::{self, NodeRef};
-use crate::render::{MergeCheck, MergeRefs, Mergeability, merge_check, merged_cleanly, rfc3339};
+use crate::render::{
+    MergeCheck, MergeRead, MergeRefs, Mergeability, merge_check, merge_read, merged_cleanly,
+    rfc3339,
+};
 
 use super::search;
 
@@ -948,10 +951,15 @@ impl PullBatch {
             .mergeability
             .get_or_init(|| async {
                 let current = self.current(ctx).await;
+                let face = face(ctx);
+                let by = ctx
+                    .data_unchecked::<world::Caller>()
+                    .via(world::Door::Graphql);
                 let mut verdicts = BTreeMap::new();
                 let mut merges = Vec::new();
                 for (repo, pulls) in self.by_repo().into_values() {
                     let mut asked: Vec<(i64, (String, String))> = Vec::new();
+                    let mut stale: Vec<(i64, i64)> = Vec::new();
                     for pull in pulls {
                         match &current[&pull.id] {
                             Err(e) => {
@@ -961,6 +969,7 @@ impl PullBatch {
                                 MergeCheck::Known(verdict) => {
                                     verdicts.insert(pull.id, Ok(verdict));
                                 }
+                                MergeCheck::Stale => stale.push((pull.id, pull.number)),
                                 MergeCheck::TestMerge { base, head } => {
                                     asked.push((pull.id, (base.to_string(), head.to_string())));
                                 }
@@ -968,6 +977,22 @@ impl PullBatch {
                         }
                     }
                     merges.push((repo, asked));
+                    if stale.is_empty() {
+                        continue;
+                    }
+                    // One repository after another, in id order, and each
+                    // one's pulls in the order asked, so the batch's writes
+                    // land in the log in one order however its other units
+                    // are scheduled.
+                    let (world, bare) = (face.world.clone(), bare(face, repo));
+                    let (repo_id, ids) = (repo.id, stale.iter().map(|s| s.0).collect());
+                    let started = face
+                        .git
+                        .batch_read(gate(ctx), repo_id, move || {
+                            start_stale(&world, &bare, repo_id, &stale, by)
+                        })
+                        .await;
+                    verdicts.extend(spread(ids, started));
                 }
                 verdicts.extend(
                     ask_each_repo(ctx, merges, |git, repo, pairs| {
@@ -1102,6 +1127,33 @@ impl PullBatch {
             .await;
         answer(dates, &(repo.id, sha.to_string()))
     }
+}
+
+/// The answer each pull of `stale`, by id and number, gives a read by `by`
+/// that found its test merge stale, which starts one ([`merge_read`]). The
+/// caller holds the repository's lock for read, and each pull is read again
+/// under it, so a write that landed since the batch read the pull, such as a
+/// push that closed it and deleted its head, decides what this does. A pull
+/// that another read started a test merge for in between still has no
+/// answer.
+fn start_stale(
+    world: &world::World,
+    bare: &std::path::Path,
+    repo_id: i64,
+    stale: &[(i64, i64)],
+    by: world::Attribution,
+) -> Vec<Result<Mergeability, String>> {
+    read_current(world, bare, repo_id, stale)
+        .into_iter()
+        .map(|read| {
+            let (now, refs) = read?;
+            match merge_read(world, &now, &refs, by) {
+                Ok(MergeRead::Known(verdict)) => Ok(verdict),
+                Ok(MergeRead::TestMerge { .. }) => Ok(Mergeability::Unknown),
+                Err(e) => Err(internal(e).message),
+            }
+        })
+        .collect()
 }
 
 /// Each pull of `asked`, by id and number, as it is now in the repository,

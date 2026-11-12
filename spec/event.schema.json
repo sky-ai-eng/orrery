@@ -1768,6 +1768,25 @@
             "null"
           ]
         },
+        "test_merge_stale": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "boolean"
+            },
+            "to": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "title": {
           "description": "A field's value before and after a change.",
           "properties": {
@@ -1898,6 +1917,11 @@
         },
         "state": {
           "$ref": "#/$defs/PullState"
+        },
+        "test_merge_stale": {
+          "default": false,
+          "description": "Whether the head or the base branch has moved since the pull's\nlast test merge started. Events appended before the world stored\nit carry none. When the world began to store it, each pull's was\nits `base_moved`, and no event records that.",
+          "type": "boolean"
         },
         "title": {
           "type": "string"
@@ -3609,6 +3633,20 @@
       "properties": {
         "type": {
           "const": "pull:head_moved",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/PullChanged",
+      "description": "A read of the pull's mergeability found it stale and started a test\nmerge.",
+      "properties": {
+        "type": {
+          "const": "pull:test_merge_started",
           "type": "string"
         }
       },

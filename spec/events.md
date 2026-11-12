@@ -98,6 +98,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `pull:review_requested` | requesting reviews | `changes` | `timeline_item:created` per reviewer |
 | `pull:review_request_removed` | withdrawing requests; a consequence of a review by a user asked for one, and of a team's deletion | `changes` | `timeline_item:created` per reviewer when withdrawn |
 | `pull:head_moved` | a consequence of a push or a merge that moves its head branch | `changes` | |
+| `pull:test_merge_started` | a read of its mergeability that found its test merge stale (`surface-github.md` §1.0) | `changes` | none |
 | `pull:updated` | a consequence of any other write that changes it | `changes` | |
 | `timeline_item:created` | a consequence only | `object` | |
 | `review:submitted` | submitting a review | `object` | `pull:review_request_removed` when the author was asked for one, or else `pull:updated` when `updated_unix` moves |
@@ -117,8 +118,8 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 
 A push's ref events come first, then what the moves did to pull requests (`surface-git.md`, "What a push does"):
 
-- `pull:updated` setting `base_moved` on each unmerged pull request whose base branch the push created or moved;
-- `pull:head_moved` for each open pull request whose head branch the push moved;
+- `pull:updated` setting `base_moved` and `test_merge_stale` on each unmerged pull request whose base branch the push created or moved;
+- `pull:head_moved` for each open pull request whose head branch the push moved, which sets `test_merge_stale` too;
 - for a deleted branch, `pull:closed` and its `timeline_item:created` for each open pull request whose head it was, then a `timeline_item:created` recording the deletion on each pull request whose head it was, and for each open pull request whose base it was, a `timeline_item:created` recording the deletion, then `pull:closed` and its `timeline_item:created`;
 - for a created branch, a `timeline_item:created` recording its restoration on each closed pull request whose head it is.
 

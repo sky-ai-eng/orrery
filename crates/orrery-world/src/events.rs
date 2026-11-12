@@ -499,6 +499,12 @@ object! {
         /// pinned: at opening, on a move of the head, on a reopen, or on a
         /// retarget.
         base_moved: bool,
+        /// Whether the head or the base branch has moved since the pull's
+        /// last test merge started. Events appended before the world stored
+        /// it carry none. When the world began to store it, each pull's was
+        /// its `base_moved`, and no event records that.
+        #[serde(default)]
+        test_merge_stale: bool,
     }
 }
 
@@ -797,6 +803,9 @@ event_types! {
     PullReviewRequestRemoved(PullChanged) = "pull:review_request_removed",
     /// A push or a merge moved the pull's head branch, and the pull with it.
     PullHeadMoved(PullChanged) = "pull:head_moved",
+    /// A read of the pull's mergeability found it stale and started a test
+    /// merge.
+    PullTestMergeStarted(PullChanged) = "pull:test_merge_started",
     /// Any other change a write makes to a pull it is not about.
     PullUpdated(PullChanged) = "pull:updated",
 

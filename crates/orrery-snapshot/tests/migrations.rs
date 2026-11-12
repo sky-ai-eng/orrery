@@ -239,6 +239,13 @@ fn every_fixture_migrates_opens_and_diffs() {
         orrery_snapshot::fork(&snapshots, &name, &forked, &FORK_SECRET).unwrap();
         let world = World::open(&forked.join("world")).unwrap();
         assert_every_table_has_rows(&world, *version);
+        // A world that stored no `test_merge_stale` takes each pull's from
+        // its `base_moved`.
+        if *version < 14 {
+            for pull in world.list_pulls().unwrap() {
+                assert_eq!(pull.test_merge_stale, pull.base_moved, "fixture v{version}");
+            }
+        }
 
         // As a snapshot, read through its own migrated copy: nothing happened
         // between it and the world but the fork's re-key, until the world

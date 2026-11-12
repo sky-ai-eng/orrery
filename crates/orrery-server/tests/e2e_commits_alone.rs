@@ -133,6 +133,9 @@ async fn a_replace_ref_and_in_repo_attributes_change_no_answer() {
     let date = git(&bare, clock, &["show", "-s", "--format=%ct", &head]);
     assert_eq!(date.trim(), (clock + 86_400).to_string());
 
+    // The push moved main, so the first read of the pull's mergeability
+    // starts a test merge and has no answer.
+    assert!(answers(&base, &alice)["rest"]["mergeable"].is_null());
     assert_eq!(answers(&base, &alice), before, "after the pushes");
 
     snapshot(&inst.control, "pushed");

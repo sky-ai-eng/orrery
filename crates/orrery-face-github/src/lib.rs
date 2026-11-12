@@ -689,7 +689,12 @@ mod ref_read_tests {
             ),
             (
                 "GET pull",
-                unbudgeted(reads::get_pull(face(), path3("1"), HeaderMap::new())),
+                unbudgeted(reads::get_pull(
+                    face(),
+                    path3("1"),
+                    Extension(caller(&f.alice)),
+                    HeaderMap::new(),
+                )),
             ),
             (
                 "GET pull files",

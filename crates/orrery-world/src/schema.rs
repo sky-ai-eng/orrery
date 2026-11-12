@@ -113,6 +113,14 @@ const MIGRATIONS: &[&str] = &[
      CREATE INDEX reviews_by_pull ON reviews (pull_id);
      CREATE INDEX issue_comments_by_pull ON issue_comments (pull_id);
      CREATE INDEX pull_timeline_by_pull ON pull_timeline (pull_id);",
+    // 14: `pulls.test_merge_stale`: whether the pull's head or its base
+    // branch has moved since its last test merge started, so the next read
+    // of its mergeability starts one. A pull whose base had moved is stale;
+    // no world recorded whether a head had moved since a test merge, so the
+    // rest start as current.
+    "ALTER TABLE pulls ADD COLUMN test_merge_stale INTEGER NOT NULL DEFAULT 0
+         CHECK (test_merge_stale IN (0, 1));
+     UPDATE pulls SET test_merge_stale = base_moved;",
 ];
 
 /// The version this binary reads and writes.
