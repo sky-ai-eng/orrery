@@ -19,6 +19,7 @@ getrandom.workspace = true
 jiff.workspace = true
 libc.workspace = true
 orrery-face-git.workspace = true
+orrery-outbound.workspace = true
 orrery-server.workspace = true
 orrery-snapshot.workspace = true
 orrery-world.workspace = true

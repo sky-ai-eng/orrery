@@ -45,3 +45,24 @@ listen = "127.0.0.1:4180"
 # Clone and fetch without a token, as GitHub allows for public repos. A world
 # whose faces are on the public internet sets this to false.
 # anonymous_git_reads = true
+
+[outbound]
+# How a world sends its webhook deliveries, the one thing a world sends: one
+# POST to a receiver's URL, given 10 seconds, never retried and never
+# redirected (spec/usage.md, "What a world sends"). The GitHub face sends no
+# deliveries yet.
+#
+# How the connection leaves this machine. "direct" looks up the receiver's
+# host name and connects to it. Anything else is the address of an HTTP
+# CONNECT proxy, as an IP address and port (127.0.0.1:3128) or
+# unix:/absolute/path: the engine asks the proxy for a tunnel to the
+# receiver's host name and port, and the proxy looks the name up, so it can
+# refuse an address. A supervisor that runs a world with no network of its own
+# gives it egress this way. The proxy is reached only when there is something
+# to send.
+egress = "direct"
+# A PEM file of certificate authorities to trust as well as the public root
+# certificates the binary ships, such as the one that issued a local
+# receiver's self-signed certificate. A file that can't be read, or that holds
+# no certificate, stops `orrery serve` before it opens the world.
+# extra_ca_certs = "./receiver-ca.pem"

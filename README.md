@@ -15,7 +15,7 @@ Orrery serves GitHub's REST and GraphQL APIs and real git from one directory, on
 - **Same inputs, same world.** Every timestamp comes from the world's clock and every id is derived rather than random, so replaying the same calls reproduces the same commit SHAs.
 - **The diff is the result.** Snapshot, run the thing under test, then diff: pull requests opened and merged, reviews posted, labels added, refs moved, each attributed to an actor. Whether something happened is answered from the world's state, so the same scenario works as an integration test or as an agent benchmark.
 
-Orrery implements the parts of GitHub its users have needed so far, and grows as they need more. An endpoint it doesn't implement returns `501` naming the path instead of a `404`, and [contributions are welcome](CONTRIBUTING.md). A world never makes a network call of its own.
+Orrery implements the parts of GitHub its users have needed so far, and grows as they need more. An endpoint it doesn't implement returns `501` naming the path instead of a `404`, and [contributions are welcome](CONTRIBUTING.md). The one network call a world makes on its own is a webhook delivery, through the egress its config names.
 
 ## Quick start
 

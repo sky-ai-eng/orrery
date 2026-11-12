@@ -136,6 +136,8 @@ struct Config {
     instance: InstanceConfig,
     #[serde(default)]
     server: ServerConfig,
+    #[serde(default)]
+    outbound: OutboundConfig,
 }
 
 #[derive(serde::Deserialize)]
@@ -209,6 +211,24 @@ impl ServerConfig {
         }
         Ok(())
     }
+}
+
+/// How the one thing a world sends, a webhook delivery, is sent
+/// (spec/usage.md, "What a world sends").
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct OutboundConfig {
+    /// How a delivery's connection leaves the machine; `direct` when absent.
+    #[serde(default, deserialize_with = "egress")]
+    egress: orrery_outbound::Egress,
+    /// A PEM file of certificate authorities to trust as well as the public
+    /// roots the binary ships.
+    extra_ca_certs: Option<PathBuf>,
+}
+
+fn egress<'de, D: serde::Deserializer<'de>>(raw: D) -> Result<orrery_outbound::Egress, D::Error> {
+    let raw = <String as serde::Deserialize>::deserialize(raw)?;
+    raw.parse().map_err(serde::de::Error::custom)
 }
 
 /// A listener address: `host:port`; `unix:/absolute/path` for a Unix socket
@@ -589,6 +609,14 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         .server
         .check()
         .with_context(|| format!("checking config {}", config_path.display()))?;
+    // Made before the world is opened, so that a certificate file it can't
+    // use stops `serve` before it opens or creates one.
+    // TODO(ORR-7): hand the client to the webhook sender, which posts each delivery with it.
+    let outbound = orrery_outbound::Client::new(
+        config.outbound.egress,
+        config.outbound.extra_ca_certs.as_deref(),
+    )
+    .with_context(|| format!("checking config {}", config_path.display()))?;
 
     let t0_unix = t0_unix(config.instance.t0.as_deref(), "instance.t0")?;
     let world_root = config.instance.dir.join("world");
@@ -637,6 +665,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         listen = %listener,
         control = %control.as_ref().map_or_else(|| format!("{listener}/_orrery"), ToString::to_string),
         %base_url,
+        egress = %outbound.egress(),
         clock_unix = world.clock()?,
         "orrery serving"
     );
