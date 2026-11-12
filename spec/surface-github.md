@@ -29,17 +29,25 @@ Routes answer with these shapes. Fields GitHub sends that are not listed are abs
 
 A pull request's `labels` are ordered by name, ignoring case, and its `requested_reviewers` and `requested_teams` are in request order. Its `head.repo` and `base.repo` are always the same repository.
 
-A single read and the create and edit answers add `mergeable_state` and `rebaseable`, and fill in `mergeable` from a test merge of the head onto the base branch's tip, computed when the answer is rendered. The first row that applies decides:
+A single read and the create and edit answers add `mergeable_state` and `rebaseable`, and fill in `mergeable` from a test merge of the head onto the base branch's tip. The first row that applies decides:
 
 | Pull request | `mergeable` | `mergeable_state` | `rebaseable` |
 | --- | --- | --- | --- |
 | Merged | null | `unknown` | null |
 | Base branch gone | `false` | `dirty` | `false` |
-| Closed, with its head branch gone and its base branch moved since its last test merge | null | `unknown` | null |
+| Its test merge is stale | null | `unknown` | null |
 | The test merge conflicts | `false` | `dirty` | `false` |
 | The test merge is clean | `true` | `clean` | `true` while open, else `false` |
 
-GitHub makes a test merge when a pull request is opened, when its head moves (a push to its head branch, or a merge into that branch), when it is reopened, and when its base is changed. A move of the base branch, by a push or a merge, makes the last one stale. A closed pull request whose head branch is gone gets no new one, so once its base branch has moved since its last test merge there is nothing to report. A draft reads as any other pull request.
+GitHub works mergeability out in the background and answers null until it has. On github.com in November 2026:
+
+- Opening a pull request, reopening it, and moving it to another base each start a test merge. The answer of the request that did it is null, and the test merge finishes a second or two later with no read.
+- A move of the base branch, by a push or a merge, starts none, and neither does a push to the head branch. Each leaves the last test merge stale for as long as nothing reads the pull request's mergeability, which was five minutes in the longest case observed.
+- A read that carries mergeability and finds the last test merge stale starts one, and answers null. Those reads are the REST single read, the answer of a REST edit, and GraphQL `mergeable`, whether in a single read, in `nodes`, or in a connection. A REST list and git start none.
+- A closed pull request whose head branch is gone gets no new one, so once its last test merge is stale there is nothing to report, however often it is read.
+- Nothing records when the answer arrives: `updated_at` does not move.
+
+Orrery stores whether each pull request's last test merge is stale, and the writes above set and clear that as GitHub does. A read that carries mergeability and finds it stale starts a test merge and answers null, and the next read answers. Starting one is a write to the world, so these face reads can change it: the write is a `pull:test_merge_started` event by the reader, through the door the read came through (`events.md`), and the test merges a client's reads cause are counted from the log. A closed pull request whose head branch is gone starts none. A draft reads as any other pull request.
 
 A list carries no test merge: `mergeable` stays null and the other two are absent, so the list's `ETag` does not change when a base branch moves.
 
@@ -222,7 +230,7 @@ A selection naming a field, type, or argument Orrery lacks fails the whole docum
 
 `databaseId` on `User`, `Bot`, `Team`, and `Organization` is the id REST gives the same account or team. `fullDatabaseId` is GitHub's `BigInt`, a string on the wire. A pull request's `body` is `""` when unset, as GitHub's non-null `String!`.
 
-- `mergeable` is REST's `mergeable` (§1.0) in GraphQL's terms, from the same decision: `MERGEABLE` for `true`, `CONFLICTING` for `false`, and `UNKNOWN` for null. GitHub answers `UNKNOWN` until its own test merge finishes; Orrery never needs to.
+- `mergeable` is REST's `mergeable` (§1.0) in GraphQL's terms, from the same decision: `MERGEABLE` for `true`, `CONFLICTING` for `false`, and `UNKNOWN` for null. Reading it is a read that carries mergeability, so one query starts a test merge for each pull request it reads `mergeable` on whose last one is stale, and answers `UNKNOWN` for each of them.
 - `additions`, `deletions`, and `changedFiles` come from the same diff as REST pull request files, and a rename counts once. So does a type change, which REST lists as two files. `files` lists `{path, changeType}` in path order; `changeType` is `ADDED`, `DELETED`, `RENAMED`, `COPIED`, `MODIFIED`, or `CHANGED`, and there is no previous path, as on GitHub.
 - `reviewRequests` lists pending requests, users then teams, each in request order. A request's `requestedReviewer` is a `User` or a `Team`.
 - `latestReviews` is each author's newest review. `reviews` takes `states`, and its `totalCount` counts the filtered set.
@@ -249,7 +257,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `DELETE …/teams/{team_slug}/memberships/{username}` for a user not on the team is `204`; GitHub documents only `204` and `403`.
 - Team slugs keep ASCII letters and digits only, so "Équipe" becomes `quipe` and "日本" has no slug (`422 invalid` on `name`), where GitHub may transliterate. Two names with one slug ("Café" and "Caf") collide as `already_exists` on `name`. No length limit is applied.
 - An id `node` or `nodes` can't resolve is `null` with no entry in `errors`.
-- A reopen, a base change, and a merge into a pull request's head branch make a test merge, as a push to its head does.
+- A merge into a pull request's head branch leaves its test merge stale, as a push to its head does.
 - A closed pull request whose test merge conflicts reads as an open one does. Every closed pull request observed had a clean test merge.
 - A closed pull request whose head branch is deleted before its base branch moves has no mergeability once the base moves. It was observed only with the base moving first, or in the same push.
 - One push that deletes several branches, or a branch that is the head of some pull requests and the base of others, handles the branches in ref-name order, and each branch's head pull requests before its base pull requests.
@@ -273,8 +281,10 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `GET /user/repos` sorts by `pushed` by default (GitHub: `full_name`) and lists only the caller's own repositories.
 - `GET …/commits/{ref}/check-runs` lists every run on the commit; GitHub's default `filter=latest` keeps the newest run per name.
 - Only a bot creates or updates a check run, and a check run's `head_sha` and a review's `commit_id` are not checked against the repository.
-- `mergeable` is computed on read rather than eventually.
-- A read never makes a test merge. On GitHub, a REST read after a pull request's base branch moves starts one, so a closed pull request whose head branch was deleted after such a read reports that test merge, where Orrery reports `unknown`.
+- A test merge finishes by the next read, not after a time. GitHub takes a second or two, so a client that reads again sooner than that gets null more than once on GitHub and once on Orrery. A test merge that a write started has finished by the first read after it, where a read made at once on GitHub is still null.
+- For about a second after a push returns, GitHub still answers from the test merge the push left stale. Orrery answers null from the first read.
+- In a repository with an Actions workflow on `pull_request`, a push to a head branch starts a test merge with no read. Orrery has no Actions, so it starts none.
+- `merge_commit_sha` is null until a pull request is merged. GitHub's names the test merge commit, which a test merge after a move of the head replaces and one after a move of the base keeps, and is null while the test merge conflicts.
 - REST `mergeable_state` reads no check runs and no branch protection, so it is never `unstable`, `blocked`, or `behind`. `rebaseable` is the test merge's answer, not a replay of the head's commits one at a time, so a head whose merge is clean but whose rebase would stop on a conflict reads `true`.
 - A read of a repository's refs waits for a write under way (a push, a merge, opening a pull request, or an edit of one that sets its `state` or `base`), and sees the refs before it or after its record (`surface-git.md`, "What a fetch sees"). Two fields of one GraphQL query can still see two states.
 - Labels belong to a pull request, not to a repository.

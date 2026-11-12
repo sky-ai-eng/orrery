@@ -426,6 +426,93 @@ fn a_base_move_stands_until_the_head_or_base_is_pinned_again() {
 }
 
 #[test]
+fn a_test_merge_is_stale_after_a_branch_moves_until_one_starts() {
+    let f = fixture();
+    let pull = open_pull(&f, "feature", SHA_B);
+    let now = || f.w.pull_by_id(pull.id).unwrap().unwrap();
+    let push = |name, old, new, repins| {
+        let moves = [RefMove {
+            name,
+            old,
+            new,
+            repins,
+            change: RefChange::Moved,
+            forced: false,
+            commits: Vec::new(),
+            commit_count: 0,
+        }];
+        f.w.record_push(f.repo, by(f.alice), &moves, None, &[])
+            .unwrap();
+    };
+    // Starting one returns the row it stored, and is the reader's write. It
+    // moves no `updated`.
+    let start = || {
+        let before = now();
+        let started = f.w.start_test_merge(pull.id, by(f.bob)).unwrap().unwrap();
+        assert_eq!(started, now());
+        assert!(!started.test_merge_stale);
+        assert_eq!(started.updated_clock_unix, before.updated_clock_unix);
+        let events = last_write(&f.w, "bob");
+        assert_eq!(types(&events), ["pull:test_merge_started"]);
+        assert_eq!(changed(&events[0]), ["test_merge_stale"]);
+    };
+    let sys = f.w.actor_by_login("orrery").unwrap().unwrap();
+    f.w.advance_clock(60, by(sys.id)).unwrap();
+
+    // Opening a pull starts its test merge, so there is none to start.
+    assert!(!now().test_merge_stale);
+    let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
+    assert_eq!(f.w.start_test_merge(pull.id, by(f.bob)).unwrap(), None);
+    assert!(f.w.log_after(mark, 1000).unwrap().is_empty());
+
+    // A move of the base leaves it stale, and so does a move of the head,
+    // which clears the base move.
+    push("refs/heads/main", SHA_A, SHA_C, vec![]);
+    assert!(now().test_merge_stale);
+    start();
+    push("refs/heads/feature", SHA_B, SHA_C, vec![pull.number]);
+    assert!(now().test_merge_stale && !now().base_moved);
+    start();
+
+    // A retarget starts one, and so does a reopen, of a pull either move
+    // left stale.
+    push("refs/heads/main", SHA_C, SHA_A, vec![]);
+    f.w.edit_pull(pull.id, by(f.alice), None, None, Some(("release", SHA_A)))
+        .unwrap();
+    assert!(!now().test_merge_stale);
+    f.w.close_pull(pull.id, by(f.alice)).unwrap();
+    push("refs/heads/release", SHA_A, SHA_B, vec![]);
+    assert!(now().test_merge_stale);
+    f.w.reopen_pull(pull.id, by(f.alice), SHA_C).unwrap();
+    assert!(!now().test_merge_stale);
+
+    // A second move of the base changes nothing on a pull the first left
+    // stale, and a merged pull has no test merge to start.
+    push("refs/heads/release", SHA_B, SHA_A, vec![]);
+    let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
+    push("refs/heads/release", SHA_A, SHA_B, vec![]);
+    let again = f.w.log_after(mark, 1000).unwrap();
+    assert!(
+        again
+            .iter()
+            .all(|e| !e.body.type_name().starts_with("pull:"))
+    );
+    let merge = RefMove {
+        name: "refs/heads/release",
+        old: SHA_B,
+        new: SHA_C,
+        repins: vec![],
+        change: RefChange::Moved,
+        forced: false,
+        commits: Vec::new(),
+        commit_count: 0,
+    };
+    f.w.record_merge(pull.id, by(f.alice), &merge).unwrap();
+    assert!(now().test_merge_stale);
+    assert_eq!(f.w.start_test_merge(pull.id, by(f.bob)).unwrap(), None);
+}
+
+#[test]
 fn a_merge_records_its_base_move_and_the_merge_together() {
     let f = fixture();
     let pull = open_pull(&f, "feature", SHA_B);

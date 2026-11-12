@@ -193,7 +193,8 @@ impl World {
                 }
                 if let Some((base_ref, base_sha)) = base {
                     tx.execute(
-                        "UPDATE pulls SET base_ref = ?1, base_sha = ?2, base_moved = 0
+                        "UPDATE pulls SET base_ref = ?1, base_sha = ?2, base_moved = 0,
+                         test_merge_stale = 0
                          WHERE id = ?3",
                         params![base_ref, base_sha, pull_id],
                     )?;
@@ -391,9 +392,10 @@ impl World {
     }
 
     /// Reopen a closed pull with `head_sha` as its head: the reopen and the
-    /// head move commit together. The caller resolves the head from its head
-    /// branch, since the kernel never touches git. Refused while another pull
-    /// is open from the same head into the same base, as `create_pull` is.
+    /// head move commit together, and start a test merge. The caller resolves
+    /// the head from its head branch, since the kernel never touches git.
+    /// Refused while another pull is open from the same head into the same
+    /// base, as `create_pull` is.
     pub fn reopen_pull(&self, pull_id: i64, by: Attribution, head_sha: &str) -> Result<Pull> {
         let head = Some(head_sha);
         let kind = EventBody::PullReopened;
@@ -471,6 +473,32 @@ impl World {
             // the one this write stores.
             self.record_moves(w, before.repo_id, std::slice::from_ref(base), None, false)?;
             Ok(pull)
+        })
+    }
+
+    /// Start a test merge of a pull whose last one is stale, as a read of its
+    /// mergeability does: the write's operation is `pull:test_merge_started`,
+    /// by the reader. Returns the stored row when it started one. A pull that
+    /// is not stale has a current test merge and a merged pull has none, so
+    /// for either nothing starts, nothing is written, and the answer is
+    /// `None`. It moves no `updated_at`, as GitHub's does not move when its
+    /// answer arrives.
+    pub fn start_test_merge(&self, pull_id: i64, by: Attribution) -> Result<Option<Pull>> {
+        self.write(by, |w| {
+            w.pull_operation(pull_id, EventBody::PullTestMergeStarted, |tx| {
+                Ok(tx
+                    .query_row(
+                        &format!(
+                            "UPDATE pulls SET test_merge_stale = 0
+                             WHERE id = ?1 AND test_merge_stale = 1 AND merged = 0
+                             RETURNING {}",
+                            queries::PULL_COLUMNS
+                        ),
+                        params![pull_id],
+                        queries::row_to_pull,
+                    )
+                    .optional()?)
+            })
         })
     }
 
@@ -659,7 +687,7 @@ impl World {
             let pull = w.pull_operation(pull_id, kind, |tx| {
                 tx.execute(sql, params![pull_id])?;
                 if let Some(sha) = head {
-                    repin(tx, before.repo_id, before.number, sha)?;
+                    repin(tx, before.repo_id, before.number, sha, false)?;
                 }
                 touch_pull(tx, pull_id)
             })?;
@@ -831,18 +859,19 @@ pub(crate) fn repin_open_pull(
         )));
     };
     w.pull(id, EventBody::PullHeadMoved, |tx| {
-        repin(tx, repo_id, number, sha)
+        repin(tx, repo_id, number, sha, true)
     })
 }
 
 /// Move an open pull's head to `sha`, clearing its base move, and bump its
-/// `updated`.
-fn repin(conn: &Connection, repo_id: i64, number: i64, sha: &str) -> Result<()> {
+/// `updated`. `stale` says whether the move leaves the pull's test merge
+/// stale, as a move of its head branch does, or starts one, as a reopen does.
+fn repin(conn: &Connection, repo_id: i64, number: i64, sha: &str, stale: bool) -> Result<()> {
     let n = conn.execute(
-        "UPDATE pulls SET head_sha = ?1, base_moved = 0,
+        "UPDATE pulls SET head_sha = ?1, base_moved = 0, test_merge_stale = ?4,
          updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
          WHERE repo_id = ?2 AND number = ?3 AND state = 'open'",
-        params![sha, repo_id, number],
+        params![sha, repo_id, number, stale],
     )?;
     if n == 0 {
         return Err(WorldError::InvalidTransition(format!(
@@ -872,20 +901,24 @@ fn touch_pull(conn: &Connection, pull_id: i64) -> Result<Pull> {
 }
 
 /// Mark the unmerged pulls whose base is `branch` as having had their base
-/// move, each a `pull:updated`. It moves no `updated_at`: GitHub's does not
-/// move on a push to the base.
+/// move, which leaves each one's test merge stale, each a `pull:updated`. It
+/// moves no `updated_at`: GitHub's does not move on a push to the base.
 pub(crate) fn mark_base_moved(w: &mut Write<'_>, repo_id: i64, branch: &str) -> Result<()> {
     let ids =
         w.tx.prepare(
             "SELECT id FROM pulls
-             WHERE repo_id = ?1 AND base_ref = ?2 AND merged = 0 AND base_moved = 0
+             WHERE repo_id = ?1 AND base_ref = ?2 AND merged = 0
+               AND (base_moved = 0 OR test_merge_stale = 0)
              ORDER BY number",
         )?
         .query_map(params![repo_id, branch], |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<i64>>>()?;
     for id in ids {
         w.pull(id, EventBody::PullUpdated, |tx| {
-            tx.execute("UPDATE pulls SET base_moved = 1 WHERE id = ?1", params![id])?;
+            tx.execute(
+                "UPDATE pulls SET base_moved = 1, test_merge_stale = 1 WHERE id = ?1",
+                params![id],
+            )?;
             Ok(())
         })?;
     }

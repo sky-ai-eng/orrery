@@ -136,7 +136,7 @@ pub(crate) async fn create_pull(
                     &repo,
                     &owner_actor,
                     &pull,
-                    landed_mergeability(&face, &repo, &pull),
+                    landed_mergeability(&face, &repo, &pull, by, true),
                 ),
             ),
             Err(e) => internal(e),
@@ -293,7 +293,11 @@ pub(crate) async fn patch_pull(
         None => (base, None),
     };
 
+    // Whether the edit starts a test merge, as a reopen and a move to another
+    // base do.
+    let mut started = false;
     if title.is_some() || body.is_some() || base_now.is_some() {
+        let base_before = pull.base_ref.clone();
         let edited = face.world.edit_pull(
             pull.id,
             by,
@@ -305,6 +309,7 @@ pub(crate) async fn patch_pull(
             Ok(p) => p,
             Err(e) => return internal(e),
         };
+        started |= pull.base_ref != base_before;
     }
 
     // A state the pull is already in is a GitHub no-op: nothing is written
@@ -328,6 +333,7 @@ pub(crate) async fn patch_pull(
                 };
             }
         };
+        started = true;
     } else if state == Some("closed") && pull.state == PullState::Open {
         pull = match face.world.close_pull(pull.id, by) {
             Ok(p) => p,
@@ -351,7 +357,7 @@ pub(crate) async fn patch_pull(
             &repo,
             &owner_actor,
             &pull,
-            landed_mergeability(&face, &repo, &pull),
+            landed_mergeability(&face, &repo, &pull, by, started),
         ),
     )
 }

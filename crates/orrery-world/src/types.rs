@@ -139,9 +139,13 @@ pub struct Pull {
     pub requested_teams: Vec<String>,
     /// Whether the base branch has moved since the head or base was last
     /// pinned: at creation, on a re-pin of the head, on a reopen, or on a
-    /// retarget. GitHub's last test merge was made at one of those, so once a
-    /// closed pull's head branch is gone it has nothing current to report.
+    /// retarget.
     pub base_moved: bool,
+    /// Whether the head or the base branch has moved since the pull's last
+    /// test merge started. Opening, reopening, and retargeting a pull start
+    /// one; a move of either branch starts none, so the next read of the
+    /// pull's mergeability does ([`crate::World::start_test_merge`]).
+    pub test_merge_stale: bool,
 }
 
 /// One item on a pull's timeline (see `pull_timeline` in the schema).

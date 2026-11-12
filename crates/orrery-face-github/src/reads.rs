@@ -15,7 +15,7 @@ use axum::extract::{Extension, OriginalUri, Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use base64::Engine as _;
 use orrery_face_git::store;
-use orrery_world::{Actor, ActorKind, PullState};
+use orrery_world::{Actor, ActorKind, Caller, Door, PullState};
 use sha2::{Digest, Sha256};
 
 use crate::pulls::pull_by_path_number;
@@ -159,6 +159,7 @@ pub(crate) async fn list_pulls(
 pub(crate) async fn get_pull(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
 ) -> Response<Body> {
     // A restore replaces the bare repository under the gate, so a read of
@@ -188,7 +189,7 @@ pub(crate) async fn get_pull(
     if let Some(media) = media::diff_media(&headers) {
         return pull_diff(&bare, &refs.diff_base(&pull), &pull.head_sha, &media);
     }
-    let verdict = match mergeability(&face, &repo, &pull, &refs) {
+    let verdict = match mergeability(&face, &repo, &pull, &refs, caller.via(Door::Rest)) {
         Ok(v) => v,
         Err(e) => return internal(e),
     };

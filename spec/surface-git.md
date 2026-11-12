@@ -53,6 +53,7 @@ What the engine works out from git, such as a test merge, a diff, a commit's dat
 `git-receive-pack` runs under a per-repository lock, and Orrery compares the repository's refs before and after it. A push that changed a ref is one write in the log, attributed to the pushing actor through the `git` door: a `repo:pushed` event, then a `ref:created`, `ref:updated`, or `ref:deleted` event for each ref that changed, in ref-name order, with the commits it brought in, then an event for each change to a pull request (`events.md`). With them:
 
 - an open pull request whose head branch moved takes the new tip as its head, GitHub's `synchronize`, and its `refs/pull/{n}/head` moves with it; a deleted branch leaves its pull requests on their last head;
+- a created or moved branch leaves stale the test merge of each unmerged pull request based on it, and a moved one that of each open pull request it is the head of, so the next read of that pull request's mergeability starts one (`surface-github.md` §1.0);
 - a deleted branch closes the open pull requests on it, and a deleted head branch pushed back is recorded on the closed ones (below);
 - the repository's `pushed_at` moves to the world clock; and
 - the first push of a branch into an empty repository sets the default branch, and `HEAD` with it, as on GitHub.

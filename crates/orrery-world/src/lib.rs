@@ -524,7 +524,8 @@ impl World {
     /// for each move in `moves`, in order. Then every unmerged pull whose
     /// base a move creates or moves is marked [`Pull::base_moved`], and each
     /// move re-pins the pulls it names, so a pull the same push re-pins ends
-    /// unmarked. Then each branch a move deleted or created changes the pulls
+    /// unmarked. Either leaves the pull's test merge stale
+    /// ([`Pull::test_merge_stale`]). Then each branch a move deleted or created changes the pulls
     /// on it, in the same order, as GitHub changes them:
     ///
     /// - a deleted branch closes every open pull whose head it is, then

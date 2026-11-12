@@ -5,7 +5,9 @@
 use std::path::Path;
 
 use orrery_face_git::{GitFaceError, store};
-use orrery_world::{Actor, ActorKind, CheckRun, IssueComment, Pull, PullState, Repo, Review, Team};
+use orrery_world::{
+    Actor, ActorKind, Attribution, CheckRun, IssueComment, Pull, PullState, Repo, Review, Team,
+};
 
 use crate::GithubFace;
 
@@ -216,12 +218,16 @@ impl MergeRefs {
 }
 
 /// What decides a pull request's mergeability, from the tips read with it. A
-/// merged one has none. A closed one whose head branch is gone keeps the test
-/// merge GitHub made when its head or base was last pinned and cannot make
-/// another, so it has none once its base branch has moved since.
+/// merged one has none. A closed one whose head branch is gone cannot make
+/// another test merge, so it has none once its last one is stale.
 pub(crate) enum MergeCheck<'a> {
     /// The pull's state decides it.
     Known(Mergeability),
+    /// The pull's last test merge is stale, so this read starts one
+    /// (`World::start_test_merge`) and answers `Unknown`, as GitHub answers
+    /// the read that starts one. If another read started it first, the test
+    /// merge of `head` onto `base` decides it.
+    Stale { base: &'a str, head: &'a str },
     /// The test merge of `head` onto `base` decides it.
     TestMerge { base: &'a str, head: &'a str },
 }
@@ -230,16 +236,17 @@ pub(crate) fn merge_check<'a>(pull: &'a Pull, refs: &'a MergeRefs) -> MergeCheck
     if pull.merged {
         return MergeCheck::Known(Mergeability::Unknown);
     }
-    let Some(base_tip) = &refs.base_tip else {
+    let Some(base) = refs.base_tip.as_deref() else {
         return MergeCheck::Known(Mergeability::Conflicting);
     };
-    if pull.state != PullState::Open && pull.base_moved && refs.head_tip.is_none() {
+    let head = pull.head_sha.as_str();
+    if !pull.test_merge_stale {
+        return MergeCheck::TestMerge { base, head };
+    }
+    if pull.state != PullState::Open && refs.head_tip.is_none() {
         return MergeCheck::Known(Mergeability::Unknown);
     }
-    MergeCheck::TestMerge {
-        base: base_tip,
-        head: &pull.head_sha,
-    }
+    MergeCheck::Stale { base, head }
 }
 
 /// The mergeability a test merge's answer gives.
@@ -251,33 +258,54 @@ pub(crate) fn merged_cleanly(clean: bool) -> Mergeability {
     }
 }
 
-/// The mergeability GitHub reports for a pull request, from the tips read
-/// with it ([`merge_check`]). The test merge reads only objects, so it needs
-/// no lock.
+/// The mergeability GitHub reports for a pull request to a read by `by`,
+/// from the tips read with it ([`merge_check`]). A read that finds the last
+/// test merge stale starts one, which is a write to the world. The test merge
+/// reads only objects, so it needs no lock.
 pub(crate) fn mergeability(
     face: &GithubFace,
     repo: &Repo,
     pull: &Pull,
     refs: &MergeRefs,
+    by: Attribution,
 ) -> Result<Mergeability, GitFaceError> {
-    match merge_check(pull, refs) {
-        MergeCheck::Known(verdict) => Ok(verdict),
-        MergeCheck::TestMerge { base, head } => face
-            .git
-            .merges_clean(repo, &[(base, head)])
-            .pop()
-            .expect("one answer for one pair")
-            .map(merged_cleanly),
-    }
+    let (base, head) = match merge_check(pull, refs) {
+        MergeCheck::Known(verdict) => return Ok(verdict),
+        MergeCheck::Stale { base, head } => {
+            if face.world.start_test_merge(pull.id, by)?.is_some() {
+                return Ok(Mergeability::Unknown);
+            }
+            (base, head)
+        }
+        MergeCheck::TestMerge { base, head } => (base, head),
+    };
+    face.git
+        .merges_clean(repo, &[(base, head)])
+        .pop()
+        .expect("one answer for one pair")
+        .map(merged_cleanly)
 }
 
 /// The mergeability a write route answers with, read under the lock it still
-/// holds. A git failure answers `Unknown`, GitHub's "not computed yet",
-/// rather than failing a response whose write has already landed.
-pub(crate) fn landed_mergeability(face: &GithubFace, repo: &Repo, pull: &Pull) -> Mergeability {
+/// holds. `started` says whether the write started a test merge, as opening,
+/// reopening, and retargeting a pull do: its answer is then `Unknown`, as
+/// GitHub's is. Any other write's answer is a read of the pull
+/// ([`mergeability`]). A git failure answers `Unknown`, GitHub's "not
+/// computed yet", rather than failing a response whose write has already
+/// landed.
+pub(crate) fn landed_mergeability(
+    face: &GithubFace,
+    repo: &Repo,
+    pull: &Pull,
+    by: Attribution,
+    started: bool,
+) -> Mergeability {
+    if started {
+        return Mergeability::Unknown;
+    }
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
     MergeRefs::read(&bare, pull)
-        .and_then(|refs| mergeability(face, repo, pull, &refs))
+        .and_then(|refs| mergeability(face, repo, pull, &refs, by))
         .unwrap_or_else(|e| {
             tracing::error!(error = %e, number = pull.number, "computing mergeability failed");
             Mergeability::Unknown

@@ -144,6 +144,7 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
             ("updated_clock_unix", Field("updated_unix")),
             ("closed_clock_unix", Field("closed_unix")),
             ("base_moved", Field("base_moved")),
+            ("test_merge_stale", Field("test_merge_stale")),
         ],
     ),
     (

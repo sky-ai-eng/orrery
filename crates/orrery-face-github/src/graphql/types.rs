@@ -948,24 +948,43 @@ impl PullBatch {
             .mergeability
             .get_or_init(|| async {
                 let current = self.current(ctx).await;
+                let world = &face(ctx).world;
+                let by = ctx
+                    .data_unchecked::<world::Caller>()
+                    .via(world::Door::Graphql);
                 let mut verdicts = BTreeMap::new();
                 let mut merges = Vec::new();
                 for (repo, pulls) in self.by_repo().into_values() {
                     let mut asked: Vec<(i64, (String, String))> = Vec::new();
                     for pull in pulls {
-                        match &current[&pull.id] {
+                        let (now, refs) = match &current[&pull.id] {
                             Err(e) => {
                                 verdicts.insert(pull.id, Err(e.clone()));
+                                continue;
                             }
-                            Ok((now, refs)) => match merge_check(now, refs) {
-                                MergeCheck::Known(verdict) => {
-                                    verdicts.insert(pull.id, Ok(verdict));
+                            Ok(read) => read,
+                        };
+                        let (base, head) = match merge_check(now, refs) {
+                            MergeCheck::Known(verdict) => {
+                                verdicts.insert(pull.id, Ok(verdict));
+                                continue;
+                            }
+                            MergeCheck::Stale { base, head } => {
+                                match world.start_test_merge(pull.id, by) {
+                                    Ok(Some(_)) => {
+                                        verdicts.insert(pull.id, Ok(Mergeability::Unknown));
+                                        continue;
+                                    }
+                                    Ok(None) => (base, head),
+                                    Err(e) => {
+                                        verdicts.insert(pull.id, Err(internal(e).message));
+                                        continue;
+                                    }
                                 }
-                                MergeCheck::TestMerge { base, head } => {
-                                    asked.push((pull.id, (base.to_string(), head.to_string())));
-                                }
-                            },
-                        }
+                            }
+                            MergeCheck::TestMerge { base, head } => (base, head),
+                        };
+                        asked.push((pull.id, (base.to_string(), head.to_string())));
                     }
                     merges.push((repo, asked));
                 }
