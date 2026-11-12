@@ -80,7 +80,7 @@ pub enum NewClock {
 }
 
 /// A world's clock as a read answers it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockReading {
     /// What time the world holds it is, in Unix seconds. In a `real` world,
     /// the later of the host's time and the stored clock.

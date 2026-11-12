@@ -384,7 +384,14 @@ fn a_world_created_real_follows_the_hosts_time() {
     assert_made(&made, &created.path().join("instance"), clock_unix);
     let (socket, _served) = serve_instance(created.path(), "");
     assert_started_at_the_hosts_time(&socket);
-    assert_eq!(created_at(&socket).0, clock_unix);
+    // `create` reports the clock as a read answers it, once the world is
+    // made: no earlier than the clock it started at, and no later than now.
+    let started = created_at(&socket).0;
+    let now = served_clock(&socket).0;
+    assert!(
+        (started..=now).contains(&clock_unix),
+        "{clock_unix} outside {started}..={now}"
+    );
 
     // `serve` creates one too, from the config.
     let first_run = tempfile::tempdir().unwrap();

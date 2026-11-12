@@ -129,6 +129,19 @@ impl World {
         self.write_by(|_| Ok((by, ())), |w, ()| f(w))
     }
 
+    /// [`World::write`] for a write whose caller dated something it records
+    /// with `at`, a time [`World::clock`] answered it. In a `real` world the
+    /// write advances the clock to `at` rather than to the host's time,
+    /// which may have passed it ([`KeepTime::At`]).
+    pub(crate) fn write_at<T>(
+        &self,
+        at: i64,
+        by: Attribution,
+        f: impl FnOnce(&mut Write<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.write_keeping(KeepTime::At(at), |_| Ok((by, ())), |w, ()| f(w))
+    }
+
     /// [`World::write`] for a write that learns who makes it from the world:
     /// `by` reads that inside the write's transaction, before `f` runs, and
     /// hands `f` what else it read.
@@ -140,18 +153,29 @@ impl World {
         self.write_keeping(KeepTime::IfReal, by, f)
     }
 
-    /// [`World::write_by`], reading the host's time first as `keep` says.
-    /// When that moves the clock, the advance is appended as a write of its
-    /// own, before this one, and in its transaction. A write that appends
-    /// nothing used no time the log has to hold, so the advance is rolled
-    /// back with it.
+    /// [`World::write_by`], keeping a `real` world's time first as `keep`
+    /// says. When that moves the clock, the advance is appended as a write of
+    /// its own, before this one, and in its transaction. A write that
+    /// appends nothing used no time the log has to hold, so the advance is
+    /// rolled back with it.
     pub(crate) fn write_keeping<X, T>(
         &self,
         keep: KeepTime,
         by: impl FnOnce(&Connection) -> Result<(Attribution, X)>,
         f: impl FnOnce(&mut Write<'_>, X) -> Result<T>,
     ) -> Result<T> {
-        let conn = self.lock();
+        self.write_locked(&self.lock(), keep, by, f)
+    }
+
+    /// [`World::write_keeping`] on the world's connection, which the caller
+    /// has locked.
+    pub(crate) fn write_locked<X, T>(
+        &self,
+        conn: &Connection,
+        keep: KeepTime,
+        by: impl FnOnce(&Connection) -> Result<(Attribution, X)>,
+        f: impl FnOnce(&mut Write<'_>, X) -> Result<T>,
+    ) -> Result<T> {
         let tx = conn.unchecked_transaction()?;
         let kept = self.keep_time(&tx, keep)?;
         #[cfg(any(test, feature = "test-support"))]
@@ -346,7 +370,7 @@ struct LegacyRefUpdate {
 
 /// Append one write's events, and in a test build check them against the
 /// schema.
-pub(crate) fn append_write(tx: &Connection, by: Attribution, events: &[EventBody]) -> Result<()> {
+fn append_write(tx: &Connection, by: Attribution, events: &[EventBody]) -> Result<()> {
     let _first = append(tx, by, events)?;
     #[cfg(any(test, feature = "test-support"))]
     crate::audit::check_schema(&read_write(tx, _first)?);

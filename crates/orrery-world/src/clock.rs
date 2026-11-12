@@ -8,9 +8,9 @@
 use rusqlite::{Connection, params};
 
 use crate::events::{self, Attribution, Door, EventBody};
-use crate::log::{Write, append_write};
+use crate::log::Write;
 use crate::{
-    ClockMode, ClockReading, Result, SYSTEM_ACTOR_ID, Signal, World, WorldError, objects, queries,
+    ClockMode, ClockReading, Result, SYSTEM_ACTOR_ID, World, WorldError, objects, queries,
 };
 
 /// The latest second a world's clock holds: the latest `jiff` represents,
@@ -54,32 +54,36 @@ impl HostTime {
     }
 }
 
-/// When a write reads the host's time, before it runs.
+/// What time a write brings the clock to before it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeepTime {
-    /// In a `real` world.
+    /// In a `real` world, the host's time.
     IfReal,
-    /// Always: the write makes the world `real`.
+    /// The host's time, whatever the mode: the write makes the world `real`.
     Always,
-    /// Never: the write creates the world, which has no clock yet.
+    /// In a `real` world, `at`: a time a read of the clock answered the
+    /// caller, which dated something the write records with it. Reading the
+    /// host's time again could pass it, and then the date would be a time
+    /// the log does not hold.
+    At(i64),
+    /// None: the write creates the world, which has no clock yet.
     Never,
 }
 
-/// What a write found when it read the host's time before it ran.
+/// What a write found when it kept the world's time before it ran.
 #[derive(Default)]
 pub(crate) struct Kept {
     /// The host's time, when the write read it.
     pub(crate) host_unix: Option<i64>,
-    /// The advance to the host's time, made in the write's transaction when
-    /// the host's time was ahead of the stored clock, for the write to
-    /// append before its own events.
+    /// The advance, made in the write's transaction when the time kept was
+    /// ahead of the stored clock, for the write to append before its own
+    /// events.
     pub(crate) advance: Option<EventBody>,
 }
 
 /// Who makes the advance a `real` world records before a write `by` makes:
-/// the system actor, through the control plane, whose
-/// `POST /_orrery/clock/advance` makes the same advance, or through the CLI
-/// when the write is a CLI command's.
+/// the system actor, through the control plane, or through the CLI when the
+/// write is a CLI command's.
 pub(crate) fn keeper(by: Attribution) -> Attribution {
     let door = match by.door {
         Door::Cli => Door::Cli,
@@ -97,12 +101,7 @@ impl World {
     /// The clock and its mode. In a `real` world the clock is the later of
     /// the host's time and the stored clock, and the read writes nothing.
     pub fn read_clock(&self) -> Result<ClockReading> {
-        self.with_conn(|conn| self.reading(conn))
-    }
-
-    pub(crate) fn reading(&self, conn: &Connection) -> Result<ClockReading> {
-        let stored = queries::clock(conn)?;
-        let mode = queries::clock_mode(conn)?;
+        let (stored, mode) = self.with_conn(queries::clock_state)?;
         let clock_unix = match mode {
             ClockMode::Manual => stored,
             ClockMode::Real => stored.max(self.host.now_unix()),
@@ -115,15 +114,15 @@ impl World {
     /// operation). It stops at the latest second `jiff` represents, so that
     /// every time the world stamps can be rendered. A `real` world's clock
     /// follows the host's time, and is never advanced by hand.
-    pub fn advance_clock(&self, seconds: i64, by: Attribution) -> Result<i64> {
+    pub fn advance_clock(&self, seconds: i64, by: Attribution) -> Result<ClockReading> {
         if seconds <= 0 {
             return Err(WorldError::ClockRegression(seconds));
         }
         self.write(by, |w| {
-            if queries::clock_mode(w.tx)? == ClockMode::Real {
+            let (from, mode) = queries::clock_state(w.tx)?;
+            if mode == ClockMode::Real {
                 return Err(WorldError::ClockIsReal);
             }
-            let from = queries::clock(w.tx)?;
             let to = from
                 .checked_add(seconds)
                 .filter(|to| *to <= latest())
@@ -132,9 +131,9 @@ impl World {
                     remaining: latest().saturating_sub(from).max(0),
                     latest: jiff::Timestamp::MAX,
                 })?;
-            let (to, advance) = advance_to(w.tx, to)?;
+            let (reading, advance) = advance_to(w.tx, to)?;
             w.operation(advance);
-            Ok(to)
+            Ok(reading)
         })
     }
 
@@ -194,59 +193,79 @@ impl World {
         *self.host.set.lock().expect("host time poisoned") = Some(unix);
     }
 
-    /// Read the host's time inside `tx` when `keep` says to, and move the
-    /// stored clock to it when it is later.
+    /// Move the stored clock inside `tx` to the time `keep` says, when that
+    /// is later.
     pub(crate) fn keep_time(&self, tx: &Connection, keep: KeepTime) -> Result<Kept> {
-        let reads = match keep {
-            KeepTime::Never => false,
-            KeepTime::Always => true,
-            KeepTime::IfReal => queries::clock_mode(tx)? == ClockMode::Real,
-        };
-        if !reads {
+        if keep == KeepTime::Never {
             return Ok(Kept::default());
         }
-        let host = self.host.now_unix();
-        if host <= queries::clock(tx)? {
-            return Ok(Kept {
-                host_unix: Some(host),
-                advance: None,
-            });
-        }
-        #[cfg(any(test, feature = "test-support"))]
-        let audit = crate::audit::Audit::begin(tx)?;
-        let (_, advance) = advance_to(tx, host)?;
-        #[cfg(any(test, feature = "test-support"))]
-        audit.end(tx, std::slice::from_ref(&advance))?;
-        Ok(Kept {
-            host_unix: Some(host),
-            advance: Some(advance),
-        })
+        let (stored, mode) = queries::clock_state(tx)?;
+        let real = mode == ClockMode::Real;
+        let (host_unix, to) = match keep {
+            KeepTime::Always => {
+                let host = self.host.now_unix();
+                (Some(host), Some(host))
+            }
+            KeepTime::IfReal if real => {
+                let host = self.host.now_unix();
+                (Some(host), Some(host))
+            }
+            KeepTime::At(at) if real => (None, Some(at.min(latest()))),
+            _ => (None, None),
+        };
+        let advance = match to {
+            Some(to) if to > stored => {
+                #[cfg(any(test, feature = "test-support"))]
+                let audit = crate::audit::Audit::begin(tx)?;
+                let (_, advance) = advance_to(tx, to)?;
+                #[cfg(any(test, feature = "test-support"))]
+                audit.end(tx, std::slice::from_ref(&advance))?;
+                Some(advance)
+            }
+            _ => None,
+        };
+        Ok(Kept { host_unix, advance })
     }
 
     /// In a `real` world, record an advance to the host's time as a write
-    /// of its own through `door`, so the stored clock is the present.
+    /// of its own through `door`, on the world's connection, which the
+    /// caller has locked, so the stored clock is the present.
     pub(crate) fn catch_up(&self, conn: &Connection, door: Door) -> Result<()> {
-        let tx = conn.unchecked_transaction()?;
-        if let Some(advance) = self.keep_time(&tx, KeepTime::IfReal)?.advance {
-            append_write(&tx, Attribution::new(SYSTEM_ACTOR_ID, door), &[advance])?;
-            self.signal(Signal::LogMayHaveGrown);
-            tx.commit()?;
-        }
-        Ok(())
+        let by = Attribution::new(SYSTEM_ACTOR_ID, door);
+        self.write_locked(
+            conn,
+            KeepTime::Never,
+            |_| Ok((by, ())),
+            |w, ()| {
+                let (stored, mode) = queries::clock_state(w.tx)?;
+                if mode == ClockMode::Real {
+                    let host = self.host.now_unix();
+                    if host > stored {
+                        w.operation(advance_to(w.tx, host)?.1);
+                    }
+                }
+                Ok(())
+            },
+        )
     }
 }
 
 /// Move the stored clock forward to `to`, and the event that records it.
-fn advance_to(tx: &Connection, to: i64) -> Result<(i64, EventBody)> {
+fn advance_to(tx: &Connection, to: i64) -> Result<(ClockReading, EventBody)> {
     let from = objects::world_object(tx)?;
-    let to: i64 = tx.query_row(
-        "UPDATE world SET clock_unix = ?1 WHERE id = 1 RETURNING clock_unix",
+    let reading = tx.query_row(
+        "UPDATE world SET clock_unix = ?1 WHERE id = 1 RETURNING clock_unix, clock_mode",
         params![to],
-        |r| r.get(0),
+        |r| {
+            Ok(ClockReading {
+                clock_unix: r.get(0)?,
+                mode: ClockMode::from_db(&r.get::<_, String>(1)?),
+            })
+        },
     )?;
     let advance = EventBody::WorldClockAdvanced(events::WorldChanged {
         subject: events::WorldSubject::default(),
         changes: events::WorldChanges::between(&from, &objects::world_object(tx)?),
     });
-    Ok((to, advance))
+    Ok((reading, advance))
 }

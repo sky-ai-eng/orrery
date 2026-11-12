@@ -2,8 +2,8 @@
 //! is set through the world, so no test waits for time to pass.
 
 use orrery_world::{
-    ActorKind, Attribution, ClockMode, ClockReading, DEFAULT_T0_UNIX, Door, Event, NewClock,
-    SYSTEM_ACTOR_ID, World, WorldError, WorldSecret,
+    ActorKind, Attribution, CheckStatus, ClockMode, ClockReading, DEFAULT_T0_UNIX, Door, Event,
+    NewCheckRun, NewClock, SYSTEM_ACTOR_ID, World, WorldError, WorldSecret,
 };
 
 const T0: i64 = DEFAULT_T0_UNIX;
@@ -136,6 +136,52 @@ fn a_write_first_records_an_advance_to_the_hosts_time() {
 }
 
 #[test]
+fn a_write_dated_with_a_time_the_world_answered_advances_to_that_time() {
+    let (_dir, w) = real_at(T0 + 100);
+    let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+    let (ci, _) = w.create_actor("ci-bot", ActorKind::Bot).unwrap();
+    let repo = w
+        .create_repo(
+            alice.id,
+            "webapp",
+            None,
+            false,
+            "main",
+            Attribution::new(alice.id, Door::Rest),
+        )
+        .unwrap();
+    w.set_host_time(T0 + 500);
+    let at = w.clock().unwrap();
+    // The host's second turns between the read and the write.
+    w.set_host_time(T0 + 501);
+    let before = last_seq(&w);
+    let run = w
+        .create_check_run(
+            Attribution::new(ci.id, Door::Rest),
+            NewCheckRun {
+                repo_id: repo.id,
+                head_sha: "1111111111111111111111111111111111111111",
+                name: "build",
+                status: CheckStatus::InProgress,
+                conclusion: None,
+                details_url: None,
+                external_id: None,
+                output: None,
+                started_clock_unix: Some(at),
+                completed_clock_unix: None,
+            },
+            at,
+        )
+        .unwrap();
+    assert_eq!(run.started_clock_unix, Some(T0 + 500));
+    assert_eq!(run.created_clock_unix, T0 + 500);
+    let added = since(&w, before);
+    assert_eq!(added.len(), 2);
+    assert_advance(&added[0], T0 + 100, T0 + 500, Door::Control);
+    assert_eq!(added[1].body.type_name(), "check_run:created");
+}
+
+#[test]
 fn the_clock_holds_while_the_host_is_behind_it() {
     let (_dir, w) = real_at(T0 + 500);
     w.set_host_time(T0 + 400);
@@ -210,7 +256,7 @@ fn making_a_world_manual_records_an_advance_to_the_present_and_stops_there() {
 
     w.set_host_time(T0 + 900);
     assert_eq!(w.clock().unwrap(), T0 + 700);
-    assert_eq!(w.advance_clock(60, CONTROL).unwrap(), T0 + 760);
+    assert_eq!(w.advance_clock(60, CONTROL).unwrap().clock_unix, T0 + 760);
 }
 
 #[test]

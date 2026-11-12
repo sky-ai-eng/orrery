@@ -135,13 +135,7 @@ async fn advance_clock(State(state): State<AppState>, body: Bytes) -> Response<B
         Err(resp) => return *resp,
     };
     match state.world.advance_clock(seconds, SYSTEM) {
-        Ok(clock) => json(
-            StatusCode::OK,
-            clock_body(ClockReading {
-                clock_unix: clock,
-                mode: ClockMode::Manual,
-            }),
-        ),
+        Ok(reading) => json(StatusCode::OK, clock_body(reading)),
         Err(e @ WorldError::ClockOutOfRange { .. }) => errors(
             StatusCode::BAD_REQUEST,
             "OUT_OF_RANGE",

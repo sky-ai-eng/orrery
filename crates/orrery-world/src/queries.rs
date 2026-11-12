@@ -200,12 +200,13 @@ pub(crate) fn clock(conn: &Connection) -> Result<i64> {
     )
 }
 
-pub(crate) fn clock_mode(conn: &Connection) -> Result<ClockMode> {
-    Ok(
-        conn.query_row("SELECT clock_mode FROM world WHERE id = 1", [], |r| {
-            Ok(ClockMode::from_db(&r.get::<_, String>(0)?))
-        })?,
-    )
+/// The stored clock and its mode, in one read.
+pub(crate) fn clock_state(conn: &Connection) -> Result<(i64, ClockMode)> {
+    Ok(conn.query_row(
+        "SELECT clock_unix, clock_mode FROM world WHERE id = 1",
+        [],
+        |r| Ok((r.get(0)?, ClockMode::from_db(&r.get::<_, String>(1)?))),
+    )?)
 }
 
 pub(crate) fn last_seq(conn: &Connection) -> Result<i64> {

@@ -53,9 +53,10 @@ pub(crate) fn actor_ref(conn: &Connection, id: i64) -> Result<ActorRef> {
 }
 
 pub(crate) fn world_object(conn: &Connection) -> Result<WorldObject> {
+    let (clock_unix, clock_mode) = queries::clock_state(conn)?;
     Ok(WorldObject {
-        clock_unix: queries::clock(conn)?,
-        clock_mode: queries::clock_mode(conn)?,
+        clock_unix,
+        clock_mode,
     })
 }
 

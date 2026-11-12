@@ -428,10 +428,20 @@ impl World {
     /// appends nothing. The kernel never touches git: the caller has moved
     /// the base branch, and each named pull's ref, before it calls.
     ///
+    /// `at` is the time the caller read from [`World::clock`] and dated the
+    /// merge commit with, which a `real` world's clock is brought to for the
+    /// write, so the pull is merged at the commit's date.
+    ///
     /// A pull that is not open or is a draft, a `base` that is not the pull's
     /// base branch, or a named pull that is not open refuses the whole record.
-    pub fn record_merge(&self, pull_id: i64, by: Attribution, base: &RefMove<'_>) -> Result<Pull> {
-        self.write(by, |w| {
+    pub fn record_merge(
+        &self,
+        pull_id: i64,
+        by: Attribution,
+        base: &RefMove<'_>,
+        at: i64,
+    ) -> Result<Pull> {
+        self.write_at(at, by, |w| {
             let before = queries::require_pull(w.tx, pull_id)?;
             if before.state != PullState::Open || before.merged {
                 return Err(WorldError::InvalidTransition(format!(

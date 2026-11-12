@@ -49,7 +49,7 @@ impl WorldView for World {
     fn view_meta(&self) -> Result<ViewMeta> {
         self.with_conn(|conn| {
             Ok(ViewMeta {
-                clock_unix: self.reading(conn)?.clock_unix,
+                clock_unix: queries::clock(conn)?,
                 last_seq: queries::last_seq(conn)?,
             })
         })
