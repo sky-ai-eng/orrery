@@ -16,8 +16,9 @@ use axum::extract::{OriginalUri, Path as UrlPath, State};
 use axum::http::{Method, Response, StatusCode};
 use axum::routing::{get, post, put};
 use orrery_world::{
-    Actor, ActorEmail, ActorKind, Attribution, Door, LogOrder, SYSTEM_ACTOR_ID, WorldError,
-    validate_actor_kind, validate_login, validate_oauth_app_callback_url, validate_oauth_app_name,
+    Actor, ActorEmail, ActorKind, Attribution, ClockMode, ClockReading, Door, LogOrder,
+    SYSTEM_ACTOR_ID, WorldError, validate_actor_kind, validate_login,
+    validate_oauth_app_callback_url, validate_oauth_app_name,
 };
 use serde_json::value::RawValue;
 
@@ -27,7 +28,7 @@ use crate::{AppState, json};
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/clock", get(get_clock))
+        .route("/clock", get(get_clock).patch(patch_clock))
         .route("/clock/advance", post(advance_clock))
         .route("/actors", post(create_actor))
         .route("/actors/list", post(list_actors).get(get_actor_named_list))
@@ -92,8 +93,30 @@ async fn healthz(State(state): State<AppState>) -> Response<Body> {
 }
 
 async fn get_clock(State(state): State<AppState>) -> Response<Body> {
-    match state.world.clock() {
-        Ok(clock) => json(StatusCode::OK, clock_body(clock)),
+    match state.world.read_clock() {
+        Ok(reading) => json(StatusCode::OK, clock_body(reading)),
+        Err(e) => internal(e),
+    }
+}
+
+/// Change how the clock moves. `mode` is the one field, and absent keeps
+/// it.
+async fn patch_clock(State(state): State<AppState>, body: Bytes) -> Response<Body> {
+    let mut fields = Fields::parse(&body);
+    let mode: Option<ClockMode> = fields.optional_not_null("mode");
+    let mode = match fields.finish(Some(mode)) {
+        Ok(m) => m,
+        Err(resp) => return *resp,
+    };
+    let changed = match mode {
+        Some(mode) => state.world.set_clock_mode(mode, SYSTEM),
+        None => state.world.read_clock(),
+    };
+    match changed {
+        Ok(reading) => json(StatusCode::OK, clock_body(reading)),
+        Err(e @ WorldError::ClockAhead { .. }) => {
+            errors(StatusCode::CONFLICT, "CLOCK_AHEAD", &e.to_string(), None)
+        }
         Err(e) => internal(e),
     }
 }
@@ -112,13 +135,16 @@ async fn advance_clock(State(state): State<AppState>, body: Bytes) -> Response<B
         Err(resp) => return *resp,
     };
     match state.world.advance_clock(seconds, SYSTEM) {
-        Ok(clock) => json(StatusCode::OK, clock_body(clock)),
+        Ok(reading) => json(StatusCode::OK, clock_body(reading)),
         Err(e @ WorldError::ClockOutOfRange { .. }) => errors(
             StatusCode::BAD_REQUEST,
             "OUT_OF_RANGE",
             &e.to_string(),
             Some("seconds"),
         ),
+        Err(e @ WorldError::ClockIsReal) => {
+            errors(StatusCode::CONFLICT, "CLOCK_IS_REAL", &e.to_string(), None)
+        }
         Err(e) => internal(e),
     }
 }
@@ -427,11 +453,15 @@ fn read_oauth_app(state: &AppState, client_id: String) -> Response<Body> {
     }
 }
 
-fn clock_body(clock: i64) -> serde_json::Value {
-    let rfc3339 = jiff::Timestamp::from_second(clock)
+fn clock_body(reading: ClockReading) -> serde_json::Value {
+    let rfc3339 = jiff::Timestamp::from_second(reading.clock_unix)
         .map(|t| t.to_string())
         .unwrap_or_else(|_| "invalid".to_string());
-    serde_json::json!({ "clock_unix": clock, "rfc3339": rfc3339 })
+    serde_json::json!({
+        "clock_unix": reading.clock_unix,
+        "rfc3339": rfc3339,
+        "mode": reading.mode,
+    })
 }
 
 /// A control-plane body, read one field at a time so that a refusal names
@@ -508,6 +538,25 @@ impl Fields {
         self.read.push(name);
         let raw = self.unread.remove(name)?;
         self.decode::<Option<T>>(name, &raw).flatten()
+    }
+
+    /// A field the route can go without and that has no null value: absent
+    /// is `None`, and `null` is a fault, recorded like one that fails to
+    /// decode.
+    pub(crate) fn optional_not_null<T: serde::de::DeserializeOwned>(
+        &mut self,
+        name: &'static str,
+    ) -> Option<T> {
+        self.read.push(name);
+        let raw = self.unread.remove(name)?;
+        let value = self.decode::<Option<T>>(name, &raw)?;
+        if value.is_none() {
+            self.fault(Fault::invalid(
+                format!("{name} cannot be null; leave it out to keep its value"),
+                name,
+            ));
+        }
+        value
     }
 
     fn decode<T: serde::de::DeserializeOwned>(

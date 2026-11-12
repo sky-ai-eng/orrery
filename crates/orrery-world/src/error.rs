@@ -30,6 +30,14 @@ pub enum WorldError {
         remaining: i64,
         latest: jiff::Timestamp,
     },
+    #[error(
+        "the clock follows the host's time in a real world, so it is never advanced by hand; make the world manual to advance it"
+    )]
+    ClockIsReal,
+    #[error(
+        "the world's clock, {clock}, is ahead of the host's time, {host} (Unix seconds), and never goes back; the world can be made real once the host's time passes its clock"
+    )]
+    ClockAhead { clock: i64, host: i64 },
     #[error("an open pull request already exists for head {0:?}")]
     PullExists(String),
     #[error("no pull with id {0}")]

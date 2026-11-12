@@ -9,7 +9,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    ActorEmail, ActorKind, CheckConclusion, CheckStatus, OrgRole, PullState, ReviewState, TeamRole,
+    ActorEmail, ActorKind, CheckConclusion, CheckStatus, ClockMode, OrgRole, PullState,
+    ReviewState, TeamRole,
 };
 
 /// How a write reached the world.
@@ -407,6 +408,10 @@ object! {
     WorldObject, WorldChanges {
         /// The world clock, in Unix seconds.
         clock_unix: i64,
+        /// How the clock moves. Events appended before the world stored it
+        /// carry none, and every world was `manual` then.
+        #[serde(default)]
+        clock_mode: ClockMode,
     }
 }
 
@@ -759,7 +764,12 @@ macro_rules! event_types {
 event_types! {
     /// A world was created, with its system actor.
     WorldCreated(WorldCreated) = "world:created",
+    /// The clock moved forward: by an advance in a `manual` world, or to the
+    /// host's time, as a write of its own, before a `real` world's write or a
+    /// change of mode.
     WorldClockAdvanced(WorldChanged) = "world:clock_advanced",
+    /// The clock's mode changed.
+    WorldClockModeSet(WorldChanged) = "world:clock_mode_set",
     /// A forked world took its own secret, and every credential it inherited
     /// was derived again under it.
     WorldRekeyed(WorldRekeyed) = "world:rekeyed",

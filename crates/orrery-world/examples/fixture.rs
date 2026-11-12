@@ -188,6 +188,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
             started_clock_unix: Some(DEFAULT_T0_UNIX + 3600),
             completed_clock_unix: None,
         },
+        w.clock()?,
     )?;
     w.update_check_run(
         check.id,
@@ -198,6 +199,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
             completed_clock_unix: Some(DEFAULT_T0_UNIX + 4200),
             ..Default::default()
         },
+        w.clock()?,
     )?;
     let merge = RefMove {
         name: "refs/heads/main",
@@ -209,7 +211,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         commits: Vec::new(),
         commit_count: 0,
     };
-    w.record_merge(merged.id, by(bob.id), &merge)?;
+    w.record_merge(merged.id, by(bob.id), &merge, w.clock()?)?;
 
     let closed = w.create_pull(
         by(bob.id),

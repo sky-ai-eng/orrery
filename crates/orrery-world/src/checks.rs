@@ -35,8 +35,16 @@ pub struct CheckRunPatch<'a> {
 }
 
 impl World {
-    pub fn create_check_run(&self, by: Attribution, new: NewCheckRun<'_>) -> Result<CheckRun> {
-        self.write(by, |w| {
+    /// Create a check run. `at` is the time the caller read from
+    /// [`World::clock`] to fill in the timestamps it was not given, which a
+    /// `real` world's clock is brought to for the write.
+    pub fn create_check_run(
+        &self,
+        by: Attribution,
+        new: NewCheckRun<'_>,
+        at: i64,
+    ) -> Result<CheckRun> {
+        self.write_at(at, by, |w| {
             let tx = w.tx;
             let clock = queries::clock(tx)?;
             let run = tx.query_row(
@@ -74,14 +82,15 @@ impl World {
     }
 
     /// Write the fields `patch` names. A patch that changes nothing writes
-    /// nothing.
+    /// nothing. `at` is as [`World::create_check_run`] takes it.
     pub fn update_check_run(
         &self,
         id: i64,
         by: Attribution,
         patch: CheckRunPatch<'_>,
+        at: i64,
     ) -> Result<CheckRun> {
-        self.write(by, |w| {
+        self.write_at(at, by, |w| {
             let tx = w.tx;
             let before = objects::check_run_object(tx, id)?;
             let run = tx

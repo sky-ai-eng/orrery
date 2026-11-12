@@ -660,7 +660,7 @@ pub(crate) async fn merge_pull(
             face.git.pin_pull_ref(&repo, number, &merge_sha)?;
             pinned += 1;
         }
-        face.world.record_merge(pull.id, by, &base)?;
+        face.world.record_merge(pull.id, by, &base, clock)?;
         Ok(())
     };
     if let Err(e) = record() {

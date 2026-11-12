@@ -190,12 +190,23 @@ pub(crate) fn row_to_check_run(r: &Row<'_>) -> rusqlite::Result<CheckRun> {
     })
 }
 
+/// The stored clock. In a `real` world a read answers the later of this and
+/// the host's time, and a write moves it to the host's time before it runs.
 pub(crate) fn clock(conn: &Connection) -> Result<i64> {
     Ok(
         conn.query_row("SELECT clock_unix FROM world WHERE id = 1", [], |r| {
             r.get(0)
         })?,
     )
+}
+
+/// The stored clock and its mode, in one read.
+pub(crate) fn clock_state(conn: &Connection) -> Result<(i64, ClockMode)> {
+    Ok(conn.query_row(
+        "SELECT clock_unix, clock_mode FROM world WHERE id = 1",
+        [],
+        |r| Ok((r.get(0)?, ClockMode::from_db(&r.get::<_, String>(1)?))),
+    )?)
 }
 
 pub(crate) fn last_seq(conn: &Connection) -> Result<i64> {
