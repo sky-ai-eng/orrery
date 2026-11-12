@@ -84,6 +84,7 @@ async fn healthz(State(state): State<AppState>) -> Response<Body> {
                 "status": "ok",
                 "clock_unix": clock,
                 "build": crate::BUILD_COMMIT,
+                "world_schema": orrery_world::SCHEMA_VERSION,
                 "config_sha256": state.config_sha256,
             }),
         ),

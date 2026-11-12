@@ -7,6 +7,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::types::{
     ActorEmail, ActorKind, CheckConclusion, CheckStatus, OrgRole, PullState, ReviewState, TeamRole,
@@ -852,4 +853,22 @@ pub fn schema_file() -> String {
     let mut text = serde_json::to_string_pretty(&schema()).expect("a schema serializes");
     text.push('\n');
     text
+}
+
+/// The SHA-256 of [`schema`], as lowercase hex, without its `description`
+/// and `title` annotations: doc comments become those, and editing one
+/// changes nothing a world stores. `tests/fixtures/event-schemas` records it
+/// for each schema version.
+pub fn schema_digest() -> String {
+    fn strip(schema: &mut schemars::Schema) {
+        if let Some(object) = schema.as_object_mut() {
+            object.remove("description");
+            object.remove("title");
+        }
+        schemars::transform::transform_subschemas(&mut strip, schema);
+    }
+    let mut schema = schemars::schema_for!(Event);
+    strip(&mut schema);
+    let text = serde_json::to_string(&schema).expect("a schema serializes");
+    hex::encode(Sha256::digest(text))
 }
