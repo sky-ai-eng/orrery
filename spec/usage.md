@@ -22,7 +22,7 @@ What this buys:
 Namespaced away from the face (its own path prefix/port) so it can never be mistaken for mocked surface. It holds only what no public GitHub API can express:
 
 - **Identity** — mint actors and their tokens (GitHub cannot create users via API); issue another token for an existing actor (`POST /_orrery/actors/{login}/tokens`); set an actor's email addresses, which is verified and which is primary (`PUT /_orrery/actors/{login}/emails` — a verification link and the settings page do this, no API); register OAuth apps (`POST /_orrery/oauth-apps` — GitHub creates them only in its web settings) and issue another client secret for one (`POST /_orrery/oauth-apps/{client_id}/secrets` — its settings page generates one); list a world's actors with their addresses (`POST /_orrery/actors/list`) and its OAuth apps (`POST /_orrery/oauth-apps/list`), which is how a caller holding a world it did not build learns which actors and apps it may issue credentials for; and read one actor (`GET /_orrery/actors/{login}`, the login compared without case) or one OAuth app (`GET /_orrery/oauth-apps/{client_id}`), answered as its item in the list, for a caller that already holds the key. These reads are the control plane's, not a copy of GitHub's `GET /users` or `GET /users/{username}`: actors and apps are created here, the REST face needs a token, and the caller of a re-keyed world holds none until it issues one. No read returns a stored token or secret, as on GitHub, so issuing a new one is the way in to an actor or app someone else made. Every one issued stays valid. Signing in and authorizing an app are the face's (`/login/oauth/*`, `surface-github.md` §2).
-- **Time** — set and advance the virtual clock (see below).
+- **Time** — read the clock, advance a `manual` world's, and change its mode (see below).
 - **Fabricated subsystem state** — Actions workflow runs, jobs, and logs, when a scenario needs a consumer's log-reading code to work. Real GitHub has no API to create a run in an arbitrary state; Actions itself does it. None is served yet.
 - **Engine operations** — snapshots and restore, listing snapshots (`POST /_orrery/snapshots/list`), diff, reading the log of events (`POST /_orrery/log/list`, `events.md`), following it as it grows (`GET /_orrery/log/stream`, below), and reading the events' JSON Schema (`GET /_orrery/log/schema`). The log read is oldest first or, with `"sort_key": "seq", "sort_dir": "desc"`, newest first. `after_seq` narrows the read to what followed a position another call reported, such as a diff's `log.shared_seq` or a snapshot's `last_seq`. As for the stream, a position is 0 or the `seq` of an event in the log, and `after_seq` defaults to 0; any other number is `404 NOT_FOUND` on `after_seq`, with the log's newest `seq` in the message, because the events above a position a restore discarded did not follow it. The log is paged as every list is (**Lists**, below). A token resumes from the last event it served. If a restore has discarded that event, the token is `400 INVALID_ARGUMENT` on `page_token`, and the walk starts again from the first page. A `seq` is issued once, so a log that still holds that event holds the same events up to it, and a walk across a restore that kept it goes on. Forking a world is the CLI's `orrery fork`, below, because it acts on a world no process is serving.
 
@@ -107,17 +107,32 @@ A few rules follow from reading states rather than events:
 
 ## Time: the clock is an input, not a history mechanism
 
-The virtual clock is one value — what time the world believes it is — consulted whenever the engine stamps something (`created_at`, `merged_at`) or computes staleness. It is a row in `world.db`, part of the state like everything else. Two operations:
+The clock is what time the world holds it is, consulted whenever the engine stamps something (`created_at`, `merged_at`) or computes staleness. It is stored in `world.db`, part of the state like everything else, with its mode, which says how it moves:
 
-- **Set** — once, when the world is created: `t0` in the instance config, or `orrery create --t0`.
-- **Advance** — forward only, any time (`POST /_orrery/clock/advance` with `seconds`). Writes one value, mutates nothing else (rule 4: nothing in the world decays or fires spontaneously with time). The clock stops at 9999-12-30T22:00:00Z, the latest time the faces can render; an advance past it is `400 OUT_OF_RANGE` on `seconds` and moves nothing.
+- **`manual`**, the default: the clock moves only when a caller advances it. Two runs of one script against a manual world make the same log, which is what a scripted test needs.
+- **`real`**: the clock is the host's time, and nobody advances it. This is for a world that stands in for GitHub in front of a running application, which compares the times the world stamps, such as a token's expiry or a rate limit's reset, with its own clock, and sends the world times it made from its own clock. Two runs of one script against a real world make different logs, and choosing `real` accepts that.
+
+The operations:
+
+- **Create** — `orrery create --clock manual|real`, or `clock` in the instance config beside `t0`, `manual` when absent. A manual world's clock starts at `t0` (`orrery create --t0`, or `t0` in the config). A real world's starts at the host's time, so a `t0` with `real` is refused. Like `t0`, the config's `clock` is read only when `serve` creates the world.
+- **Read** — `GET /_orrery/clock` answers `clock_unix`, the same instant as `rfc3339`, and `mode`.
+- **Advance** — a manual world's, forward only, any time (`POST /_orrery/clock/advance` with `seconds`, answered as a read). Writes one value, mutates nothing else (rule 4: nothing in the world decays or fires spontaneously with time). The clock stops at 9999-12-30T22:00:00Z, the latest time the faces can render; an advance past it is `400 OUT_OF_RANGE` on `seconds` and moves nothing. A real world's clock is never advanced by hand: the call is `409 CLOCK_IS_REAL` and moves nothing.
+- **Change the mode** — `PATCH /_orrery/clock` with `{"mode": "manual"}` or `{"mode": "real"}`, answered as a read. An absent `mode` keeps the mode, and `null` is `400 INVALID_ARGUMENT`. A change to `real` first advances the clock to the host's time. Since the clock never goes back, a world whose clock is ahead of the host's time cannot become real: the change is `409 CLOCK_AHEAD` until the host's time passes the clock. A change to `manual` first advances the clock to the present, and the clock stays there. Each change is a logged write whose event carries the new mode, after the advance, which is a write of its own (`events.md`).
+
+**How a real world keeps time.** Before a write, the world reads the host's time once. If it is ahead of the stored clock, the world first records an advance to it, a `world:clock_advanced` event as a manual advance makes, as a write of its own; the write then stamps from the stored clock, as in a manual world. So every time a write used is in the log, and a seed snapshot plus the log still rebuilds the world (rule 5). A write that fails, or that appends nothing, keeps no advance. An idle world writes nothing: there is no timer and no event per second.
+
+A read that needs the time, such as `GET /_orrery/clock`, `GET /_orrery/healthz`, an expiry check, or a rate limit's reset, answers the later of the host's time and the stored clock, and writes nothing. That is a time no event records, and it is outside what replay rebuilds, because replay re-executes writes, not reads.
+
+The clock never goes back. When the host's time is behind the stored clock, because the host's clock was stepped back or the world came from a machine whose clock was ahead, the clock holds at the stored value, for reads and writes alike, until the host's time passes it.
+
+**Snapshots, restores, and forks** carry the mode with the clock. Taking a snapshot of a real world first records an advance to the host's time, so the snapshot's `clock_unix` is the time it was taken. A restored or forked world holds the snapshot's older clock, so its first read answers the present and its first write records the advance to it: a pull request untouched for 30 days in the snapshot is 30 days old the moment the snapshot is restored. Re-keying a fork is its first write, so `orrery fork` of a real world records the advance, through the CLI, and reports the present as `clock_unix`.
 
 Authoring history is replaying it under the crank: set clock to T0, make the calls (they stamp T0), advance, repeat. Backdated worlds need no backdoor.
 
 **There is no clock rollback in a live world.** Rewinding time over existing state is meaningless. What feels like rollback is a world operation:
 
 - **Coarse:** restore or fork from a named snapshot (the clock value travels inside it).
-- **Fine:** replay — rule 5 guarantees seed + log rebuilds the world at any prefix. The log is the fine-grained history; snapshots are memoized prefixes for speed. "State as of event N" = fork from the nearest earlier snapshot, re-execute each write's operation through its door up to N; the engine makes the rest of each write's events again. Credentials replay too: each is derived under the world's secret, which is never in the log, and a world is re-keyed only at its creation (one `world:rekeyed` event, when it is made from another world's state). So every event after that was made under the secret the world holds now, and a replay reads it from the live world and re-executes under it rather than re-keying.
+- **Fine:** replay — rule 5 guarantees seed + log rebuilds the world at any prefix. The log is the fine-grained history; snapshots are memoized prefixes for speed. "State as of event N" = fork from the nearest earlier snapshot, re-execute each write's operation through its door up to N; the engine makes the rest of each write's events again. A real world's clock moves in a replay as its logged advances moved it, never by the replaying host's time. Credentials replay too: each is derived under the world's secret, which is never in the log, and a world is re-keyed only at its creation (one `world:rekeyed` event, when it is made from another world's state). So every event after that was made under the secret the world holds now, and a replay reads it from the live world and re-executes under it rather than re-keying.
 
 Snapshots are therefore taken at explicit moments only — named test points (`before`/`after`), seed caches, a long-lived world's reset point — never per event.
 
@@ -141,14 +156,14 @@ Snapshots are therefore taken at explicit moments only — named test points (`b
 
 Two commands make an instance's world and exit, for anything that supervises many worlds or builds them ahead of time. Neither is a control-plane alias: no world is running for them to call.
 
-- `orrery create --instance <dir> [--t0 <rfc3339>] [--secret local|random]` creates the world at `<dir>/world`, exactly as `serve` does on first run with the same `t0` and `secret`, and writes no config file. `t0` defaults to 2020-01-01T00:00:00Z, and `secret` to `local`. An instance that already holds a world is refused.
+- `orrery create --instance <dir> [--t0 <rfc3339>] [--clock manual|real] [--secret local|random]` creates the world at `<dir>/world`, exactly as `serve` does on first run with the same `t0`, `clock`, and `secret`, and writes no config file. `t0` defaults to 2020-01-01T00:00:00Z, `clock` to `manual`, and `secret` to `local`. A `t0` with `--clock real` is refused, since a real world's clock starts at the host's time (**Time**, above). An instance that already holds a world is refused.
 - `orrery fork (--instance <dir> --snapshot <name> | --world <dir>) --dest <dir> [--secret local|random]` copies a world into a new instance and re-keys it under `secret` (default `local`), so the fork accepts none of its source's credentials, except that two local worlds derive the same ones. The source is `<instance>/snapshots/<name>`, or any world directory, such as a stopped instance's `world/` or a built template. It is only read, so any number of forks may copy it at once. A world that `serve` is running can change mid-copy, so it is never a `--world` source: snapshot it and fork the snapshot.
 
 With `--json`, each prints exactly one object on stdout. Success is `{"instance": "<dest>", "world": "<dest>/world", "clock_unix": <n>}`, with absolute paths. Failure is the control plane's error shape, `{"errors": [{"reason", "message", "field"}]}`, and exit status 1. `field` names the flag the failure is about (`t0`, `snapshot`, `world`, `instance`, or `dest`), and is absent for `INTERNAL`.
 
 | `reason` | When |
 | --- | --- |
-| `INVALID_ARGUMENT` | a malformed snapshot name or `t0` |
+| `INVALID_ARGUMENT` | a malformed snapshot name or `t0`, or a `t0` with `--clock real` |
 | `NOT_FOUND` | no such snapshot or world directory |
 | `ALREADY_EXISTS` | the destination already holds a world |
 | `INTERNAL` | anything else |
@@ -188,7 +203,7 @@ The egress is the config's alone: proxy variables in `serve`'s environment, such
   export GIT_COMMITTER_DATE='@<clock_unix> +0000'
   ```
 
-  A script runs `eval "$(orrery env)"` before each commit, and again after advancing the clock.
+  A script runs `eval "$(orrery env)"` before each commit, and again after advancing the clock. In a `real` world, `orrery env` reads the present, so the commits it dates carry the real time.
 
 - **A signature is part of its commit.** A signed commit's id covers its signature, so a replay makes the same commit only if the signature comes out the same. `ssh-keygen` signs the same payload with the same Ed25519 or RSA key the same way every time, and with an ECDSA or security key differently each time, so a scenario that signs commits uses an Ed25519 or RSA key. The verdict on a signature depends on the commit and the world alone (`surface-github.md` §1.10).
 

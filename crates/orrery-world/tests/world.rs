@@ -184,7 +184,7 @@ fn the_world_secret_never_reaches_the_log() {
     let log = serde_json::to_string(&w.log_after(0, 100).unwrap()).unwrap();
     assert_eq!(
         body(&w.log_after(0, 1).unwrap()[0])["object"],
-        serde_json::json!({ "clock_unix": DEFAULT_T0_UNIX })
+        serde_json::json!({ "clock_unix": DEFAULT_T0_UNIX, "clock_mode": "manual" })
     );
     assert!(!log.contains(&"ab".repeat(32)), "{log}");
     assert!(!log.contains(&token), "{log}");

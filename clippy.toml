@@ -2,11 +2,13 @@
 # Wall-clock time and randomness are compile-time errors everywhere; the world's
 # only time source is the virtual clock in world.db. Real time is allowed in
 # three places, each carrying an #[allow] with a justification comment:
-# operator-facing CLI edges; the one read in orrery-world that records the real
-# time each action-log entry is appended at (`wall_unix_ms`), which nothing in
-# the world reads; and the one read in orrery-outbound that starts an outbound
-# attempt's clock, which bounds the attempt and measures how long it took, and
-# reaches a world only as a result a logged write records.
+# operator-facing CLI edges; the one read of the host's time in orrery-world,
+# which each action-log entry records as the time it was appended at
+# (`wall_unix_ms`), which nothing in the world reads, and which a `real`
+# world's clock follows, reaching the world only as an advance the log records
+# before any write uses it; and the one read in orrery-outbound that starts an
+# outbound attempt's clock, which bounds the attempt and measures how long it
+# took, and reaches a world only as a result a logged write records.
 disallowed-methods = [
     { path = "std::time::SystemTime::now", reason = "the world's time source is the virtual clock (orrery-world); real time is a hidden input that breaks replay" },
     { path = "std::time::Instant::now", reason = "the world's time source is the virtual clock; use it, or justify an #[allow] at an operator-facing edge" },

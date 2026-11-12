@@ -8,6 +8,14 @@ dir = "./instance"
 # the clock lives in the world, not the config. Omit for the fixed default
 # (2020-01-01T00:00:00Z).
 t0 = "2026-01-01T00:00:00Z"
+# How a newly created world's clock moves. "manual" moves only by
+# POST /_orrery/clock/advance, so two runs of one script make the same log.
+# "real" follows the host's time, for a world standing in for GitHub in front
+# of a running application that compares the times the world stamps with its
+# own clock. A real world's clock starts at the host's time, so t0 with
+# "real" is refused. Ignored when the world already exists: the mode lives in
+# the world, and PATCH /_orrery/clock changes it.
+# clock = "manual"
 # The secret a newly created world derives its fake credentials from. "local"
 # is a fixed, well-known one, so local runs mint the same tokens every time;
 # "random" makes them unguessable, as a world on the public internet needs.

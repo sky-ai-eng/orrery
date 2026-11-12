@@ -38,7 +38,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 3. **A write's operation comes first.** A write appends its operation's event, then one event for each consequence, in the order the engine made them, in one transaction. A reader holding `write.events` events from `write.seq` holds the whole write. A write that changes nothing appends nothing.
 4. **Every event has one subject:** the object it is about, by its stable id, its names at that moment, and the objects that contain it as top-level keys (`owner`, `repo`, `pull`, `team`). A reader can keep one repository's or one account's events without knowing every type, and an event still names its object after the object is renamed. A ref and a commit have no id, so a ref is named by its name and a commit by its sha.
 5. **Bodies carry values.** A create carries `object`, every stored field of the new object. A change carries `changes`, each field that changed as `{"from", "to"}`; a field holding a set, such as labels or requested reviewers, is its whole list before and after. A delete carries `object` as it was. Timestamps the engine sets, such as a pull's `updated_unix`, are fields like any other. Every value a write stores is in one of its events, so a reader learns each change from the log without knowing the engine's behavior. No event holds a credential: tokens, client secrets, and codes are derived from the world secret and the numbers the events carry.
-6. **Attribution** is who made the change (`actor`), how it reached the world (`door`: `rest`, `graphql`, `git`, `web` for the OAuth web flow, `control`, or `cli`), and the OAuth app the call came through (`app`, or `null`): the one whose token authenticated it, or whose authorize page or client credentials it used. Control-plane and CLI writes are the system actor's. A scenario driver is a client of the faces and the control plane, so it is not a door (`usage.md`).
+6. **Attribution** is who made the change (`actor`), how it reached the world (`door`: `rest`, `graphql`, `git`, `web` for the OAuth web flow, `control`, or `cli`), and the OAuth app the call came through (`app`, or `null`): the one whose token authenticated it, or whose authorize page or client credentials it used. Control-plane and CLI writes are the system actor's, and so is the advance a `real` world records before a write ([below](#the-clock-in-a-real-world)). A scenario driver is a client of the faces and the control plane, so it is not a door (`usage.md`).
 7. **Shapes only grow.** Once a type ships it keeps its meaning and its fields. New fields and types are added, and none are removed. A reader skips a type it does not know.
 
 ## How the rules are checked
@@ -73,7 +73,8 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | Type | Made by | Body | Consequences in the same write |
 | --- | --- | --- | --- |
 | `world:created` | creating a world | `object` | `actor:created` for the system actor |
-| `world:clock_advanced` | advancing the clock | `changes` | none |
+| `world:clock_advanced` | advancing a `manual` world's clock; in a `real` world, a write of its own before a write that used the host's time ([below](#the-clock-in-a-real-world)) | `changes` | none |
+| `world:clock_mode_set` | changing the clock's mode | `changes` | none |
 | `world:rekeyed` | forking a world | `rekeyed`: how many of each credential were derived again | none |
 | `actor:created` | creating an actor, with its first token and its address | `object` | none |
 | `actor:emails_set` | setting an actor's addresses | `changes` | none |
@@ -126,6 +127,14 @@ A push's ref events come first, then what the moves did to pull requests (`surfa
 A pull request whose `updated_unix` moves without another change gets a `pull:updated` before its item.
 
 Last come the verdicts the push stores: a `commit:verified` for each commit the ref events list, each once, in the order they list them, whose signature is `valid` and that has no stored verdict yet (`surface-github.md` §1.10).
+
+### The clock in a real world
+
+A `real` world's clock follows the host's time (`usage.md`, "Time"). Before a write, the world reads the host's time, and when it is ahead of the stored clock, the world moves the clock to it and appends a `world:clock_advanced` as a write of its own, then the write that caused it, in the same transaction. The advance is the system actor's, through the control plane, whose `POST /_orrery/clock/advance` makes the same advance, or through the CLI when the write that caused it is a CLI command's, as a fork's re-keying is. Both writes' events carry the advanced clock as `clock_unix`. A write that fails or appends nothing appends no advance either. Taking a snapshot of a real world appends an advance alone, through the control plane.
+
+A change of mode is a write whose `world:clock_mode_set` carries the mode before and after. A change to `real`, and a change from `real` to `manual`, first append the advance that brings the clock to the host's time, as a write of its own, when the host's time is ahead of the clock.
+
+A `world:created` carries the mode in its `object`. One appended before a world stored the mode carries none, and every world was `manual` then.
 
 ### Ref events
 

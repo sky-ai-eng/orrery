@@ -33,6 +33,61 @@ impl ActorKind {
     }
 }
 
+/// How a world's clock moves (spec/usage.md, "Time").
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ClockMode {
+    /// Only an advance moves it.
+    #[default]
+    Manual,
+    /// It follows the host's time.
+    Real,
+}
+
+impl ClockMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClockMode::Manual => "manual",
+            ClockMode::Real => "real",
+        }
+    }
+
+    pub(crate) fn from_db(s: &str) -> ClockMode {
+        match s {
+            "real" => ClockMode::Real,
+            _ => ClockMode::Manual,
+        }
+    }
+}
+
+/// How a new world's clock starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewClock {
+    /// `manual`, at `t0_unix`.
+    Manual { t0_unix: i64 },
+    /// `real`, at the host's time.
+    Real,
+}
+
+/// A world's clock as a read answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ClockReading {
+    /// What time the world holds it is, in Unix seconds. In a `real` world,
+    /// the later of the host's time and the stored clock.
+    pub clock_unix: i64,
+    pub mode: ClockMode,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Actor {
     pub id: i64,

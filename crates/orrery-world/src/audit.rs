@@ -46,6 +46,7 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
             ("clock_unix", Field("clock_unix")),
             ("secret", Credential),
             ("log_entries", LogLength),
+            ("clock_mode", Field("clock_mode")),
         ],
     ),
     (
