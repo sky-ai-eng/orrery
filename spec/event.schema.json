@@ -1920,7 +1920,7 @@
         },
         "test_merge_stale": {
           "default": false,
-          "description": "Whether the head or the base branch has moved since the pull's\nlast test merge started. Events appended before the world stored\nit carry none, and read as `false`.",
+          "description": "Whether the head or the base branch has moved since the pull's\nlast test merge started. Events appended before the world stored\nit carry none. When the world began to store it, each pull's was\nits `base_moved`, and no event records that.",
           "type": "boolean"
         },
         "title": {

@@ -20,8 +20,8 @@ use sha2::{Digest, Sha256};
 
 use crate::pulls::pull_by_path_number;
 use crate::render::{
-    MergeRefs, check_run_json, comment_json, full_pull_json, mergeability, org_full_json,
-    pull_json, repo_json, review_json, team_full_json, team_json, user_full_json,
+    MergeRead, MergeRefs, check_run_json, comment_json, full_pull_json, merge_read, org_full_json,
+    pull_json, repo_json, review_json, team_full_json, team_json, test_merge, user_full_json,
 };
 use crate::{
     GithubFace, github_error, internal, json_response, media, orrery_unsupported_field, parse_form,
@@ -185,11 +185,20 @@ pub(crate) async fn get_pull(
         Ok(refs) => refs,
         Err(e) => return internal(e),
     };
-    drop(held);
     if let Some(media) = media::diff_media(&headers) {
+        drop(held);
         return pull_diff(&bare, &refs.diff_base(&pull), &pull.head_sha, &media);
     }
-    let verdict = match mergeability(&face, &repo, &pull, &refs, caller.via(Door::Rest)) {
+    // A stale test merge starts under the hold, so no push lands between
+    // the read of the pull and the start.
+    let read = merge_read(&face.world, &pull, &refs, caller.via(Door::Rest));
+    drop(held);
+    let verdict = match read {
+        Ok(MergeRead::Known(verdict)) => Ok(verdict),
+        Ok(MergeRead::TestMerge { base, head }) => test_merge(&face, &repo, base, head),
+        Err(e) => return internal(e),
+    };
+    let verdict = match verdict {
         Ok(v) => v,
         Err(e) => return internal(e),
     };

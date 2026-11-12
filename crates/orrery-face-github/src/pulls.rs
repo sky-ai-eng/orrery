@@ -15,7 +15,8 @@ use orrery_world::{
 };
 
 use crate::render::{
-    comment_json, full_pull_json, label_json, landed_mergeability, pull_json, review_json,
+    Mergeability, comment_json, full_pull_json, label_json, landed_mergeability, pull_json,
+    review_json,
 };
 use crate::{
     GithubFace, github_error, internal, json_response, media, orrery_unsupported_field,
@@ -136,7 +137,8 @@ pub(crate) async fn create_pull(
                     &repo,
                     &owner_actor,
                     &pull,
-                    landed_mergeability(&face, &repo, &pull, by, true),
+                    // Opening the pull started its test merge.
+                    Mergeability::Unknown,
                 ),
             ),
             Err(e) => internal(e),
@@ -357,7 +359,11 @@ pub(crate) async fn patch_pull(
             &repo,
             &owner_actor,
             &pull,
-            landed_mergeability(&face, &repo, &pull, by, started),
+            if started {
+                Mergeability::Unknown
+            } else {
+                landed_mergeability(&face, &repo, &pull, by)
+            },
         ),
     )
 }

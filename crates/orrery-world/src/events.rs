@@ -501,7 +501,8 @@ object! {
         base_moved: bool,
         /// Whether the head or the base branch has moved since the pull's
         /// last test merge started. Events appended before the world stored
-        /// it carry none, and read as `false`.
+        /// it carry none. When the world began to store it, each pull's was
+        /// its `base_moved`, and no event records that.
         #[serde(default)]
         test_merge_stale: bool,
     }
