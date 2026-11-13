@@ -53,7 +53,7 @@ pub(crate) fn paginate<T>(
 ) -> Vec<T> {
     items
         .into_iter()
-        .skip((page - 1) * per_page)
+        .skip((page - 1).saturating_mul(per_page))
         .take(per_page)
         .collect()
 }
@@ -839,16 +839,7 @@ pub(crate) async fn get_org(
 /// installation token on the authenticated-user routes: there is no user
 /// behind it.
 pub(crate) fn refuse_integration(actor: &Actor) -> Option<Response<Body>> {
-    (actor.kind == orrery_world::ActorKind::Bot).then(|| {
-        json_response(
-            StatusCode::FORBIDDEN,
-            serde_json::json!({
-                "message": "Resource not accessible by integration",
-                "documentation_url": "https://docs.github.com/rest",
-                "status": "403",
-            }),
-        )
-    })
+    (actor.kind == orrery_world::ActorKind::Bot).then(crate::apps::not_accessible)
 }
 
 /// The actor's stored addresses, primary first. Every actor starts with one

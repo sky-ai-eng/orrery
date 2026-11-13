@@ -19,8 +19,8 @@ pub const INSTALLATION_TOKEN_TTL_SECONDS: i64 = 3600;
 /// The most callback URLs an app holds, as on GitHub.
 const MAX_CALLBACK_URLS: usize = 10;
 
-/// An app with its bot and its owner. The bot's columns start at 6 and the
-/// owner's at 10, each in [`queries::ACTOR_COLUMNS`]'s order.
+/// An app with its bot and its owner, each as [`queries::ACTOR_COLUMNS`],
+/// the bot's first.
 const APP_SELECT: &str = "SELECT a.id, o.name, o.client_id, o.callback_url, o.created_clock_unix,
             a.permissions, a.events,
             b.id, b.login, b.kind, b.created_clock_unix,
@@ -30,8 +30,8 @@ const APP_SELECT: &str = "SELECT a.id, o.name, o.client_id, o.callback_url, o.cr
      JOIN actors b ON b.id = a.bot_id
      JOIN actors w ON w.id = a.owner_id";
 
-/// An installation with its app's slug and client id and its account, whose
-/// columns start at 8 in [`queries::ACTOR_COLUMNS`]'s order.
+/// An installation with its app's slug and client id, then its account as
+/// [`queries::ACTOR_COLUMNS`].
 const INSTALLATION_SELECT: &str = "SELECT i.id, i.app_id, b.login, o.client_id,
             i.repository_selection, i.permissions, i.events, i.created_clock_unix,
             c.id, c.login, c.kind, c.created_clock_unix
@@ -416,7 +416,12 @@ impl World {
         let installations = installations_from(
             &conn,
             &format!("{INSTALLATION_SELECT} WHERE i.app_id = ?1 ORDER BY i.id LIMIT ?3 OFFSET ?2"),
-            params![app_id, offset as i64, limit as i64],
+            // An offset past what SQLite counts is past every row.
+            params![
+                app_id,
+                i64::try_from(offset).unwrap_or(i64::MAX),
+                limit as i64
+            ],
         )?;
         Ok((installations, count_installations(&conn, app_id)?))
     }

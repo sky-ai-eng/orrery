@@ -1725,6 +1725,11 @@ fn find_node(face: &GithubFace, caller: &world::Caller, id: &str) -> Result<Opti
             let Some(review) = face.world.review_by_id(review_id).map_err(internal)? else {
                 return Ok(None);
             };
+            // Only an installation token needs the review's repository to
+            // know whether it sees the review.
+            if caller.installation.is_none() {
+                return Ok(Some(Found::Review(review)));
+            }
             Ok(find_pull(face, caller, review.pull_id)?.map(|_| Found::Review(review)))
         }
         None => Ok(None),
@@ -1874,12 +1879,14 @@ fn set_draft(ctx: &Context<'_>, id: &ID, draft: bool) -> Result<PullRequest, Err
     // An installation token changes nothing in a repository it does not
     // reach: a private one does not exist for it, and a public one it may
     // only read.
-    match find_pull(face, caller, pull_id)? {
-        Some((_, repo)) if !caller.reaches(&repo) => {
-            return Err(Error::new("Resource not accessible by integration"));
+    if caller.installation.is_some() {
+        match find_pull(face, caller, pull_id)? {
+            Some((_, repo)) if !caller.reaches(&repo) => {
+                return Err(Error::new(crate::apps::NOT_ACCESSIBLE));
+            }
+            Some(_) => {}
+            None => return Err(unresolved(id)),
         }
-        Some(_) => {}
-        None => return Err(unresolved(id)),
     }
     let pull = face
         .world

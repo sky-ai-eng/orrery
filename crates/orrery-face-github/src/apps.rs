@@ -8,14 +8,17 @@
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, OriginalUri, Path as UrlPath, RawQuery, Request, State};
+use axum::extract::rejection::RawPathParamsRejection;
+use axum::extract::{
+    Extension, MatchedPath, OriginalUri, Path as UrlPath, RawPathParams, RawQuery, Request, State,
+};
 use axum::http::{HeaderMap, Method, Response, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use base64::Engine as _;
 use orrery_world::{
-    AccessLevel, App, Caller, ClockMode, Installation, Permissions, Repo, RepositorySelection,
-    WorldError,
+    AccessLevel, App, Caller, ClockMode, Installation, OAuthApp, Permissions, Repo,
+    RepositorySelection, WorldError,
 };
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
 
@@ -27,15 +30,22 @@ use crate::{GithubFace, github_error, internal, json_response, media, resolve_re
 /// minutes.
 const JWT_MAX_SECONDS: i64 = 600;
 
+pub(crate) const NOT_ACCESSIBLE: &str = "Resource not accessible by integration";
+
 const JWT_NOT_DECODED: &str = "A JSON web token could not be decoded";
 const JWT_EXP: &str = "'Expiration time' claim ('exp') must be a numeric value representing the future time at which the assertion expires";
 const JWT_EXP_TOO_FAR: &str = "'Expiration time' claim ('exp') is too far in the future";
 const JWT_IAT: &str = "'Issued at' claim ('iat') must be an Integer representing the time that the assertion was issued";
 
-/// The routes an App calls as itself, and the one that checks an OAuth
-/// client's credentials, at their paths under `/api/v3`. Every other path
-/// under `/api/v3/app/` is an App's too, so it is authenticated the same way
-/// before it answers that it is not mocked.
+/// The routes an App calls as itself, and the ones an OAuth client calls
+/// with its id and secret, at their paths under `/api/v3`.
+///
+/// GitHub serves more under each than Orrery does: every other path under
+/// `/app` and `/applications/{client_id}`, and the lookups of the
+/// installation on a repository, an organization, or a user, which take the
+/// App's JWT too. Each is authenticated as its served neighbours are before
+/// it answers that it is not mocked, so a caller with good credentials is
+/// never told they are bad.
 pub fn app_router(face: GithubFace) -> Router {
     let as_app = Router::new()
         .route("/api/v3/app", get(get_app))
@@ -46,12 +56,48 @@ pub fn app_router(face: GithubFace) -> Router {
             post(create_token),
         )
         .route("/api/v3/app/{*rest}", any(not_mocked))
+        .route("/api/v3/repos/{owner}/{repo}/installation", any(not_mocked))
+        .route("/api/v3/orgs/{org}/installation", any(not_mocked))
+        .route("/api/v3/users/{username}/installation", any(not_mocked))
         .method_not_allowed_fallback(not_mocked)
         .layer(middleware::from_fn_with_state(face.clone(), authenticate));
-    Router::new()
+    let as_client = Router::new()
         .route("/api/v3/applications/{client_id}/token", post(check_token))
+        .route("/api/v3/applications/{client_id}/{*rest}", any(not_mocked))
+        .method_not_allowed_fallback(not_mocked)
+        .layer(middleware::from_fn_with_state(
+            face.clone(),
+            authenticate_client,
+        ));
+    Router::new()
+        .merge(as_client)
         .merge(as_app)
         .with_state(face)
+}
+
+/// Authenticate a request as the OAuth client whose id and secret it
+/// carries as HTTP Basic, and attach the [`OAuthApp`].
+async fn authenticate_client(
+    State(face): State<GithubFace>,
+    mut req: Request,
+    next: Next,
+) -> Response<Body> {
+    let bad_credentials = || github_error(StatusCode::UNAUTHORIZED, "Bad credentials");
+    let Some((id, secret)) = crate::oauth::basic_credentials(req.headers()) else {
+        return bad_credentials();
+    };
+    let client = match face.world.oauth_app_by_client_id(&id) {
+        Ok(Some(client)) => client,
+        Ok(None) => return bad_credentials(),
+        Err(e) => return internal(e),
+    };
+    match face.world.oauth_app_holds_secret(client.id, &secret) {
+        Ok(true) => {}
+        Ok(false) => return bad_credentials(),
+        Err(e) => return internal(e),
+    }
+    req.extensions_mut().insert(client);
+    next.run(req).await
 }
 
 async fn not_mocked(method: Method, OriginalUri(uri): OriginalUri) -> Response<Body> {
@@ -219,7 +265,7 @@ async fn list_installations(
     let (installations, total) =
         match face
             .world
-            .installations_slice(app.id, (page - 1) * per_page, per_page)
+            .installations_slice(app.id, (page - 1).saturating_mul(per_page), per_page)
         {
             Ok(found) => found,
             Err(e) => return internal(e),
@@ -314,10 +360,11 @@ async fn create_token(
     if let Some(refused) = media::refuse_unrendered(&headers, "Installation") {
         return refused;
     }
-    let asked: TokenBody = match body.iter().all(u8::is_ascii_whitespace) {
+    // A client with no options to send may send no body, or `null`.
+    let asked = match body.iter().all(u8::is_ascii_whitespace) {
         true => TokenBody::default(),
-        false => match serde_json::from_slice(&body) {
-            Ok(parsed) => parsed,
+        false => match serde_json::from_slice::<Option<TokenBody>>(&body) {
+            Ok(parsed) => parsed.unwrap_or_default(),
             Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
         },
     };
@@ -374,25 +421,11 @@ async fn create_token(
 /// holding only a client secret learns whether it is right.
 async fn check_token(
     State(face): State<GithubFace>,
+    Extension(client): Extension<OAuthApp>,
     UrlPath(client_id): UrlPath<String>,
     OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    let bad_credentials = || github_error(StatusCode::UNAUTHORIZED, "Bad credentials");
-    let Some((id, secret)) = crate::oauth::basic_credentials(&headers) else {
-        return bad_credentials();
-    };
-    let client = match face.world.oauth_app_by_client_id(&id) {
-        Ok(Some(client)) => client,
-        Ok(None) => return bad_credentials(),
-        Err(e) => return internal(e),
-    };
-    match face.world.oauth_app_holds_secret(client.id, &secret) {
-        Ok(true) => {}
-        Ok(false) => return bad_credentials(),
-        Err(e) => return internal(e),
-    }
     let not_found = || github_error(StatusCode::NOT_FOUND, "Not Found");
     if client.client_id != client_id {
         return not_found();
@@ -481,35 +514,43 @@ pub(crate) fn not_accessible() -> Response<Body> {
     json_response(
         StatusCode::FORBIDDEN,
         serde_json::json!({
-            "message": "Resource not accessible by integration",
+            "message": NOT_ACCESSIBLE,
             "documentation_url": "https://docs.github.com/rest",
             "status": "403",
         }),
     )
 }
 
-/// Keep an installation token to the repositories its installation covers,
-/// on every REST route about one repository.
+/// Keep an installation token to what its installation covers, on every
+/// REST route about one repository or one organization.
+///
+/// The repository and the organization are read from the route's own path
+/// parameters, as the handler reads them, so the two never disagree about
+/// which one a path names, however the path spells it.
 pub(crate) async fn limit_installation(
     State(face): State<GithubFace>,
+    matched: Option<MatchedPath>,
+    params: Result<RawPathParams, RawPathParamsRejection>,
     req: Request,
     next: Next,
 ) -> Response<Body> {
-    let Some(caller) = req
+    let caller = req
         .extensions()
         .get::<Caller>()
-        .filter(|caller| caller.installation.is_some())
-    else {
+        .filter(|caller| caller.installation.is_some());
+    let (Some(caller), Ok(params)) = (caller, params) else {
         return next.run(req).await;
     };
-    let mut segments = req.uri().path().trim_start_matches('/').split('/');
-    let repo = match (segments.next(), segments.next(), segments.next()) {
-        (Some("repos"), Some(owner), Some(name)) => match resolve_repo(&face, owner, name) {
+    let param = |name: &str| params.iter().find(|(key, _)| *key == name).map(|(_, v)| v);
+    let write = !matches!(*req.method(), Method::GET | Method::HEAD);
+    let by_id = matched.is_some_and(|m| m.as_str().ends_with("/repositories/{id}"));
+    let repo = match (param("owner"), param("repo"), param("id")) {
+        (Some(owner), Some(name), _) => match resolve_repo(&face, owner, name) {
             Ok((repo, _)) => Some(repo),
             // The route answers for a repository that does not exist.
             Err(_) => None,
         },
-        (Some("repositories"), Some(id), _) => match id.parse::<i64>() {
+        (_, _, Some(id)) if by_id => match id.parse::<i64>() {
             Ok(id) => match face.world.repo_by_id(id) {
                 Ok(repo) => repo,
                 Err(e) => return internal(e),
@@ -518,9 +559,19 @@ pub(crate) async fn limit_installation(
         },
         _ => None,
     };
-    let write = !matches!(*req.method(), Method::GET | Method::HEAD);
     if let Some(refused) = repo.and_then(|repo| refuse_unreached(caller, &repo, write)) {
         return refused;
+    }
+    // An organization the App is not installed on is not the token's to
+    // change: it creates no repository and no team there.
+    let elsewhere = param("org").is_some_and(|org| {
+        caller
+            .installation
+            .as_ref()
+            .is_some_and(|grant| !grant.account.eq_ignore_ascii_case(org))
+    });
+    if write && elsewhere {
+        return not_accessible();
     }
     next.run(req).await
 }
@@ -541,7 +592,7 @@ fn permissions_json(permissions: &Permissions) -> serde_json::Value {
 }
 
 /// GitHub's App object.
-fn app_json(face: &GithubFace, app: &App) -> serde_json::Value {
+pub(crate) fn app_json(face: &GithubFace, app: &App) -> serde_json::Value {
     let base = face.base_url.trim_end_matches('/');
     let html_url = format!("{base}/apps/{}", app.slug);
     serde_json::json!({

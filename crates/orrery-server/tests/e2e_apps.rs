@@ -36,6 +36,10 @@ fn call(
             .post(url)
             .header("authorization", authorization)
             .send_json(body),
+        ("DELETE", None) => http
+            .delete(url)
+            .header("authorization", authorization)
+            .call(),
         (other, _) => panic!("unsupported call {other}"),
     }
     .unwrap_or_else(|e| panic!("{method} {url} transport error: {e:?}"));
@@ -667,6 +671,177 @@ async fn an_installation_token_fetches_and_pushes_what_it_reaches() {
         serde_json::json!(null),
     );
     assert_eq!(branches, serde_json::json!([]), "nothing was pushed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_path_spelled_another_way_names_the_same_repository() {
+    let s = setup().await;
+    let api = &s.api;
+    let issued = s.token(s.on_acme, None);
+    let auth = bearer(issued["token"].as_str().unwrap());
+    let status = |method: &str, path: &str| {
+        let body = (method == "POST").then(|| serde_json::json!({ "labels": ["x"] }));
+        call(method, &format!("{api}{path}"), &auth, body).0
+    };
+
+    // `%61` is `a`: the route's handler reads `alice`, and so does the
+    // limit on what the token reaches.
+    assert_eq!(status("GET", "/repos/alice/own"), 404);
+    assert_eq!(status("GET", "/repos/%61lice/own"), 404);
+    assert_eq!(status("GET", "/repos/alice/%6Fwn"), 404);
+    assert_eq!(status("GET", "/repos/%61lice/pub"), 200);
+    assert_eq!(status("POST", "/repos/alice/pub/issues/1/labels"), 403);
+    assert_eq!(status("POST", "/repos/%61lice/pub/issues/1/labels"), 403);
+
+    let own_id = face_ok(
+        "GET",
+        &format!("{api}/repos/alice/own"),
+        &s.alice,
+        serde_json::json!(null),
+    )["id"]
+        .as_i64()
+        .unwrap();
+    assert!((0..10).contains(&own_id), "a one-digit id");
+    assert_eq!(status("GET", &format!("/repositories/{own_id}")), 404);
+    assert_eq!(status("GET", &format!("/repositories/%3{own_id}")), 404);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_installation_token_changes_its_own_account_alone() {
+    let s = setup().await;
+    let api = &s.api;
+    let on_acme = bearer(s.token(s.on_acme, None)["token"].as_str().unwrap());
+    let on_alice = bearer(s.token(s.on_alice, None)["token"].as_str().unwrap());
+
+    // An organization the App is not installed on takes no repository and
+    // no team from the token, and is still read.
+    let new_repo = serde_json::json!({ "name": "made", "private": true });
+    let orgs = format!("{api}/orgs/acme/repos");
+    let (status, _, body) = call("POST", &orgs, &on_alice, Some(new_repo.clone()));
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["message"], "Resource not accessible by integration");
+    let teams = format!("{api}/orgs/acme/teams");
+    let team = serde_json::json!({ "name": "Platform" });
+    assert_eq!(call("POST", &teams, &on_alice, Some(team.clone())).0, 403);
+    assert_eq!(
+        call("GET", &format!("{api}/orgs/acme"), &on_alice, None).0,
+        200
+    );
+    assert_eq!(call("GET", &teams, &on_alice, None).0, 200);
+
+    // The installation on the organization makes both, and reaches the
+    // repository it made.
+    let (status, _, body) = call("POST", &orgs, &on_acme, Some(new_repo));
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(
+        call("GET", &format!("{api}/repos/acme/made"), &on_acme, None).0,
+        200
+    );
+    assert_eq!(call("POST", &teams, &on_acme, Some(team)).0, 201);
+
+    // A check run names the App that made it, as `GET /app` answers it.
+    let (status, _, run) = call(
+        "POST",
+        &format!("{api}/repos/acme/web/check-runs"),
+        &on_acme,
+        Some(serde_json::json!({ "name": "build", "head_sha": "a".repeat(40) })),
+    );
+    assert_eq!(status, 201, "{run}");
+    assert_eq!(run["app"]["id"], s.app_id);
+    assert_eq!(run["app"]["slug"], "helper");
+    assert_eq!(run["app"]["name"], "Helper");
+    assert_eq!(run["app"]["client_id"], s.client_id.as_str());
+    // A bot with no App is named by its login.
+    let ci = mint_actor(&s.base, "ci", "bot");
+    let run = face_ok(
+        "POST",
+        &format!("{api}/repos/acme/web/check-runs"),
+        &ci,
+        serde_json::json!({ "name": "lint", "head_sha": "a".repeat(40) }),
+    );
+    assert_eq!(
+        run["app"],
+        serde_json::json!({ "slug": "ci", "name": "ci" })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_github_serves_an_app_and_orrery_does_not_says_so() {
+    let s = setup().await;
+    let api = &s.api;
+
+    // GitHub's lookups of an installation take the App's JWT outside /app.
+    for path in [
+        "/repos/acme/web/installation",
+        "/orgs/acme/installation",
+        "/users/alice/installation",
+    ] {
+        let url = format!("{api}{path}");
+        let (status, _, body) = call("GET", &url, &s.jwt(), None);
+        assert_eq!(status, 501, "{path}: {body}");
+        assert_eq!(body["orrery"]["path"], format!("/api/v3{path}"));
+        let (status, _, body) = call("GET", &url, &bearer(&s.alice), None);
+        assert_eq!(status, 401, "{path}: {body}");
+    }
+    // The routes beside them are untouched.
+    assert_eq!(
+        call(
+            "GET",
+            &format!("{api}/repos/acme/web"),
+            &bearer(&s.alice),
+            None
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            "GET",
+            &format!("{api}/users/alice"),
+            &bearer(&s.alice),
+            None
+        )
+        .0,
+        200
+    );
+
+    // So do an OAuth client's other routes, to its credentials alone.
+    use base64::Engine as _;
+    let basic = |secret: &str| {
+        let pair = format!("{}:{secret}", s.client_id);
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(pair)
+        )
+    };
+    for path in ["token", "grant", "token/scoped"] {
+        let url = format!("{api}/applications/{}/{path}", s.client_id);
+        let (status, _, body) = call("DELETE", &url, &basic(&s.client_secret), None);
+        assert_eq!(status, 501, "{path}: {body}");
+        assert_eq!(body["orrery"]["method"], "DELETE");
+        assert_eq!(call("DELETE", &url, &basic("wrong"), None).0, 401, "{path}");
+    }
+
+    // A client with no options to send may send `null`.
+    let tokens = format!("{api}/app/installations/{}/access_tokens", s.on_acme);
+    let (status, _, issued) = call("POST", &tokens, &s.jwt(), Some(serde_json::json!(null)));
+    assert_eq!(status, 201, "{issued}");
+    assert_eq!(issued["repository_selection"], "all");
+    let (status, _, body) = call(
+        "POST",
+        &tokens,
+        &s.jwt(),
+        Some(serde_json::json!({ "repositories": "web" })),
+    );
+    assert_eq!(
+        (status, &body["message"]),
+        (400, &"Problems parsing JSON".into())
+    );
+
+    // A page past the end of anything is an empty page.
+    let far = format!("{api}/app/installations?page=18446744073709551615");
+    let (status, _, page) = call("GET", &far, &s.jwt(), None);
+    assert_eq!((status, &page), (200, &serde_json::json!([])));
 }
 
 #[tokio::test(flavor = "multi_thread")]

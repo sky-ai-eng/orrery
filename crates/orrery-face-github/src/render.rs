@@ -397,11 +397,17 @@ pub(crate) fn check_run_json(face: &GithubFace, repo: &Repo, run: &CheckRun) -> 
             "title": null, "summary": null, "text": null, "annotations_count": 0,
         })),
         "check_suite": serde_json::Value::Null,
-        "app": {
-            "slug": run.creator_login,
-            "name": run.creator_login,
-        },
+        "app": check_run_app(face, &run.creator_login),
     })
+}
+
+/// The App a check run names as its creator: the bot's App, as `GET /app`
+/// answers it, or the bot's login alone for a bot that has no App.
+fn check_run_app(face: &GithubFace, creator_login: &str) -> serde_json::Value {
+    match face.world.app_by_slug(creator_login) {
+        Ok(Some(app)) => crate::apps::app_json(face, &app),
+        _ => serde_json::json!({ "slug": creator_login, "name": creator_login }),
+    }
 }
 
 /// An actor's login as GitHub's REST API spells it. A bot actor stands for a

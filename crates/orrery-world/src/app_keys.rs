@@ -136,8 +136,33 @@ fn subject_public_key(der: &[u8]) -> Result<&[u8]> {
     }
 }
 
-/// Refuse anything but an `RSAPublicKey` whose modulus an RS256 signature
-/// can be checked against.
+/// The exponents an RS256 signature is checked against: at least 3, and
+/// below 2^33.
+const EXPONENT_BITS: std::ops::RangeInclusive<usize> = 2..=33;
+
+/// The bytes of a positive DER integer without its sign byte. DER writes an
+/// integer in the fewest bytes, with a zero byte first only when the top bit
+/// would otherwise read as a sign.
+fn positive<'a>(integer: &'a [u8], what: &str) -> Result<&'a [u8]> {
+    match integer {
+        [0, next, ..] if next & 0x80 != 0 => Ok(&integer[1..]),
+        [first, ..] if *first != 0 && first & 0x80 == 0 => Ok(integer),
+        _ => Err(invalid(format!(
+            "its {what} is not a positive integer in DER's shortest form"
+        ))),
+    }
+}
+
+/// How many bits a positive integer's bytes hold.
+fn bits(magnitude: &[u8]) -> usize {
+    match magnitude.first() {
+        Some(top) => magnitude.len() * 8 - top.leading_zeros() as usize,
+        None => 0,
+    }
+}
+
+/// Refuse anything but an `RSAPublicKey` an RS256 signature can be checked
+/// against, so that a key a world takes is one its JWTs verify under.
 fn check_rsa_public_key(der: &[u8]) -> Result<()> {
     let (key, after) = tagged(der, SEQUENCE, "RSAPublicKey")?;
     if !after.is_empty() {
@@ -150,22 +175,17 @@ fn check_rsa_public_key(der: &[u8]) -> Result<()> {
             "its RSAPublicKey holds more than a modulus and an exponent",
         ));
     }
-    // DER writes a positive integer whose top bit is set with a zero byte
-    // before it.
-    let magnitude = match modulus.split_first() {
-        Some((0, rest)) => rest,
-        _ => modulus,
-    };
-    let bits = match magnitude.first() {
-        Some(top) => magnitude.len() * 8 - top.leading_zeros() as usize,
-        None => 0,
-    };
-    if !MODULUS_BITS.contains(&bits) {
+    let modulus_bits = bits(positive(modulus, "modulus")?);
+    if !MODULUS_BITS.contains(&modulus_bits) {
         return Err(invalid(format!(
-            "its modulus is {bits} bits; a key is {} to {} bits",
+            "its modulus is {modulus_bits} bits; a key is {} to {} bits",
             MODULUS_BITS.start(),
             MODULUS_BITS.end()
         )));
+    }
+    let exponent = positive(exponent, "public exponent")?;
+    if !EXPONENT_BITS.contains(&bits(exponent)) {
+        return Err(invalid("its public exponent is not between 3 and 2^33"));
     }
     if exponent.last().is_none_or(|low| low % 2 == 0) {
         return Err(invalid("its public exponent is even"));
@@ -220,6 +240,55 @@ Ur9JGENNAIaUkrl7Gr3CzFnUIFfuCpd9uQIDAQAB
             let pem = format!("-----BEGIN {label}-----\nAAAA\n-----END {label}-----\n");
             assert!(refusal(&pem).contains("private key"), "{label}");
         }
+    }
+
+    /// A DER element with `tag` and `content`.
+    fn der(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        match content.len() {
+            short if short < 0x80 => out.push(short as u8),
+            long => {
+                let bytes = long.to_be_bytes();
+                let bytes = &bytes[bytes.iter().take_while(|b| **b == 0).count()..];
+                out.push(0x80 | bytes.len() as u8);
+                out.extend_from_slice(bytes);
+            }
+        }
+        out.extend_from_slice(content);
+        out
+    }
+
+    /// An `RSA PUBLIC KEY` block holding `modulus` and `exponent` as DER
+    /// writes them.
+    fn pkcs1(modulus: &[u8], exponent: &[u8]) -> String {
+        let key = der(
+            SEQUENCE,
+            &[der(INTEGER, modulus), der(INTEGER, exponent)].concat(),
+        );
+        format!(
+            "-----BEGIN RSA PUBLIC KEY-----\n{}\n-----END RSA PUBLIC KEY-----\n",
+            base64::engine::general_purpose::STANDARD.encode(key)
+        )
+    }
+
+    #[test]
+    fn a_key_no_signature_verifies_under_is_refused() {
+        // 2048 bits, written with the zero byte its set top bit needs.
+        let mut modulus = vec![0];
+        modulus.extend([0xc5; 256]);
+        assert!(rsa_public_key_from_pem(&pkcs1(&modulus, &[1, 0, 1])).is_ok());
+        assert!(rsa_public_key_from_pem(&pkcs1(&modulus, &[3])).is_ok());
+
+        assert!(refusal(&pkcs1(&modulus, &[1])).contains("between 3 and 2^33"));
+        assert!(refusal(&pkcs1(&modulus, &[2, 0, 0, 0, 1])).contains("between 3 and 2^33"));
+        assert!(refusal(&pkcs1(&modulus, &[1, 0, 0])).contains("even"));
+        assert!(refusal(&pkcs1(&modulus, &[0, 3])).contains("shortest form"));
+        assert!(refusal(&pkcs1(&modulus, &[])).contains("shortest form"));
+        // The same modulus without its zero byte reads as negative, and
+        // with a second one is longer than it need be.
+        assert!(refusal(&pkcs1(&modulus[1..], &[3])).contains("shortest form"));
+        let padded = [&[0][..], &modulus].concat();
+        assert!(refusal(&pkcs1(&padded, &[3])).contains("shortest form"));
     }
 
     #[test]
