@@ -6,6 +6,11 @@
 //! each migration adds one. World databases outlive the binary that wrote
 //! them, so every schema change is a new forward migration with a fixture
 //! (`tests/fixtures/README.md`), and the baseline never changes.
+//!
+//! The version covers the events a world logs as well as its tables. A
+//! change to the events is a migration too, with no SQL when no table
+//! changes, so a binary without the change refuses the world instead of
+//! failing on the first event it can't read.
 
 use rusqlite::{Connection, TransactionBehavior};
 
@@ -15,8 +20,9 @@ use crate::{Result, WorldError};
 /// one this binary migrates from.
 pub const BASELINE_VERSION: i64 = 6;
 
-/// Forward migrations, oldest first, each one SQL batch. `MIGRATIONS[i]`
-/// takes a database from version `BASELINE_VERSION + i` to the next.
+/// Forward migrations, oldest first, each one SQL batch, which is only a
+/// comment for a change to the events alone. `MIGRATIONS[i]` takes a
+/// database from version `BASELINE_VERSION + i` to the next.
 const MIGRATIONS: &[&str] = &[
     // 7: the real time each action-log entry was appended at, in Unix
     // milliseconds. Entries appended before this version never recorded one,
@@ -486,6 +492,7 @@ mod tests {
         INSERT INTO repo_topics (repo_id, topic) SELECT id, 'migrated' FROM repos;
     ";
     const BROKEN: &str = "INSERT INTO no_such_table VALUES (1);";
+    const EVENTS_ONLY: &str = "-- A change to the events alone.";
 
     /// A world at this binary's version with a little of everything the
     /// tests compare: actors, a repo, and events.
@@ -607,7 +614,7 @@ mod tests {
     fn a_world_newer_than_the_binary_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let root = world(dir.path());
-        with_appended_migrations(&[TOPICS], || World::open(&root).map(drop)).unwrap();
+        with_appended_migrations(&[EVENTS_ONLY], || World::open(&root).map(drop)).unwrap();
 
         assert!(matches!(
             World::open(&root),

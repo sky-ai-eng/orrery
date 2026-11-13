@@ -12,9 +12,10 @@ use sha2::{Digest as _, Sha256};
 
 static VERSION: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "{} ({})",
+        "{} ({})\nworld schema {}",
         env!("CARGO_PKG_VERSION"),
-        orrery_server::BUILD_COMMIT
+        orrery_server::BUILD_COMMIT,
+        orrery_world::SCHEMA_VERSION
     )
 });
 

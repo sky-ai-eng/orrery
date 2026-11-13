@@ -154,7 +154,10 @@ pub fn version(binary: &Path) -> String {
         .arg("--version")
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .map(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines().next().unwrap_or_default().trim().to_string()
+        })
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "(no version)".to_string())
 }

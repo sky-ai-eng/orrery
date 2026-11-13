@@ -18,7 +18,7 @@ tar xzf orrery_*_linux_amd64.tar.gz orrery
 ./orrery --version
 ```
 
-`orrery --version` prints the version and the full commit the binary was built from.
+`orrery --version` prints the version and the full commit the binary was built from, then the world schema it writes. A binary refuses a world written at a higher world schema than its own.
 
 Each archive also holds `spec/event.schema.json`, the JSON Schema of the events a world's log records, for validating what `log/list` and `log/stream` serve without a world running. A served world answers the same document at `GET /_orrery/log/schema`.
 
