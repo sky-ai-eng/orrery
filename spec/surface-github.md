@@ -236,7 +236,7 @@ It reaches the repositories its installation covers: every repository the accoun
 - A public repository it does not reach is read as anyone reads it. Any other method on it is `403` `{"message": "Resource not accessible by integration", ...}`.
 - Git answers the same way: `404` "Repository not found." for the private one, and for the public one a fetch succeeds and a push is `403` "Permission to {owner}/{repo}.git denied to {slug}[bot]." (`surface-git.md`).
 - GraphQL shows it the same repositories (§3.2).
-- An organization other than the account it is installed on is read as anyone reads it. Any other method on a route under `/orgs/{org}` is the same `403`, so it creates no repository and no team there.
+- An organization other than the account it is installed on is read as anyone reads it. Any other method on a route under `/orgs/{org}` is the same `403`, so it creates no repository and no team there. A name no organization has is the route's `404`, as it is for any caller.
 
 Permissions are recorded and echoed, not checked: no route reads a token's permissions, as none reads an OAuth token's scopes.
 
@@ -345,7 +345,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `repository(owner:, name:)` for a repository that does not exist, or that an installation token does not see, is `null` with no error. GitHub adds an error whose `type` is `NOT_FOUND`: "Could not resolve to a Repository with the name '{owner}/{name}'."
 - A bot's own token, the one its actor was created with, reaches every repository. Only an installation token is limited.
 - An App holds at least one callback URL, where GitHub lets an App have none. Its `description` is null and its `external_url` is its `html_url`, since Orrery keeps neither.
-- `repository_ids` on a request for an installation token is not mocked, where GitHub narrows the token by it. `GET /app/installations` ignores `since` and `outdated`.
+- `repository_ids` on a request for an installation token is not mocked, where GitHub narrows the token by it. `GET /app/installations` refuses `since` and `outdated` as not mocked (`422`), where GitHub filters the list by them.
 - A path under `/app` that Orrery does not serve is `501` to a valid JWT, where GitHub answers a path it does not serve `401` "Bad credentials".
 - GitHub's error bodies in §1.11 carry `documentation_url` and `status` beside `message`. Orrery's carry `message`, as its other routes' do.
 - An installation token is `orrfake_` and 32 hex digits. GitHub's is `ghs_` and three segments joined by dots, 383 characters when observed.

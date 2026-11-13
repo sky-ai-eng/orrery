@@ -159,7 +159,9 @@ pub(crate) fn world_secret(conn: &Connection) -> Result<WorldSecret> {
 impl World {
     /// Open the world at `root` — a fresh copy of another world's state — as
     /// a new world: give it `secret` and re-derive every credential it
-    /// inherited, so it accepts none of its source's. This is the only way a
+    /// inherited, so it accepts none of its source's. An app's keys stay:
+    /// each is the public half of a pair its caller holds, which no secret
+    /// of a world's derives. This is the only way a
     /// world is re-keyed, and only at its creation, so every event after its
     /// `world:rekeyed` was made under the secret it holds now. The `orrery`
     /// command's fork is the one caller, so the write is the system actor's,

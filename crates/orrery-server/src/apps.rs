@@ -43,12 +43,37 @@ struct AppBody {
     callback_urls: Vec<String>,
     permissions: Permissions,
     events: Vec<String>,
-    keys: Vec<AppKey>,
+    keys: Vec<KeyBody>,
+}
+
+/// One of an app's keys as the control plane answers it.
+#[derive(serde::Serialize)]
+struct KeyBody {
+    id: i64,
+    /// One PEM block labelled `RSA PUBLIC KEY`, which is a form the route
+    /// that adds a key takes, so a key read here can be sent there.
+    public_key: String,
+}
+
+fn key_body(key: AppKey) -> KeyBody {
+    let mut pem = String::from("-----BEGIN RSA PUBLIC KEY-----\n");
+    for (n, c) in key.public_key.chars().enumerate() {
+        if n > 0 && n % 64 == 0 {
+            pem.push('\n');
+        }
+        pem.push(c);
+    }
+    pem.push_str("\n-----END RSA PUBLIC KEY-----\n");
+    KeyBody {
+        id: key.id,
+        public_key: pem,
+    }
 }
 
 fn app_body(state: &AppState, app: App) -> Result<AppBody, WorldError> {
+    let keys = state.world.app_keys(app.id)?;
     Ok(AppBody {
-        keys: state.world.app_keys(app.id)?,
+        keys: keys.into_iter().map(key_body).collect(),
         id: app.id,
         slug: app.slug,
         name: app.name,
@@ -242,7 +267,7 @@ async fn add_key(
         Err(resp) => return *resp,
     };
     match state.world.add_app_key(&slug, &public_key, SYSTEM) {
-        Ok(key) => json(StatusCode::CREATED, serde_json::json!(key)),
+        Ok(key) => json(StatusCode::CREATED, serde_json::json!(key_body(key))),
         Err(e @ WorldError::InvalidAppKey(_)) => errors(
             StatusCode::BAD_REQUEST,
             "INVALID_ARGUMENT",

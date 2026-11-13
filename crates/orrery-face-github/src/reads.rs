@@ -362,10 +362,14 @@ pub(crate) async fn list_check_runs_for_ref(
     match face.world.list_check_runs_for_sha(repo.id, &sha) {
         Ok(runs) => {
             let total = runs.len();
-            let items: Vec<serde_json::Value> = paginate(runs, per_page, page)
+            let items: Result<Vec<serde_json::Value>, _> = paginate(runs, per_page, page)
                 .iter()
                 .map(|r| check_run_json(&face, &repo, r))
                 .collect();
+            let items = match items {
+                Ok(items) => items,
+                Err(e) => return internal(e),
+            };
             json_response(
                 StatusCode::OK,
                 serde_json::json!({ "total_count": total, "check_runs": items }),

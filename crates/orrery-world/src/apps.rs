@@ -428,6 +428,11 @@ impl World {
         Ok((installations, count_installations(&conn, app_id)?))
     }
 
+    /// How many installations an app has.
+    pub fn installation_count(&self, app_id: i64) -> Result<i64> {
+        count_installations(&self.lock(), app_id)
+    }
+
     /// The repositories an installation token reaches, in id order.
     pub fn granted_repos(&self, grant: &InstallationGrant) -> Result<Vec<Repo>> {
         let conn = self.lock();

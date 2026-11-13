@@ -367,6 +367,15 @@ async fn a_jwt_is_held_to_githubs_rules() {
         refused(&s.key.jwt(serde_json::json!(999), now)),
         (404, "Integration not found".into())
     );
+    for beyond in [
+        serde_json::json!("99999999999999999999"),
+        serde_json::json!(u64::MAX),
+    ] {
+        assert_eq!(
+            refused(&s.key.jwt(beyond, now)),
+            (404, "Integration not found".into())
+        );
+    }
     assert_eq!(
         refused(&s.key.jwt(serde_json::json!("999"), now)),
         (404, "Integration not found".into())
@@ -737,9 +746,27 @@ async fn an_installation_token_fetches_and_pushes_what_it_reaches() {
     assert_eq!(pushed["actor"]["login"], "helper");
     assert_eq!(pushed["app"]["client_id"], s.client_id.as_str());
 
-    // A private repository outside it does not exist.
+    // A private repository outside it does not exist: it answers as a
+    // repository nobody has does.
     let out = git_output(src, clock, &["ls-remote", &remote("alice/own")]);
     assert!(!out.status.success());
+    let advertised = |repo: &str| {
+        let url = format!("{}/{repo}.git/info/refs?service=git-upload-pack", s.base);
+        let mut resp = agent()
+            .get(&url)
+            .header("authorization", bearer(&token))
+            .call()
+            .unwrap();
+        (
+            resp.status().as_u16(),
+            resp.body_mut().read_to_string().unwrap(),
+        )
+    };
+    assert_eq!(
+        advertised("alice/own"),
+        (404, "Repository not found.".into())
+    );
+    assert_eq!(advertised("alice/own"), advertised("alice/nothing"));
     let out = git_output(src, clock, &["push", "-q", &remote("alice/own"), "main"]);
     assert!(!out.status.success());
 
@@ -813,6 +840,16 @@ async fn an_installation_token_changes_its_own_account_alone() {
         200
     );
     assert_eq!(call("GET", &teams, &on_alice, None).0, 200);
+    // A name no organization has is not found, as it is for any caller.
+    for none in ["ghost", "alice"] {
+        let url = format!("{api}/orgs/{none}/repos");
+        let (status, _, body) = call("POST", &url, &on_acme, Some(new_repo.clone()));
+        assert_eq!(
+            (status, &body["message"]),
+            (404, &"Not Found".into()),
+            "{none}"
+        );
+    }
 
     // The installation on the organization makes both, and reaches the
     // repository it made.
@@ -867,6 +904,14 @@ async fn what_github_serves_an_app_and_orrery_does_not_says_so() {
         assert_eq!(body["orrery"]["path"], format!("/api/v3{path}"));
         let (status, _, body) = call("GET", &url, &bearer(&s.alice), None);
         assert_eq!(status, 401, "{path}: {body}");
+    }
+    assert_eq!(call("GET", &format!("{api}/app/"), &s.jwt(), None).0, 501);
+    // A filter Orrery does not apply is refused, never ignored.
+    for filter in ["since=2030-01-01T00:00:00Z", "outdated=true"] {
+        let url = format!("{api}/app/installations?{filter}");
+        let (status, _, body) = call("GET", &url, &s.jwt(), None);
+        assert_eq!(status, 422, "{filter}: {body}");
+        assert_eq!(body["orrery"]["not_mocked"], true);
     }
     // The routes beside them are untouched.
     assert_eq!(
@@ -1308,6 +1353,19 @@ async fn the_control_plane_registers_and_installs_apps() {
         faults(&refused),
         [fault("ALREADY_EXISTS", Some("public_key"))]
     );
+    // A key is answered as a PEM block the route takes back as that key.
+    let answered = added["public_key"].as_str().unwrap();
+    assert!(
+        answered.starts_with("-----BEGIN RSA PUBLIC KEY-----\n"),
+        "{answered}"
+    );
+    assert!(answered.lines().all(|line| line.len() <= 64), "{answered}");
+    assert_eq!(
+        added,
+        serde_json::json!({ "id": added["id"], "public_key": answered })
+    );
+    let (status, refused) = control("POST", &keys, serde_json::json!({ "public_key": answered }));
+    assert_eq!(status, 409, "{refused}");
     let private = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n";
     let (status, refused) = control("POST", &keys, serde_json::json!({ "public_key": private }));
     assert_eq!(status, 400);

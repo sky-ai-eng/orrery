@@ -188,6 +188,9 @@ fn effective_redirect(
     let Some(requested) = params.get("redirect_uri").filter(|r| !r.is_empty()) else {
         return Ok(app.callback_url.clone());
     };
+    if redirect_allowed(&app.callback_url, requested) {
+        return Ok(requested.clone());
+    }
     let callbacks = match face.world.oauth_callback_urls(app.id) {
         Ok(urls) => urls,
         Err(e) => return Err(Box::new(internal(e))),

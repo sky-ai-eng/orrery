@@ -21,6 +21,7 @@ use orrery_world::{
     RepositorySelection, WorldError,
 };
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
+use serde::Deserialize as _;
 
 use crate::reads::{page_params, paginate};
 use crate::render::{actor_json, owner_type, repo_json, rfc3339};
@@ -64,6 +65,7 @@ pub fn app_router(face: GithubFace) -> Router {
             "/api/v3/app/installations/{id}/access_tokens",
             post(create_token),
         )
+        .route("/api/v3/app/", any(not_mocked))
         .route("/api/v3/app/{*rest}", any(not_mocked))
         .route("/api/v3/repos/{owner}/{repo}/installation", any(not_mocked))
         .route("/api/v3/orgs/{org}/installation", any(not_mocked))
@@ -247,21 +249,22 @@ fn expiration(value: &serde_json::Value) -> Option<i64> {
 /// client id. GitHub answers a JWT with no `iss` as bad credentials, an id
 /// no App has as `404`, and any other string as not an integer.
 fn issuer(face: &GithubFace, iss: Option<&serde_json::Value>) -> Result<App, Box<Response<Body>>> {
+    let no_such = || Box::new(github_error(StatusCode::NOT_FOUND, "Integration not found"));
     let by_id = |id: i64| match face.world.app_by_id(id) {
         Ok(Some(app)) => Ok(app),
-        Ok(None) => Err(Box::new(github_error(
-            StatusCode::NOT_FOUND,
-            "Integration not found",
-        ))),
+        Ok(None) => Err(no_such()),
         Err(e) => Err(Box::new(internal(e))),
     };
     match iss {
         Some(serde_json::Value::Number(id)) => match id.as_i64() {
             Some(id) => by_id(id),
+            // A whole number past the ids a world can hold names no App.
+            None if id.is_u64() => Err(no_such()),
             None => Err(unauthorized(JWT_ISS)),
         },
         Some(serde_json::Value::String(iss)) => match iss.parse::<i64>() {
             Ok(id) => by_id(id),
+            Err(_) if !iss.is_empty() && iss.bytes().all(|b| b.is_ascii_digit()) => Err(no_such()),
             Err(_) => match face.world.app_by_client_id(iss) {
                 Ok(Some(app)) => Ok(app),
                 Ok(None) => Err(unauthorized(JWT_ISS)),
@@ -280,8 +283,8 @@ async fn get_app(
     if let Some(refused) = media::refuse_unrendered(&headers, "Integration") {
         return refused;
     }
-    let installations = match face.world.installations_slice(app.id, 0, 0) {
-        Ok((_, total)) => total,
+    let installations = match face.world.installation_count(app.id) {
+        Ok(total) => total,
         Err(e) => return internal(e),
     };
     let mut json = app_json(&face, &app);
@@ -299,6 +302,14 @@ async fn list_installations(
         return refused;
     }
     let query = query.unwrap_or_default();
+    // GitHub filters the list by each. Ignoring one would answer a wider
+    // list than the caller asked for.
+    let asked = crate::parse_form(query.as_bytes());
+    for filter in ["since", "outdated"] {
+        if asked.contains_key(filter) {
+            return crate::orrery_unsupported_field("Installation", filter);
+        }
+    }
     let (per_page, page) = page_params(&query);
     let (installations, total) =
         match face
@@ -443,16 +454,11 @@ async fn create_token(
         .into_iter()
         .flatten()
     {
-        let level = match level.as_str() {
-            Some("read") => AccessLevel::Read,
-            Some("write") => AccessLevel::Write,
-            Some("admin") => AccessLevel::Admin,
-            _ => {
-                return github_error(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "There is at least one permission action that is not supported. It should be one of: \"read\", \"write\" or \"admin\".",
-                );
-            }
+        let Ok(level) = AccessLevel::deserialize(level) else {
+            return github_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "There is at least one permission action that is not supported. It should be one of: \"read\", \"write\" or \"admin\".",
+            );
         };
         permissions.insert(name.clone(), level);
     }
@@ -664,32 +670,28 @@ pub(crate) async fn limit_installation(
         return refused;
     }
     // An organization the App is not installed on is not the token's to
-    // change: it creates no repository and no team there.
-    let elsewhere = param("org").is_some_and(|org| {
+    // change: it creates no repository and no team there. The route answers
+    // for a name no organization has, as it does for any other caller.
+    let elsewhere = param("org").filter(|org| {
         caller
             .installation
             .as_ref()
             .is_some_and(|grant| !grant.account.eq_ignore_ascii_case(org))
     });
-    if write && elsewhere {
-        return not_accessible();
+    if write && let Some(org) = elsewhere {
+        match face.world.actor_by_login(org) {
+            Ok(Some(account)) if account.kind == orrery_world::ActorKind::Org => {
+                return not_accessible();
+            }
+            Ok(_) => {}
+            Err(e) => return internal(e),
+        }
     }
     next.run(req).await
 }
 
 fn permissions_json(permissions: &Permissions) -> serde_json::Value {
-    permissions
-        .iter()
-        .map(|(name, level)| {
-            let level = match level {
-                AccessLevel::Read => "read",
-                AccessLevel::Write => "write",
-                AccessLevel::Admin => "admin",
-            };
-            (name.clone(), serde_json::json!(level))
-        })
-        .collect::<serde_json::Map<_, _>>()
-        .into()
+    serde_json::json!(permissions)
 }
 
 /// GitHub's App object.

@@ -356,12 +356,24 @@ struct Seeded {
     oauth_token: String,
     pending_code: String,
     installation_token: String,
+    helper_id: i64,
 }
+
+/// The public half of a 2048-bit RSA key, as `ssh-keygen -e -m PEM` writes it.
+const HELPER_KEY: &str = "-----BEGIN RSA PUBLIC KEY-----
+MIIBCgKCAQEAyQDurX+SGDbR9X9O5rwYXND5rbR9L5MHPsh5fy9PCvnjEtf9vd+g
+bv+MKb5isMFXGXS2Jwc/zZ4mitvK/TUBFZD5K4Q53vIVpt54aWggRB9a3KaePpA8
+hMrLDklc2JaVcUtOqR2U8okAqQhagx+VHkjnfr2FKrRaIcA/vRvx/o+9yqSP/6TP
+3Kp5kMpxMBuCIPs3kF2WzxnvSrw+91QpCljNv66agiv3iPnNWyeaOe5C/0YFg3PR
+LVJq03K/LT4cHaUGM/tSFJLGj9BwyxHT67koh9CtImSoshN5v/41kPYAuxUYzKXm
+Ur9JGENNAIaUkrl7Gr3CzFnUIFfuCpd9uQIDAQAB
+-----END RSA PUBLIC KEY-----
+";
 
 /// Alice with a token issued beside her first, an OAuth app with a client
 /// secret issued beside its first, a code she authorized and exchanged, a
-/// second code still waiting to be, and an app installed on her with a token
-/// issued for the installation.
+/// second code still waiting to be, and an app holding a key, installed on
+/// her with a token issued for the installation.
 fn seed(world: &World) -> Seeded {
     let (alice, alice_token) = world.create_actor("alice", ActorKind::User).unwrap();
     let (_, issued_token) = world.issue_actor_token("alice", by(alice.id)).unwrap();
@@ -395,6 +407,9 @@ fn seed(world: &World) -> Seeded {
             by(alice.id),
         )
         .unwrap();
+    world
+        .add_app_key("helper", HELPER_KEY, by(alice.id))
+        .unwrap();
     let installation = world
         .create_installation("helper", "alice", None, by(alice.id))
         .unwrap();
@@ -412,6 +427,7 @@ fn seed(world: &World) -> Seeded {
         oauth_token,
         pending_code,
         installation_token,
+        helper_id: helper.app.id,
     }
 }
 
@@ -469,6 +485,11 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
         .unwrap()
         .expect("the re-derived installation token");
     assert_eq!(bot.actor.login, "helper");
+    // The app's key is the public half of a pair its caller holds, which
+    // no secret of a world's derives: the fork holds it as the source does.
+    let keys = fork.app_keys(source.helper_id).unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys, inst.world.app_keys(source.helper_id).unwrap());
 
     // The app keeps its public client id and gets the re-derived secret.
     assert_eq!(twin.client_id, source.client_id);
