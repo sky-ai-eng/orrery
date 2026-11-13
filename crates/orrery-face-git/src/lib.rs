@@ -744,7 +744,7 @@ async fn serve(
         && !caller.reaches(&repo)
     {
         if repo.private {
-            return plain(StatusCode::NOT_FOUND, "Not Found");
+            return plain(StatusCode::NOT_FOUND, "Repository not found.");
         }
         let for_push = is_push
             || (tail == "info/refs" && query.split('&').any(|kv| kv == "service=git-receive-pack"));

@@ -226,7 +226,8 @@ async fn an_app_reads_itself_and_its_installations() {
     assert_eq!(acme["repository_selection"], "all");
     assert_eq!(acme["permissions"]["contents"], "write");
     assert_eq!(acme["events"], serde_json::json!(["push", "pull_request"]));
-    assert_eq!(acme["created_at"], "2020-01-01T00:00:00Z");
+    // GitHub writes an installation's times with milliseconds.
+    assert_eq!(acme["created_at"], "2020-01-01T00:00:00.000Z");
     assert!(acme["suspended_at"].is_null());
     assert!(acme["suspended_by"].is_null());
     assert_eq!(
@@ -294,91 +295,135 @@ async fn a_jwt_is_held_to_githubs_rules() {
     let rs256 = || serde_json::json!({ "alg": "RS256", "typ": "JWT" });
     let claims =
         |iat: i64, exp: i64| serde_json::json!({ "iss": s.app_id, "iat": iat, "exp": exp });
-    let refused = |jwt: &str| {
-        let (status, _, body) = call("GET", &url, &bearer(jwt), None);
-        assert_eq!(status, 401, "{body}");
-        body["message"].as_str().unwrap().to_string()
+    let answer = |authorization: &str| {
+        let (status, _, body) = call("GET", &url, authorization, None);
+        (
+            status,
+            body["message"].as_str().unwrap_or_default().to_string(),
+        )
     };
+    let refused = |jwt: &str| answer(&bearer(jwt));
+    let signed = |claims: serde_json::Value| s.key.sign(rs256(), claims);
+    let good = s.key.jwt(serde_json::json!(s.app_id), now);
     const NOT_DECODED: &str = "A JSON web token could not be decoded";
+    const BAD: &str = "Bad credentials";
 
-    // What is not a JWT one of the App's keys signed.
-    assert_eq!(refused("not-a-jwt"), NOT_DECODED);
-    assert_eq!(refused(&s.alice), NOT_DECODED);
+    // What carries no JWT.
+    let http = agent();
+    let mut bare = http.get(&url).call().unwrap();
+    assert_eq!(bare.status(), 401);
+    let bare: serde_json::Value = bare.body_mut().read_json().unwrap();
+    assert_eq!(bare["message"], "Requires authentication");
+    assert_eq!(answer(&format!("token {good}")), (401, NOT_DECODED.into()));
+    assert_eq!(refused("not-a-jwt"), (401, BAD.into()));
+    // A token of the world's, as an installation token is.
+    assert_eq!(refused(&s.alice), (401, NOT_DECODED.into()));
+
+    // What none of the App's keys signed.
     let other = app_key();
     assert_eq!(
         refused(&other.jwt(serde_json::json!(s.app_id), now)),
-        NOT_DECODED
+        (401, NOT_DECODED.into())
     );
+    assert_eq!(refused(&format!("{good}x")), (401, NOT_DECODED.into()));
+    let none = s.key.sign(
+        serde_json::json!({ "alg": "none" }),
+        claims(now - 60, now + 540),
+    );
+    assert_eq!(refused(&none), (401, BAD.into()));
+
+    // The issuer.
     assert_eq!(
         refused(&s.key.jwt(serde_json::json!(999), now)),
-        NOT_DECODED
+        (404, "Integration not found".into())
+    );
+    assert_eq!(
+        refused(&s.key.jwt(serde_json::json!("999"), now)),
+        (404, "Integration not found".into())
     );
     assert_eq!(
         refused(&s.key.jwt(serde_json::json!("nobody"), now)),
-        NOT_DECODED
+        (401, "'Issuer' claim ('iss') must be an Integer".into())
     );
     assert_eq!(
-        refused(&s.key.sign(
-            serde_json::json!({ "alg": "none" }),
-            claims(now - 60, now + 540)
+        refused(&signed(
+            serde_json::json!({ "iat": now - 60, "exp": now + 540 })
         )),
-        NOT_DECODED
+        (401, BAD.into())
     );
-    let good = s.key.jwt(serde_json::json!(s.app_id), now);
-    let tampered = format!("{}x", good);
-    assert_eq!(refused(&tampered), NOT_DECODED);
-    let (status, _, _) = call("GET", &url, "", None);
-    assert_eq!(status, 401);
 
-    // The claims.
-    let signed = |claims: serde_json::Value| s.key.sign(rs256(), claims);
-    assert!(refused(&signed(serde_json::json!({ "iss": s.app_id, "iat": now }))).contains("'exp'"));
-    assert!(
+    // The claims: present, and of the types GitHub takes.
+    assert_eq!(
         refused(&signed(
             serde_json::json!({ "iss": s.app_id, "exp": now + 60 })
-        ))
-        .contains("'iat'")
+        )),
+        (401, "Missing 'issued at' claim ('iat') in assertion".into())
     );
     assert_eq!(
-        refused(&signed(claims(now, now + 601))),
-        "'Expiration time' claim ('exp') is too far in the future"
+        refused(&signed(serde_json::json!({ "iss": s.app_id, "iat": now }))),
+        (401, BAD.into())
     );
-    let (status, _, _) = call("GET", &url, &bearer(&signed(claims(now, now + 600))), None);
-    assert_eq!(status, 200);
+    let (status, message) = refused(&signed(
+        serde_json::json!({ "iss": s.app_id, "iat": now, "exp": now as f64 + 540.5 }),
+    ));
+    assert_eq!(status, 401);
+    assert!(message.starts_with("'Expiration time' claim ('exp') must be a numeric value"));
+    for odd in [
+        serde_json::json!({ "iss": s.app_id, "iat": now, "exp": (now + 540).to_string() }),
+        serde_json::json!({ "iss": s.app_id, "iat": now.to_string(), "exp": now + 540 }),
+        serde_json::json!({ "iss": s.app_id, "iat": now as f64 - 60.5, "exp": now + 540 }),
+    ] {
+        assert_eq!(refused(&signed(odd.clone())).0, 200, "{odd}");
+    }
 
-    // A manual world's clock is not the signer's, so a JWT dated years
-    // from it is accepted.
+    // A manual world's clock is not the signer's, so it holds neither
+    // claim to it: a JWT dated years from it, and one that lasts a day,
+    // are accepted.
     let later = now + 86_400 * 365;
-    let (status, _, _) = call(
-        "GET",
-        &url,
-        &bearer(&s.key.jwt(serde_json::json!(s.app_id), later)),
-        None,
+    assert_eq!(
+        refused(&s.key.jwt(serde_json::json!(s.app_id), later)).0,
+        200
     );
-    assert_eq!(status, 200);
+    assert_eq!(refused(&signed(claims(now, now + 86_400))).0, 200);
 
-    // A real world holds both claims to its clock.
+    // A real world holds both to its clock, as GitHub does: `exp` at most
+    // ten minutes ahead, and a minute's difference between the two clocks.
     let host = now + 1000;
     s.inst.world.set_host_time(host);
-    let http = agent();
     let patched = http
         .patch(format!("{}/_orrery/clock", s.base))
         .send_json(serde_json::json!({ "mode": "real" }))
         .unwrap();
     assert_eq!(patched.status(), 200);
-    let (status, _, _) = call(
-        "GET",
-        &url,
-        &bearer(&s.key.jwt(serde_json::json!(s.app_id), host)),
-        None,
+    assert_eq!(
+        refused(&s.key.jwt(serde_json::json!(s.app_id), host)).0,
+        200
     );
-    assert_eq!(status, 200);
-    assert!(refused(&signed(claims(host - 600, host))).contains("'exp'"));
-    assert!(refused(&signed(claims(host + 1, host + 300))).contains("'iat'"));
+    // Issued an hour ago is fine: only `exp` is held to ten minutes.
+    assert_eq!(refused(&signed(claims(host - 3600, host + 600))).0, 200);
+    assert_eq!(
+        refused(&signed(claims(host - 3600, host + 601))),
+        (
+            401,
+            "'Expiration time' claim ('exp') is too far in the future".into()
+        )
+    );
+    assert_eq!(refused(&signed(claims(host - 600, host - 59))).0, 200);
+    assert_eq!(
+        refused(&signed(claims(host - 600, host - 60))),
+        (401, BAD.into())
+    );
+    assert_eq!(refused(&signed(claims(host + 60, host + 300))).0, 200);
+    assert_eq!(
+        refused(&signed(claims(host + 61, host + 300))),
+        (401, BAD.into())
+    );
     // Time passes, and a JWT that was good expires.
     let jwt = s.key.jwt(serde_json::json!(s.app_id), host);
-    s.inst.world.set_host_time(host + 540);
-    assert!(refused(&jwt).contains("'exp'"));
+    s.inst.world.set_host_time(host + 599);
+    assert_eq!(refused(&jwt).0, 200);
+    s.inst.world.set_host_time(host + 600);
+    assert_eq!(refused(&jwt), (401, BAD.into()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -533,9 +578,10 @@ async fn an_installation_token_reaches_what_its_installation_covers() {
         s.on_acme,
         Some(serde_json::json!({ "permissions": { "contents": "read" } })),
     );
+    // Metadata is read whatever a token narrows itself to.
     assert_eq!(
         lesser["permissions"],
-        serde_json::json!({ "contents": "read" })
+        serde_json::json!({ "contents": "read", "metadata": "read" })
     );
     let tokens = format!("{api}/app/installations/{}/access_tokens", s.on_acme);
     for (body, message) in [
@@ -545,7 +591,11 @@ async fn an_installation_token_reaches_what_its_installation_covers() {
         ),
         (
             serde_json::json!({ "permissions": { "contents": "admin" } }),
-            "The permissions requested are not granted to this installation.",
+            "The level of access for permissions requested are not granted to this installation.",
+        ),
+        (
+            serde_json::json!({ "permissions": { "contents": "own" } }),
+            "There is at least one permission action that is not supported. It should be one of: \"read\", \"write\" or \"admin\".",
         ),
         (
             serde_json::json!({ "permissions": { "issues": "read" } }),
@@ -827,16 +877,36 @@ async fn what_github_serves_an_app_and_orrery_does_not_says_so() {
     let (status, _, issued) = call("POST", &tokens, &s.jwt(), Some(serde_json::json!(null)));
     assert_eq!(status, 201, "{issued}");
     assert_eq!(issued["repository_selection"], "all");
-    let (status, _, body) = call(
+    // A field of the wrong type narrows nothing, and an unknown one is
+    // ignored, as on GitHub. A body that is not JSON is refused.
+    let (status, _, issued) = call(
         "POST",
         &tokens,
         &s.jwt(),
-        Some(serde_json::json!({ "repositories": "web" })),
+        Some(serde_json::json!({ "repositories": "web", "permissions": [], "bogus": 1 })),
     );
-    assert_eq!(
-        (status, &body["message"]),
-        (400, &"Problems parsing JSON".into())
-    );
+    assert_eq!(status, 201, "{issued}");
+    assert!(issued.get("repositories").is_none());
+    assert_eq!(issued["permissions"]["contents"], "write");
+    let http = agent();
+    let mut garbled = http
+        .post(&tokens)
+        .header("authorization", &s.jwt())
+        .header("content-type", "application/json")
+        .send("{not json")
+        .unwrap();
+    assert_eq!(garbled.status(), 400);
+    let garbled: serde_json::Value = garbled.body_mut().read_json().unwrap();
+    assert_eq!(garbled["message"], "Problems parsing JSON");
+
+    // An OAuth client's route with no credentials at all.
+    let mut bare = http
+        .post(format!("{api}/applications/{}/token", s.client_id))
+        .send_json(serde_json::json!({ "access_token": "made-up" }))
+        .unwrap();
+    assert_eq!(bare.status(), 401);
+    let bare: serde_json::Value = bare.body_mut().read_json().unwrap();
+    assert_eq!(bare["message"], "Requires authentication");
 
     // A page past the end of anything is an empty page.
     let far = format!("{api}/app/installations?page=18446744073709551615");

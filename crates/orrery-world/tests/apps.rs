@@ -464,15 +464,14 @@ fn a_token_is_narrowed_to_repositories_and_permissions_the_installation_holds() 
             Err(WorldError::InstallationRepository(n)) if n == name
         ));
     }
-    for asked in [
-        permissions(&[("contents", AccessLevel::Admin)]),
-        permissions(&[("issues", AccessLevel::Read)]),
-    ] {
-        assert!(matches!(
-            refused(None, Some(&asked)),
-            Err(WorldError::InstallationPermission(_))
-        ));
-    }
+    assert!(matches!(
+        refused(None, Some(&permissions(&[("issues", AccessLevel::Read)]))),
+        Err(WorldError::InstallationPermission(name)) if name == "issues"
+    ));
+    assert!(matches!(
+        refused(None, Some(&permissions(&[("contents", AccessLevel::Admin)]))),
+        Err(WorldError::InstallationPermissionLevel(name)) if name == "contents"
+    ));
 
     // A selected installation's token reaches its list, and narrows within
     // it.

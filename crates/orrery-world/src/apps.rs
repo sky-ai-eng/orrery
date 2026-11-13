@@ -250,12 +250,12 @@ impl World {
             let permissions = match permissions.filter(|asked| !asked.is_empty()) {
                 Some(asked) => {
                     for (name, level) in asked {
-                        if installation
-                            .permissions
-                            .get(name)
-                            .is_none_or(|held| held < level)
-                        {
-                            return Err(WorldError::InstallationPermission(name.clone()));
+                        match installation.permissions.get(name) {
+                            None => return Err(WorldError::InstallationPermission(name.clone())),
+                            Some(held) if held < level => {
+                                return Err(WorldError::InstallationPermissionLevel(name.clone()));
+                            }
+                            Some(_) => {}
                         }
                     }
                     asked.clone()

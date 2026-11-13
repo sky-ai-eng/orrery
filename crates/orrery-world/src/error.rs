@@ -113,8 +113,10 @@ pub enum WorldError {
     NoSuchInstallation(i64),
     #[error("the installation does not cover a repository named {0:?}")]
     InstallationRepository(String),
-    #[error("the installation does not hold the permission {0:?} at the level asked for")]
+    #[error("the installation does not hold the permission {0:?}")]
     InstallationPermission(String),
+    #[error("the installation holds the permission {0:?} below the level asked for")]
+    InstallationPermissionLevel(String),
     #[error("{0:?} is not an SSH public key in OpenSSH format")]
     InvalidSigningKey(String),
     #[error("the SSH key is already held as a signing key")]

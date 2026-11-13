@@ -26,16 +26,25 @@ use crate::reads::{page_params, paginate};
 use crate::render::{actor_json, owner_type, repo_json, rfc3339};
 use crate::{GithubFace, github_error, internal, json_response, media, resolve_repo};
 
-/// The longest an App's JWT may last, from `iat` to `exp`: GitHub's ten
-/// minutes.
-const JWT_MAX_SECONDS: i64 = 600;
+/// How far ahead of the clock a JWT's `exp` may be: GitHub's ten minutes.
+const JWT_MAX_AHEAD_SECONDS: i64 = 600;
+
+/// How far GitHub's clock and a signer's may differ: it takes an `exp` up
+/// to about a minute past, and an `iat` up to about a minute ahead.
+const JWT_LEEWAY_SECONDS: i64 = 60;
 
 pub(crate) const NOT_ACCESSIBLE: &str = "Resource not accessible by integration";
 
+/// What every token of a world's starts with (spec/grammar.md).
+const TOKEN_PREFIX: &str = "orrfake_";
+
+const BAD_CREDENTIALS: &str = "Bad credentials";
+const REQUIRES_AUTHENTICATION: &str = "Requires authentication";
 const JWT_NOT_DECODED: &str = "A JSON web token could not be decoded";
+const JWT_ISS: &str = "'Issuer' claim ('iss') must be an Integer";
+const JWT_IAT_MISSING: &str = "Missing 'issued at' claim ('iat') in assertion";
 const JWT_EXP: &str = "'Expiration time' claim ('exp') must be a numeric value representing the future time at which the assertion expires";
 const JWT_EXP_TOO_FAR: &str = "'Expiration time' claim ('exp') is too far in the future";
-const JWT_IAT: &str = "'Issued at' claim ('iat') must be an Integer representing the time that the assertion was issued";
 
 /// The routes an App calls as itself, and the ones an OAuth client calls
 /// with its id and secret, at their paths under `/api/v3`.
@@ -82,7 +91,10 @@ async fn authenticate_client(
     mut req: Request,
     next: Next,
 ) -> Response<Body> {
-    let bad_credentials = || github_error(StatusCode::UNAUTHORIZED, "Bad credentials");
+    let bad_credentials = || github_error(StatusCode::UNAUTHORIZED, BAD_CREDENTIALS);
+    if !req.headers().contains_key(header::AUTHORIZATION) {
+        return github_error(StatusCode::UNAUTHORIZED, REQUIRES_AUTHENTICATION);
+    }
     let Some((id, secret)) = crate::oauth::basic_credentials(req.headers()) else {
         return bad_credentials();
     };
@@ -124,21 +136,35 @@ fn unauthorized(message: &str) -> Box<Response<Body>> {
     Box::new(github_error(StatusCode::UNAUTHORIZED, message))
 }
 
-/// The App a request's JWT names and one of its keys signed.
+/// The App a request's JWT names and one of its keys signed, held to the
+/// answers github.com gave a scratch App (spec/surface-github.md §1.11).
 ///
 /// The JWT is RS256 over `iss`, `iat`, and `exp`. `iss` is the App's id, as
-/// a number or a string, or its client id. `exp` is at most ten minutes
-/// after `iat`. A `real` world also holds both to its clock, as GitHub
-/// does. A `manual` world's clock is not the signer's, so it compares
-/// neither to it (spec/usage.md, "Time").
+/// a number or a string, or its client id. A `real` world also holds `exp`
+/// and `iat` to its clock, as GitHub does. A `manual` world's clock is not
+/// the signer's, so it compares neither to it (spec/usage.md, "Time").
 fn app_of(face: &GithubFace, headers: &HeaderMap) -> Result<App, Box<Response<Body>>> {
+    let bad_credentials = || unauthorized(BAD_CREDENTIALS);
     let not_decoded = || unauthorized(JWT_NOT_DECODED);
-    let jwt = bearer(headers).ok_or_else(not_decoded)?;
+    let Some(authorization) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return Err(unauthorized(REQUIRES_AUTHENTICATION));
+    };
+    let jwt = match authorization.split_once(' ') {
+        Some((scheme, value)) if scheme.eq_ignore_ascii_case("bearer") => value.trim(),
+        _ => return Err(not_decoded()),
+    };
+    // A token of this world's, such as an installation token, is not a JWT.
+    if jwt.starts_with(TOKEN_PREFIX) {
+        return Err(not_decoded());
+    }
     let mut parts = jwt.split('.');
     let (Some(head), Some(claims), Some(signature), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
-        return Err(not_decoded());
+        return Err(bad_credentials());
     };
     let decode = |part: &str| {
         base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -150,16 +176,12 @@ fn app_of(face: &GithubFace, headers: &HeaderMap) -> Result<App, Box<Response<Bo
     };
     let head_json = json(head).ok_or_else(not_decoded)?;
     if head_json.get("alg").and_then(|a| a.as_str()) != Some("RS256") {
-        return Err(not_decoded());
+        return Err(bad_credentials());
     }
     let claims_json = json(claims).ok_or_else(not_decoded)?;
     let signature = decode(signature).ok_or_else(not_decoded)?;
 
-    let app = match issuer(face, claims_json.get("iss")) {
-        Ok(Some(app)) => app,
-        Ok(None) => return Err(not_decoded()),
-        Err(e) => return Err(Box::new(internal(e))),
-    };
+    let app = issuer(face, claims_json.get("iss"))?;
     let keys = face
         .world
         .app_keys(app.id)
@@ -178,61 +200,76 @@ fn app_of(face: &GithubFace, headers: &HeaderMap) -> Result<App, Box<Response<Bo
         return Err(not_decoded());
     }
 
-    let exp = claims_json
-        .get("exp")
-        .and_then(numeric_date)
-        .ok_or_else(|| unauthorized(JWT_EXP))?;
     let iat = claims_json
         .get("iat")
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| unauthorized(JWT_IAT))?;
-    if exp.saturating_sub(iat) > JWT_MAX_SECONDS {
-        return Err(unauthorized(JWT_EXP_TOO_FAR));
-    }
+        .and_then(issued_at)
+        .ok_or_else(|| unauthorized(JWT_IAT_MISSING))?;
+    let exp = match claims_json.get("exp") {
+        None | Some(serde_json::Value::Null) => return Err(bad_credentials()),
+        Some(exp) => expiration(exp).ok_or_else(|| unauthorized(JWT_EXP))?,
+    };
     let clock = face.world.read_clock().map_err(|e| Box::new(internal(e)))?;
     if clock.mode == ClockMode::Real {
         let now = clock.clock_unix;
-        if exp <= now {
-            return Err(unauthorized(JWT_EXP));
+        if exp <= now.saturating_sub(JWT_LEEWAY_SECONDS)
+            || iat > now.saturating_add(JWT_LEEWAY_SECONDS)
+        {
+            return Err(bad_credentials());
         }
-        if exp > now.saturating_add(JWT_MAX_SECONDS) {
+        if exp > now.saturating_add(JWT_MAX_AHEAD_SECONDS) {
             return Err(unauthorized(JWT_EXP_TOO_FAR));
-        }
-        if iat > now {
-            return Err(unauthorized(JWT_IAT));
         }
     }
     Ok(app)
 }
 
-/// A JWT `NumericDate`: seconds since the epoch, which may carry a fraction.
-fn numeric_date(value: &serde_json::Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_f64().map(|seconds| seconds.floor() as i64))
-}
-
-/// The App an `iss` claim names: its id, as a number or as digits, or its
-/// client id.
-fn issuer(face: &GithubFace, iss: Option<&serde_json::Value>) -> Result<Option<App>, WorldError> {
-    match iss {
-        Some(serde_json::Value::Number(id)) => match id.as_i64() {
-            Some(id) => face.world.app_by_id(id),
-            None => Ok(None),
-        },
-        Some(serde_json::Value::String(iss)) => match iss.parse::<i64>() {
-            Ok(id) => face.world.app_by_id(id),
-            Err(_) => face.world.app_by_client_id(iss),
-        },
-        _ => Ok(None),
+/// An `iat` claim as GitHub takes one: a number, with or without a
+/// fraction, or a string of one.
+fn issued_at(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|s| s.floor() as i64)),
+        serde_json::Value::String(s) => s.parse::<f64>().ok().map(|s| s.floor() as i64),
+        _ => None,
     }
 }
 
-fn bearer(headers: &HeaderMap) -> Option<&str> {
-    let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, value) = auth.split_once(' ')?;
-    (scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("token"))
-        .then(|| value.trim())
+/// An `exp` claim as GitHub takes one: an integer, or a string of one. It
+/// refuses one with a fraction.
+fn expiration(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::Number(n) => n.as_i64(),
+        serde_json::Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+/// The App an `iss` claim names: its id, as a number or as digits, or its
+/// client id. GitHub answers a JWT with no `iss` as bad credentials, an id
+/// no App has as `404`, and any other string as not an integer.
+fn issuer(face: &GithubFace, iss: Option<&serde_json::Value>) -> Result<App, Box<Response<Body>>> {
+    let by_id = |id: i64| match face.world.app_by_id(id) {
+        Ok(Some(app)) => Ok(app),
+        Ok(None) => Err(Box::new(github_error(
+            StatusCode::NOT_FOUND,
+            "Integration not found",
+        ))),
+        Err(e) => Err(Box::new(internal(e))),
+    };
+    match iss {
+        Some(serde_json::Value::Number(id)) => match id.as_i64() {
+            Some(id) => by_id(id),
+            None => Err(unauthorized(JWT_ISS)),
+        },
+        Some(serde_json::Value::String(iss)) => match iss.parse::<i64>() {
+            Ok(id) => by_id(id),
+            Err(_) => match face.world.app_by_client_id(iss) {
+                Ok(Some(app)) => Ok(app),
+                Ok(None) => Err(unauthorized(JWT_ISS)),
+                Err(e) => Err(Box::new(internal(e))),
+            },
+        },
+        _ => Err(unauthorized(BAD_CREDENTIALS)),
+    }
 }
 
 async fn get_app(
@@ -337,12 +374,9 @@ async fn get_installation(
     json_response(StatusCode::OK, installation_json(&face, &installation))
 }
 
-#[derive(serde::Deserialize, Default)]
-struct TokenBody {
-    repositories: Option<Vec<String>>,
-    repository_ids: Option<serde_json::Value>,
-    permissions: Option<Permissions>,
-}
+/// The permission every installation token holds beside the ones it asks
+/// for, when its installation holds it.
+const METADATA: &str = "metadata";
 
 /// Issue a token for an installation. GitHub's clients send no body at all
 /// for a token that reaches the whole installation.
@@ -360,22 +394,57 @@ async fn create_token(
     if let Some(refused) = media::refuse_unrendered(&headers, "Installation") {
         return refused;
     }
-    // A client with no options to send may send no body, or `null`.
-    let asked = match body.iter().all(u8::is_ascii_whitespace) {
-        true => TokenBody::default(),
-        false => match serde_json::from_slice::<Option<TokenBody>>(&body) {
-            Ok(parsed) => parsed.unwrap_or_default(),
+    // A client with no options to send may send no body, or `null`. GitHub
+    // reads the body laxly: a field of the wrong type narrows nothing.
+    let asked: serde_json::Value = match body.iter().all(u8::is_ascii_whitespace) {
+        true => serde_json::Value::Null,
+        false => match serde_json::from_slice(&body) {
+            Ok(parsed) => parsed,
             Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
         },
     };
-    if asked.repository_ids.is_some() {
+    if asked.get("repository_ids").is_some() {
         return crate::orrery_unsupported_field("Installation", "repository_ids");
+    }
+    let repositories: Option<Vec<String>> = asked
+        .get("repositories")
+        .and_then(|r| r.as_array())
+        .map(|r| {
+            r.iter()
+                .filter_map(|name| name.as_str().map(str::to_string))
+                .collect()
+        });
+    let mut permissions = Permissions::new();
+    for (name, level) in asked
+        .get("permissions")
+        .and_then(|p| p.as_object())
+        .into_iter()
+        .flatten()
+    {
+        let level = match level.as_str() {
+            Some("read") => AccessLevel::Read,
+            Some("write") => AccessLevel::Write,
+            Some("admin") => AccessLevel::Admin,
+            _ => {
+                return github_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "There is at least one permission action that is not supported. It should be one of: \"read\", \"write\" or \"admin\".",
+                );
+            }
+        };
+        permissions.insert(name.clone(), level);
+    }
+    // A token narrowed to some permissions still reads metadata.
+    if !permissions.is_empty() && installation.permissions.contains_key(METADATA) {
+        permissions
+            .entry(METADATA.to_string())
+            .or_insert(AccessLevel::Read);
     }
     let issued = face.world.create_installation_token(
         app.id,
         installation.id,
-        asked.repositories.as_deref(),
-        asked.permissions.as_ref(),
+        repositories.as_deref(),
+        Some(&permissions),
     );
     let token = match issued {
         Ok(token) => token,
@@ -392,6 +461,12 @@ async fn create_token(
             return github_error(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "The permissions requested are not granted to this installation.",
+            );
+        }
+        Err(WorldError::InstallationPermissionLevel(_)) => {
+            return github_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "The level of access for permissions requested are not granted to this installation.",
             );
         }
         Err(e) => return internal(e),
@@ -612,6 +687,12 @@ pub(crate) fn app_json(face: &GithubFace, app: &App) -> serde_json::Value {
     })
 }
 
+/// A time as GitHub writes an installation's: with milliseconds, where its
+/// other objects have none.
+fn rfc3339_millis(unix: i64) -> String {
+    rfc3339(unix).replacen('Z', ".000Z", 1)
+}
+
 /// GitHub's installation object.
 fn installation_json(face: &GithubFace, installation: &Installation) -> serde_json::Value {
     let base = face.base_url.trim_end_matches('/');
@@ -640,8 +721,8 @@ fn installation_json(face: &GithubFace, installation: &Installation) -> serde_js
         "target_type": owner_type(account.kind),
         "permissions": permissions_json(&installation.permissions),
         "events": installation.events,
-        "created_at": rfc3339(installation.created_clock_unix),
-        "updated_at": rfc3339(installation.created_clock_unix),
+        "created_at": rfc3339_millis(installation.created_clock_unix),
+        "updated_at": rfc3339_millis(installation.created_clock_unix),
         "single_file_name": serde_json::Value::Null,
         "has_multiple_single_files": false,
         "single_file_paths": [],

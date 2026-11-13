@@ -117,7 +117,7 @@ The clock is what time the world holds it is, consulted whenever the engine stam
 - **`manual`**, the default: the clock moves only when a caller advances it. Two runs of one script against a manual world make the same log, which is what a scripted test needs.
 - **`real`**: the clock is the host's time, and nobody advances it. This is for a world that stands in for GitHub in front of a running application, which compares the times the world stamps with its own clock, and sends the world times it made from its own clock. Two runs of one script against a real world make different logs, and choosing `real` accepts that.
 
-A caller's own clock is the host's in a real world, and anything in a manual one. So a manual world compares no time a caller made from its own clock to the world's: it checks that a GitHub App's JWT lasts at most 10 minutes, and not whether it has expired (`surface-github.md` §1.11). A time the world made itself, such as an installation token's expiry, is held to the world's clock in both modes, so in a manual world a token expires when the clock is advanced past it.
+A caller's own clock is the host's in a real world, and anything in a manual one. So a manual world compares no time a caller made from its own clock to the world's: it checks the signature on a GitHub App's JWT and who issued it, and not whether it has expired or how long it lasts, since GitHub holds both only to its own clock (`surface-github.md` §1.11). A time the world made itself, such as an installation token's expiry, is held to the world's clock in both modes, so in a manual world a token expires when the clock is advanced past it.
 
 The operations:
 

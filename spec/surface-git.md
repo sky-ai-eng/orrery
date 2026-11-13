@@ -18,7 +18,7 @@ An unknown repository is `404`. A request body is capped at 256 MiB.
 
 An actor authenticates with HTTP Basic, its token as the password, the way GitHub documents for tokens (`x-access-token:<token>`; the username is not checked). Without credentials, clone and fetch of a public repository succeed unless the instance sets `anonymous_git_reads = false`, which a world whose faces are on the public internet does. A push, or any request for a private repository, without credentials is `401`, not `404`, so `git` knows credentials would change the answer.
 
-An installation token reaches the repositories its installation covers (`surface-github.md` §1.11). A private repository it does not reach is `404`, as one that does not exist. A public one is fetched, as anyone fetches it, and a push to it is `403`.
+An installation token reaches the repositories its installation covers (`surface-github.md` §1.11). A private repository it does not reach is `404` "Repository not found.". A public one is fetched, as anyone fetches it, and a push to it is `403` "Permission to {owner}/{repo}.git denied to {slug}[bot].". Both were observed on github.com.
 
 ## The bare repository recipe
 
