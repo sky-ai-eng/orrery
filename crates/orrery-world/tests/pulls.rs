@@ -207,7 +207,9 @@ fn close_reopen_merge_state_machine() {
     assert_eq!(unchanged.head_sha, SHA_C, "a refused reopen moves nothing");
 
     let merge = into_main(SHA_A, SHA_C, Vec::new());
-    let merged = f.w.record_merge(pull.id, by(f.bob), &merge).unwrap();
+    let merged =
+        f.w.record_merge(pull.id, by(f.bob), &merge, f.w.clock().unwrap())
+            .unwrap();
     assert!(merged.merged);
     assert_eq!(merged.state, PullState::Closed);
     assert_eq!(merged.merge_commit_sha.as_deref(), Some(SHA_C));
@@ -221,7 +223,7 @@ fn close_reopen_merge_state_machine() {
         Err(WorldError::InvalidTransition(_))
     ));
     assert!(matches!(
-        f.w.record_merge(pull.id, by(f.bob), &merge),
+        f.w.record_merge(pull.id, by(f.bob), &merge, f.w.clock().unwrap()),
         Err(WorldError::InvalidTransition(_))
     ));
 
@@ -507,7 +509,8 @@ fn a_test_merge_is_stale_after_a_branch_moves_until_one_starts() {
         commits: Vec::new(),
         commit_count: 0,
     };
-    f.w.record_merge(pull.id, by(f.alice), &merge).unwrap();
+    f.w.record_merge(pull.id, by(f.alice), &merge, f.w.clock().unwrap())
+        .unwrap();
     assert!(now().test_merge_stale);
     assert_eq!(f.w.start_test_merge(pull.id, by(f.bob)).unwrap(), None);
 }
@@ -521,7 +524,9 @@ fn a_merge_records_its_base_move_and_the_merge_together() {
     f.w.advance_clock(60, by(sys.id)).unwrap();
 
     let merge = into_main(SHA_A, SHA_C, vec![release.number]);
-    let merged = f.w.record_merge(pull.id, by(f.bob), &merge).unwrap();
+    let merged =
+        f.w.record_merge(pull.id, by(f.bob), &merge, f.w.clock().unwrap())
+            .unwrap();
     assert_eq!(
         merged,
         f.w.pull_by_number(f.repo, pull.number).unwrap().unwrap()
@@ -591,7 +596,7 @@ fn a_merge_whose_record_is_refused_records_none_of_it() {
     };
     for refused in [&elsewhere, &stale, &deleting] {
         assert!(matches!(
-            f.w.record_merge(pull.id, by(f.bob), refused),
+            f.w.record_merge(pull.id, by(f.bob), refused, f.w.clock().unwrap()),
             Err(WorldError::InvalidTransition(_))
         ));
     }
@@ -614,7 +619,7 @@ fn a_merge_whose_record_is_refused_records_none_of_it() {
     let mark = f.w.log_after(0, 1000).unwrap().last().unwrap().seq;
     let merge = into_main(SHA_A, SHA_C, vec![release.number]);
     assert!(matches!(
-        f.w.record_merge(pull.id, by(f.bob), &merge),
+        f.w.record_merge(pull.id, by(f.bob), &merge, f.w.clock().unwrap()),
         Err(WorldError::InvalidTransition(_))
     ));
     assert!(f.w.log_after(mark, 1000).unwrap().is_empty());
@@ -667,7 +672,8 @@ fn a_reader_sees_all_of_a_merge_or_none_of_it() {
     });
 
     let merge = into_main(SHA_A, SHA_C, vec![release.number]);
-    f.w.record_merge(pull.id, by(f.bob), &merge).unwrap();
+    f.w.record_merge(pull.id, by(f.bob), &merge, f.w.clock().unwrap())
+        .unwrap();
 
     let none = (0, None, false, SHA_A.to_string());
     let all = (2, Some(DEFAULT_T0_UNIX + 60), true, SHA_C.to_string());
@@ -794,6 +800,7 @@ fn check_run_create_and_patch_return_stored_rows() {
                 started_clock_unix: Some(DEFAULT_T0_UNIX),
                 completed_clock_unix: None,
             },
+            DEFAULT_T0_UNIX,
         )
         .unwrap();
     let read = f.w.check_run_by_id(created.id).unwrap().unwrap();
@@ -812,6 +819,7 @@ fn check_run_create_and_patch_return_stored_rows() {
                 completed_clock_unix: Some(DEFAULT_T0_UNIX + 120),
                 ..Default::default()
             },
+            DEFAULT_T0_UNIX,
         )
         .unwrap();
     assert_eq!(updated.status, CheckStatus::Completed);
@@ -824,7 +832,7 @@ fn check_run_create_and_patch_return_stored_rows() {
     assert_eq!(updated, read);
 
     assert!(matches!(
-        f.w.update_check_run(999, by(ci.id), CheckRunPatch::default()),
+        f.w.update_check_run(999, by(ci.id), CheckRunPatch::default(), DEFAULT_T0_UNIX),
         Err(WorldError::NoSuchCheckRun(999))
     ));
 

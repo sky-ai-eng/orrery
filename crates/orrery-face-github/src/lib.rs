@@ -862,6 +862,7 @@ mod ref_read_tests {
                     commits: vec![merge.clone()],
                     commit_count: 1,
                 },
+                f.face.world.clock().unwrap(),
             )
             .unwrap();
         drop(merging);

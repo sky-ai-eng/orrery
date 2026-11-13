@@ -54,7 +54,7 @@ fn clock_is_forward_only_and_logged() {
     let (_dir, w) = fresh();
     let sys = w.actor_by_login("orrery").unwrap().unwrap();
     let to = w.advance_clock(3600, by(sys.id)).unwrap();
-    assert_eq!(to, DEFAULT_T0_UNIX + 3600);
+    assert_eq!(to.clock_unix, DEFAULT_T0_UNIX + 3600);
     assert!(matches!(
         w.advance_clock(0, by(sys.id)),
         Err(WorldError::ClockRegression(0))
@@ -100,7 +100,8 @@ fn the_clock_stops_at_the_latest_time_it_can_render() {
 
     assert_eq!(
         w.advance_clock(latest - DEFAULT_T0_UNIX, by(sys.id))
-            .unwrap(),
+            .unwrap()
+            .clock_unix,
         latest
     );
     let refused = w.advance_clock(1, by(sys.id)).unwrap_err();
@@ -184,7 +185,7 @@ fn the_world_secret_never_reaches_the_log() {
     let log = serde_json::to_string(&w.log_after(0, 100).unwrap()).unwrap();
     assert_eq!(
         body(&w.log_after(0, 1).unwrap()[0])["object"],
-        serde_json::json!({ "clock_unix": DEFAULT_T0_UNIX })
+        serde_json::json!({ "clock_unix": DEFAULT_T0_UNIX, "clock_mode": "manual" })
     );
     assert!(!log.contains(&"ab".repeat(32)), "{log}");
     assert!(!log.contains(&token), "{log}");

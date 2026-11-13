@@ -28,6 +28,13 @@ fn routes() -> Vec<Route> {
             mistyped: ("seconds", json!("60")),
         },
         Route {
+            method: "PATCH",
+            path: "/clock",
+            accepted: json!({ "mode": "manual" }),
+            required: &[],
+            mistyped: ("mode", json!("Manual")),
+        },
+        Route {
             method: "POST",
             path: "/actors",
             accepted: json!({ "login": "alice", "kind": "user" }),
@@ -106,6 +113,7 @@ fn call(base: &str, method: &str, path: &str, body: &[u8]) -> (u16, Value) {
     let request = match method {
         "POST" => agent.post(&url),
         "PUT" => agent.put(&url),
+        "PATCH" => agent.patch(&url),
         "DELETE" => agent.delete(&url).force_send_body(),
         other => panic!("unsupported method {other}"),
     };

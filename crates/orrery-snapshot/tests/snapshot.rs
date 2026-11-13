@@ -594,7 +594,7 @@ fn diff_reports_the_interval_between_states() {
         commit_count: 1,
     };
     inst.world
-        .record_merge(pull.id, by(bob.id), &merge)
+        .record_merge(pull.id, by(bob.id), &merge, inst.world.clock().unwrap())
         .unwrap();
     orrery_snapshot::create(&inst.world, &inst.snapshots(), "after").unwrap();
 

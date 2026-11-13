@@ -33,9 +33,9 @@ GitHub is the only face. Rule 8 is what lets another vendor's face be added with
 
 **Determinism**
 
-4. **Only three things change the world:** a scenario step, a driver (scenario steps on a timer), or an outside actor's API call. Nothing changes on its own.
+4. **Only three things change the world:** a scenario step, a driver (scenario steps on a timer), or an outside actor's API call. A `real` world's clock follows the host's time, an outside input the log records as an advance before any write uses it, as it records an API call (`usage.md`, "Time"). Nothing else changes on its own.
 5. **Replay is free.** A seed snapshot plus the log rebuilds the exact world: re-executing each write's operation makes the same events again, consequences included. If it doesn't, something read a hidden input, and that is a bug.
-6. **The world never touches the internet.**
+6. **Nothing a world sends can change it.** A world's state changes only through logged calls (rule 4). The one thing a world sends is a webhook delivery, through the egress its instance configures (`usage.md`, "What a world sends"), and what the receiver answers reaches the world only as a result a logged write records. Nothing else leaves a world: no telemetry, no fetching, and no calls to an LLM.
 
 **Shape**
 

@@ -20,6 +20,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 #[cfg(any(test, feature = "test-support"))]
 mod audit;
 mod checks;
+mod clock;
 mod credentials;
 mod error;
 pub mod events;
@@ -112,6 +113,7 @@ pub struct World {
     root: PathBuf,
     conn: Mutex<Connection>,
     listeners: RwLock<Vec<Listener>>,
+    host: clock::HostTime,
 }
 
 type Listener = Box<dyn Fn(Signal) + Send + Sync>;
@@ -134,36 +136,50 @@ pub enum Signal {
 
 impl World {
     /// Create a new world at `root` (which must not already contain one) with
-    /// the clock at `t0_unix` and every credential keyed by `secret`, and seed
-    /// the system actor. The `orrery` command is the one caller that creates
-    /// a world, so the write is the system actor's, through the CLI.
+    /// a `manual` clock at `t0_unix` and every credential keyed by `secret`,
+    /// and seed the system actor.
     pub fn create(root: &Path, t0_unix: i64, secret: &WorldSecret) -> Result<World> {
+        World::create_with_clock(root, NewClock::Manual { t0_unix }, secret)
+    }
+
+    /// [`World::create`], with the clock `clock` says. The `orrery` command
+    /// is the one caller that creates a world, so the write is the system
+    /// actor's, through the CLI.
+    pub fn create_with_clock(root: &Path, clock: NewClock, secret: &WorldSecret) -> Result<World> {
         if root.join(DB_FILE).exists() {
             return Err(WorldError::AlreadyExists(root.to_path_buf()));
         }
         std::fs::create_dir_all(root.join(REPOS_DIR))?;
         let world = World::connect(root)?;
+        let (t0_unix, mode) = match clock {
+            NewClock::Manual { t0_unix } => (t0_unix, ClockMode::Manual),
+            NewClock::Real => (world.host.now_unix(), ClockMode::Real),
+        };
         let by = Attribution::new(SYSTEM_ACTOR_ID, Door::Cli);
-        world.write(by, |w| {
-            w.tx.execute(
-                "INSERT INTO world (id, clock_unix, secret) VALUES (1, ?1, ?2)",
-                params![t0_unix, secret],
-            )?;
-            w.tx.execute(
-                "INSERT INTO actors (id, login, kind, created_clock_unix)
-                 VALUES (?1, ?2, 'system', ?3)",
-                params![SYSTEM_ACTOR_ID, SYSTEM_ACTOR_LOGIN, t0_unix],
-            )?;
-            w.operation(EventBody::WorldCreated(events::WorldCreated {
-                subject: events::WorldSubject::default(),
-                object: objects::world_object(w.tx)?,
-            }));
-            w.emit(EventBody::ActorCreated(events::ActorCreated {
-                subject: objects::actor_subject(w.tx, SYSTEM_ACTOR_ID)?,
-                object: objects::actor_object(w.tx, SYSTEM_ACTOR_ID)?,
-            }));
-            Ok(())
-        })?;
+        world.write_keeping(
+            clock::KeepTime::Never,
+            |_| Ok((by, ())),
+            |w, ()| {
+                w.tx.execute(
+                    "INSERT INTO world (id, clock_unix, clock_mode, secret) VALUES (1, ?1, ?2, ?3)",
+                    params![t0_unix, mode.as_str(), secret],
+                )?;
+                w.tx.execute(
+                    "INSERT INTO actors (id, login, kind, created_clock_unix)
+                     VALUES (?1, ?2, 'system', ?3)",
+                    params![SYSTEM_ACTOR_ID, SYSTEM_ACTOR_LOGIN, t0_unix],
+                )?;
+                w.operation(EventBody::WorldCreated(events::WorldCreated {
+                    subject: events::WorldSubject::default(),
+                    object: objects::world_object(w.tx)?,
+                }));
+                w.emit(EventBody::ActorCreated(events::ActorCreated {
+                    subject: objects::actor_subject(w.tx, SYSTEM_ACTOR_ID)?,
+                    object: objects::actor_object(w.tx, SYSTEM_ACTOR_ID)?,
+                }));
+                Ok(())
+            },
+        )?;
         Ok(world)
     }
 
@@ -176,13 +192,13 @@ impl World {
         World::connect(root)
     }
 
-    /// Open the world at `root`, creating it with `t0_unix` and `secret` if
-    /// absent. An existing world keeps the secret it was created with.
-    pub fn open_or_create(root: &Path, t0_unix: i64, secret: &WorldSecret) -> Result<World> {
+    /// Open the world at `root`, creating it with `clock` and `secret` if
+    /// absent. An existing world keeps the clock and the secret it holds.
+    pub fn open_or_create(root: &Path, clock: NewClock, secret: &WorldSecret) -> Result<World> {
         if root.join(DB_FILE).exists() {
             World::open(root)
         } else {
-            World::create(root, t0_unix, secret)
+            World::create_with_clock(root, clock, secret)
         }
     }
 
@@ -192,6 +208,7 @@ impl World {
             root: root.to_path_buf(),
             conn: Mutex::new(conn),
             listeners: RwLock::new(Vec::new()),
+            host: clock::HostTime::default(),
         })
     }
 
@@ -226,45 +243,6 @@ impl World {
     /// The directory the git face keeps bare repositories in.
     pub fn repos_dir(&self) -> PathBuf {
         self.root.join(REPOS_DIR)
-    }
-
-    // ---- clock ----
-
-    pub fn clock(&self) -> Result<i64> {
-        queries::clock(&self.lock())
-    }
-
-    /// Advance the virtual clock. Forward-only: the clock never rewinds in a
-    /// live world (spec/usage.md — rollback is a snapshot operation). It
-    /// stops at the latest second `jiff` represents, so that every time the
-    /// world stamps can be rendered.
-    pub fn advance_clock(&self, seconds: i64, by: Attribution) -> Result<i64> {
-        if seconds <= 0 {
-            return Err(WorldError::ClockRegression(seconds));
-        }
-        let latest = jiff::Timestamp::MAX.as_second();
-        self.write(by, |w| {
-            let from = objects::world_object(w.tx)?;
-            let to = from
-                .clock_unix
-                .checked_add(seconds)
-                .filter(|to| *to <= latest)
-                .ok_or_else(|| WorldError::ClockOutOfRange {
-                    seconds,
-                    remaining: latest.saturating_sub(from.clock_unix).max(0),
-                    latest: jiff::Timestamp::MAX,
-                })?;
-            let to: i64 = w.tx.query_row(
-                "UPDATE world SET clock_unix = ?1 WHERE id = 1 RETURNING clock_unix",
-                params![to],
-                |r| r.get(0),
-            )?;
-            w.operation(EventBody::WorldClockAdvanced(events::WorldChanged {
-                subject: events::WorldSubject::default(),
-                changes: events::WorldChanges::between(&from, &objects::world_object(w.tx)?),
-            }));
-            Ok(to)
-        })
     }
 
     // ---- actors & tokens ----
@@ -631,8 +609,13 @@ impl World {
     /// Run `f` with the database quiesced: the WAL checkpointed into the main
     /// file and the connection lock held, so no write can land while `f` runs.
     /// This is the moment a snapshot copy of the world directory is exact.
+    ///
+    /// A `real` world's clock is first brought to the host's time, as a
+    /// write of the system actor's through the control plane, which takes
+    /// snapshots, so a copy's clock is the moment it was made.
     pub fn quiesce<T>(&self, f: impl FnOnce() -> T) -> Result<T> {
         let conn = self.lock();
+        self.catch_up(&conn, Door::Control)?;
         checkpoint(&conn)?;
         Ok(f())
     }
@@ -798,7 +781,7 @@ fn validate_repo_name(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::log::wall_unix_ms;
+    use super::clock::host_unix_ms;
     use super::{ActorKind, DEFAULT_T0_UNIX, World, WorldSecret, uniqueness_violation};
 
     // No kernel write reaches a foreign-key, CHECK, or NOT NULL failure, so
@@ -858,9 +841,9 @@ mod tests {
         )
         .unwrap();
 
-        let before = wall_unix_ms();
+        let before = host_unix_ms();
         w.create_actor("alice", ActorKind::User).unwrap();
-        let after = wall_unix_ms();
+        let after = host_unix_ms();
 
         let log = w.log_after(0, 100).unwrap();
         let created = log.last().unwrap();

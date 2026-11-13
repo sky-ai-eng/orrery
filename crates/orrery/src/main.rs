@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock};
 use anyhow::Context;
 use clap::{ArgGroup, Parser, Subcommand};
 use orrery_snapshot::SnapshotError;
-use orrery_world::{World, WorldError, WorldSecret};
+use orrery_world::{ClockMode, NewClock, World, WorldError, WorldSecret};
 use sha2::{Digest as _, Sha256};
 
 static VERSION: LazyLock<String> = LazyLock::new(|| {
@@ -48,9 +48,12 @@ enum Command {
         #[arg(long)]
         instance: PathBuf,
         /// RFC3339 T0, the new world's clock. Defaults to
-        /// 2020-01-01T00:00:00Z.
+        /// 2020-01-01T00:00:00Z. Refused with `--clock real`.
         #[arg(long)]
         t0: Option<String>,
+        /// How the new world's clock moves.
+        #[arg(long, value_enum, default_value_t)]
+        clock: ClockChoice,
         /// The secret the new world derives its credentials from.
         #[arg(long, value_enum, default_value_t)]
         secret: SecretChoice,
@@ -137,6 +140,8 @@ struct Config {
     instance: InstanceConfig,
     #[serde(default)]
     server: ServerConfig,
+    #[serde(default)]
+    outbound: OutboundConfig,
 }
 
 #[derive(serde::Deserialize)]
@@ -147,6 +152,10 @@ struct InstanceConfig {
     /// RFC3339 T0 for a newly created world. Ignored when the world already
     /// exists — the clock lives in the world, not the config.
     t0: Option<String>,
+    /// How a newly created world's clock moves. Ignored when the world
+    /// already exists, like `t0`: the mode lives in the world.
+    #[serde(default)]
+    clock: ClockChoice,
     /// The secret a newly created world derives its credentials from. Ignored
     /// when the world already exists, like `t0`: the secret lives in the world.
     #[serde(default)]
@@ -182,6 +191,25 @@ impl SecretChoice {
     }
 }
 
+#[derive(serde::Deserialize, clap::ValueEnum, Default, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum ClockChoice {
+    /// Moved only by `POST /_orrery/clock/advance`, from T0.
+    #[default]
+    Manual,
+    /// The host's time, from the moment the world is created.
+    Real,
+}
+
+impl ClockChoice {
+    fn mode(self) -> ClockMode {
+        match self {
+            ClockChoice::Manual => ClockMode::Manual,
+            ClockChoice::Real => ClockMode::Real,
+        }
+    }
+}
+
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct ServerConfig {
@@ -210,6 +238,24 @@ impl ServerConfig {
         }
         Ok(())
     }
+}
+
+/// How the one thing a world sends, a webhook delivery, is sent
+/// (spec/usage.md, "What a world sends").
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct OutboundConfig {
+    /// How a delivery's connection leaves the machine; `direct` when absent.
+    #[serde(default, deserialize_with = "egress")]
+    egress: orrery_outbound::Egress,
+    /// A PEM file of certificate authorities to trust as well as the public
+    /// roots the binary ships.
+    extra_ca_certs: Option<PathBuf>,
+}
+
+fn egress<'de, D: serde::Deserializer<'de>>(raw: D) -> Result<orrery_outbound::Egress, D::Error> {
+    let raw = <String as serde::Deserialize>::deserialize(raw)?;
+    raw.parse().map_err(serde::de::Error::custom)
 }
 
 /// A listener address: `host:port`; `unix:/absolute/path` for a Unix socket
@@ -376,16 +422,22 @@ async fn main() -> anyhow::Result<ExitCode> {
         Command::Create {
             instance,
             t0,
+            clock,
             secret,
             json,
-        } => report(json, create(&instance, t0.as_deref(), secret), |made| {
-            format!(
-                "created a world at {} with its clock at {} — serve it with a config whose instance.dir is {}",
-                made.world.display(),
-                rfc3339(made.clock_unix),
-                made.instance.display(),
-            )
-        }),
+        } => report(
+            json,
+            create(&instance, t0.as_deref(), clock, secret),
+            |made| {
+                format!(
+                    "created a world at {} with its {} clock at {} — serve it with a config whose instance.dir is {}",
+                    made.world.display(),
+                    clock.mode().as_str(),
+                    rfc3339(made.clock_unix),
+                    made.instance.display(),
+                )
+            },
+        ),
         Command::Fork {
             instance,
             snapshot,
@@ -498,12 +550,18 @@ fn report(
     Ok(ExitCode::SUCCESS)
 }
 
-fn create(instance: &Path, t0: Option<&str>, secret: SecretChoice) -> Result<Made, Failure> {
-    let t0_unix = t0_unix(t0, "--t0").map_err(|e| Failure::new("INVALID_ARGUMENT", e, "t0"))?;
+fn create(
+    instance: &Path,
+    t0: Option<&str>,
+    clock: ClockChoice,
+    secret: SecretChoice,
+) -> Result<Made, Failure> {
+    let clock = new_clock(clock, t0, ["--t0", "--clock real"])
+        .map_err(|e| Failure::new("INVALID_ARGUMENT", e, "t0"))?;
     let instance = std::path::absolute(instance).map_err(Failure::internal)?;
     let world_root = instance.join("world");
     let secret = secret.secret().map_err(Failure::internal)?;
-    let world = World::create(&world_root, t0_unix, &secret).map_err(|e| match e {
+    let world = World::create_with_clock(&world_root, clock, &secret).map_err(|e| match e {
         WorldError::AlreadyExists(_) => Failure::new("ALREADY_EXISTS", e, "instance"),
         e => Failure::internal(e),
     })?;
@@ -558,6 +616,22 @@ fn fork(source: &Source, dest: &Path, secret: SecretChoice) -> Result<Made, Fail
     })
 }
 
+/// A new world's clock: `real`, starting at the host's time, or `manual`,
+/// starting at `t0`. `names` are what the caller calls `t0` and the choice of
+/// `real`: a real world has no T0 to set, so the two are refused together.
+fn new_clock(clock: ClockChoice, t0: Option<&str>, names: [&str; 2]) -> anyhow::Result<NewClock> {
+    let [t0_name, real_name] = names;
+    match (clock, t0) {
+        (ClockChoice::Real, Some(_)) => anyhow::bail!(
+            "{t0_name} is refused with {real_name}: a real world's clock starts at the host's time"
+        ),
+        (ClockChoice::Real, None) => Ok(NewClock::Real),
+        (ClockChoice::Manual, t0) => Ok(NewClock::Manual {
+            t0_unix: t0_unix(t0, t0_name)?,
+        }),
+    }
+}
+
 /// A new world's T0: the RFC3339 instant `t0`, which the caller calls `name`,
 /// or the fixed default.
 fn t0_unix(t0: Option<&str>, name: &str) -> anyhow::Result<i64> {
@@ -590,12 +664,25 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         .server
         .check()
         .with_context(|| format!("checking config {}", config_path.display()))?;
+    // Made before the world is opened, so that a certificate file it can't
+    // use stops `serve` before it opens or creates one.
+    // TODO(ORR-7): hand the client to the webhook sender, which posts each delivery with it.
+    let outbound = orrery_outbound::Client::new(
+        config.outbound.egress,
+        config.outbound.extra_ca_certs.as_deref(),
+    )
+    .with_context(|| format!("checking config {}", config_path.display()))?;
 
-    let t0_unix = t0_unix(config.instance.t0.as_deref(), "instance.t0")?;
+    let clock = new_clock(
+        config.instance.clock,
+        config.instance.t0.as_deref(),
+        ["instance.t0", "instance.clock = \"real\""],
+    )
+    .with_context(|| format!("checking config {}", config_path.display()))?;
     let world_root = config.instance.dir.join("world");
     let world = Arc::new(World::open_or_create(
         &world_root,
-        t0_unix,
+        clock,
         &config.instance.secret.secret()?,
     )?);
 
@@ -638,6 +725,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         listen = %listener,
         control = %control.as_ref().map_or_else(|| format!("{listener}/_orrery"), ToString::to_string),
         %base_url,
+        egress = %outbound.egress(),
         clock_unix = world.clock()?,
         "orrery serving"
     );

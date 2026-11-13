@@ -338,3 +338,112 @@ fn each_json_failure_names_its_reason() {
     let (code, made) = orrery_json(cwd, &["fork", "--world", "made/world", "--dest", "retry"]);
     assert_eq!(code, 0, "{made}");
 }
+
+/// The clock a served world answers, and its mode.
+fn served_clock(socket: &str) -> (i64, String) {
+    let clock = call(socket, "GET", "/_orrery/clock", None, "", 200);
+    (
+        clock["clock_unix"].as_i64().unwrap(),
+        clock["mode"].as_str().unwrap().to_string(),
+    )
+}
+
+/// The first event of a served world's log, its creation: the clock it
+/// started at, and the host's time, in Unix milliseconds, it was appended at.
+fn created_at(socket: &str) -> (i64, i64) {
+    let log = call(socket, "POST", "/_orrery/log/list", None, "{}", 200);
+    let created = &log["items"][0];
+    assert_eq!(created["type"], "world:created", "{created}");
+    (
+        created["object"]["clock_unix"].as_i64().unwrap(),
+        created["wall_unix_ms"].as_i64().unwrap(),
+    )
+}
+
+/// A world's clock starts at the host's time when it is created `real`:
+/// read just before its creation event records the host's time it was
+/// appended at.
+fn assert_started_at_the_hosts_time(socket: &str) {
+    let (clock, wall_ms) = created_at(socket);
+    let lag = wall_ms - clock * 1000;
+    assert!((0..60_000).contains(&lag), "{clock} vs {wall_ms}");
+    let (now, mode) = served_clock(socket);
+    assert_eq!(mode, "real");
+    assert!(now >= clock, "{now} < {clock}");
+}
+
+#[test]
+fn a_world_created_real_follows_the_hosts_time() {
+    let created = tempfile::tempdir().unwrap();
+    let (code, made) = orrery_json(
+        created.path(),
+        &["create", "--instance", "instance", "--clock", "real"],
+    );
+    assert_eq!(code, 0, "{made}");
+    let clock_unix = made["clock_unix"].as_i64().unwrap();
+    assert_made(&made, &created.path().join("instance"), clock_unix);
+    let (socket, _served) = serve_instance(created.path(), "");
+    assert_started_at_the_hosts_time(&socket);
+    // `create` reports the clock as a read answers it, once the world is
+    // made: no earlier than the clock it started at, and no later than now.
+    let started = created_at(&socket).0;
+    let now = served_clock(&socket).0;
+    assert!(
+        (started..=now).contains(&clock_unix),
+        "{clock_unix} outside {started}..={now}"
+    );
+
+    // `serve` creates one too, from the config.
+    let first_run = tempfile::tempdir().unwrap();
+    let (socket, _served) = serve_instance(first_run.path(), "clock = \"real\"\n");
+    assert_started_at_the_hosts_time(&socket);
+
+    // A world that exists keeps its mode, whatever the config says.
+    drop(_served);
+    let config = common::write_config(
+        first_run.path(),
+        "clock = \"manual\"\n",
+        &format!(
+            "listen = \"unix:{}\"\nbase_url = \"http://world.test\"\n",
+            first_run.path().join("faces.sock").display()
+        ),
+    );
+    let (_served, ready) = common::serve(&config, &[]);
+    assert_eq!(served_clock(&ready.listen).1, "real");
+}
+
+#[test]
+fn a_t0_is_refused_for_a_real_world() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_failed(
+        orrery_json(
+            dir.path(),
+            &[
+                "create",
+                "--instance",
+                "instance",
+                "--clock",
+                "real",
+                "--t0",
+                "2026-03-04T05:06:07Z",
+            ],
+        ),
+        "INVALID_ARGUMENT",
+        Some("t0"),
+    );
+    assert!(!dir.path().join("instance").exists());
+
+    let config = common::write_config(
+        dir.path(),
+        "t0 = \"2026-03-04T05:06:07Z\"\nclock = \"real\"\n",
+        "listen = \"127.0.0.1:0\"\n",
+    );
+    let out = common::refused(common::orrery_serve(&config, &[]));
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("instance.t0 is refused with instance.clock = \"real\""),
+        "{stderr}"
+    );
+    assert!(!dir.path().join("instance").exists());
+}

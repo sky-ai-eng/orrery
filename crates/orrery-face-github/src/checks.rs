@@ -100,6 +100,7 @@ pub(crate) async fn create_check_run(
             started_clock_unix: Some(started),
             completed_clock_unix: completed,
         },
+        clock,
     );
     match created {
         Ok(run) => json_response(StatusCode::CREATED, check_run_json(&face, &repo, &run)),
@@ -179,6 +180,7 @@ pub(crate) async fn patch_check_run(
             started_clock_unix: fields.started,
             completed_clock_unix: completed,
         },
+        clock,
     );
     match updated {
         Ok(run) => json_response(StatusCode::OK, check_run_json(&face, &repo, &run)),

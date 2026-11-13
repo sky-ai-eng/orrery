@@ -127,6 +127,10 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE pulls ADD COLUMN test_merge_stale INTEGER NOT NULL DEFAULT 0
          CHECK (test_merge_stale IN (0, 1));
      UPDATE pulls SET test_merge_stale = base_moved;",
+    // 15: `world.clock_mode`: how the clock moves, `manual` or `real`. Every
+    // world before this version was manual.
+    "ALTER TABLE world ADD COLUMN clock_mode TEXT NOT NULL DEFAULT 'manual'
+         CHECK (clock_mode IN ('manual', 'real'));",
 ];
 
 /// The version this binary reads and writes.

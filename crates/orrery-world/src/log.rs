@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
+use crate::clock::{KeepTime, host_unix_ms};
 use crate::events::*;
 use crate::{LogOrder, Result, Signal, World, WorldError, objects, queries};
 
@@ -13,15 +14,19 @@ use crate::{LogOrder, Result, Signal, World, WorldError, objects, queries};
 pub(crate) struct Write<'a> {
     pub(crate) tx: &'a Connection,
     pub(crate) by: Attribution,
+    /// The host's time, when the write read it before it ran
+    /// ([`KeepTime`]).
+    pub(crate) host_unix: Option<i64>,
     operation: Option<EventBody>,
     consequences: Vec<EventBody>,
 }
 
 impl<'a> Write<'a> {
-    fn new(tx: &'a Connection, by: Attribution) -> Write<'a> {
+    fn new(tx: &'a Connection, by: Attribution, host_unix: Option<i64>) -> Write<'a> {
         Write {
             tx,
             by,
+            host_unix,
             operation: None,
             consequences: Vec::new(),
         }
@@ -124,6 +129,19 @@ impl World {
         self.write_by(|_| Ok((by, ())), |w, ()| f(w))
     }
 
+    /// [`World::write`] for a write whose caller dated something it records
+    /// with `at`, a time [`World::clock`] answered it. In a `real` world the
+    /// write advances the clock to `at` rather than to the host's time,
+    /// which may have passed it ([`KeepTime::At`]).
+    pub(crate) fn write_at<T>(
+        &self,
+        at: i64,
+        by: Attribution,
+        f: impl FnOnce(&mut Write<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.write_keeping(KeepTime::At(at), |_| Ok((by, ())), |w, ()| f(w))
+    }
+
     /// [`World::write`] for a write that learns who makes it from the world:
     /// `by` reads that inside the write's transaction, before `f` runs, and
     /// hands `f` what else it read.
@@ -132,22 +150,54 @@ impl World {
         by: impl FnOnce(&Connection) -> Result<(Attribution, X)>,
         f: impl FnOnce(&mut Write<'_>, X) -> Result<T>,
     ) -> Result<T> {
-        let conn = self.lock();
+        self.write_keeping(KeepTime::IfReal, by, f)
+    }
+
+    /// [`World::write_by`], keeping a `real` world's time first as `keep`
+    /// says. When that moves the clock, the advance is appended as a write of
+    /// its own, before this one, and in its transaction. A write that
+    /// appends nothing used no time the log has to hold, so the advance is
+    /// rolled back with it.
+    pub(crate) fn write_keeping<X, T>(
+        &self,
+        keep: KeepTime,
+        by: impl FnOnce(&Connection) -> Result<(Attribution, X)>,
+        f: impl FnOnce(&mut Write<'_>, X) -> Result<T>,
+    ) -> Result<T> {
+        self.write_locked(&self.lock(), keep, by, f)
+    }
+
+    /// [`World::write_keeping`] on the world's connection, which the caller
+    /// has locked.
+    pub(crate) fn write_locked<X, T>(
+        &self,
+        conn: &Connection,
+        keep: KeepTime,
+        by: impl FnOnce(&Connection) -> Result<(Attribution, X)>,
+        f: impl FnOnce(&mut Write<'_>, X) -> Result<T>,
+    ) -> Result<T> {
         let tx = conn.unchecked_transaction()?;
+        let kept = self.keep_time(&tx, keep)?;
         #[cfg(any(test, feature = "test-support"))]
         let audit = crate::audit::Audit::begin(&tx)?;
         let (by, read) = by(&tx)?;
-        let mut w = Write::new(&tx, by);
+        let mut w = Write::new(&tx, by, kept.host_unix);
         let out = f(&mut w, read)?;
         let events = w.into_events();
+        let advanced = kept.advance.is_some();
         if !events.is_empty() {
-            let _first = append(&tx, by, &events)?;
-            #[cfg(any(test, feature = "test-support"))]
-            crate::audit::check_schema(&read_write(&tx, _first)?);
+            if let Some(advance) = kept.advance {
+                append_write(&tx, crate::clock::keeper(by), &[advance])?;
+            }
+            append_write(&tx, by, &events)?;
             self.signal(Signal::LogMayHaveGrown);
         }
         #[cfg(any(test, feature = "test-support"))]
         audit.end(&tx, &events)?;
+        if events.is_empty() && advanced {
+            // Dropped uncommitted, the transaction rolls the advance back.
+            return Ok(out);
+        }
         tx.commit()?;
         Ok(out)
     }
@@ -318,12 +368,21 @@ struct LegacyRefUpdate {
     new: String,
 }
 
+/// Append one write's events, and in a test build check them against the
+/// schema.
+fn append_write(tx: &Connection, by: Attribution, events: &[EventBody]) -> Result<()> {
+    let _first = append(tx, by, events)?;
+    #[cfg(any(test, feature = "test-support"))]
+    crate::audit::check_schema(&read_write(tx, _first)?);
+    Ok(())
+}
+
 /// Append a write's events, numbered from the next `seq` this database
-/// issues, each stamped with the current clock and the one real time, add
+/// issues, each stamped with the current clock and the host's time, add
 /// them to the log's count, and return the first event's `seq`.
 fn append(tx: &Connection, by: Attribution, events: &[EventBody]) -> Result<i64> {
     let first = issued_seq(tx)? + 1;
-    let wall = wall_unix_ms();
+    let wall = host_unix_ms();
     let mut insert = tx.prepare_cached(
         "INSERT INTO action_log (seq, write_seq, write_events, clock_unix, wall_unix_ms,
                                  actor_id, door, app_id, type, body)
@@ -432,20 +491,6 @@ pub(crate) fn issued_seq(conn: &Connection) -> Result<i64> {
         )
         .optional()?
         .unwrap_or(0))
-}
-
-/// The real time, in Unix milliseconds, a write's events record as the
-/// moment they were appended.
-pub(crate) fn wall_unix_ms() -> i64 {
-    // The world's one wall-clock read. It is recorded for callers showing
-    // when something happened, and nothing in the world reads it, so it is
-    // not an input to replay (rule 5).
-    #[allow(clippy::disallowed_methods)]
-    let now = std::time::SystemTime::now();
-    match now.duration_since(std::time::UNIX_EPOCH) {
-        Ok(since) => since.as_millis() as i64,
-        Err(before) => -(before.duration().as_millis() as i64),
-    }
 }
 
 #[cfg(test)]
