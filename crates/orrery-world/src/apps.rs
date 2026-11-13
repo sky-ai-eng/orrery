@@ -404,8 +404,8 @@ impl World {
         Ok((installations, count_installations(&conn, app_id)?))
     }
 
-    /// The `limit` installations of an app after its first `offset`, in id
-    /// order, and how many it has.
+    /// The `limit` installations of an app after its first `offset`, newest
+    /// first, and how many it has.
     pub fn installations_slice(
         &self,
         app_id: i64,
@@ -415,7 +415,9 @@ impl World {
         let conn = self.lock();
         let installations = installations_from(
             &conn,
-            &format!("{INSTALLATION_SELECT} WHERE i.app_id = ?1 ORDER BY i.id LIMIT ?3 OFFSET ?2"),
+            &format!(
+                "{INSTALLATION_SELECT} WHERE i.app_id = ?1 ORDER BY i.id DESC LIMIT ?3 OFFSET ?2"
+            ),
             // An offset past what SQLite counts is past every row.
             params![
                 app_id,

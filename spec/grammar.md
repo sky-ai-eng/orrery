@@ -66,7 +66,7 @@ GraphQL marks the same fault in its `errors` entry (`surface-github.md` §3.1). 
 
 ## Pagination
 
-REST lists page with `?per_page=&page=`: `per_page` defaults to 30 and is limited to 1 through 100, as on GitHub, and `page` starts at 1. No list sends a total, and only `GET /app/installations` sends a `Link` header (`surface-github.md` §1.11), so a client pages until a short page. Every list has a fixed total order, so a page boundary never drops or repeats an item. GraphQL connections are in `surface-github.md` §3.4.
+REST lists page with `?per_page=&page=`: `per_page` defaults to 30 and is limited to 1 through 100, as on GitHub, and `page` starts at 1. No list sends a total, and only `GET /app/installations` and `GET /installation/repositories` send a `Link` header (`surface-github.md` §1.11), so on any other list a client pages until a short page. Every list has a fixed total order, so a page boundary never drops or repeats an item. GraphQL connections are in `surface-github.md` §3.4.
 
 ## Conditional requests
 

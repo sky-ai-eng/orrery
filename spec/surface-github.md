@@ -197,13 +197,15 @@ A GitHub App is registered, given a public key, and installed on the control pla
 | Route | Behavior |
 | --- | --- |
 | `GET /app` | The App, plus `installations_count`. |
-| `GET /app/installations` | The App's installations, oldest first, paged. With more than one page, a `Link` header names `next` and `last` while pages follow, and `prev` and `first` after the first page, each a URL on the base URL. |
+| `GET /app/installations` | The App's installations, newest first, paged, with a `Link` header (below). |
 | `GET /app/installations/{installation_id}` | One installation. An id that is not one of the App's installations is `404`. |
 | `POST /app/installations/{installation_id}/access_tokens` | Issues an installation token, answering `201` `{token, expires_at, permissions, repository_selection}`. With no body, `null`, or `{}`, as GitHub's clients send when they have no options, the token reaches what the installation covers. `repositories`, a list of repository names, narrows it to those: `repository_selection` is then `selected`, and `repositories` lists them as repositories. A name the installation does not cover is `422` "There is at least one repository that does not exist or is not accessible to the parent installation." `permissions` narrows it to the levels it gives, plus `metadata: read` when the installation holds `metadata`. A permission the installation does not hold is `422` "The permissions requested are not granted to this installation.", one it holds at a lower level is `422` "The level of access for permissions requested are not granted to this installation.", and a level other than `read`, `write`, or `admin` is `422` "There is at least one permission action that is not supported. It should be one of: \"read\", \"write\" or \"admin\"." The body is read laxly, as GitHub reads it: an empty list or object, a field of the wrong type, and an unknown field narrow nothing. A body that is not JSON is `400`. `repository_ids` is not mocked. |
 
+**The `Link` header.** `GET /app/installations` and `GET /installation/repositories` send GitHub's `Link` header when the list is more than the page asked for. It names, in this order, `prev`, `next`, `last`, and `first`, each when there is such a page and it is not the page asked for; a page past the end names the last page as both `prev` and `last`. Each is a URL on the base URL carrying `page`, and `per_page` when the request carried it.
+
 GitHub serves more to an App's JWT than Orrery does: every other path under `/app`, and the lookups of the installation on a repository, an organization, or a user (`GET /repos/{o}/{r}/installation`, `/orgs/{org}/installation`, `/users/{username}/installation`). Each answers the `501` of surface Orrery does not serve, to a valid JWT alone, so a caller whose JWT is good is never told it is bad.
 
-**The JWT** is RS256 over `iss`, `iat`, and `exp`, checked against the App's keys. Each answer here was observed on github.com (2026-11-13, a scratch App owned by a user).
+**The JWT** is RS256 over `iss`, `iat`, and `exp`, checked against the App's keys. Each answer here, and the rest of this section but what §4 lists, was observed on github.com on 2026-11-13, with a scratch App installed on one repository of a user and on every repository of an organization.
 
 - `iss` is the App's id, as a number or a string of digits, or its client id.
 - `iat` is a number, with or without a fraction, or a string of one. `exp` is an integer, or a string of one.
@@ -240,7 +242,7 @@ Permissions are recorded and echoed, not checked: no route reads a token's permi
 
 | Route | Behavior |
 | --- | --- |
-| `GET /installation/repositories` | `{total_count, repository_selection, repositories}`: the repositories the caller's installation token reaches, by id, paged. `repository_selection` is `selected` for a narrowed token. Any other token is `403` "You must authenticate with an installation access token in order to list repositories for an installation." |
+| `GET /installation/repositories` | `{total_count, repository_selection, repositories}`: the repositories the caller's installation token reaches, by id, paged, with a `Link` header (above). `repository_selection` is `selected` for a narrowed token. Any other token is `403` "You must authenticate with an installation access token in order to list repositories for an installation." |
 
 **Client credentials.** One route takes an OAuth client's id and secret as HTTP Basic, for an App's client and any other OAuth app's. Every other path under `/applications/{client_id}`, and every other method, answers the `501` of surface Orrery does not serve, to a client id and secret that name an OAuth app.
 
@@ -313,7 +315,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 
 **Not yet observed on GitHub:**
 
-- For GitHub Apps (§1.11), what a scratch App installed on one repository of a user could not show: the `Link` header of `GET /app/installations`, an installation on every repository or on an organization, a token narrowed from an installation on every repository, a write to an organization the App is not installed on, the answer once a token's hour has passed (a revoked token is `401` "Bad credentials"), and a mutation over GraphQL on a pull request in a public repository the token does not reach. The rest of §1.11 was observed on github.com on 2026-11-13.
+- For GitHub Apps (§1.11): the answer once an installation token's hour has passed. A token that was revoked, and one whose installation was removed, are `401` "Bad credentials".
 - A team member's review leaves the team's pending request in place.
 - Adding a user who is not a member of the organization to a team is a `422` with Orrery's own message.
 - The `422` bodies for requesting a review from the pull request's author, and from someone who is not a collaborator.
@@ -344,7 +346,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `repository(owner:, name:)` for a repository that does not exist, or that an installation token does not see, is `null` with no error. GitHub adds an error whose `type` is `NOT_FOUND`: "Could not resolve to a Repository with the name '{owner}/{name}'."
 - A bot's own token, the one its actor was created with, reaches every repository. Only an installation token is limited.
 - An App holds at least one callback URL, where GitHub lets an App have none. Its `description` is null and its `external_url` is its `html_url`, since Orrery keeps neither.
-- `repository_ids` on a request for an installation token is not mocked. `GET /app/installations` ignores `since` and `outdated`.
+- `repository_ids` on a request for an installation token is not mocked, where GitHub narrows the token by it. `GET /app/installations` ignores `since` and `outdated`.
 - A path under `/app` that Orrery does not serve is `501` to a valid JWT, where GitHub answers a path it does not serve `401` "Bad credentials".
 - GitHub's error bodies in §1.11 carry `documentation_url` and `status` beside `message`. Orrery's carry `message`, as its other routes' do.
 - An installation token is `orrfake_` and 32 hex digits. GitHub's is `ghs_` and three segments joined by dots, 383 characters when observed.

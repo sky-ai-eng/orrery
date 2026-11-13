@@ -215,7 +215,8 @@ async fn an_app_reads_itself_and_its_installations() {
     assert_eq!(link, None, "one page has no Link");
     let listed = listed.as_array().unwrap();
     assert_eq!(listed.len(), 2);
-    let acme = &listed[0];
+    // Newest first, as GitHub lists them.
+    let acme = &listed[1];
     assert_eq!(acme["id"], s.on_acme);
     assert_eq!(acme["account"]["login"], "acme");
     assert_eq!(acme["account"]["type"], "Organization");
@@ -234,9 +235,9 @@ async fn an_app_reads_itself_and_its_installations() {
         acme["access_tokens_url"],
         format!("{api}/app/installations/{}/access_tokens", s.on_acme)
     );
-    assert_eq!(listed[1]["id"], s.on_alice);
-    assert_eq!(listed[1]["repository_selection"], "selected");
-    assert_eq!(listed[1]["target_type"], "User");
+    assert_eq!(listed[0]["id"], s.on_alice);
+    assert_eq!(listed[0]["repository_selection"], "selected");
+    assert_eq!(listed[0]["target_type"], "User");
 
     // Paged, each page names the ones around it on this origin.
     let (_, link, first) = call(
@@ -257,15 +258,44 @@ async fn an_app_reads_itself_and_its_installations() {
         &s.jwt(),
         None,
     );
-    assert_eq!(second[0]["id"], s.on_alice);
+    assert_eq!(second[0]["id"], s.on_acme);
     assert_eq!(
         link.unwrap(),
         format!("{}; rel=\"prev\", {}; rel=\"first\"", page(1), page(1))
     );
+    // A page past the end names the last page as `prev` and as `last`, and
+    // a link carries `per_page` only when the request did.
+    let (_, link, past) = call(
+        "GET",
+        &format!("{api}/app/installations?per_page=1&page=3"),
+        &s.jwt(),
+        None,
+    );
+    assert_eq!(past, serde_json::json!([]));
+    assert_eq!(
+        link.unwrap(),
+        format!(
+            "{}; rel=\"prev\", {}; rel=\"last\", {}; rel=\"first\"",
+            page(2),
+            page(2),
+            page(1)
+        )
+    );
+    let (_, link, _) = call(
+        "GET",
+        &format!("{api}/app/installations?page=2"),
+        &s.jwt(),
+        None,
+    );
+    let bare = format!("<{api}/app/installations?page=1>");
+    assert_eq!(
+        link.unwrap(),
+        format!("{bare}; rel=\"prev\", {bare}; rel=\"last\", {bare}; rel=\"first\"")
+    );
 
     let one = format!("{api}/app/installations/{}", s.on_alice);
     let (status, _, read) = call("GET", &one, &s.jwt(), None);
-    assert_eq!((status, &read), (200, &listed[1]));
+    assert_eq!((status, &read), (200, &listed[0]));
     for missing in ["999", "nope"] {
         let (status, _, body) = call(
             "GET",
@@ -454,7 +484,7 @@ async fn an_installation_token_reaches_what_its_installation_covers() {
     assert_eq!(names(&repos["repositories"]), ["acme/web", "acme/secret"]);
     assert_eq!(repos["repositories"][1]["private"], true);
     assert_eq!(repos["repositories"][0]["owner"]["login"], "acme");
-    let (_, _, paged) = call(
+    let (_, link, paged) = call(
         "GET",
         &format!("{api}/installation/repositories?per_page=1&page=2"),
         &auth,
@@ -462,6 +492,11 @@ async fn an_installation_token_reaches_what_its_installation_covers() {
     );
     assert_eq!(paged["total_count"], 2);
     assert_eq!(names(&paged["repositories"]), ["acme/secret"]);
+    let first = format!("<{api}/installation/repositories?per_page=1&page=1>");
+    assert_eq!(
+        link.unwrap(),
+        format!("{first}; rel=\"prev\", {first}; rel=\"first\"")
+    );
 
     // It acts as the App's bot.
     let (status, _, me) = call("GET", &format!("{api}/user"), &auth, None);

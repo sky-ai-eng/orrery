@@ -303,9 +303,14 @@ fn create_installation_returns_the_installation_a_read_answers() {
         w.installations_page(app_id, Some(all.id), 10).unwrap(),
         (vec![chosen.clone()], 2)
     );
+    // The face's list is newest first.
+    assert_eq!(
+        w.installations_slice(app_id, 0, 1).unwrap(),
+        (vec![chosen], 2)
+    );
     assert_eq!(
         w.installations_slice(app_id, 1, 10).unwrap(),
-        (vec![chosen], 2)
+        (vec![all], 2)
     );
     assert_eq!(w.installations_slice(app_id, 0, 0).unwrap(), (vec![], 2));
     assert_eq!(w.installation_by_id(999).unwrap(), None);

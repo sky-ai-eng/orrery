@@ -298,7 +298,8 @@ async fn list_installations(
     if let Some(refused) = media::refuse_unrendered(&headers, "Installation") {
         return refused;
     }
-    let (per_page, page) = page_params(&query.unwrap_or_default());
+    let query = query.unwrap_or_default();
+    let (per_page, page) = page_params(&query);
     let (installations, total) =
         match face
             .world
@@ -311,10 +312,18 @@ async fn list_installations(
         .iter()
         .map(|i| installation_json(&face, i))
         .collect();
-    let mut resp = json_response(StatusCode::OK, serde_json::Value::Array(items));
+    let resp = json_response(StatusCode::OK, serde_json::Value::Array(items));
     let base = face.base_url.trim_end_matches('/');
     let url = format!("{base}/api/v3/app/installations");
-    if let Some(link) = link_header(&url, per_page, page, total as usize)
+    with_link(resp, &url, &query, total as usize)
+}
+
+/// `resp` with GitHub's `Link` header for the page `query` asks of `total`
+/// items at `url`, when the list is more than that page.
+fn with_link(mut resp: Response<Body>, url: &str, query: &str, total: usize) -> Response<Body> {
+    let (per_page, page) = page_params(query);
+    let asked = crate::parse_form(query.as_bytes()).contains_key("per_page");
+    if let Some(link) = link_header(url, asked.then_some(per_page), per_page, page, total)
         && let Ok(value) = link.parse()
     {
         resp.headers_mut().insert(header::LINK, value);
@@ -322,18 +331,31 @@ async fn list_installations(
     resp
 }
 
-/// GitHub's `Link` header for page `page` of `total` items: `next` and
-/// `last` while pages follow, `first` and `prev` after the first. `None`
-/// when the list is one page.
-fn link_header(url: &str, per_page: usize, page: usize, total: usize) -> Option<String> {
+/// GitHub's `Link` header for page `page` of `total` items, `per_page` to a
+/// page: `prev`, then `next`, then `last`, then `first`, each when there is
+/// such a page and this is not it. A page past the end names the last page
+/// as both `prev` and `last`. `None` for the only page. A link carries
+/// `per_page` when the request did (`asked`), as GitHub's does.
+fn link_header(
+    url: &str,
+    asked: Option<usize>,
+    per_page: usize,
+    page: usize,
+    total: usize,
+) -> Option<String> {
     let last = total.div_ceil(per_page).max(1);
-    let to = |n: usize, rel: &str| format!("<{url}?per_page={per_page}&page={n}>; rel=\"{rel}\"");
+    let to = |n: usize, rel: &str| match asked {
+        Some(per_page) => format!("<{url}?per_page={per_page}&page={n}>; rel=\"{rel}\""),
+        None => format!("<{url}?page={n}>; rel=\"{rel}\""),
+    };
     let mut links = Vec::new();
     if page > 1 {
         links.push(to((page - 1).min(last), "prev"));
     }
     if page < last {
         links.push(to(page + 1, "next"));
+    }
+    if page != last {
         links.push(to(last, "last"));
     }
     if page > 1 {
@@ -547,7 +569,8 @@ pub(crate) async fn list_installation_repos(
         Ok(None) => return internal("installation account missing"),
         Err(e) => return internal(e),
     };
-    let (per_page, page) = page_params(&query.unwrap_or_default());
+    let query = query.unwrap_or_default();
+    let (per_page, page) = page_params(&query);
     let total = repos.len();
     let listed: Vec<_> = paginate(repos, per_page, page)
         .iter()
@@ -557,14 +580,17 @@ pub(crate) async fn list_installation_repos(
         Some(_) => RepositorySelection::Selected,
         None => RepositorySelection::All,
     };
-    json_response(
+    let resp = json_response(
         StatusCode::OK,
         serde_json::json!({
             "total_count": total,
             "repository_selection": selection.as_str(),
             "repositories": listed,
         }),
-    )
+    );
+    let base = face.base_url.trim_end_matches('/');
+    let url = format!("{base}/api/v3/installation/repositories");
+    with_link(resp, &url, &query, total)
 }
 
 /// What an installation token is refused when it does not reach `repo`, or
@@ -739,27 +765,45 @@ mod tests {
 
     #[test]
     fn a_list_of_one_page_has_no_link() {
-        assert_eq!(link_header(URL, 30, 1, 0), None);
-        assert_eq!(link_header(URL, 30, 1, 30), None);
+        assert_eq!(link_header(URL, None, 30, 1, 0), None);
+        assert_eq!(link_header(URL, Some(30), 30, 1, 30), None);
+    }
+
+    // Each as github.com answered it.
+    #[test]
+    fn a_page_past_the_end_names_the_last_page_twice() {
+        assert_eq!(
+            link_header(URL, Some(1), 1, 3, 2).unwrap(),
+            format!(
+                "<{URL}?per_page=1&page=2>; rel=\"prev\", <{URL}?per_page=1&page=2>; rel=\"last\", \
+                 <{URL}?per_page=1&page=1>; rel=\"first\""
+            )
+        );
+        assert_eq!(
+            link_header(URL, None, 30, 2, 2).unwrap(),
+            format!(
+                "<{URL}?page=1>; rel=\"prev\", <{URL}?page=1>; rel=\"last\", <{URL}?page=1>; rel=\"first\""
+            )
+        );
     }
 
     #[test]
     fn a_link_names_the_pages_around_this_one() {
         assert_eq!(
-            link_header(URL, 2, 1, 5).unwrap(),
+            link_header(URL, Some(2), 2, 1, 5).unwrap(),
             format!(
                 "<{URL}?per_page=2&page=2>; rel=\"next\", <{URL}?per_page=2&page=3>; rel=\"last\""
             )
         );
         assert_eq!(
-            link_header(URL, 2, 2, 5).unwrap(),
+            link_header(URL, Some(2), 2, 2, 5).unwrap(),
             format!(
                 "<{URL}?per_page=2&page=1>; rel=\"prev\", <{URL}?per_page=2&page=3>; rel=\"next\", \
                  <{URL}?per_page=2&page=3>; rel=\"last\", <{URL}?per_page=2&page=1>; rel=\"first\""
             )
         );
         assert_eq!(
-            link_header(URL, 2, 3, 5).unwrap(),
+            link_header(URL, Some(2), 2, 3, 5).unwrap(),
             format!(
                 "<{URL}?per_page=2&page=2>; rel=\"prev\", <{URL}?per_page=2&page=1>; rel=\"first\""
             )
