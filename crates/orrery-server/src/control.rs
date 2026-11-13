@@ -48,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .route("/log/list", post(log_list))
         .route("/log/schema", get(log_schema))
         .route("/log/stream", get(crate::log_stream::stream))
+        .merge(crate::apps::router())
         .merge(crate::snapshots::router())
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
@@ -305,7 +306,7 @@ async fn issue_oauth_client_secret(
 
 /// Every control-plane write is the system actor's, through the control
 /// plane.
-const SYSTEM: Attribution = Attribution::new(SYSTEM_ACTOR_ID, Door::Control);
+pub(crate) const SYSTEM: Attribution = Attribution::new(SYSTEM_ACTOR_ID, Door::Control);
 
 /// The log's events, oldest first unless the body orders them newest first.
 /// `after_seq` narrows it to what followed a position another call reported,

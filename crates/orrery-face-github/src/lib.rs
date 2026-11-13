@@ -23,6 +23,7 @@ use axum::routing::{delete, get, patch, post, put};
 use orrery_face_git::GitFace;
 use orrery_world::{Actor, ActorKind, Attribution, Caller, Door, Repo, World, WorldError};
 
+pub mod apps;
 mod checks;
 pub mod graphql;
 mod media;
@@ -81,6 +82,10 @@ pub fn router(face: GithubFace) -> Router {
         .route(
             "/user/repos",
             get(reads::list_user_repos).post(create_user_repo),
+        )
+        .route(
+            "/installation/repositories",
+            get(apps::list_installation_repos),
         )
         .route("/repositories/{id}", get(reads::get_repo_by_id))
         .route("/repos/{owner}/{repo}", get(reads::get_repo))
@@ -153,6 +158,10 @@ pub fn router(face: GithubFace) -> Router {
             "/repos/{owner}/{repo}/check-runs/{id}",
             patch(checks::patch_check_run),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            face.clone(),
+            apps::limit_installation,
+        ))
         .with_state(face)
 }
 
@@ -487,6 +496,7 @@ mod ref_read_tests {
         Caller {
             actor: actor.clone(),
             app_id: None,
+            installation: None,
         }
     }
 

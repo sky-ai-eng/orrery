@@ -145,29 +145,7 @@ impl World {
         validate_oauth_app_callback_url(callback_url)?;
         self.write(by, |w| {
             let tx = w.tx;
-            let clock = queries::clock(tx)?;
-            let secret = credentials::world_secret(tx)?;
-            let id: i64 =
-                tx.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM oauth_apps", [], |r| {
-                    r.get(0)
-                })?;
-            let app = tx.query_row(
-                &format!(
-                    "INSERT INTO oauth_apps (id, name, client_id, client_secret, callback_url,
-                                         created_clock_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 RETURNING {OAUTH_APP_COLUMNS}"
-                ),
-                params![
-                    id,
-                    name,
-                    credentials::oauth_client_id(id),
-                    credentials::oauth_client_secret(&secret, id, 0),
-                    callback_url,
-                    clock
-                ],
-                row_to_oauth_app,
-            )?;
+            let app = insert_oauth_app(tx, name, callback_url)?;
             w.operation(EventBody::OAuthAppCreated(events::OAuthAppCreated {
                 subject: objects::oauth_app_subject(tx, app.id)?,
                 object: objects::oauth_app_object(tx, app.id)?,
@@ -406,6 +384,37 @@ impl World {
             })
         })
     }
+}
+
+/// Store an OAuth app, with the client id and the client secret its id
+/// derives. The caller's write makes the event that carries it.
+pub(crate) fn insert_oauth_app(
+    tx: &Connection,
+    name: &str,
+    callback_url: &str,
+) -> Result<OAuthApp> {
+    let clock = queries::clock(tx)?;
+    let secret = credentials::world_secret(tx)?;
+    let id: i64 = tx.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM oauth_apps", [], |r| {
+        r.get(0)
+    })?;
+    Ok(tx.query_row(
+        &format!(
+            "INSERT INTO oauth_apps (id, name, client_id, client_secret, callback_url,
+                                     created_clock_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             RETURNING {OAUTH_APP_COLUMNS}"
+        ),
+        params![
+            id,
+            name,
+            credentials::oauth_client_id(id),
+            credentials::oauth_client_secret(&secret, id, 0),
+            callback_url,
+            clock
+        ],
+        row_to_oauth_app,
+    )?)
 }
 
 /// The address every new actor starts with: `.invalid`, so it can never

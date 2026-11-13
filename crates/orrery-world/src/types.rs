@@ -96,18 +96,29 @@ pub struct Actor {
     pub created_clock_unix: i64,
 }
 
-/// Who a request's token acts as, and the OAuth app it was issued to, if
-/// an authorization code was traded for it.
+/// Who a request's token acts as, and the app it was issued to: the OAuth
+/// app whose authorization code was traded for it, or the app whose
+/// installation it is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Caller {
     pub actor: Actor,
     pub app_id: Option<i64>,
+    /// What an installation token may reach. `None` for any other token,
+    /// which reaches every repository.
+    pub installation: Option<InstallationGrant>,
 }
 
 impl Caller {
     /// The attribution of a write this caller makes through `door`.
     pub fn via(&self, door: crate::Door) -> crate::Attribution {
         crate::Attribution::new(self.actor.id, door).with_app(self.app_id)
+    }
+
+    /// Whether the caller's token reaches `repo`.
+    pub fn reaches(&self, repo: &Repo) -> bool {
+        self.installation
+            .as_ref()
+            .is_none_or(|grant| grant.covers(repo))
     }
 }
 
@@ -613,4 +624,155 @@ pub struct CommitVerification {
     /// When the push that brought the commit in stored its verdict, or
     /// `None` for a verdict reached on this read.
     pub stored_clock_unix: Option<i64>,
+}
+
+/// How far a permission reaches. Each level includes the ones before it.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessLevel {
+    Read,
+    Write,
+    Admin,
+}
+
+/// What an app, an installation, or an installation token may do, by
+/// permission name. The world records and echoes them; nothing checks a
+/// call against them.
+pub type Permissions = std::collections::BTreeMap<String, AccessLevel>;
+
+/// Which of its account's repositories an installation covers.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositorySelection {
+    /// Every repository the account owns, those created later included.
+    All,
+    /// The repositories the installation lists.
+    Selected,
+}
+
+impl RepositorySelection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RepositorySelection::All => "all",
+            RepositorySelection::Selected => "selected",
+        }
+    }
+
+    pub(crate) fn from_db(s: &str) -> RepositorySelection {
+        match s {
+            "selected" => RepositorySelection::Selected,
+            _ => RepositorySelection::All,
+        }
+    }
+}
+
+/// An app: an OAuth app with a bot, which accounts install. Its `id` is its
+/// OAuth app's.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct App {
+    pub id: i64,
+    /// The bot's login.
+    pub slug: String,
+    pub name: String,
+    pub client_id: String,
+    pub owner: Actor,
+    pub bot: Actor,
+    /// At least one. The first is the one an authorization redirects to when
+    /// its request names none.
+    pub callback_urls: Vec<String>,
+    pub permissions: Permissions,
+    pub events: Vec<String>,
+    pub created_clock_unix: i64,
+}
+
+/// What registering an app answers: the app, and the client secret issued
+/// with it, which no read returns again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredApp {
+    pub app: App,
+    pub client_secret: String,
+}
+
+/// An app to register.
+#[derive(Debug, Clone, Copy)]
+pub struct NewApp<'a> {
+    pub slug: &'a str,
+    pub name: &'a str,
+    /// The login of the user or organization that owns it.
+    pub owner: &'a str,
+    pub callback_urls: &'a [String],
+    pub permissions: &'a Permissions,
+    pub events: &'a [String],
+}
+
+/// A public key an app's signatures are checked against.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppKey {
+    pub id: i64,
+    /// The key as the base64 of its PKCS#1 `RSAPublicKey` DER.
+    pub public_key: String,
+    pub created_clock_unix: i64,
+}
+
+/// An app installed on an account.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Installation {
+    pub id: i64,
+    pub app_id: i64,
+    pub app_slug: String,
+    pub client_id: String,
+    pub account: Actor,
+    pub repository_selection: RepositorySelection,
+    /// The repositories a `selected` installation lists, by name, in id
+    /// order. Empty for `all`.
+    pub repositories: Vec<String>,
+    pub permissions: Permissions,
+    pub events: Vec<String>,
+    pub created_clock_unix: i64,
+}
+
+/// A token issued for an installation, as its issue answers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallationToken {
+    pub token: String,
+    pub installation: Installation,
+    pub permissions: Permissions,
+    /// The repositories the token was narrowed to, in id order, or `None`
+    /// for one that reaches everything its installation covers.
+    pub repositories: Option<Vec<Repo>>,
+    pub expires_clock_unix: i64,
+}
+
+/// What an installation token may reach: the repositories its installation
+/// covers, or the ones it was narrowed to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallationGrant {
+    pub installation_id: i64,
+    /// The login of the account the app is installed on.
+    pub account: String,
+    /// The repositories by id, or `None` for every repository the account
+    /// owns.
+    pub repos: Option<Vec<i64>>,
+}
+
+impl InstallationGrant {
+    pub fn covers(&self, repo: &Repo) -> bool {
+        match &self.repos {
+            Some(ids) => ids.contains(&repo.id),
+            None => repo.owner_login.eq_ignore_ascii_case(&self.account),
+        }
+    }
 }

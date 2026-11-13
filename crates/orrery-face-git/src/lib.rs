@@ -737,6 +737,28 @@ async fn serve(
     if caller.is_none() && (repo.private || is_push) {
         return plain_unauthorized();
     }
+    // An installation token reaches the repositories its installation
+    // covers. A private repository outside them does not exist for it, and
+    // a public one can be fetched, as anyone can, but not pushed to.
+    if let Some(caller) = caller
+        && !caller.reaches(&repo)
+    {
+        if repo.private {
+            return plain(StatusCode::NOT_FOUND, "Not Found");
+        }
+        let for_push = is_push
+            || (tail == "info/refs" && query.split('&').any(|kv| kv == "service=git-receive-pack"));
+        if for_push {
+            return plain(
+                StatusCode::FORBIDDEN,
+                &format!(
+                    "Permission to {}.git denied to {}[bot].",
+                    repo.full_name(),
+                    caller.actor.login
+                ),
+            );
+        }
+    }
     // Fetch requests share the lock, so they never wait on each other. A
     // write waits for the ones already running, and new ones queue behind a
     // waiting write, so a stream of fetches cannot hold a push off forever.
@@ -890,6 +912,7 @@ mod tests {
             alice: Caller {
                 actor: alice,
                 app_id: None,
+                installation: None,
             },
             bare,
             main,

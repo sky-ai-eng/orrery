@@ -41,6 +41,8 @@ httparse = "1"
 jiff = "0.2"
 libc = "0.2"
 rusqlite = { version = "0.37", features = ["bundled"] }
+# Checks the signature on a GitHub App's JWT. rustls already brings it in.
+ring = "0.17"
 # ring alone, as ureq uses it: the default would add a second crypto provider.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }

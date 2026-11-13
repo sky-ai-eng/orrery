@@ -6,7 +6,7 @@ The surface grows when a consumer needs it (rule 1). A route not listed here ans
 
 ## 1. REST
 
-Every route is under `/api/v3` and needs a token.
+Every route is under `/api/v3` and needs a token, except the routes a GitHub App calls as itself, which take a JWT the App signed (§1.11).
 
 ### 1.0 Objects
 
@@ -24,6 +24,8 @@ Routes answer with these shapes. Fields GitHub sends that are not listed are abs
 | Issue comment | `id, node_id, user, body, html_url, url, issue_url, created_at, updated_at, author_association` (`NONE`) |
 | Label | `name, color` (`ededed`, what GitHub gives a label created on first use), `default` (false), `description` (null). No `id`. |
 | Check run | `id, node_id, name, head_sha, status, conclusion, external_id, details_url, url, html_url, started_at, completed_at, output, check_suite` (null), `app` (`slug` and `name`, the bot's bare login) |
+| App | `id, slug, client_id, node_id, owner` (a nested user), `name, description` (null), `external_url` and `html_url` (both `{base}/apps/{slug}`), `created_at, updated_at, permissions` (each permission's name to `read`, `write`, or `admin`), `events` |
+| Installation | `id, account` (a nested user), `repository_selection` (`all` or `selected`), `access_tokens_url, repositories_url, html_url, app_id, app_slug, client_id, target_id` (the account's id), `target_type` (`User` or `Organization`), `permissions, events, created_at, updated_at, single_file_name` (null), `has_multiple_single_files` (false), `single_file_paths` (empty), `suspended_by, suspended_at` (null) |
 | SSH signing key | `id, key` (its type and base64 blob, without a comment), `title, created_at` |
 | Commit | `sha, url, html_url, commit, parents`. `commit` is `url, author, committer, message, tree, verification`: `author` and `committer` are `name, email, date` as the commit object holds them, `message` is the commit's without its final newlines, `tree` is `sha, url`, and `verification` is `verified, reason, signature, payload, verified_at` (§1.10). `parents` is `[{sha, url, html_url}]`. `files`, `stats`, and the accounts GitHub matches to the author and committer (the top-level `author` and `committer`) are absent. |
 
@@ -186,9 +188,60 @@ Addresses compare ignoring case. Whether an SSH signature verifies is judged by 
 
 **When the verdict is reached.** A push reaches the verdict of each commit its ref events list (`events.md`, "Ref events") that carries a signature, against the world as its write finds it, and stores each one that is `valid` as a `commit:verified` event in its write. A stored verdict answers every later read: `valid`, with `verified_at` the world clock at the push, after the key is deleted or the address changes too. A failing verdict is not stored, so a read reaches it again from the world as it is then, and a commit whose fault has since been fixed, by registering its key or verifying its address, reads `valid` with `verified_at` null. A commit no push listed, such as one past a ref event's 2048, has its verdict reached on every read. `signature` is the armored signature and `payload` the commit without it, which is what the signature signs; both are null for an unsigned commit.
 
+### 1.11 GitHub Apps
+
+A GitHub App is registered, given a public key, and installed on the control plane (`usage.md`), since GitHub does each only in its web pages. Its bot is the `bot` actor whose login is its slug. An App is an OAuth app too: it has a client id, client secrets, and callback URLs, and the OAuth web flow takes its client id (§2).
+
+**As the App.** These routes take a JWT the App signed, as `Authorization: Bearer <jwt>`, in place of a token.
+
+| Route | Behavior |
+| --- | --- |
+| `GET /app` | The App, plus `installations_count`. |
+| `GET /app/installations` | The App's installations, oldest first, paged. With more than one page, a `Link` header names `next` and `last` while pages follow, and `prev` and `first` after the first page, each a URL on the base URL. |
+| `GET /app/installations/{installation_id}` | One installation. An id that is not one of the App's installations is `404`. |
+| `POST /app/installations/{installation_id}/access_tokens` | Issues an installation token, answering `201` `{token, expires_at, permissions, repository_selection}`. With no body, as GitHub's clients send, or `{}`, the token reaches what the installation covers. `repositories`, a list of repository names, narrows it to those: `repository_selection` is then `selected`, and `repositories` lists them as repositories. A name the installation does not cover is `422` "There is at least one repository that does not exist or is not accessible to the parent installation." `permissions` narrows it to the levels it gives, and one the installation does not hold, or holds at a lower level, is `422` "The permissions requested are not granted to this installation." An empty list or object narrows nothing. `repository_ids` is not mocked. |
+
+Every other path under `/app` answers the `501` of surface Orrery does not serve, to a valid JWT alone.
+
+**The JWT** is RS256 over `iss`, `iat`, and `exp`, checked against the App's keys.
+
+- `iss` is the App's id, as a number or a string, or its client id.
+- `exp` is at most 10 minutes after `iat`.
+- A `real` world also holds both to its clock, as GitHub does: `exp` has not passed and is at most 10 minutes ahead, and `iat` is not ahead. A `manual` world compares neither to its clock, which is not the signer's (`usage.md`, "Time").
+
+A refusal is `401` with one of GitHub's messages:
+
+| Fault | `message` |
+| --- | --- |
+| Not a JWT, an algorithm other than RS256, an `iss` that names no App, or a signature none of the App's keys made | "A JSON web token could not be decoded" |
+| No numeric `exp`, or one that has passed | "'Expiration time' claim ('exp') must be a numeric value representing the future time at which the assertion expires" |
+| No integer `iat`, or one ahead of the clock | "'Issued at' claim ('iat') must be an Integer representing the time that the assertion was issued" |
+| An `exp` more than 10 minutes after `iat`, or ahead of the clock | "'Expiration time' claim ('exp') is too far in the future" |
+
+**An installation token** is a token like any other (`grammar.md`), prefixed `orrfake_` and derived from the world's secret. It acts as the App's bot, so the routes that refuse a bot refuse it (§1.1), and a write it makes records the App. It expires an hour after it is issued, on the world's clock, and is then `401` "Bad credentials".
+
+It reaches the repositories its installation covers: every repository the account owns, those created later included, or the ones the installation lists. A narrowed token reaches the repositories it was narrowed to.
+
+- A private repository it does not reach is `404` on every route under `/repos/{o}/{r}`, and on `GET /repositories/{id}`.
+- A public repository it does not reach is read as anyone reads it. Any other method on it is `403` `{"message": "Resource not accessible by integration", ...}`.
+- Git answers the same way: `404` for the private one, and for the public one a fetch succeeds and a push is `403` (`surface-git.md`).
+- GraphQL shows it the same repositories (§3.2).
+
+Permissions are recorded and echoed, not checked: no route reads a token's permissions, as none reads an OAuth token's scopes.
+
+| Route | Behavior |
+| --- | --- |
+| `GET /installation/repositories` | `{total_count, repository_selection, repositories}`: the repositories the caller's installation token reaches, by id, paged. `repository_selection` is `selected` for a narrowed token. Any other token is `403` "You must authenticate with an installation access token in order to list repositories for an installation." |
+
+**Client credentials.** One route takes an OAuth client's id and secret as HTTP Basic, for an App's client and any other OAuth app's.
+
+| Route | Behavior |
+| --- | --- |
+| `POST /applications/{client_id}/token` | `{access_token}`. A client id and secret that do not name an OAuth app are `401` "Bad credentials". A token the client did not issue is `404`, which is how a caller holding a client secret learns that it is right. A token the client did issue is not mocked: GitHub answers the authorization it stands for. |
+
 ## 2. OAuth web flow
 
-GitHub's OAuth web flow on the web host, without a token. An OAuth app is registered on the control plane (`POST /_orrery/oauth-apps`).
+GitHub's OAuth web flow on the web host, without a token. An OAuth app is registered on the control plane (`POST /_orrery/oauth-apps`). A GitHub App is an OAuth app too (§1.11): the flow takes its client id, a `redirect_uri` may match any of its callback URLs, and the first of them is the default.
 
 | Route | Behavior |
 | --- | --- |
@@ -213,6 +266,8 @@ A selection naming a field, type, or argument Orrery lacks fails the whole docum
 - `search(query:, type: ISSUE, first:)`: pull requests, newest first, as `{pageInfo, nodes}`. The query takes `is:pr`, `is:issue` (matches nothing), `is:open`, `is:closed`, `is:merged`, `is:unmerged`, `author:`, `reviewed-by:`, `repo:` (repeatable, any of), `merged:>=`, and `closed:>=` (a date or a timestamp; a merge is a close). Values compare ignoring case. Any other qualifier fails the field as not mocked, because answering a query Orrery half understands would return wrong results.
 - `rateLimit`: always `null`, as a GitHub Enterprise Server with rate limiting off answers.
 - Mutations: `markPullRequestReadyForReview` and `convertPullRequestToDraft`, each taking `input: {pullRequestId, clientMutationId?}` and answering `{pullRequest, clientMutationId}`. A pull request that is closed, or already in the requested state, is an error.
+
+An installation token (§1.11) sees the repositories it reaches and every public one. A private repository it does not reach reads as one that does not exist: `repository` is `null`, a `node` in it is `null`, a search leaves its pull requests out, and a mutation on one of them is the error of an id that does not resolve. A mutation on a pull request in a public repository it does not reach is an error with the message "Resource not accessible by integration".
 
 ### 3.3 Types
 
@@ -249,6 +304,9 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 
 **Not yet observed on GitHub:**
 
+- Every status code and message of §1.11. They come from GitHub's documentation and from clients' code: the JWT refusals and which fault each message names, the `404` for another App's installation, the two `422` messages of a request for an installation token, the `403` of `GET /installation/repositories`, and the answers of `POST /applications/{client_id}/token`.
+- Whether GitHub answers a JWT whose `iss` names no App as it answers one it cannot decode, and how far ahead of its own clock it accepts an `iat`.
+- What an installation token is answered on a repository it does not reach, over REST, GraphQL, and git.
 - A team member's review leaves the team's pending request in place.
 - Adding a user who is not a member of the organization to a team is a `422` with Orrery's own message.
 - The `422` bodies for requesting a review from the pull request's author, and from someone who is not a collaborator.
@@ -274,7 +332,12 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 
 **Deliberate differences:**
 
-- There are no permissions. Any authenticated actor may read any repository, create repositories in any organization, label, request reviews, review, and merge.
+- There are no permissions. Any authenticated actor may read any repository, create repositories in any organization, label, request reviews, review, and merge. The one limit is the repositories an installation token reaches (§1.11). An App's, an installation's, and a token's `permissions` are recorded and echoed, and no route checks them.
+- A `manual` world compares neither `iat` nor `exp` of an App's JWT to its clock, so it accepts one that has expired (`usage.md`, "Time").
+- A bot's own token, the one its actor was created with, reaches every repository. Only an installation token is limited.
+- An App holds at least one callback URL, where GitHub lets an App have none. Its `description` is null and its `external_url` is its `html_url`, since Orrery keeps neither.
+- `repository_ids` on a request for an installation token is not mocked. `GET /app/installations` ignores `since` and `outdated`.
+- An installation's `suspended_at` and `suspended_by` are always null: nothing suspends one yet (§5).
 - A repository name outside `[A-Za-z0-9._-]` is refused rather than slugified.
 - Repositories are never renamed or deleted, so nothing redirects, and `GET /repositories/{repository_id}` never answers under a later name.
 - A file's `content` is not line-wrapped, and a directory's contents are `404`, not a listing.
@@ -310,5 +373,6 @@ Every route here answers `501` until a consumer needs it:
 - listing commits, a commit's `files` and `stats`, trees, and statuses;
 - GPG keys and SSH authentication keys (`/user/gpg_keys`, `/user/keys`), and a single signing key (`GET /user/ssh_signing_keys/{id}`);
 - Actions: workflow runs, jobs, and logs;
-- GitHub Apps and installations (`/app`, `/app/installations`, installation tokens), and webhook delivery;
+- for GitHub Apps: webhook configuration and deliveries (`/app/hook/…`), suspending and deleting an installation, the manifest flow (`/app-manifests/{code}/conversions`), the install pages, `GET /user/installations`, changing an installation's repositories, and `DELETE /installation/token`;
+- webhook delivery;
 - REST search, organization member listings, and `/rate_limit`.

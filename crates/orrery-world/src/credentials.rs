@@ -115,6 +115,14 @@ pub(crate) fn oauth_token(secret: &WorldSecret, code_id: i64) -> String {
     )
 }
 
+/// The token with this id issued for an installation.
+pub(crate) fn installation_token(secret: &WorldSecret, token_id: i64) -> String {
+    format!(
+        "orrfake_{}",
+        hex::encode(&secret.derive(&format!("installation-token:{token_id}"))[..16])
+    )
+}
+
 pub(crate) fn oauth_code(secret: &WorldSecret, code_id: i64) -> String {
     hex::encode(&secret.derive(&format!("oauth-code:{code_id}"))[..10])
 }
@@ -229,6 +237,18 @@ impl World {
                 )?;
             }
 
+            let installation_tokens: Vec<i64> = queries::list(
+                tx,
+                "SELECT id FROM app_installation_tokens ORDER BY id",
+                |r| r.get(0),
+            )?;
+            for id in &installation_tokens {
+                tx.execute(
+                    "UPDATE app_installation_tokens SET token = ?1 WHERE id = ?2",
+                    params![installation_token(secret, *id), id],
+                )?;
+            }
+
             w.operation(EventBody::WorldRekeyed(events::WorldRekeyed {
                 subject: events::WorldSubject::default(),
                 rekeyed: events::Rekeyed {
@@ -236,6 +256,7 @@ impl World {
                     oauth_apps: apps.len() as i64,
                     oauth_app_secrets: app_secrets.len() as i64,
                     oauth_codes: codes.len() as i64,
+                    installation_tokens: installation_tokens.len() as i64,
                 },
             }));
             Ok(())

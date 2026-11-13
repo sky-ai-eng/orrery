@@ -26,6 +26,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 orrery-world = { workspace = true, features = ["test-support"] }
+# Signs the JWTs the GitHub App tests send.
+ring.workspace = true
 tempfile.workspace = true
 ureq.workspace = true
 

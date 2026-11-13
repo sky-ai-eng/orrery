@@ -26,6 +26,8 @@ A missing, malformed, or unknown token is `401` `{"message": "Bad credentials"}`
 
 Every token is fake, prefixed `orrfake_`, and derived from the world's secret, so a world holds no real credential (rule 12). Tokens carry no scopes, and no route checks permissions: a token is only an actor's identity.
 
+The exception is what a GitHub App holds (`surface-github.md` §1.11). The routes an App calls as itself take a JWT the App signed in place of a token. An installation token, which an App issues, acts as the App's bot, expires after an hour, and reaches only the repositories its installation covers.
+
 ## Requests
 
 - **Bodies decode laxly, as GitHub's do.** An unknown field is ignored. A known field Orrery does not implement is refused by its presence, whatever its value, with `422`:
@@ -36,7 +38,7 @@ Every token is fake, prefixed `orrfake_`, and derived from the world's secret, s
    "errors": [{"resource": "…", "code": "custom", "field": "F", "message": "not mocked by orrery"}]}
   ```
 
-  `resource` names what the route is about: `Repository`, `PullRequest`, `PullRequestReview`, `PullRequestReviewComment`, `IssueComment`, `Label`, `CheckRun`, `Organization`, `Membership`, `Team`, `TeamMember`, `User`, `UserEmail`, `Branch`, `Ref`, `Content`, `Comparison`, `Meta`, `Commit`, `SshSigningKey`, or `OauthAccess` for the OAuth token exchange.
+  `resource` names what the route is about: `Repository`, `PullRequest`, `PullRequestReview`, `PullRequestReviewComment`, `IssueComment`, `Label`, `CheckRun`, `Organization`, `Membership`, `Team`, `TeamMember`, `User`, `UserEmail`, `Branch`, `Ref`, `Content`, `Comparison`, `Meta`, `Commit`, `SshSigningKey`, `Integration` (a GitHub App), `Installation`, or `OauthAccess` for the OAuth token exchange and the check of a token against its client.
 
 - **REST answers JSON.** GitHub picks a rendering from its media type's parameter: `application/vnd.github.v3.full+json` adds `body_text` and `body_html` beside `body`, `.raw` answers a file's bytes, and `.diff` a diff. Every route answers JSON when `Accept` lists only `application/json`, `*/*`, `application/vnd.github+json`, `application/vnd.github.v3+json`, previews (`application/vnd.github.<name>-preview`, with or without `+json`), and media types that aren't GitHub's. Any other GitHub media type in `Accept`, even beside a JSON one, is refused with the not-mocked `422` above, with `field` `Accept`, unless the route lists it as served. A route that serves the diff answers it whenever `Accept` lists its media type, whatever it lists beside it, as GitHub does. As on GitHub, a route first finds what its path names, so something that doesn't exist is a `404` whatever the request accepts, and it refuses the media type before it reads the body or writes anything. The OAuth token exchange, which is not REST, refuses XML the same way.
 
@@ -47,7 +49,7 @@ Every token is fake, prefixed `orrfake_`, and derived from the world's secret, s
 ## Responses
 
 - JSON, `application/json; charset=utf-8`, except a diff (`surface-github.md` §1.4). Times are RFC 3339 in UTC, read from the world clock.
-- Node ids are stable strings that REST's `node_id` and GraphQL's `id` share: `O_actor_N`, `O_repo_N`, `O_pull_N`, `O_review_N`, `O_comment_N`, `O_check_N`, and `O_team_N`.
+- Node ids are stable strings that REST's `node_id` and GraphQL's `id` share: `O_actor_N`, `O_repo_N`, `O_pull_N`, `O_review_N`, `O_comment_N`, `O_check_N`, `O_team_N`, and `O_app_N`.
 - GitHub's error bodies: `{"message"}` for `404` "Not Found" and the like, and for a validation failure `422` `{"message": "Validation Failed", "errors": [{"resource", "code", "field"}]}`, where `code` is `missing_field`, `invalid`, `already_exists`, or `custom` (with a `message` and no `field`). Repository creation uses GitHub's own envelope, "Repository creation failed.". A route reports the first failing field.
 
 ## Surface Orrery doesn't serve
@@ -64,7 +66,7 @@ GraphQL marks the same fault in its `errors` entry (`surface-github.md` §3.1). 
 
 ## Pagination
 
-REST lists page with `?per_page=&page=`: `per_page` defaults to 30 and is limited to 1 through 100, as on GitHub, and `page` starts at 1. There is no `Link` header and no total, so a client pages until a short page. Every list has a fixed total order, so a page boundary never drops or repeats an item. GraphQL connections are in `surface-github.md` §3.4.
+REST lists page with `?per_page=&page=`: `per_page` defaults to 30 and is limited to 1 through 100, as on GitHub, and `page` starts at 1. No list sends a total, and only `GET /app/installations` sends a `Link` header (`surface-github.md` §1.11), so a client pages until a short page. Every list has a fixed total order, so a page boundary never drops or repeats an item. GraphQL connections are in `surface-github.md` §3.4.
 
 ## Conditional requests
 

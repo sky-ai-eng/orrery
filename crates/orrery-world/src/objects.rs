@@ -641,3 +641,195 @@ pub(crate) fn team_membership_object(
         )
         .optional()?)
 }
+
+fn app_ref_at(r: &Row<'_>, id: usize) -> rusqlite::Result<AppRef> {
+    Ok(AppRef {
+        id: r.get(id)?,
+        client_id: r.get(id + 1)?,
+    })
+}
+
+pub(crate) fn app_subject(conn: &Connection, id: i64) -> Result<AppSubject> {
+    Ok(conn.query_row(
+        "SELECT a.id, b.login, o.client_id
+         FROM apps a JOIN oauth_apps o ON o.id = a.id JOIN actors b ON b.id = a.bot_id
+         WHERE a.id = ?1",
+        params![id],
+        |r| {
+            Ok(AppSubject {
+                kind: AppType::Tag,
+                id: r.get(0)?,
+                slug: r.get(1)?,
+                client_id: r.get(2)?,
+            })
+        },
+    )?)
+}
+
+pub(crate) fn app_object(conn: &Connection, id: i64) -> Result<AppObject> {
+    let mut object = conn.query_row(
+        "SELECT a.id, b.login, o.name, o.client_id, w.id, w.login, b.id, b.login,
+                o.callback_url, a.permissions, a.events, o.created_clock_unix
+         FROM apps a
+         JOIN oauth_apps o ON o.id = a.id
+         JOIN actors b ON b.id = a.bot_id
+         JOIN actors w ON w.id = a.owner_id
+         WHERE a.id = ?1",
+        params![id],
+        |r| {
+            Ok(AppObject {
+                id: r.get(0)?,
+                slug: r.get(1)?,
+                name: r.get(2)?,
+                client_id: r.get(3)?,
+                owner: actor_ref_at(r, 4)?,
+                bot: actor_ref_at(r, 6)?,
+                callback_urls: vec![r.get(8)?],
+                permissions: crate::apps::json_column(r, 9)?,
+                events: crate::apps::json_column(r, 10)?,
+                created_unix: r.get(11)?,
+            })
+        },
+    )?;
+    object.callback_urls.extend(list_by(
+        conn,
+        "SELECT url FROM app_callback_urls WHERE app_id = ?1 ORDER BY n",
+        id,
+        |r| r.get::<_, String>(0),
+    )?);
+    Ok(object)
+}
+
+pub(crate) fn app_key_subject(conn: &Connection, id: i64) -> Result<AppKeySubject> {
+    Ok(conn.query_row(
+        "SELECT k.id, o.id, o.client_id FROM app_keys k JOIN oauth_apps o ON o.id = k.app_id
+         WHERE k.id = ?1",
+        params![id],
+        |r| {
+            Ok(AppKeySubject {
+                kind: AppKeyType::Tag,
+                id: r.get(0)?,
+                app: app_ref_at(r, 1)?,
+            })
+        },
+    )?)
+}
+
+pub(crate) fn app_key_object(conn: &Connection, id: i64) -> Result<AppKeyObject> {
+    Ok(conn.query_row(
+        "SELECT id, public_key, created_clock_unix FROM app_keys WHERE id = ?1",
+        params![id],
+        |r| {
+            Ok(AppKeyObject {
+                id: r.get(0)?,
+                public_key: r.get(1)?,
+                created_unix: r.get(2)?,
+            })
+        },
+    )?)
+}
+
+pub(crate) fn installation_subject(conn: &Connection, id: i64) -> Result<InstallationSubject> {
+    Ok(conn.query_row(
+        "SELECT i.id, o.id, o.client_id, c.id, c.login
+         FROM app_installations i
+         JOIN oauth_apps o ON o.id = i.app_id
+         JOIN actors c ON c.id = i.account_id
+         WHERE i.id = ?1",
+        params![id],
+        |r| {
+            Ok(InstallationSubject {
+                kind: InstallationType::Tag,
+                id: r.get(0)?,
+                app: app_ref_at(r, 1)?,
+                account: actor_ref_at(r, 3)?,
+            })
+        },
+    )?)
+}
+
+pub(crate) fn installation_object(conn: &Connection, id: i64) -> Result<InstallationObject> {
+    let mut object = conn.query_row(
+        "SELECT i.id, c.id, c.login, i.repository_selection, i.permissions, i.events,
+                i.created_clock_unix
+         FROM app_installations i JOIN actors c ON c.id = i.account_id
+         WHERE i.id = ?1",
+        params![id],
+        |r| {
+            Ok(InstallationObject {
+                id: r.get(0)?,
+                account: actor_ref_at(r, 1)?,
+                repository_selection: crate::RepositorySelection::from_db(&r.get::<_, String>(3)?),
+                repositories: Vec::new(),
+                permissions: crate::apps::json_column(r, 4)?,
+                events: crate::apps::json_column(r, 5)?,
+                created_unix: r.get(6)?,
+            })
+        },
+    )?;
+    object.repositories = list_by(
+        conn,
+        "SELECT r.id, r.name FROM app_installation_repos s JOIN repos r ON r.id = s.repo_id
+         WHERE s.installation_id = ?1 ORDER BY r.id",
+        id,
+        repo_ref_at,
+    )?;
+    Ok(object)
+}
+
+pub(crate) fn installation_token_subject(
+    conn: &Connection,
+    id: i64,
+) -> Result<InstallationTokenSubject> {
+    Ok(conn.query_row(
+        "SELECT t.id, i.id, o.id, o.client_id
+         FROM app_installation_tokens t
+         JOIN app_installations i ON i.id = t.installation_id
+         JOIN oauth_apps o ON o.id = i.app_id
+         WHERE t.id = ?1",
+        params![id],
+        |r| {
+            Ok(InstallationTokenSubject {
+                kind: InstallationTokenType::Tag,
+                id: r.get(0)?,
+                installation: InstallationRef { id: r.get(1)? },
+                app: app_ref_at(r, 2)?,
+            })
+        },
+    )?)
+}
+
+pub(crate) fn installation_token_object(
+    conn: &Connection,
+    id: i64,
+) -> Result<InstallationTokenObject> {
+    let mut object = conn.query_row(
+        "SELECT id, permissions, created_clock_unix, expires_clock_unix
+         FROM app_installation_tokens WHERE id = ?1",
+        params![id],
+        |r| {
+            Ok(InstallationTokenObject {
+                id: r.get(0)?,
+                repositories: Vec::new(),
+                permissions: crate::apps::json_column(r, 1)?,
+                created_unix: r.get(2)?,
+                expires_unix: r.get(3)?,
+            })
+        },
+    )?;
+    object.repositories = list_by(
+        conn,
+        "SELECT r.id, r.name FROM app_installation_token_repos s JOIN repos r ON r.id = s.repo_id
+         WHERE s.token_id = ?1 ORDER BY r.id",
+        id,
+        repo_ref_at,
+    )?;
+    Ok(object)
+}
+
+fn repo_ref_at(r: &Row<'_>) -> rusqlite::Result<RepoRef> {
+    Ok(RepoRef {
+        id: r.get(0)?,
+        name: r.get(1)?,
+    })
+}

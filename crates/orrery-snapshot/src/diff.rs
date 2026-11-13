@@ -132,6 +132,26 @@ pub struct OAuthAppAdded {
     pub client_id: String,
 }
 
+/// An app, by its public identity. Its OAuth app is in `oauth_apps_added`
+/// too.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AppAdded {
+    pub slug: String,
+    pub client_id: String,
+    pub owner: String,
+}
+
+/// An app installed on an account.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstallationAdded {
+    pub app: String,
+    pub account: String,
+    pub repository_selection: String,
+    /// The repositories a `selected` installation lists, each as
+    /// `owner/repo`. Empty for `all`.
+    pub repositories: Vec<String>,
+}
+
 /// An actor's authorization of an OAuth app. The code itself is never
 /// reported.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -244,6 +264,8 @@ pub struct WorldDiff {
     /// both lists, as a pull opened and merged in one interval does.
     pub authorizations_issued: Vec<Authorization>,
     pub authorizations_exchanged: Vec<Authorization>,
+    pub apps_added: Vec<AppAdded>,
+    pub installations_added: Vec<InstallationAdded>,
     pub repos_created: Vec<String>,
     pub repos_deleted: Vec<String>,
     pub default_branch_changes: Vec<DefaultBranchChange>,
@@ -361,6 +383,41 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
             authorizations_issued.push(entry);
         }
     }
+
+    let from_apps: BTreeSet<i64> = from.view.list_apps()?.into_iter().map(|a| a.id).collect();
+    let apps_added = to
+        .view
+        .list_apps()?
+        .into_iter()
+        .filter(|a| !from_apps.contains(&a.id))
+        .map(|a| AppAdded {
+            slug: a.slug,
+            client_id: a.client_id,
+            owner: a.owner.login,
+        })
+        .collect();
+    let from_installations: BTreeSet<i64> = from
+        .view
+        .list_installations()?
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    let installations_added = to
+        .view
+        .list_installations()?
+        .into_iter()
+        .filter(|i| !from_installations.contains(&i.id))
+        .map(|i| InstallationAdded {
+            repositories: i
+                .repositories
+                .iter()
+                .map(|name| format!("{}/{name}", i.account.login))
+                .collect(),
+            app: i.app_slug,
+            account: i.account.login,
+            repository_selection: i.repository_selection.as_str().to_string(),
+        })
+        .collect();
 
     let from_repos: BTreeMap<i64, _> = from
         .view
@@ -806,6 +863,8 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         oauth_apps_added,
         authorizations_issued,
         authorizations_exchanged,
+        apps_added,
+        installations_added,
         repos_created,
         repos_deleted,
         default_branch_changes,

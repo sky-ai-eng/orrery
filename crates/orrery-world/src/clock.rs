@@ -101,12 +101,24 @@ impl World {
     /// The clock and its mode. In a `real` world the clock is the later of
     /// the host's time and the stored clock, and the read writes nothing.
     pub fn read_clock(&self) -> Result<ClockReading> {
-        let (stored, mode) = self.with_conn(queries::clock_state)?;
+        self.with_conn(|conn| self.reading_on(conn))
+    }
+
+    /// [`World::read_clock`] on the world's connection, which the caller
+    /// has locked.
+    fn reading_on(&self, conn: &Connection) -> Result<ClockReading> {
+        let (stored, mode) = queries::clock_state(conn)?;
         let clock_unix = match mode {
             ClockMode::Manual => stored,
             ClockMode::Real => stored.max(self.host.now_unix()),
         };
         Ok(ClockReading { clock_unix, mode })
+    }
+
+    /// [`World::clock`] on the world's connection, which the caller has
+    /// locked.
+    pub(crate) fn clock_on(&self, conn: &Connection) -> Result<i64> {
+        Ok(self.reading_on(conn)?.clock_unix)
     }
 
     /// Advance a `manual` world's clock. Forward-only: the clock never
