@@ -855,20 +855,57 @@ pub fn schema_file() -> String {
     text
 }
 
-/// The SHA-256 of [`schema`], as lowercase hex, without its `description`
-/// and `title` annotations: doc comments become those, and editing one
-/// changes nothing a world stores. `tests/fixtures/event-schemas` records it
-/// for each schema version.
+/// The SHA-256 of [`EventBody`]'s JSON Schema, as lowercase hex: the shape
+/// of what a world stores of an event, its type and its body. The rest of
+/// the envelope is read from columns, which the tables' migrations cover.
+/// `tests/fixtures/event-schemas` records it for each schema version.
+///
+/// It is taken over a normal form that keeps only what a stored body's shape
+/// depends on. Doc comments become `description` and `title`, and a
+/// documented value splits a string enum into a `oneOf` of its values, so
+/// both are undone. `enum`, `oneOf`, and `required` are sets, so their order,
+/// which follows the order of the declarations, is dropped too.
 pub fn schema_digest() -> String {
-    fn strip(schema: &mut schemars::Schema) {
-        if let Some(object) = schema.as_object_mut() {
-            object.remove("description");
-            object.remove("title");
+    fn string_values(schema: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+        let object = schema.as_object()?;
+        if object.len() != 2 || object.get("type")? != "string" {
+            return None;
         }
-        schemars::transform::transform_subschemas(&mut strip, schema);
+        object.get("enum")?.as_array()
     }
-    let mut schema = schemars::schema_for!(Event);
-    strip(&mut schema);
+    fn normalize(schema: &mut schemars::Schema) {
+        schemars::transform::transform_subschemas(&mut normalize, schema);
+        let Some(object) = schema.as_object_mut() else {
+            return;
+        };
+        object.remove("description");
+        object.remove("title");
+        if let Some(value) = object.remove("const") {
+            object.insert("enum".into(), vec![value].into());
+        }
+        let values: Option<Vec<serde_json::Value>> = object
+            .get("oneOf")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|members| {
+                members
+                    .iter()
+                    .map(string_values)
+                    .collect::<Option<Vec<_>>>()
+            })
+            .map(|lists| lists.into_iter().flatten().cloned().collect());
+        if let Some(values) = values {
+            object.remove("oneOf");
+            object.insert("type".into(), "string".into());
+            object.insert("enum".into(), values.into());
+        }
+        for set in ["enum", "oneOf", "required"] {
+            if let Some(serde_json::Value::Array(members)) = object.get_mut(set) {
+                members.sort_by_cached_key(serde_json::Value::to_string);
+            }
+        }
+    }
+    let mut schema = schemars::schema_for!(EventBody);
+    normalize(&mut schema);
     let text = serde_json::to_string(&schema).expect("a schema serializes");
     hex::encode(Sha256::digest(text))
 }

@@ -7,7 +7,6 @@
 //! cargo run -p orrery-world --example event_schema
 //! ```
 
-use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -29,15 +28,18 @@ fn main() -> std::io::Result<ExitCode> {
         Some(_) => {
             eprintln!(
                 "schema version {version} records other events. Add a migration \
-                 first, with no SQL if no table changes (tests/fixtures/README.md)"
+                 first (tests/fixtures/README.md), or, if this branch recorded \
+                 the line, delete it and run this again."
             );
             return Ok(ExitCode::FAILURE);
         }
         None => {
-            let mut ledger = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&ledger_path)?;
-            writeln!(ledger, "{version} {digest}")?;
+            let mut ledger = ledger;
+            if !ledger.is_empty() && !ledger.ends_with('\n') {
+                ledger.push('\n');
+            }
+            ledger.push_str(&format!("{version} {digest}\n"));
+            std::fs::write(&ledger_path, ledger)?;
             println!(
                 "recorded schema version {version} in {}",
                 ledger_path.display()

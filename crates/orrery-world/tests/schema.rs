@@ -17,7 +17,7 @@ fn the_published_event_schema_is_the_one_the_types_make() {
 #[test]
 fn the_events_are_the_ones_recorded_for_this_schema_version() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/event-schemas");
-    let ledger = std::fs::read_to_string(path).unwrap_or_default();
+    let ledger = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let version = SCHEMA_VERSION.to_string();
     let recorded = ledger
         .lines()
@@ -34,6 +34,7 @@ fn the_events_are_the_ones_recorded_for_this_schema_version() {
         "{path} records other events for schema version {version}. An engine \
          at this version would open a world with these events and fail to read \
          them, so a change to the events needs a migration, with no SQL if no \
-         table changes (tests/fixtures/README.md)"
+         table changes (tests/fixtures/README.md). If this branch recorded the \
+         line, delete it and record it again."
     );
 }
