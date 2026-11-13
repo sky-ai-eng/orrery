@@ -239,6 +239,17 @@ fn every_fixture_migrates_opens_and_diffs() {
         orrery_snapshot::fork(&snapshots, &name, &forked, &FORK_SECRET).unwrap();
         let world = World::open(&forked.join("world")).unwrap();
         assert_every_table_has_rows(&world, *version);
+        // Events only grow (spec/events.md, rule 7), so today's types read
+        // every event the fixture logged. Its log holds events from version
+        // 10, the migration that made the entries events.
+        if *version >= 10 {
+            let logged = world.log_count_after(0).unwrap();
+            assert_eq!(
+                world.log_after(0, logged as usize).unwrap().len() as i64,
+                logged,
+                "fixture v{version}"
+            );
+        }
         // A world that stored no `test_merge_stale` takes each pull's from
         // its `base_moved`.
         if *version < 14 {
