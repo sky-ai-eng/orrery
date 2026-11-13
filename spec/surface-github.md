@@ -205,7 +205,7 @@ A GitHub App is registered, given a public key, and installed on the control pla
 
 GitHub serves more to an App's JWT than Orrery does: every other path under `/app`, and the lookups of the installation on a repository, an organization, or a user (`GET /repos/{o}/{r}/installation`, `/orgs/{org}/installation`, `/users/{username}/installation`). Each answers the `501` of surface Orrery does not serve, to a valid JWT alone, so a caller whose JWT is good is never told it is bad.
 
-**The JWT** is RS256 over `iss`, `iat`, and `exp`, checked against the App's keys. Each answer here, and the rest of this section but what §4 lists, was observed on github.com on 2026-11-13, with a scratch App installed on one repository of a user and on every repository of an organization.
+**The JWT** is RS256 over `iss`, `iat`, and `exp`, checked against the App's keys. Each answer here, and each answer in this section that is GitHub's own, was observed on github.com on 2026-11-13, with a scratch App installed on one repository of a user and on every repository of an organization.
 
 - `iss` is the App's id, as a number or a string of digits, or its client id.
 - `iat` is a number, with or without a fraction, or a string of one. `exp` is an integer, or a string of one.
@@ -228,7 +228,7 @@ GitHub serves more to an App's JWT than Orrery does: every other path under `/ap
 
 The signature is checked before `iat` and `exp`. GitHub's order between the two was not observed.
 
-**An installation token** is a token like any other (`grammar.md`), prefixed `orrfake_` and derived from the world's secret. It acts as the App's bot, so the routes that refuse a bot refuse it (§1.1), and a write it makes records the App. It expires an hour after it is issued, on the world's clock, and is then `401` "Bad credentials".
+**An installation token** is a token like any other (`grammar.md`), prefixed `orrfake_` and derived from the world's secret. It acts as the App's bot, so the routes that refuse a bot refuse it (§1.1), and a write it makes records the App. It expires an hour after it is issued, on the world's clock, and is then `401` "Bad credentials", with no allowance: on github.com a token was accepted 6 seconds before its `expires_at` and refused 4 seconds after it.
 
 It reaches the repositories its installation covers: every repository the account owns, those created later included, or the ones the installation lists. A narrowed token reaches the repositories it was narrowed to.
 
@@ -315,7 +315,6 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 
 **Not yet observed on GitHub:**
 
-- For GitHub Apps (§1.11): the answer once an installation token's hour has passed. A token that was revoked, and one whose installation was removed, are `401` "Bad credentials".
 - A team member's review leaves the team's pending request in place.
 - Adding a user who is not a member of the organization to a team is a `422` with Orrery's own message.
 - The `422` bodies for requesting a review from the pull request's author, and from someone who is not a collaborator.
