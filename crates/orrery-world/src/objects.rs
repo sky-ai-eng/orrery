@@ -669,7 +669,8 @@ pub(crate) fn app_subject(conn: &Connection, id: i64) -> Result<AppSubject> {
 pub(crate) fn app_object(conn: &Connection, id: i64) -> Result<AppObject> {
     let mut object = conn.query_row(
         "SELECT a.id, b.login, o.name, o.client_id, w.id, w.login, b.id, b.login,
-                o.callback_url, a.permissions, a.events, o.created_clock_unix
+                o.callback_url, a.permissions, a.events, o.created_clock_unix,
+                a.hook_url, a.hook_active, a.hook_secrets
          FROM apps a
          JOIN oauth_apps o ON o.id = a.id
          JOIN actors b ON b.id = a.bot_id
@@ -688,6 +689,9 @@ pub(crate) fn app_object(conn: &Connection, id: i64) -> Result<AppObject> {
                 permissions: crate::apps::json_column(r, 9)?,
                 events: crate::apps::json_column(r, 10)?,
                 created_unix: r.get(11)?,
+                hook_url: r.get(12)?,
+                hook_active: r.get(13)?,
+                hook_secrets: r.get(14)?,
             })
         },
     )?;
@@ -751,8 +755,11 @@ pub(crate) fn installation_subject(conn: &Connection, id: i64) -> Result<Install
 pub(crate) fn installation_object(conn: &Connection, id: i64) -> Result<InstallationObject> {
     let mut object = conn.query_row(
         "SELECT i.id, c.id, c.login, i.repository_selection, i.permissions, i.events,
-                i.created_clock_unix
-         FROM app_installations i JOIN actors c ON c.id = i.account_id
+                i.created_clock_unix, i.suspended_clock_unix, s.id, s.login,
+                i.updated_clock_unix
+         FROM app_installations i
+         JOIN actors c ON c.id = i.account_id
+         LEFT JOIN actors s ON s.id = i.suspended_by_id
          WHERE i.id = ?1",
         params![id],
         |r| {
@@ -764,6 +771,9 @@ pub(crate) fn installation_object(conn: &Connection, id: i64) -> Result<Installa
                 permissions: crate::apps::json_column(r, 4)?,
                 events: crate::apps::json_column(r, 5)?,
                 created_unix: r.get(6)?,
+                suspended_unix: r.get(7)?,
+                suspended_by: optional_actor_ref_at(r, 8)?,
+                updated_unix: r.get(10)?,
             })
         },
     )?;
@@ -832,4 +842,62 @@ fn repo_ref_at(r: &Row<'_>) -> rusqlite::Result<RepoRef> {
         id: r.get(0)?,
         name: r.get(1)?,
     })
+}
+
+pub(crate) fn delivery_subject(conn: &Connection, id: i64) -> Result<DeliverySubject> {
+    Ok(conn.query_row(
+        "SELECT d.id, o.id, o.client_id FROM deliveries d JOIN oauth_apps o ON o.id = d.app_id
+         WHERE d.id = ?1",
+        params![id],
+        |r| {
+            Ok(DeliverySubject {
+                kind: DeliveryType::Tag,
+                id: r.get(0)?,
+                app: app_ref_at(r, 1)?,
+            })
+        },
+    )?)
+}
+
+pub(crate) fn delivery_object(conn: &Connection, id: i64) -> Result<DeliveryObject> {
+    let (mut object, headers) = conn.query_row(
+        "SELECT id, guid, event, action, installation_id, repo_id, url, body, redelivery_of,
+                created_clock_unix, state, attempted_clock_unix, status_code, failure,
+                failure_detail, duration_ms, response_headers, response_body, response_truncated
+         FROM deliveries WHERE id = ?1",
+        params![id],
+        |r| {
+            let object = DeliveryObject {
+                id: r.get(0)?,
+                guid: r.get(1)?,
+                event: r.get(2)?,
+                action: r.get(3)?,
+                installation: r.get::<_, Option<i64>>(4)?.map(|id| InstallationRef { id }),
+                repo: r.get(5)?,
+                url: r.get(6)?,
+                body: r.get(7)?,
+                redelivery_of: r.get(8)?,
+                created_unix: r.get(9)?,
+                state: crate::DeliveryState::from_db(&r.get::<_, String>(10)?),
+                attempted_unix: r.get(11)?,
+                status_code: r.get(12)?,
+                failure: r
+                    .get::<_, Option<String>>(13)?
+                    .and_then(|step| crate::DeliveryFailure::from_db(&step)),
+                failure_detail: r.get(14)?,
+                duration_ms: r.get(15)?,
+                response_headers: None,
+                response_body: r.get(17)?,
+                response_truncated: r.get(18)?,
+            };
+            Ok((object, r.get::<_, Option<String>>(16)?))
+        },
+    )?;
+    object.response_headers = match headers {
+        Some(text) => Some(serde_json::from_str(&text).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(16, rusqlite::types::Type::Text, Box::new(e))
+        })?),
+        None => None,
+    };
+    Ok(object)
 }

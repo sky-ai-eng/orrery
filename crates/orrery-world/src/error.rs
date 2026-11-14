@@ -117,6 +117,16 @@ pub enum WorldError {
     InstallationPermission(String),
     #[error("the installation holds the permission {0:?} below the level asked for")]
     InstallationPermissionLevel(String),
+    #[error("the installation {0} is suspended")]
+    InstallationSuspended(i64),
+    #[error("no delivery with id {0}")]
+    NoSuchDelivery(i64),
+    #[error("the delivery {0} is not pending")]
+    DeliveryNotPending(i64),
+    #[error("the app's webhook is not active, so it sends nothing")]
+    HookInactive,
+    #[error("a notifier wrote to the world it was reading for")]
+    WriteWhileNotifying,
     #[error("{0:?} is not an SSH public key in OpenSSH format")]
     InvalidSigningKey(String),
     #[error("the SSH key is already held as a signing key")]

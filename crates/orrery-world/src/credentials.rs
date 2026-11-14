@@ -15,7 +15,7 @@ use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
 use crate::events::{self, Attribution, Door, EventBody};
-use crate::{Result, SYSTEM_ACTOR_ID, World, queries};
+use crate::{Result, SYSTEM_ACTOR_ID, World, objects, queries};
 
 /// The key behind every credential a world derives.
 #[derive(Clone)]
@@ -140,6 +140,34 @@ pub(crate) fn oauth_client_secret(secret: &WorldSecret, app_id: i64, n: i64) -> 
     )
 }
 
+/// The `n`th secret issued for an app's webhook, counting from 1.
+pub(crate) fn hook_secret(secret: &WorldSecret, app_id: i64, n: i64) -> String {
+    format!(
+        "orrfake_whsec_{}",
+        hex::encode(&secret.derive(&format!("app-hook-secret:{app_id}:{n}"))[..20])
+    )
+}
+
+/// The GUID of the delivery with this id: a UUID, with a random UUID's
+/// version and variant so that anything that parses one takes it. It is
+/// derived under the world's secret, so two worlds that hold different
+/// secrets never give a receiver the same GUID.
+pub(crate) fn delivery_guid(secret: &WorldSecret, delivery_id: i64) -> String {
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&secret.derive(&format!("delivery:{delivery_id}"))[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = hex::encode(bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
+}
+
 /// Every client id starts with this, so a value without it names no app.
 pub const OAUTH_CLIENT_ID_PREFIX: &str = "orrfake_client_";
 
@@ -175,6 +203,10 @@ impl World {
     /// One transaction, so the world never holds credentials derived under
     /// two secrets. Spent authorization codes keep their values: they can
     /// never be exchanged again.
+    ///
+    /// The world is a copy, so it starts quiet: every webhook is turned off,
+    /// and a delivery that was pending is dropped, so the copy sends nothing
+    /// to its source's receivers until a caller turns a webhook on.
     fn rekey(&self, secret: &WorldSecret) -> Result<()> {
         let by = Attribution::new(SYSTEM_ACTOR_ID, Door::Cli);
         self.write(by, |w| {
@@ -251,6 +283,39 @@ impl World {
                 )?;
             }
 
+            let hooks = queries::list(
+                tx,
+                "SELECT id, hook_secrets, hook_active FROM apps
+                 WHERE hook_secrets > 0 OR hook_active ORDER BY id",
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, bool>(2)?,
+                    ))
+                },
+            )?;
+            let mut hook_secrets = 0;
+            for (id, issued, active) in &hooks {
+                if *issued > 0 {
+                    tx.execute(
+                        "UPDATE apps SET hook_secret = ?1 WHERE id = ?2",
+                        params![hook_secret(secret, *id, *issued), id],
+                    )?;
+                    hook_secrets += 1;
+                }
+                if *active {
+                    let before = objects::app_object(tx, *id)?;
+                    tx.execute("UPDATE apps SET hook_active = 0 WHERE id = ?1", params![id])?;
+                    w.emit(EventBody::AppHookSet(events::AppChanged {
+                        subject: objects::app_subject(tx, *id)?,
+                        changes: events::AppChanges::between(
+                            &before,
+                            &objects::app_object(tx, *id)?,
+                        ),
+                    }));
+                }
+            }
             w.operation(EventBody::WorldRekeyed(events::WorldRekeyed {
                 subject: events::WorldSubject::default(),
                 rekeyed: events::Rekeyed {
@@ -259,8 +324,10 @@ impl World {
                     oauth_app_secrets: app_secrets.len() as i64,
                     oauth_codes: codes.len() as i64,
                     installation_tokens: installation_tokens.len() as i64,
+                    hook_secrets,
                 },
             }));
+            crate::deliveries::drop_pending(w, None)?;
             Ok(())
         })
     }

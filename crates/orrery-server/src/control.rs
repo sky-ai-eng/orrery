@@ -561,6 +561,18 @@ impl Fields {
         value
     }
 
+    /// A PATCH's field that can be cleared: absent is `None`, which keeps
+    /// the value, `null` is `Some(None)`, which clears it, and a value sets
+    /// it. One that fails to decode is `None`, and is recorded.
+    pub(crate) fn patched<T: serde::de::DeserializeOwned>(
+        &mut self,
+        name: &'static str,
+    ) -> Option<Option<T>> {
+        self.read.push(name);
+        let raw = self.unread.remove(name)?;
+        self.decode::<Option<T>>(name, &raw)
+    }
+
     fn decode<T: serde::de::DeserializeOwned>(
         &mut self,
         name: &'static str,

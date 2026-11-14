@@ -275,6 +275,300 @@
       ],
       "type": "string"
     },
+    "AppChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/AppChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/AppSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "AppChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "bot": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "callback_urls": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "to": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "client_id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "events": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "to": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "hook_active": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "boolean"
+            },
+            "to": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "hook_secrets": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "hook_url": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "owner": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "permissions": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "additionalProperties": {
+                "$ref": "#/$defs/AccessLevel"
+              },
+              "type": "object"
+            },
+            "to": {
+              "additionalProperties": {
+                "$ref": "#/$defs/AccessLevel"
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "slug": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "AppCreated": {
       "properties": {
         "object": {
@@ -378,6 +672,25 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "hook_active": {
+          "default": false,
+          "description": "Whether the hook makes deliveries.",
+          "type": "boolean"
+        },
+        "hook_secrets": {
+          "default": 0,
+          "description": "How many secrets the hook has been issued. Deliveries are signed\nwith the newest, which is derived and never in an event.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "hook_url": {
+          "default": null,
+          "description": "Where the app's deliveries go, or null for an app with no\nwebhook. Events appended before a world held webhooks carry\nnone of the three hook fields.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "id": {
           "format": "int64",
@@ -1055,6 +1368,718 @@
       ],
       "type": "object"
     },
+    "DeliveryChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/DeliveryChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/DeliverySubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "DeliveryChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "action": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "attempted_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "body": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "event": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "failure": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryFailure"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryFailure"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "failure_detail": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "guid": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "installation": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/InstallationRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/InstallationRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "redelivery_of": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "response_body": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "response_headers": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "items": {
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ],
+                "type": "array"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "to": {
+              "items": {
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ],
+                "type": "array"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "response_truncated": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/DeliveryState"
+            },
+            "to": {
+              "$ref": "#/$defs/DeliveryState"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "status_code": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DeliveryCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/DeliveryObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/DeliverySubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "DeliveryFailure": {
+      "description": "Which step of an attempt failed, when it got no answer.",
+      "oneOf": [
+        {
+          "const": "url",
+          "description": "The URL is not one a delivery can be sent to.",
+          "type": "string"
+        },
+        {
+          "const": "connect",
+          "description": "No connection was made.",
+          "type": "string"
+        },
+        {
+          "const": "proxy",
+          "description": "The egress proxy opened no tunnel.",
+          "type": "string"
+        },
+        {
+          "const": "tls",
+          "description": "The TLS handshake failed.",
+          "type": "string"
+        },
+        {
+          "const": "timeout",
+          "description": "The time for the attempt ran out.",
+          "type": "string"
+        },
+        {
+          "const": "exchange",
+          "description": "The exchange failed after the connection was made.",
+          "type": "string"
+        }
+      ]
+    },
+    "DeliveryObject": {
+      "properties": {
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attempted_unix": {
+          "description": "The world's clock when the attempt's result was recorded.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "body": {
+          "description": "The request body, exactly as it is sent.",
+          "type": "string"
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "duration_ms": {
+          "description": "How long the attempt took, in real milliseconds.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "event": {
+          "description": "The event's name, in the words of the face that made the\ndelivery.",
+          "type": "string"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which step failed, for an attempt that got no answer."
+        },
+        "failure_detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guid": {
+          "description": "The same for a delivery and every redelivery of it.",
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "installation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InstallationRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redelivery_of": {
+          "description": "The delivery this one sends again.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "The id of the repository the event is about.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "response_body": {
+          "description": "The first of the answer's body, as text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "response_headers": {
+          "description": "The answer's headers, each a name and a value.",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "response_truncated": {
+          "description": "Whether the answer's body went on past what was kept.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/DeliveryState"
+        },
+        "status_code": {
+          "description": "The status the receiver answered with.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "The hook's URL when the delivery was made.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "guid",
+        "event",
+        "url",
+        "body",
+        "created_unix",
+        "state"
+      ],
+      "type": "object"
+    },
+    "DeliveryState": {
+      "description": "Where a delivery stands.",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Its one attempt has not been made.",
+          "type": "string"
+        },
+        {
+          "const": "answered",
+          "description": "The receiver answered, with whatever status.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The attempt got no answer.",
+          "type": "string"
+        },
+        {
+          "const": "dropped",
+          "description": "It will not be attempted: the world it was pending in was restored\nor copied.",
+          "type": "string"
+        }
+      ]
+    },
+    "DeliverySubject": {
+      "description": "One POST a world owes an app's webhook.",
+      "properties": {
+        "app": {
+          "$ref": "#/$defs/AppRef"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "type": {
+          "$ref": "#/$defs/DeliveryType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "app"
+      ],
+      "type": "object"
+    },
+    "DeliveryType": {
+      "enum": [
+        "delivery"
+      ],
+      "type": "string"
+    },
     "Door": {
       "description": "How a write reached the world.",
       "oneOf": [
@@ -1087,10 +2112,282 @@
           "const": "cli",
           "description": "The `orrery` command, creating or forking a world.",
           "type": "string"
+        },
+        {
+          "const": "engine",
+          "description": "The engine itself, recording what came of a delivery it sent.",
+          "type": "string"
         }
       ]
     },
+    "InstallationChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/InstallationChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/InstallationSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "InstallationChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "account": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "events": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "to": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "permissions": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "additionalProperties": {
+                "$ref": "#/$defs/AccessLevel"
+              },
+              "type": "object"
+            },
+            "to": {
+              "additionalProperties": {
+                "$ref": "#/$defs/AccessLevel"
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "repositories": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "items": {
+                "$ref": "#/$defs/RepoRef"
+              },
+              "type": "array"
+            },
+            "to": {
+              "items": {
+                "$ref": "#/$defs/RepoRef"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "repository_selection": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/RepositorySelection"
+            },
+            "to": {
+              "$ref": "#/$defs/RepositorySelection"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "suspended_by": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActorRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActorRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "suspended_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "updated_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "InstallationCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/InstallationObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/InstallationSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "InstallationDeleted": {
+      "description": "The installation as it was.",
       "properties": {
         "object": {
           "$ref": "#/$defs/InstallationObject"
@@ -1139,6 +2436,36 @@
         },
         "repository_selection": {
           "$ref": "#/$defs/RepositorySelection"
+        },
+        "suspended_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Who suspended it."
+        },
+        "suspended_unix": {
+          "default": null,
+          "description": "When the installation was suspended, or null while it is not.\nEvents appended before a world could suspend one carry neither\nsuspension field.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "updated_unix": {
+          "default": null,
+          "description": "When it was last suspended or had a suspension lifted, or null\nfor one that never was.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2580,6 +3907,12 @@
     "Rekeyed": {
       "description": "What `world:rekeyed` derived again under the world's new secret.",
       "properties": {
+        "hook_secrets": {
+          "default": 0,
+          "description": "The hook secrets. Events appended before a world held any carry\nnone.",
+          "format": "int64",
+          "type": "integer"
+        },
         "installation_tokens": {
           "default": 0,
           "description": "The installation tokens. Events appended before a world held any\ncarry none.",
@@ -3875,6 +5208,34 @@
       "type": "object"
     },
     {
+      "$ref": "#/$defs/AppChanged",
+      "description": "An app's webhook was pointed at a URL, taken off one, or turned on\nor off.",
+      "properties": {
+        "type": {
+          "const": "app:hook_set",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/AppChanged",
+      "description": "A secret was issued for an app's webhook, replacing the one before.",
+      "properties": {
+        "type": {
+          "const": "app:hook_secret_issued",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
       "$ref": "#/$defs/AppKeyCreated",
       "properties": {
         "type": {
@@ -3902,11 +5263,93 @@
       "type": "object"
     },
     {
+      "$ref": "#/$defs/InstallationChanged",
+      "properties": {
+        "type": {
+          "const": "installation:suspended",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/InstallationChanged",
+      "properties": {
+        "type": {
+          "const": "installation:unsuspended",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/InstallationDeleted",
+      "description": "An installation was removed. Its tokens stop working with it.",
+      "properties": {
+        "type": {
+          "const": "installation:deleted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
       "$ref": "#/$defs/InstallationTokenCreated",
       "description": "An app issued a token for one of its installations.",
       "properties": {
         "type": {
           "const": "installation_token:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/DeliveryCreated",
+      "description": "The world owes a receiver a POST: a face made a delivery for a write\nthat had just landed, or an app asked for one to be sent again.",
+      "properties": {
+        "type": {
+          "const": "delivery:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/DeliveryChanged",
+      "description": "The engine made a delivery's one attempt, and this is what came of\nit.",
+      "properties": {
+        "type": {
+          "const": "delivery:attempted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/DeliveryChanged",
+      "description": "A pending delivery will not be attempted: its world was restored or\ncopied.",
+      "properties": {
+        "type": {
+          "const": "delivery:dropped",
           "type": "string"
         }
       },

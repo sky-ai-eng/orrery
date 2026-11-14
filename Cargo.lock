@@ -1432,6 +1432,7 @@ dependencies = [
  "jiff",
  "orrery-face-git",
  "orrery-face-github",
+ "orrery-outbound",
  "orrery-snapshot",
  "orrery-world",
  "ring",

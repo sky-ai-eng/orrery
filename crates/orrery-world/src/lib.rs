@@ -24,6 +24,7 @@ mod audit;
 mod checks;
 mod clock;
 mod credentials;
+mod deliveries;
 mod error;
 pub mod events;
 mod identity;
@@ -40,10 +41,11 @@ mod types;
 pub use app_keys::rsa_public_key_from_pem;
 pub use apps::{
     INSTALLATION_TOKEN_TTL_SECONDS, validate_app_callback_urls, validate_app_events,
-    validate_app_name, validate_app_permissions, validate_app_slug,
+    validate_app_name, validate_app_permissions, validate_app_slug, validate_hook_url,
 };
 pub use checks::{CheckRunPatch, NewCheckRun};
 pub use credentials::{OAUTH_CLIENT_ID_PREFIX, WorldSecret};
+pub use deliveries::{DeliveryFilter, Notifier};
 pub use error::WorldError;
 pub use events::{Attribution, Door, Event, EventBody, WriteSpan};
 pub use identity::{
@@ -119,6 +121,11 @@ pub enum RefChange {
 pub struct World {
     root: PathBuf,
     conn: Mutex<Connection>,
+    /// Held by a write from before it begins until the deliveries it makes
+    /// are stored, so no other write lands between the two
+    /// ([`deliveries`]). Taken before `conn`, never after.
+    order: Mutex<()>,
+    notifier: RwLock<Option<std::sync::Arc<dyn Notifier>>>,
     listeners: RwLock<Vec<Listener>>,
     host: clock::HostTime,
 }
@@ -214,6 +221,8 @@ impl World {
         Ok(World {
             root: root.to_path_buf(),
             conn: Mutex::new(conn),
+            order: Mutex::new(()),
+            notifier: RwLock::new(None),
             listeners: RwLock::new(Vec::new()),
             host: clock::HostTime::default(),
         })
@@ -604,6 +613,7 @@ impl World {
     /// write of the system actor's through the control plane, which takes
     /// snapshots, so a copy's clock is the moment it was made.
     pub fn quiesce<T>(&self, f: impl FnOnce() -> T) -> Result<T> {
+        let _order = self.order();
         let conn = self.lock();
         self.catch_up(&conn, Door::Control)?;
         checkpoint(&conn)?;
@@ -621,14 +631,22 @@ impl World {
     /// database's next `seq` is raised past every one this world issued
     /// before. The log then has a gap where the discarded events were.
     ///
+    /// A delivery's id is issued once per world too, and its GUID is derived
+    /// from it, so a receiver that has seen a GUID never sees it again on a
+    /// different delivery. A delivery that was pending in the state swapped
+    /// in is dropped, as a write of the system actor's through the control
+    /// plane, which restores: the world that owed it has since moved on.
+    ///
     /// [`Signal::StateReplaced`] is raised once the reopen succeeds, before
     /// the raise and whatever `f` returned: the state may have changed even
     /// when a later step fails, and listeners must not go on reading it as
     /// the log they had.
     pub fn swap_state(&self, f: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
+        let _order = self.order();
         let mut guard = self.lock();
         checkpoint(&guard)?;
         let issued = log::issued_seq(&guard)?;
+        let deliveries = issued_id(&guard, "deliveries")?;
         let old = std::mem::replace(&mut *guard, Connection::open_in_memory()?);
         drop(old);
         let swap_result = f();
@@ -636,8 +654,16 @@ impl World {
         self.signal(Signal::StateReplaced {
             newest_seq: queries::last_seq(&guard)?,
         });
-        raise_issued_seq(&guard, issued)?;
+        raise_issued(&guard, "action_log", issued)?;
+        raise_issued(&guard, "deliveries", deliveries)?;
         swap_result?;
+        let by = Attribution::new(SYSTEM_ACTOR_ID, Door::Control);
+        self.write_locked(
+            &guard,
+            clock::KeepTime::Never,
+            |_| Ok((by, ())),
+            |w, ()| deliveries::drop_pending(w, None),
+        )?;
         Ok(())
     }
 
@@ -645,6 +671,10 @@ impl World {
     // write to the world; WAL would let reads run on a connection of their own.
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("world.db mutex poisoned")
+    }
+
+    fn order(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.order.lock().expect("write order mutex poisoned")
     }
 
     pub(crate) fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
@@ -699,16 +729,28 @@ fn checkpoint(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Make the next `seq` this database issues greater than `issued`.
-fn raise_issued_seq(conn: &Connection, issued: i64) -> Result<()> {
+/// The newest id `table` has issued, or 0 when it has issued none.
+fn issued_id(conn: &Connection, table: &str) -> Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = ?1",
+            params![table],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+/// Make the next id `table` issues greater than `issued`.
+fn raise_issued(conn: &Connection, table: &str, issued: i64) -> Result<()> {
     let raised = conn.execute(
-        "UPDATE sqlite_sequence SET seq = MAX(seq, ?1) WHERE name = 'action_log'",
-        params![issued],
+        "UPDATE sqlite_sequence SET seq = MAX(seq, ?2) WHERE name = ?1",
+        params![table, issued],
     )?;
     if raised == 0 {
         conn.execute(
-            "INSERT INTO sqlite_sequence (name, seq) VALUES ('action_log', ?1)",
-            params![issued],
+            "INSERT INTO sqlite_sequence (name, seq) VALUES (?1, ?2)",
+            params![table, issued],
         )?;
     }
     Ok(())

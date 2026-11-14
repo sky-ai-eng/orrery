@@ -820,6 +820,21 @@ fn a_world_starts_with_egress_through_a_proxy() {
     assert_eq!(status, 200);
 }
 
+/// A world told to send nothing starts as any other, and `send` takes a
+/// boolean alone.
+#[test]
+fn a_world_starts_that_sends_no_deliveries() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "",
+        "listen = \"127.0.0.1:0\"\n[outbound]\nsend = false\n",
+    );
+    let (_served, ready) = serve(&config, &[]);
+    let (status, _) = request(&ready.listen, "GET", "/_orrery/healthz", None, "");
+    assert_eq!(status, 200);
+}
+
 /// An outbound setting the client can't use stops `serve` before it makes
 /// the world, so fixing the config and starting again is all it takes.
 #[test]

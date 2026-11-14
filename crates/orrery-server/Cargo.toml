@@ -16,6 +16,7 @@ hex.workspace = true
 jiff.workspace = true
 orrery-face-git.workspace = true
 orrery-face-github.workspace = true
+orrery-outbound.workspace = true
 orrery-snapshot.workspace = true
 orrery-world.workspace = true
 serde.workspace = true
