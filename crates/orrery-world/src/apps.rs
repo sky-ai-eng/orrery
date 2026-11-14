@@ -37,7 +37,8 @@ const APP_SELECT: &str = "SELECT a.id, o.name, o.client_id, o.callback_url, o.cr
 const INSTALLATION_SELECT: &str = "SELECT i.id, i.app_id, b.login, o.client_id,
             i.repository_selection, i.permissions, i.events, i.created_clock_unix,
             c.id, c.login, c.kind, c.created_clock_unix,
-            i.suspended_clock_unix, s.id, s.login, s.kind, s.created_clock_unix
+            i.suspended_clock_unix, s.id, s.login, s.kind, s.created_clock_unix,
+            COALESCE(i.updated_clock_unix, i.created_clock_unix)
      FROM app_installations i
      JOIN apps a ON a.id = i.app_id
      JOIN oauth_apps o ON o.id = a.id
@@ -322,8 +323,9 @@ impl World {
                 }
                 let before = objects::installation_object(tx, installation.id)?;
                 tx.execute(
-                    "UPDATE app_installations SET suspended_clock_unix = ?1, suspended_by_id = ?2
-                 WHERE id = ?3",
+                    "UPDATE app_installations
+                     SET suspended_clock_unix = ?1, suspended_by_id = ?2, updated_clock_unix = ?1
+                     WHERE id = ?3",
                     params![queries::clock(tx)?, bot_id, installation.id],
                 )?;
                 w.operation(EventBody::InstallationSuspended(
@@ -354,9 +356,10 @@ impl World {
             }
             let before = objects::installation_object(tx, installation.id)?;
             tx.execute(
-                "UPDATE app_installations SET suspended_clock_unix = NULL, suspended_by_id = NULL
+                "UPDATE app_installations
+                 SET suspended_clock_unix = NULL, suspended_by_id = NULL, updated_clock_unix = ?2
                  WHERE id = ?1",
-                params![installation.id],
+                params![installation.id, queries::clock(tx)?],
             )?;
             w.operation(EventBody::InstallationUnsuspended(
                 events::InstallationChanged {
@@ -926,6 +929,7 @@ fn installations_from(
                     }),
                     None => None,
                 },
+                updated_clock_unix: r.get(17)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<Installation>>>()?;

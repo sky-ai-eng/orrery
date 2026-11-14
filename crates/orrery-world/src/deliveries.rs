@@ -40,10 +40,21 @@ pub trait Notifier: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryFilter {
     All,
-    /// The receiver answered with a `2xx` status.
+    /// The receiver answered with a status below 400.
     Succeeded,
-    /// The receiver answered with any other status, or did not answer.
+    /// The receiver answered with a status of 400 or more, or did not
+    /// answer.
     Failed,
+}
+
+impl DeliveryFilter {
+    fn sql(self) -> &'static str {
+        match self {
+            DeliveryFilter::All => "",
+            DeliveryFilter::Succeeded => "AND state = 'answered' AND status_code < 400",
+            DeliveryFilter::Failed => "AND NOT (state = 'answered' AND status_code < 400)",
+        }
+    }
 }
 
 thread_local! {
@@ -289,15 +300,7 @@ impl World {
         limit: usize,
         filter: DeliveryFilter,
     ) -> Result<Vec<Delivery>> {
-        let outcome = match filter {
-            DeliveryFilter::All => "",
-            DeliveryFilter::Succeeded => {
-                "AND state = 'answered' AND status_code BETWEEN 200 AND 299"
-            }
-            DeliveryFilter::Failed => {
-                "AND NOT (state = 'answered' AND status_code BETWEEN 200 AND 299)"
-            }
-        };
+        let outcome = filter.sql();
         let conn = self.lock();
         let rows = conn
             .prepare(&format!(
@@ -309,6 +312,29 @@ impl World {
                 params![app_id, before.unwrap_or(i64::MAX), limit as i64],
                 row_to_delivery,
             )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The attempted deliveries of an app under `filter` that are newer than
+    /// the delivery `id`, nearest first, at most `limit`: what a list paged
+    /// backwards from `id` reads.
+    pub fn deliveries_newer(
+        &self,
+        app_id: i64,
+        id: i64,
+        limit: usize,
+        filter: DeliveryFilter,
+    ) -> Result<Vec<Delivery>> {
+        let outcome = filter.sql();
+        let conn = self.lock();
+        let rows = conn
+            .prepare(&format!(
+                "SELECT {DELIVERY_COLUMNS} FROM deliveries
+                 WHERE app_id = ?1 AND state IN ('answered', 'failed') AND id > ?2 {outcome}
+                 ORDER BY id LIMIT ?3"
+            ))?
+            .query_map(params![app_id, id, limit as i64], row_to_delivery)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }

@@ -166,6 +166,7 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
             ("created_clock_unix", Field("created_unix")),
             ("suspended_clock_unix", Field("suspended_unix")),
             ("suspended_by_id", Field("suspended_by")),
+            ("updated_clock_unix", Field("updated_unix")),
         ],
     ),
     (

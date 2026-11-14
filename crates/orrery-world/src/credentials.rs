@@ -148,11 +148,16 @@ pub(crate) fn hook_secret(secret: &WorldSecret, app_id: i64, n: i64) -> String {
     )
 }
 
-/// The GUID of the delivery with this id, in a UUID's shape. It is derived
-/// under the world's secret, so two worlds that hold different secrets never
-/// give a receiver the same GUID.
+/// The GUID of the delivery with this id: a UUID, with a random UUID's
+/// version and variant so that anything that parses one takes it. It is
+/// derived under the world's secret, so two worlds that hold different
+/// secrets never give a receiver the same GUID.
 pub(crate) fn delivery_guid(secret: &WorldSecret, delivery_id: i64) -> String {
-    let hex = hex::encode(&secret.derive(&format!("delivery:{delivery_id}"))[..16]);
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&secret.derive(&format!("delivery:{delivery_id}"))[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = hex::encode(bytes);
     format!(
         "{}-{}-{}-{}-{}",
         &hex[..8],

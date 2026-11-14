@@ -102,6 +102,8 @@ impl Received {
 struct Receiver {
     url: String,
     got: Arc<Mutex<Vec<Received>>>,
+    /// The status it answers with, which a test may change.
+    status: Arc<std::sync::atomic::AtomicU16>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -115,10 +117,13 @@ impl Receiver {
     async fn start(status: u16) -> Receiver {
         let got: Arc<Mutex<Vec<Received>>> = Arc::default();
         let kept = got.clone();
+        let status = Arc::new(std::sync::atomic::AtomicU16::new(status));
+        let answered = status.clone();
         let app = axum::Router::new().route(
             "/hook",
-            axum::routing::post(
-                move |headers: axum::http::HeaderMap, body: String| async move {
+            axum::routing::post(move |headers: axum::http::HeaderMap, body: String| {
+                let (kept, answered) = (kept.clone(), answered.clone());
+                async move {
                     kept.lock().unwrap().push(Received {
                         headers: headers
                             .iter()
@@ -126,16 +131,22 @@ impl Receiver {
                             .collect(),
                         body,
                     });
+                    let status = answered.load(std::sync::atomic::Ordering::SeqCst);
                     axum::http::StatusCode::from_u16(status).unwrap()
-                },
-            ),
+                }
+            }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/hook", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        Receiver { url, got, task }
+        Receiver {
+            url,
+            got,
+            status,
+            task,
+        }
     }
 
     /// What the receiver has got, once it has got `n` requests.
@@ -383,7 +394,10 @@ async fn a_receiver_gets_a_signed_delivery_for_each_event() {
             received.header("x-github-hook-installation-target-type"),
             "integration"
         );
-        assert!(guids.insert(received.header("x-github-delivery").to_string()));
+        let guid = received.header("x-github-delivery");
+        assert!(guids.insert(guid.to_string()));
+        // A UUID, with a random UUID's version.
+        assert_eq!((guid.len(), &guid[14..15]), (36, "4"), "{guid}");
         let payload = received.json();
         assert_eq!(payload["installation"]["id"], installation);
         if received.header("x-github-event") != "installation" {
@@ -417,6 +431,12 @@ async fn a_receiver_gets_a_signed_delivery_for_each_event() {
         serde_json::json!(["change.txt"])
     );
     assert_eq!(pushed["pusher"]["name"], "alice");
+    assert!(pushed["pusher"]["email"].as_str().unwrap().contains('@'));
+    assert_eq!(pushed["commits"][0]["distinct"], true);
+    assert_eq!(pushed["head_commit"]["distinct"], true);
+    // The commit was written under an address alice holds.
+    assert_eq!(pushed["head_commit"]["author"]["username"], "alice");
+    assert_eq!(pushed["base_ref"], serde_json::Value::Null);
     assert!(pushed["repository"]["created_at"].is_i64());
 
     // pull_request: the pull request as a read answers it.
@@ -444,6 +464,10 @@ async fn a_receiver_gets_a_signed_delivery_for_each_event() {
     let reviewed = payload(6);
     assert_eq!(reviewed["review"]["state"], "commented");
     assert_eq!(reviewed["pull_request"]["number"], number);
+    assert!(reviewed["pull_request"].get("merged").is_none());
+    assert!(reviewed["review"]["_links"]["html"]["href"].is_string());
+    assert_eq!(commented["issue"]["reactions"]["total_count"], 0);
+    assert_eq!(commented["comment"]["reactions"]["total_count"], 0);
 
     // check_run: its commit, and the pull requests that commit heads.
     for n in [7, 8] {
@@ -515,7 +539,7 @@ async fn an_app_reads_its_deliveries_and_asks_for_one_again() {
     let events: Vec<&str> = all.iter().map(|d| d["event"].as_str().unwrap()).collect();
     assert_eq!(events, ["push", "push", "installation"]);
     let push = &all[0];
-    assert_eq!(push["status"], "Invalid HTTP Response: 500");
+    assert_eq!(push["status"], "500 ");
     assert_eq!(push["status_code"], 500);
     assert_eq!(push["redelivery"], false);
     assert_eq!(push["installation_id"], installation);
@@ -540,7 +564,30 @@ async fn an_app_reads_its_deliveries_and_asks_for_one_again() {
     let cursor = format!("{list}?per_page=2&cursor=v1_{}", all[2]["id"]);
     let (_, link, page) = call("GET", &cursor, &s.jwt(), None);
     assert_eq!(page, serde_json::json!([all[2]]));
-    assert_eq!(link, None);
+    // A page reached by a cursor names the page before it, by its own
+    // first delivery and how far to go back, and that cursor reads it.
+    let prev = format!(
+        "<{api}/app/hook/deliveries?per_page=2&cursor=v1_p{}l2>; rel=\"prev\"",
+        all[2]["id"]
+    );
+    assert_eq!(link.as_deref(), Some(prev.as_str()));
+    let back = format!("{list}?per_page=2&cursor=v1_p{}l2", all[2]["id"]);
+    let (_, link, page) = call("GET", &back, &s.jwt(), None);
+    assert_eq!(page, serde_json::json!([all[0], all[1]]));
+    assert_eq!(
+        link.as_deref(),
+        Some(
+            format!(
+                "{next}, <{api}/app/hook/deliveries?per_page=2&cursor=v1_p{}l2>; rel=\"prev\"",
+                all[0]["id"]
+            )
+            .as_str()
+        )
+    );
+    // Before the newest delivery there is nothing.
+    let none = format!("{list}?per_page=2&cursor=v1_p{}l2", all[0]["id"]);
+    let (status, link, page) = call("GET", &none, &s.jwt(), None);
+    assert_eq!((status, page, link), (200, serde_json::json!([]), None));
 
     // `status` keeps the failures or the successes, and the next link
     // repeats it.
@@ -565,6 +612,15 @@ async fn an_app_reads_its_deliveries_and_asks_for_one_again() {
             "Invalid request.\n\n\"page\" is not a permitted key.",
         ),
         ("cursor=garbage", "Error parsing cursor parameter"),
+        ("cursor=v1_px", "Error parsing cursor parameter"),
+        (
+            "per_page=abc",
+            "Invalid request.\n\nabc does not match /^\\d+$/.",
+        ),
+        (
+            "per_page=-1",
+            "Invalid request.\n\n-1 does not match /^\\d+$/.",
+        ),
     ] {
         let (status, _, body) = call("GET", &format!("{list}?{query}"), &s.jwt(), None);
         assert_eq!(
@@ -600,6 +656,53 @@ async fn an_app_reads_its_deliveries_and_asks_for_one_again() {
     assert_eq!(newest["redelivery"], true);
     assert_eq!(newest["guid"], all[2]["guid"]);
     assert_ne!(newest["id"], all[2]["id"]);
+
+    // What the list says of each answer, as GitHub's does: a status below
+    // 400 is a success, and 500 and 502 are listed as themselves.
+    let mut expected = Vec::new();
+    for (answer, status) in [
+        (204, "OK"),
+        (302, "Invalid HTTP Response: 302"),
+        (404, "Invalid HTTP Response: 404"),
+        (502, "502 "),
+        (503, "Invalid HTTP Response: 503"),
+    ] {
+        s.receiver
+            .status
+            .store(answer, std::sync::atomic::Ordering::SeqCst);
+        let sent = s.receiver.got.lock().unwrap().len();
+        assert_eq!(call("POST", &again, &s.jwt(), None).0, 202);
+        s.receiver.wait(sent + 1).await;
+        expected.insert(0, (i64::from(answer), status));
+        for _ in 0..200 {
+            let newest = call("GET", &format!("{list}?per_page=1"), &s.jwt(), None).2;
+            if newest[0]["status_code"] == answer {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+    let listed = |query: &str| -> Vec<(i64, String)> {
+        let (_, _, page) = call("GET", &format!("{list}?{query}"), &s.jwt(), None);
+        page.as_array()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                (
+                    d["status_code"].as_i64().unwrap(),
+                    d["status"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let expected: Vec<(i64, String)> = expected
+        .into_iter()
+        .map(|(code, status)| (code, status.to_string()))
+        .collect();
+    assert_eq!(listed("per_page=5"), expected);
+    let codes = |query: &str| -> Vec<i64> { listed(query).into_iter().map(|(c, _)| c).collect() };
+    assert_eq!(codes("status=success"), [302, 204]);
+    assert_eq!(codes("status=failure&per_page=4"), [503, 502, 404, 500]);
 
     let (status, _, body) = call("POST", &format!("{list}/999/attempts"), &s.jwt(), None);
     assert_eq!((status, &body["message"]), (404, &"Not Found".into()));
@@ -646,6 +749,20 @@ async fn a_suspended_installation_issues_and_uses_no_token() {
             403,
             &"This GitHub App installation is currently suspended.".into()
         )
+    );
+    // Git is told the token is no good.
+    let mut over_git = agent()
+        .get(&format!(
+            "{}/acme/web.git/info/refs?service=git-upload-pack",
+            s.base
+        ))
+        .header("authorization", bearer(&token))
+        .call()
+        .unwrap();
+    assert_eq!(over_git.status(), 401);
+    assert_eq!(
+        over_git.body_mut().read_to_string().unwrap(),
+        "Invalid username or token. Password authentication is not supported for Git operations."
     );
     // A suspended installation is sent nothing about its repositories.
     s.push("feature");

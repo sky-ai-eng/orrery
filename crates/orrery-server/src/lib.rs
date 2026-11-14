@@ -296,6 +296,18 @@ async fn face_auth(State(state): State<AppState>, mut req: Request, next: Next) 
             // GitHub knows a suspended installation's token and says why it
             // refuses it, where an unknown token is bad credentials.
             if caller.installation.as_ref().is_some_and(|i| i.suspended) {
+                // Git is told the token is no good, in git's words.
+                if is_git(&req) {
+                    return Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .header("www-authenticate", "Basic realm=\"orrery\"")
+                        .header("content-type", "text/plain; charset=UTF-8")
+                        .body(Body::from(
+                            "Invalid username or token. Password authentication is not \
+                             supported for Git operations.",
+                        ))
+                        .expect("static response parts are valid");
+                }
                 return json(
                     StatusCode::FORBIDDEN,
                     serde_json::json!({
@@ -316,6 +328,15 @@ async fn face_auth(State(state): State<AppState>, mut req: Request, next: Next) 
             )
         }
     }
+}
+
+/// Git smart-HTTP, either direction: a negotiation or one of the two
+/// services.
+fn is_git(req: &Request) -> bool {
+    let path = req.uri().path();
+    ["/info/refs", "/git-upload-pack", "/git-receive-pack"]
+        .iter()
+        .any(|end| path.ends_with(end))
 }
 
 /// Fetch-side git smart-HTTP only: the upload-pack POST, or an info/refs

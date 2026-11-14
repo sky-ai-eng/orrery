@@ -755,7 +755,8 @@ pub(crate) fn installation_subject(conn: &Connection, id: i64) -> Result<Install
 pub(crate) fn installation_object(conn: &Connection, id: i64) -> Result<InstallationObject> {
     let mut object = conn.query_row(
         "SELECT i.id, c.id, c.login, i.repository_selection, i.permissions, i.events,
-                i.created_clock_unix, i.suspended_clock_unix, s.id, s.login
+                i.created_clock_unix, i.suspended_clock_unix, s.id, s.login,
+                i.updated_clock_unix
          FROM app_installations i
          JOIN actors c ON c.id = i.account_id
          LEFT JOIN actors s ON s.id = i.suspended_by_id
@@ -772,6 +773,7 @@ pub(crate) fn installation_object(conn: &Connection, id: i64) -> Result<Installa
                 created_unix: r.get(6)?,
                 suspended_unix: r.get(7)?,
                 suspended_by: optional_actor_ref_at(r, 8)?,
+                updated_unix: r.get(10)?,
             })
         },
     )?;

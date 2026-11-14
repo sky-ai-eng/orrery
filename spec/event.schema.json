@@ -2344,6 +2344,29 @@
             "object",
             "null"
           ]
+        },
+        "updated_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -2429,6 +2452,15 @@
         "suspended_unix": {
           "default": null,
           "description": "When the installation was suspended, or null while it is not.\nEvents appended before a world could suspend one carry neither\nsuspension field.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "updated_unix": {
+          "default": null,
+          "description": "When it was last suspended or had a suspension lifted, or null\nfor one that never was.",
           "format": "int64",
           "type": [
             "integer",

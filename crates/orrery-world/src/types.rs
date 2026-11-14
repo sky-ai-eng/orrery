@@ -762,6 +762,9 @@ pub struct Installation {
     pub created_clock_unix: i64,
     /// When it was suspended, and by whom, while it is.
     pub suspended: Option<Suspension>,
+    /// When it last changed: when it was created, or last suspended or had
+    /// a suspension lifted.
+    pub updated_clock_unix: i64,
 }
 
 /// An installation's suspension: it issues no token, and the ones it issued

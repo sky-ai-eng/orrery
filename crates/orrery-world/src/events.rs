@@ -559,6 +559,10 @@ object! {
         /// Who suspended it.
         #[serde(default)]
         suspended_by: Option<ActorRef>,
+        /// When it was last suspended or had a suspension lifted, or null
+        /// for one that never was.
+        #[serde(default)]
+        updated_unix: Option<i64>,
     }
 }
 

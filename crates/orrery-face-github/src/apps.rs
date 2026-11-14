@@ -828,7 +828,7 @@ pub(crate) fn installation_json(
         "permissions": permissions_json(&installation.permissions),
         "events": installation.events,
         "created_at": rfc3339_millis(installation.created_clock_unix),
-        "updated_at": rfc3339_millis(installation.created_clock_unix),
+        "updated_at": rfc3339_millis(installation.updated_clock_unix),
         "single_file_name": serde_json::Value::Null,
         "has_multiple_single_files": false,
         "single_file_paths": [],

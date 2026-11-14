@@ -27,8 +27,9 @@ use crate::render::{
 };
 use crate::{GithubFace, github_error, internal, json_response};
 
-/// What GitHub's sender calls itself, before the build it runs.
-const USER_AGENT: &str = "GitHub-Hookshot/orrery";
+/// What GitHub's sender calls itself: its name, then seven hex digits of
+/// the build it runs, which here are zeros.
+const USER_AGENT: &str = "GitHub-Hookshot/0000000";
 
 /// The most deliveries a page of the list holds, and how many it holds when
 /// the request names no size.
@@ -65,15 +66,21 @@ pub(crate) async fn list_deliveries(
     RawQuery(query): RawQuery,
 ) -> Response<Body> {
     let mut per_page = DEFAULT_PER_PAGE;
-    let mut first: Option<i64> = None;
+    let mut cursor = None;
     let mut filter = DeliveryFilter::All;
-    // What the next page's link repeats: every parameter but the cursor.
+    // What a page's links repeat: every parameter but the cursor, in the
+    // order the request gave them.
     let mut repeated = Vec::new();
     for (key, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
         match key.as_ref() {
-            "per_page" => per_page = value.parse().unwrap_or(DEFAULT_PER_PAGE).min(MAX_PER_PAGE),
-            "cursor" => match value.strip_prefix("v1_").and_then(|id| id.parse().ok()) {
-                Some(id) => first = Some(id),
+            "per_page" => match value.parse::<usize>() {
+                Ok(n) if value.bytes().all(|b| b.is_ascii_digit()) => {
+                    per_page = n.min(MAX_PER_PAGE);
+                }
+                _ => return invalid_request(&format!("{value} does not match /^\\d+$/.")),
+            },
+            "cursor" => match Cursor::parse(&value) {
+                Some(parsed) => cursor = Some(parsed),
                 None => {
                     return github_error(
                         StatusCode::UNPROCESSABLE_ENTITY,
@@ -98,6 +105,22 @@ pub(crate) async fn list_deliveries(
             repeated.push(format!("{key}={value}"));
         }
     }
+    // The delivery the page starts at. A cursor that pages backwards names
+    // a delivery and how many before it to go back over, and with none
+    // before it the page is empty.
+    let first = match cursor {
+        None => None,
+        Some(Cursor::At(id)) => Some(id),
+        Some(Cursor::Before { id, back }) => {
+            match face.world.deliveries_newer(app.id, id, back, filter) {
+                Ok(newer) => match newer.last() {
+                    Some(farthest) => Some(farthest.id),
+                    None => return json_response(StatusCode::OK, serde_json::json!([])),
+                },
+                Err(e) => return internal(e),
+            }
+        }
+    };
     // One past the page says whether there is a next page, and names its
     // first delivery.
     let before = first.map(|id| id.saturating_add(1));
@@ -111,18 +134,54 @@ pub(crate) async fn list_deliveries(
     let next = (found.len() > per_page).then(|| found.split_off(per_page)[0].id);
     let items: Vec<_> = found.iter().map(delivery_json).collect();
     let mut resp = json_response(StatusCode::OK, serde_json::Value::Array(items));
+    let base = face.base_url.trim_end_matches('/');
+    let link = |cursor: String, rel: &str| {
+        let mut params = repeated.clone();
+        params.push(format!("cursor={cursor}"));
+        format!(
+            "<{base}/api/v3/app/hook/deliveries?{}>; rel=\"{rel}\"",
+            params.join("&")
+        )
+    };
+    let mut links = Vec::new();
     if let Some(next) = next {
-        let base = face.base_url.trim_end_matches('/');
-        repeated.push(format!("cursor=v1_{next}"));
-        let link = format!(
-            "<{base}/api/v3/app/hook/deliveries?{}>; rel=\"next\"",
-            repeated.join("&")
-        );
-        if let Ok(value) = link.parse() {
-            resp.headers_mut().insert(header::LINK, value);
-        }
+        links.push(link(format!("v1_{next}"), "next"));
+    }
+    // A page reached by a cursor names the page before it, whether or not
+    // there is one, as GitHub's does.
+    if let (Some(_), Some(first)) = (cursor, found.first()) {
+        links.push(link(format!("v1_p{}l{per_page}", first.id), "prev"));
+    }
+    if !links.is_empty()
+        && let Ok(value) = links.join(", ").parse()
+    {
+        resp.headers_mut().insert(header::LINK, value);
     }
     resp
+}
+
+/// The list's cursor: `v1_{id}` starts a page at a delivery, and
+/// `v1_p{id}l{n}` starts one `n` deliveries before it.
+#[derive(Clone, Copy)]
+enum Cursor {
+    At(i64),
+    Before { id: i64, back: usize },
+}
+
+impl Cursor {
+    fn parse(value: &str) -> Option<Cursor> {
+        let rest = value.strip_prefix("v1_")?;
+        match rest.strip_prefix('p') {
+            Some(backwards) => {
+                let (id, back) = backwards.split_once('l')?;
+                Some(Cursor::Before {
+                    id: id.parse().ok()?,
+                    back: back.parse().ok()?,
+                })
+            }
+            None => rest.parse().ok().map(Cursor::At),
+        }
+    }
 }
 
 /// A delivery as GitHub lists it. GitHub reports an attempt that reached no
@@ -133,6 +192,8 @@ fn delivery_json(delivery: &Delivery) -> serde_json::Value {
             let (status, code) = match &attempt.outcome {
                 DeliveryOutcome::Answered { status_code, .. } => match status_code {
                     200..=299 => ("OK".to_string(), *status_code),
+                    // GitHub lists these two as the status and a space.
+                    500 | 502 => (format!("{status_code} "), *status_code),
                     code => (format!("Invalid HTTP Response: {code}"), *code),
                 },
                 DeliveryOutcome::Failed { step, .. } => match step {
@@ -438,6 +499,7 @@ impl Webhooks {
         sender: Option<&Actor>,
     ) -> Result<Vec<Outgoing>, WorldError> {
         let face = &self.face;
+        let actor = sender;
         let sender = sender.map(actor_json).unwrap_or(serde_json::Value::Null);
         let about = |repo_id: i64| -> Result<Option<(Repo, Actor)>, WorldError> {
             let Some(repo) = world.repo_by_id(repo_id)? else {
@@ -598,13 +660,26 @@ impl Webhooks {
                 // A webhook spells a review's state in lower case, where
                 // REST spells it in upper.
                 review_json["state"] = review.state.as_str().into();
+                review_json["updated_at"] = review_json["submitted_at"].clone();
+                review_json["_links"] = serde_json::json!({
+                    "html": { "href": review_json["html_url"] },
+                    "pull_request": { "href": review_json["pull_request_url"] },
+                });
+                // The pull request a review's payload carries has none of
+                // the fields a single read adds, nor these three.
+                let mut pull_json = pull_json(face, &repo, &owner, &pull);
+                if let Some(fields) = pull_json.as_object_mut() {
+                    for field in ["merged", "mergeable", "merged_by"] {
+                        fields.remove(field);
+                    }
+                }
                 Ok(vec![Outgoing {
                     event: "pull_request_review",
                     action: Some("submitted".to_string()),
                     payload: serde_json::json!({
                         "action": "submitted",
                         "review": review_json,
-                        "pull_request": pull_json(face, &repo, &owner, &pull),
+                        "pull_request": pull_json,
                         "repository": repo_json(face, &repo, &owner),
                         "sender": sender,
                     }),
@@ -622,13 +697,20 @@ impl Webhooks {
                 let Some(comment) = comments.iter().find(|c| c.id == e.subject.id) else {
                     return Ok(Vec::new());
                 };
+                // A comment in a payload carries three fields a world keeps
+                // nothing for: nobody reacts to one, minimizes one, or
+                // writes one through an App.
+                let mut comment = comment_json(face, &repo, &pull, comment);
+                comment["reactions"] = no_reactions(comment["url"].as_str().unwrap_or_default());
+                comment["performed_via_github_app"] = serde_json::Value::Null;
+                comment["minimized"] = serde_json::Value::Null;
                 Ok(vec![Outgoing {
                     event: "issue_comment",
                     action: Some("created".to_string()),
                     payload: serde_json::json!({
                         "action": "created",
                         "issue": issue_json(face, &repo, &pull, comments.len()),
-                        "comment": comment_json(face, &repo, &pull, comment),
+                        "comment": comment,
                         "repository": repo_json(face, &repo, &owner),
                         "sender": sender,
                     }),
@@ -653,7 +735,7 @@ impl Webhooks {
                     forced: false,
                     commits: &e.commits,
                 };
-                self.push(world, &e.subject, commits, sender)
+                self.push(world, &e.subject, commits, actor, sender)
             }
             EventBody::RefUpdated(e) => match &e.changes.sha {
                 Some(sha) => {
@@ -663,7 +745,7 @@ impl Webhooks {
                         forced: e.forced,
                         commits: &e.commits,
                     };
-                    self.push(world, &e.subject, commits, sender)
+                    self.push(world, &e.subject, commits, actor, sender)
                 }
                 None => Ok(Vec::new()),
             },
@@ -674,7 +756,7 @@ impl Webhooks {
                     forced: false,
                     commits: &[],
                 };
-                self.push(world, &e.subject, commits, sender)
+                self.push(world, &e.subject, commits, actor, sender)
             }
             _ => Ok(Vec::new()),
         }
@@ -751,6 +833,7 @@ impl Webhooks {
         world: &World,
         subject: &events::RefSubject,
         pushed: Pushed<'_>,
+        pusher: Option<&Actor>,
         sender: serde_json::Value,
     ) -> Result<Vec<Outgoing>, WorldError> {
         let face = &self.face;
@@ -782,7 +865,10 @@ impl Webhooks {
             (None, None) => html.clone(),
         };
         let bare = store::bare_dir(&world.repos_dir(), &repo.owner_login, &repo.name);
-        let commits = match commit_payloads(&bare, pushed.commits, &html) {
+        let refs = store::list_refs(&bare).unwrap_or_default();
+        let distinct = distinct_commits(&bare, &refs, &subject.name, &pushed);
+        let commits = match commit_payloads(world, &bare, pushed.commits, &html, distinct.as_ref())
+        {
             Ok(commits) => commits,
             Err(e) => {
                 tracing::error!(error = %e, "reading a push's commits failed");
@@ -791,15 +877,26 @@ impl Webhooks {
         };
         // The head commit is the one the ref now names, which the push may
         // not have added: a branch made at an existing commit adds none.
+        // GitHub calls it distinct whether or not the push added it.
         let head_commit = match pushed.after {
-            Some(after) => match commits.iter().find(|c| c["id"] == *after) {
-                Some(commit) => commit.clone(),
-                None => commit_payloads(&bare, &[after.to_string()], &html)
-                    .ok()
-                    .and_then(|mut one| one.pop())
-                    .unwrap_or(serde_json::Value::Null),
-            },
+            Some(after) => commit_payloads(world, &bare, &[after.to_string()], &html, None)
+                .ok()
+                .and_then(|mut one| one.pop())
+                .unwrap_or(serde_json::Value::Null),
             None => serde_json::Value::Null,
+        };
+        // A new ref made at a commit a branch already names is based on
+        // that branch: the first in name order, when several name it.
+        let base_ref = match (pushed.before, pushed.after) {
+            (None, Some(after)) => refs
+                .iter()
+                .find(|(name, sha)| {
+                    name.starts_with("refs/heads/")
+                        && **name != subject.name
+                        && sha.as_str() == after
+                })
+                .map(|(name, _)| name.clone()),
+            _ => None,
         };
         // A push's repository carries its times as Unix seconds, and three
         // fields no other repository object has.
@@ -810,9 +907,15 @@ impl Webhooks {
         repository["stargazers"] = 0.into();
         repository["owner"]["name"] = owner.login.clone().into();
         repository["owner"]["email"] = serde_json::Value::Null;
-        let pusher = match sender.get("login").and_then(|l| l.as_str()) {
-            Some(login) => {
-                serde_json::json!({ "name": login.trim_end_matches("[bot]"), "email": null })
+        // Who pushed, by login and primary address.
+        let pusher = match pusher {
+            Some(actor) => {
+                let email = world
+                    .actor_emails(actor.id)?
+                    .into_iter()
+                    .find(|address| address.primary)
+                    .map(|address| address.email);
+                serde_json::json!({ "name": crate::render::rest_login(actor), "email": email })
             }
             None => serde_json::Value::Null,
         };
@@ -829,7 +932,7 @@ impl Webhooks {
                 "created": pushed.before.is_none(),
                 "deleted": pushed.after.is_none(),
                 "forced": pushed.forced,
-                "base_ref": serde_json::Value::Null,
+                "base_ref": base_ref,
                 "compare": compare,
                 "commits": commits,
                 "head_commit": head_commit,
@@ -901,6 +1004,10 @@ fn deleted_installation(
         permissions: deleted.object.permissions.clone(),
         events: deleted.object.events.clone(),
         created_clock_unix: deleted.object.created_unix,
+        updated_clock_unix: deleted
+            .object
+            .updated_unix
+            .unwrap_or(deleted.object.created_unix),
         suspended,
     }))
 }
@@ -909,6 +1016,23 @@ fn deleted_installation(
 /// its id.
 fn installation_node_id(id: i64) -> String {
     base64::engine::general_purpose::STANDARD.encode(format!("023:IntegrationInstallation{id}"))
+}
+
+/// GitHub's count of the reactions to the issue or the comment at `url`,
+/// which in a world has none.
+fn no_reactions(url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "url": format!("{url}/reactions"),
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0,
+    })
 }
 
 /// A pull request as GitHub's issue object, which an `issue_comment`
@@ -959,16 +1083,53 @@ fn issue_json(face: &GithubFace, repo: &Repo, pull: &Pull, comments: usize) -> s
         "timeline_url": format!("{api}/issues/{n}/timeline"),
         "performed_via_github_app": serde_json::Value::Null,
         "state_reason": serde_json::Value::Null,
+        "reactions": no_reactions(&format!("{api}/issues/{n}")),
     })
 }
 
 /// Each of `shas` as a push's payload carries a commit, in their order:
 /// its id and tree, its message, who wrote and committed it and when, and
 /// the files it added, removed, and modified against its first parent.
+/// The commits a push added that no other branch or tag reaches: what
+/// GitHub calls distinct. `None` when git could not say, and for a ref that
+/// was deleted.
+fn distinct_commits(
+    bare: &std::path::Path,
+    refs: &std::collections::BTreeMap<String, String>,
+    name: &str,
+    pushed: &Pushed<'_>,
+) -> Option<std::collections::BTreeSet<String>> {
+    let after = pushed.after?;
+    let mut others: std::collections::BTreeSet<&str> = refs
+        .iter()
+        .filter(|(other, _)| {
+            other.as_str() != name
+                && (other.starts_with("refs/heads/") || other.starts_with("refs/tags/"))
+        })
+        .map(|(_, sha)| sha.as_str())
+        .collect();
+    others.extend(pushed.before);
+    let out = store::hermetic_git(bare)
+        .args(["rev-list", after, "--not"])
+        .args(others)
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+/// `distinct` holds the commits to call distinct, or `None` to call every
+/// one distinct.
 fn commit_payloads(
+    world: &World,
     bare: &std::path::Path,
     shas: &[String],
     html: &str,
+    distinct: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     if shas.is_empty() {
         return Ok(Vec::new());
@@ -1013,11 +1174,18 @@ fn commit_payloads(
                 }
             }
         }
-        let person = |name: &str, email: &str, date: &str| serde_json::json!({ "name": name, "email": email, "date": date });
+        // GitHub names the account that holds the address, when one does.
+        let person = |name: &str, email: &str, date: &str| {
+            let mut person = serde_json::json!({ "name": name, "email": email, "date": date });
+            if let Ok(Some(login)) = world.login_by_email(email) {
+                person["username"] = login.into();
+            }
+            person
+        };
         commits.push(serde_json::json!({
             "id": f[0],
             "tree_id": f[1],
-            "distinct": true,
+            "distinct": distinct.is_none_or(|set| set.contains(f[0])),
             "message": f[9].trim_end_matches('\n'),
             "timestamp": f[8],
             "url": format!("{html}/commit/{}", f[0]),

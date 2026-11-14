@@ -197,7 +197,8 @@ const MIGRATIONS: &[&str] = &[
     // they are signed with, which is derived: `hook_secrets` counts the ones
     // issued, and an app registered before this version holds none until one
     // is issued. An installation is suspended while `suspended_clock_unix`
-    // is set. Removing an installation deletes its row, and a token is
+    // is set, and `updated_clock_unix` is when it was last suspended or had
+    // a suspension lifted, null for one that never was. Removing an installation deletes its row, and a token is
     // derived from its id, so a token's row outlives its installation's and
     // no id is ever issued twice: the token tables are made again without
     // the reference. A delivery is one POST the world owes a receiver: what
@@ -243,6 +244,7 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE apps ADD COLUMN hook_secrets INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE app_installations ADD COLUMN suspended_clock_unix INTEGER;
      ALTER TABLE app_installations ADD COLUMN suspended_by_id INTEGER REFERENCES actors(id);
+     ALTER TABLE app_installations ADD COLUMN updated_clock_unix INTEGER;
      CREATE TABLE app_installation_token_repos_kept AS
         SELECT token_id, repo_id FROM app_installation_token_repos;
      DROP TABLE app_installation_token_repos;

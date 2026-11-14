@@ -24,6 +24,21 @@ const LISTED_OAUTH_APP_SELECT: &str = "SELECT name, client_id, callback_url FROM
 
 impl World {
     /// An actor's addresses, primary first.
+    /// The login of the account that holds `email`: the one that has
+    /// verified it, when one has, and the oldest account otherwise. `None`
+    /// for an address no account holds.
+    pub fn login_by_email(&self, email: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT a.login FROM actor_emails e JOIN actors a ON a.id = e.actor_id
+                 WHERE e.email = ?1 ORDER BY e.verified DESC, a.id LIMIT 1",
+                params![email],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn actor_emails(&self, actor_id: i64) -> Result<Vec<ActorEmail>> {
         emails_of(&self.lock(), actor_id)
     }
