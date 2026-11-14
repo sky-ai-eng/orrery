@@ -692,6 +692,12 @@ async fn a_suspended_installation_issues_and_uses_no_token() {
     let deleted = got[3].json();
     assert_eq!(deleted["installation"]["id"], installation);
     assert_eq!(deleted["repositories"][0]["name"], "web");
+    // Who asked for an installation is in its `created` alone.
+    assert!(deleted.get("requester").is_none());
+    let created = got[0].json();
+    assert_eq!(created["requester"], serde_json::Value::Null);
+    assert_eq!(created["sender"]["login"], "acme");
+    assert_eq!(deleted["sender"]["login"], "helper[bot]");
     assert_eq!(got[4].json()["installation"]["id"], again);
 }
 

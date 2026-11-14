@@ -414,7 +414,11 @@ impl Webhooks {
                     })
                 })
                 .collect();
-            payload["requester"] = serde_json::Value::Null;
+            // GitHub names who asked for an installation, null for one
+            // nobody had to approve, and only when it is created.
+            if of.action == "created" {
+                payload["requester"] = serde_json::Value::Null;
+            }
         }
         Ok(NewDelivery {
             app_id: app.id,
