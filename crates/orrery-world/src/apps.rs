@@ -24,22 +24,26 @@ const MAX_CALLBACK_URLS: usize = 10;
 const APP_SELECT: &str = "SELECT a.id, o.name, o.client_id, o.callback_url, o.created_clock_unix,
             a.permissions, a.events,
             b.id, b.login, b.kind, b.created_clock_unix,
-            w.id, w.login, w.kind, w.created_clock_unix
+            w.id, w.login, w.kind, w.created_clock_unix,
+            a.hook_url, a.hook_active, a.hook_secret IS NOT NULL
      FROM apps a
      JOIN oauth_apps o ON o.id = a.id
      JOIN actors b ON b.id = a.bot_id
      JOIN actors w ON w.id = a.owner_id";
 
 /// An installation with its app's slug and client id, then its account as
-/// [`queries::ACTOR_COLUMNS`].
+/// [`queries::ACTOR_COLUMNS`], then when it was suspended and who by, as
+/// the same columns, all null while it is not.
 const INSTALLATION_SELECT: &str = "SELECT i.id, i.app_id, b.login, o.client_id,
             i.repository_selection, i.permissions, i.events, i.created_clock_unix,
-            c.id, c.login, c.kind, c.created_clock_unix
+            c.id, c.login, c.kind, c.created_clock_unix,
+            i.suspended_clock_unix, s.id, s.login, s.kind, s.created_clock_unix
      FROM app_installations i
      JOIN apps a ON a.id = i.app_id
      JOIN oauth_apps o ON o.id = a.id
      JOIN actors b ON b.id = a.bot_id
-     JOIN actors c ON c.id = i.account_id";
+     JOIN actors c ON c.id = i.account_id
+     LEFT JOIN actors s ON s.id = i.suspended_by_id";
 
 impl World {
     /// Register an app. Its OAuth app is made with it, and so is its bot,
@@ -72,15 +76,21 @@ impl World {
                 }
             };
             let oauth = identity::insert_oauth_app(tx, new.name, &new.callback_urls[0])?;
+            let hook_secret =
+                credentials::hook_secret(&credentials::world_secret(tx)?, oauth.id, 1);
             tx.execute(
-                "INSERT INTO apps (id, bot_id, owner_id, permissions, events)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO apps (id, bot_id, owner_id, permissions, events,
+                                   hook_url, hook_active, hook_secret, hook_secrets)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
                 params![
                     oauth.id,
                     bot.id,
                     owner.id,
                     json_text(new.permissions),
-                    json_text(new.events)
+                    json_text(new.events),
+                    new.hook_url,
+                    new.hook_active,
+                    hook_secret
                 ],
             )?;
             for (n, url) in new.callback_urls.iter().enumerate().skip(1) {
@@ -106,8 +116,92 @@ impl World {
             Ok(RegisteredApp {
                 app: require_app(tx, "a.id = ?1", &oauth.id)?,
                 client_secret: oauth.client_secret,
+                hook_secret,
             })
         })
+    }
+
+    /// Point an app's webhook at a URL or take it off one, and turn it on
+    /// or off. `url` and `active` each change what they name and leave the
+    /// other as it is: `Some(None)` for `url` takes the hook off its URL.
+    /// A hook is active only while it has a URL. A change that changes
+    /// nothing writes nothing.
+    pub fn set_app_hook(
+        &self,
+        slug: &str,
+        url: Option<Option<&str>>,
+        active: Option<bool>,
+        by: Attribution,
+    ) -> Result<App> {
+        if let Some(Some(url)) = url {
+            validate_hook_url(url)?;
+        }
+        self.write(by, |w| {
+            let tx = w.tx;
+            let app = app_where(tx, "b.login = ?1", &slug)?
+                .ok_or_else(|| WorldError::NoSuchApp(slug.to_string()))?;
+            let url = match url {
+                Some(url) => url.map(str::to_string),
+                None => app.hook.url.clone(),
+            };
+            let active = active.unwrap_or(app.hook.active);
+            if active && url.is_none() {
+                return Err(WorldError::InvalidApp {
+                    field: "webhook_active",
+                    message: "a webhook with no URL cannot be active".to_string(),
+                });
+            }
+            let before = objects::app_object(tx, app.id)?;
+            tx.execute(
+                "UPDATE apps SET hook_url = ?1, hook_active = ?2 WHERE id = ?3",
+                params![url, active, app.id],
+            )?;
+            let changes = events::AppChanges::between(&before, &objects::app_object(tx, app.id)?);
+            if !changes.is_empty() {
+                w.operation(EventBody::AppHookSet(events::AppChanged {
+                    subject: objects::app_subject(tx, app.id)?,
+                    changes,
+                }));
+            }
+            require_app(tx, "a.id = ?1", &app.id)
+        })
+    }
+
+    /// Issue a secret for an app's webhook, which replaces the one before:
+    /// its deliveries are signed with the newest. It is derived, as a client
+    /// secret is, and no read returns it again.
+    pub fn issue_app_hook_secret(&self, slug: &str, by: Attribution) -> Result<String> {
+        self.write(by, |w| {
+            let tx = w.tx;
+            let app = app_where(tx, "b.login = ?1", &slug)?
+                .ok_or_else(|| WorldError::NoSuchApp(slug.to_string()))?;
+            let before = objects::app_object(tx, app.id)?;
+            let n = before.hook_secrets + 1;
+            let secret = credentials::hook_secret(&credentials::world_secret(tx)?, app.id, n);
+            tx.execute(
+                "UPDATE apps SET hook_secret = ?1, hook_secrets = ?2 WHERE id = ?3",
+                params![secret, n, app.id],
+            )?;
+            w.operation(EventBody::AppHookSecretIssued(events::AppChanged {
+                subject: objects::app_subject(tx, app.id)?,
+                changes: events::AppChanges::between(&before, &objects::app_object(tx, app.id)?),
+            }));
+            Ok(secret)
+        })
+    }
+
+    /// The secret an app's deliveries are signed with, or `None` for an app
+    /// that has been issued none.
+    pub fn app_hook_secret(&self, app_id: i64) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT hook_secret FROM apps WHERE id = ?1",
+                params![app_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     /// Add a public key an app's signatures are checked against, from its
@@ -214,6 +308,93 @@ impl World {
         })
     }
 
+    /// Suspend one of an app's installations: it issues no token, and the
+    /// ones it issued are refused, until the suspension is lifted. The app
+    /// does it with its own signature, so the write is its bot's, through
+    /// the app. Suspending a suspended installation writes nothing.
+    pub fn suspend_installation(&self, app_id: i64, installation_id: i64) -> Result<Installation> {
+        self.write_by(
+            as_app(app_id, installation_id),
+            |w, (installation, bot_id)| {
+                let tx = w.tx;
+                if installation.suspended.is_some() {
+                    return Ok(installation);
+                }
+                let before = objects::installation_object(tx, installation.id)?;
+                tx.execute(
+                    "UPDATE app_installations SET suspended_clock_unix = ?1, suspended_by_id = ?2
+                 WHERE id = ?3",
+                    params![queries::clock(tx)?, bot_id, installation.id],
+                )?;
+                w.operation(EventBody::InstallationSuspended(
+                    events::InstallationChanged {
+                        subject: objects::installation_subject(tx, installation.id)?,
+                        changes: events::InstallationChanges::between(
+                            &before,
+                            &objects::installation_object(tx, installation.id)?,
+                        ),
+                    },
+                ));
+                require_installation(tx, installation.id)
+            },
+        )
+    }
+
+    /// Lift an installation's suspension. Lifting one it does not have
+    /// writes nothing.
+    pub fn unsuspend_installation(
+        &self,
+        app_id: i64,
+        installation_id: i64,
+    ) -> Result<Installation> {
+        self.write_by(as_app(app_id, installation_id), |w, (installation, _)| {
+            let tx = w.tx;
+            if installation.suspended.is_none() {
+                return Ok(installation);
+            }
+            let before = objects::installation_object(tx, installation.id)?;
+            tx.execute(
+                "UPDATE app_installations SET suspended_clock_unix = NULL, suspended_by_id = NULL
+                 WHERE id = ?1",
+                params![installation.id],
+            )?;
+            w.operation(EventBody::InstallationUnsuspended(
+                events::InstallationChanged {
+                    subject: objects::installation_subject(tx, installation.id)?,
+                    changes: events::InstallationChanges::between(
+                        &before,
+                        &objects::installation_object(tx, installation.id)?,
+                    ),
+                },
+            ));
+            require_installation(tx, installation.id)
+        })
+    }
+
+    /// Remove one of an app's installations. Its tokens stop working, and
+    /// the app can be installed on the account again, as a new
+    /// installation. Answers the installation as it was.
+    pub fn delete_installation(&self, app_id: i64, installation_id: i64) -> Result<Installation> {
+        self.write_by(as_app(app_id, installation_id), |w, (installation, _)| {
+            let tx = w.tx;
+            w.operation(EventBody::InstallationDeleted(
+                events::InstallationDeleted {
+                    subject: objects::installation_subject(tx, installation.id)?,
+                    object: objects::installation_object(tx, installation.id)?,
+                },
+            ));
+            tx.execute(
+                "DELETE FROM app_installation_repos WHERE installation_id = ?1",
+                params![installation.id],
+            )?;
+            tx.execute(
+                "DELETE FROM app_installations WHERE id = ?1",
+                params![installation.id],
+            )?;
+            Ok(installation)
+        })
+    }
+
     /// Issue a token for one of an app's installations. It acts as the app's
     /// bot, reaches the repositories the installation covers, and expires
     /// [`INSTALLATION_TOKEN_TTL_SECONDS`] later on the world's clock.
@@ -243,6 +424,9 @@ impl World {
         };
         self.write_by(by, |w, installation| {
             let tx = w.tx;
+            if installation.suspended.is_some() {
+                return Err(WorldError::InstallationSuspended(installation.id));
+            }
             let repos = match repositories.filter(|names| !names.is_empty()) {
                 Some(names) => Some(covered_repos(tx, &installation, names)?),
                 None => None,
@@ -474,7 +658,8 @@ pub(crate) fn caller_by_installation_token(
     let found = conn
         .query_row(
             "SELECT b.id, b.login, b.kind, b.created_clock_unix,
-                    t.id, t.expires_clock_unix, i.id, i.app_id, i.repository_selection, c.login
+                    t.id, t.expires_clock_unix, i.id, i.app_id, i.repository_selection, c.login,
+                    i.suspended_clock_unix IS NOT NULL
              FROM app_installation_tokens t
              JOIN app_installations i ON i.id = t.installation_id
              JOIN apps a ON a.id = i.app_id
@@ -491,11 +676,13 @@ pub(crate) fn caller_by_installation_token(
                     r.get::<_, i64>(7)?,
                     RepositorySelection::from_db(&r.get::<_, String>(8)?),
                     r.get::<_, String>(9)?,
+                    r.get::<_, bool>(10)?,
                 ))
             },
         )
         .optional()?;
-    let Some((actor, token_id, expires, installation_id, app_id, selection, account)) = found
+    let Some((actor, token_id, expires, installation_id, app_id, selection, account, suspended)) =
+        found
     else {
         return Ok(None);
     };
@@ -524,6 +711,7 @@ pub(crate) fn caller_by_installation_token(
             installation_id,
             account,
             repos,
+            suspended,
         }),
     }))
 }
@@ -561,6 +749,27 @@ fn actor_by_login(conn: &Connection, login: &str) -> Result<Option<Actor>> {
             queries::row_to_actor,
         )
         .optional()?)
+}
+
+/// Who makes a write an app makes about one of its installations, with its
+/// own signature: its bot, through the app. Read with the installation and
+/// the bot's id.
+fn as_app(
+    app_id: i64,
+    installation_id: i64,
+) -> impl FnOnce(&Connection) -> Result<(Attribution, (Installation, i64))> {
+    move |tx| {
+        let installation = installation_where(tx, "i.id = ?1", installation_id)?
+            .filter(|i| i.app_id == app_id)
+            .ok_or(WorldError::NoSuchInstallation(installation_id))?;
+        let bot_id: i64 = tx.query_row(
+            "SELECT bot_id FROM apps WHERE id = ?1",
+            params![app_id],
+            |r| r.get(0),
+        )?;
+        let by = Attribution::new(bot_id, Door::Rest).with_app(Some(app_id));
+        Ok((by, (installation, bot_id)))
+    }
 }
 
 /// The user or organization holding `login`: what owns an app, and what an
@@ -659,6 +868,11 @@ fn apps_from(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> Res
                 bot: actor_at(r, 7)?,
                 owner: actor_at(r, 11)?,
                 slug: r.get(8)?,
+                hook: crate::Hook {
+                    url: r.get(15)?,
+                    active: r.get(16)?,
+                    has_secret: r.get(17)?,
+                },
             })
         })?
         .collect::<rusqlite::Result<Vec<App>>>()?;
@@ -705,6 +919,13 @@ fn installations_from(
                 events: json_column(r, 6)?,
                 created_clock_unix: r.get(7)?,
                 account: actor_at(r, 8)?,
+                suspended: match r.get::<_, Option<i64>>(12)? {
+                    Some(clock_unix) => Some(crate::Suspension {
+                        clock_unix,
+                        by: actor_at(r, 13)?,
+                    }),
+                    None => None,
+                },
             })
         })?
         .collect::<rusqlite::Result<Vec<Installation>>>()?;
@@ -764,7 +985,15 @@ fn validate_app(new: &NewApp<'_>) -> Result<()> {
     validate_app_name(new.name)?;
     validate_app_callback_urls(new.callback_urls)?;
     validate_app_permissions(new.permissions)?;
-    validate_app_events(new.events)
+    validate_app_events(new.events)?;
+    match new.hook_url {
+        Some(url) => validate_hook_url(url),
+        None if new.hook_active => Err(invalid_app(
+            "webhook_active",
+            "a webhook with no URL cannot be active".to_string(),
+        )),
+        None => Ok(()),
+    }
 }
 
 fn invalid_app(field: &'static str, message: String) -> WorldError {
@@ -787,6 +1016,22 @@ pub fn validate_app_name(name: &str) -> Result<()> {
 
 /// The URLs an app's authorizations redirect to: at least one, each held to
 /// an OAuth app's rule, and none twice.
+/// A webhook's URL: an absolute `http` or `https` URL with a host, the two
+/// schemes a delivery can be sent to.
+pub fn validate_hook_url(url: &str) -> Result<()> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    let host = rest.map(|rest| rest.split(['/', '?', '#']).next().unwrap_or_default());
+    match host {
+        Some(host) if !host.is_empty() && !url.contains(char::is_whitespace) => Ok(()),
+        _ => Err(invalid_app(
+            "webhook_url",
+            format!("{url:?} is not an http or https URL with a host"),
+        )),
+    }
+}
+
 pub fn validate_app_callback_urls(callback_urls: &[String]) -> Result<()> {
     if callback_urls.is_empty() || callback_urls.len() > MAX_CALLBACK_URLS {
         return Err(invalid_app(

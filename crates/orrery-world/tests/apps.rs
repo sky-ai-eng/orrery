@@ -68,6 +68,8 @@ fn seeded() -> (tempfile::TempDir, World, i64) {
                     ("metadata", AccessLevel::Read),
                 ]),
                 events: &strings(&["push"]),
+                hook_url: None,
+                hook_active: false,
             },
             SYSTEM,
         )
@@ -94,6 +96,8 @@ fn create_app_returns_the_app_a_read_answers() {
                 callback_urls: &urls,
                 permissions: &permissions(&[("contents", AccessLevel::Write)]),
                 events: &strings(&["push", "pull_request"]),
+                hook_url: None,
+                hook_active: false,
             },
             SYSTEM,
         )
@@ -155,6 +159,8 @@ fn an_app_takes_a_bot_that_has_none_and_no_other_login() {
                 callback_urls: &urls,
                 permissions: &Permissions::new(),
                 events: &[],
+                hook_url: None,
+                hook_active: false,
             },
             SYSTEM,
         )
@@ -194,6 +200,8 @@ fn an_app_value_is_refused_under_its_own_field() {
         callback_urls: &good_urls,
         permissions: &Permissions::new(),
         events: &[],
+        hook_url: None,
+        hook_active: false,
     };
     assert_eq!(
         refused(NewApp {
@@ -512,6 +520,8 @@ fn a_token_is_narrowed_to_repositories_and_permissions_the_installation_holds() 
                 callback_urls: &strings(&["https://other.test/cb"]),
                 permissions: &Permissions::new(),
                 events: &[],
+                hook_url: None,
+                hook_active: false,
             },
             SYSTEM,
         )

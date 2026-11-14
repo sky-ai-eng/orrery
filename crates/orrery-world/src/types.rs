@@ -696,14 +696,29 @@ pub struct App {
     pub permissions: Permissions,
     pub events: Vec<String>,
     pub created_clock_unix: i64,
+    pub hook: Hook,
 }
 
-/// What registering an app answers: the app, and the client secret issued
-/// with it, which no read returns again.
+/// An app's webhook: where its deliveries go, and whether it sends them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Hook {
+    /// `None` for an app with no webhook.
+    pub url: Option<String>,
+    /// An active hook with a URL makes deliveries. A copy of a world starts
+    /// with every hook inactive.
+    pub active: bool,
+    /// Whether a secret has been issued for it. Deliveries of a hook with
+    /// none are not signed.
+    pub has_secret: bool,
+}
+
+/// What registering an app answers: the app, and the client secret and the
+/// hook secret issued with it, which no read returns again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredApp {
     pub app: App,
     pub client_secret: String,
+    pub hook_secret: String,
 }
 
 /// An app to register.
@@ -716,6 +731,9 @@ pub struct NewApp<'a> {
     pub callback_urls: &'a [String],
     pub permissions: &'a Permissions,
     pub events: &'a [String],
+    /// Where its deliveries go, or `None` for no webhook.
+    pub hook_url: Option<&'a str>,
+    pub hook_active: bool,
 }
 
 /// A public key an app's signatures are checked against.
@@ -742,6 +760,16 @@ pub struct Installation {
     pub permissions: Permissions,
     pub events: Vec<String>,
     pub created_clock_unix: i64,
+    /// When it was suspended, and by whom, while it is.
+    pub suspended: Option<Suspension>,
+}
+
+/// An installation's suspension: it issues no token, and the ones it issued
+/// are refused, until it is lifted.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Suspension {
+    pub clock_unix: i64,
+    pub by: Actor,
 }
 
 /// A token issued for an installation, as its issue answers it.
@@ -766,6 +794,9 @@ pub struct InstallationGrant {
     /// The repositories by id, or `None` for every repository the account
     /// owns.
     pub repos: Option<Vec<i64>>,
+    /// Whether the installation is suspended. Its tokens still name their
+    /// caller, so a face can say why it refuses them.
+    pub suspended: bool,
 }
 
 impl InstallationGrant {
@@ -775,4 +806,148 @@ impl InstallationGrant {
             None => repo.owner_login.eq_ignore_ascii_case(&self.account),
         }
     }
+}
+
+/// Where a delivery stands.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryState {
+    /// Its one attempt has not been made.
+    Pending,
+    /// The receiver answered, with whatever status.
+    Answered,
+    /// The attempt got no answer.
+    Failed,
+    /// It will not be attempted: the world it was pending in was restored
+    /// or copied.
+    Dropped,
+}
+
+impl DeliveryState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeliveryState::Pending => "pending",
+            DeliveryState::Answered => "answered",
+            DeliveryState::Failed => "failed",
+            DeliveryState::Dropped => "dropped",
+        }
+    }
+
+    pub(crate) fn from_db(s: &str) -> DeliveryState {
+        match s {
+            "answered" => DeliveryState::Answered,
+            "failed" => DeliveryState::Failed,
+            "dropped" => DeliveryState::Dropped,
+            _ => DeliveryState::Pending,
+        }
+    }
+}
+
+/// Which step of an attempt failed, when it got no answer.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryFailure {
+    /// The URL is not one a delivery can be sent to.
+    Url,
+    /// No connection was made.
+    Connect,
+    /// The egress proxy opened no tunnel.
+    Proxy,
+    /// The TLS handshake failed.
+    Tls,
+    /// The time for the attempt ran out.
+    Timeout,
+    /// The exchange failed after the connection was made.
+    Exchange,
+}
+
+impl DeliveryFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeliveryFailure::Url => "url",
+            DeliveryFailure::Connect => "connect",
+            DeliveryFailure::Proxy => "proxy",
+            DeliveryFailure::Tls => "tls",
+            DeliveryFailure::Timeout => "timeout",
+            DeliveryFailure::Exchange => "exchange",
+        }
+    }
+
+    pub(crate) fn from_db(s: &str) -> Option<DeliveryFailure> {
+        Some(match s {
+            "url" => DeliveryFailure::Url,
+            "connect" => DeliveryFailure::Connect,
+            "proxy" => DeliveryFailure::Proxy,
+            "tls" => DeliveryFailure::Tls,
+            "timeout" => DeliveryFailure::Timeout,
+            "exchange" => DeliveryFailure::Exchange,
+            _ => return None,
+        })
+    }
+}
+
+/// One POST a world owes a receiver: an app's webhook delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delivery {
+    pub id: i64,
+    pub app_id: i64,
+    /// The same for a delivery and every redelivery of it.
+    pub guid: String,
+    /// The event's name, in the words of the face that made the delivery.
+    pub event: String,
+    pub action: Option<String>,
+    pub installation_id: Option<i64>,
+    pub repo_id: Option<i64>,
+    /// The hook's URL when the delivery was made.
+    pub url: String,
+    pub body: String,
+    /// The delivery this one sends again.
+    pub redelivery_of: Option<i64>,
+    pub created_clock_unix: i64,
+    pub state: DeliveryState,
+    /// What came of its attempt, once that is made.
+    pub attempt: Option<DeliveryAttempt>,
+}
+
+/// What a delivery's one attempt came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryAttempt {
+    /// The world's clock when the result was recorded.
+    pub clock_unix: i64,
+    /// How long the attempt took, in real milliseconds.
+    pub duration_ms: i64,
+    pub outcome: DeliveryOutcome,
+}
+
+/// A receiver's answer, or why there was none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryOutcome {
+    Answered {
+        status_code: i64,
+        headers: Vec<(String, String)>,
+        /// The first of the body, as text.
+        body: String,
+        /// Whether the body went on past what was kept.
+        truncated: bool,
+    },
+    Failed {
+        step: DeliveryFailure,
+        detail: String,
+    },
+}
+
+/// A delivery a face asks the world to make, for a write that has just
+/// landed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDelivery {
+    pub app_id: i64,
+    pub installation_id: Option<i64>,
+    pub repo_id: Option<i64>,
+    pub event: String,
+    pub action: Option<String>,
+    pub body: String,
 }

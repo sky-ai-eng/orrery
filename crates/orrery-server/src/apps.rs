@@ -174,6 +174,8 @@ async fn create_app(State(state): State<AppState>, body: Bytes) -> Response<Body
         callback_urls: &callback_urls,
         permissions: &permissions,
         events: &events,
+        hook_url: None,
+        hook_active: false,
     };
     let registered = match state.world.create_app(&new, SYSTEM) {
         Ok(registered) => registered,

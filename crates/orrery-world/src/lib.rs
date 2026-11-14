@@ -24,6 +24,7 @@ mod audit;
 mod checks;
 mod clock;
 mod credentials;
+mod deliveries;
 mod error;
 pub mod events;
 mod identity;
@@ -44,6 +45,7 @@ pub use apps::{
 };
 pub use checks::{CheckRunPatch, NewCheckRun};
 pub use credentials::{OAUTH_CLIENT_ID_PREFIX, WorldSecret};
+pub use deliveries::{DeliveryFilter, Notifier};
 pub use error::WorldError;
 pub use events::{Attribution, Door, Event, EventBody, WriteSpan};
 pub use identity::{
@@ -119,6 +121,11 @@ pub enum RefChange {
 pub struct World {
     root: PathBuf,
     conn: Mutex<Connection>,
+    /// Held by a write from before it begins until the deliveries it makes
+    /// are stored, so no other write lands between the two
+    /// ([`deliveries`]). Taken before `conn`, never after.
+    order: Mutex<()>,
+    notifier: RwLock<Option<std::sync::Arc<dyn Notifier>>>,
     listeners: RwLock<Vec<Listener>>,
     host: clock::HostTime,
 }
@@ -214,6 +221,8 @@ impl World {
         Ok(World {
             root: root.to_path_buf(),
             conn: Mutex::new(conn),
+            order: Mutex::new(()),
+            notifier: RwLock::new(None),
             listeners: RwLock::new(Vec::new()),
             host: clock::HostTime::default(),
         })
@@ -604,6 +613,7 @@ impl World {
     /// write of the system actor's through the control plane, which takes
     /// snapshots, so a copy's clock is the moment it was made.
     pub fn quiesce<T>(&self, f: impl FnOnce() -> T) -> Result<T> {
+        let _order = self.order();
         let conn = self.lock();
         self.catch_up(&conn, Door::Control)?;
         checkpoint(&conn)?;
@@ -626,6 +636,7 @@ impl World {
     /// when a later step fails, and listeners must not go on reading it as
     /// the log they had.
     pub fn swap_state(&self, f: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
+        let _order = self.order();
         let mut guard = self.lock();
         checkpoint(&guard)?;
         let issued = log::issued_seq(&guard)?;
@@ -645,6 +656,10 @@ impl World {
     // write to the world; WAL would let reads run on a connection of their own.
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("world.db mutex poisoned")
+    }
+
+    fn order(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.order.lock().expect("write order mutex poisoned")
     }
 
     pub(crate) fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {

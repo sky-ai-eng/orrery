@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::types::{
-    ActorEmail, ActorKind, CheckConclusion, CheckStatus, ClockMode, OrgRole, Permissions,
-    PullState, RepositorySelection, ReviewState, TeamRole,
+    ActorEmail, ActorKind, CheckConclusion, CheckStatus, ClockMode, DeliveryFailure, DeliveryState,
+    OrgRole, Permissions, PullState, RepositorySelection, ReviewState, TeamRole,
 };
 
 /// How a write reached the world.
@@ -30,6 +30,8 @@ pub enum Door {
     Control,
     /// The `orrery` command, creating or forking a world.
     Cli,
+    /// The engine itself, recording what came of a delivery it sent.
+    Engine,
 }
 
 impl Door {
@@ -41,6 +43,7 @@ impl Door {
             Door::Web => "web",
             Door::Control => "control",
             Door::Cli => "cli",
+            Door::Engine => "engine",
         }
     }
 
@@ -52,6 +55,7 @@ impl Door {
             "web" => Door::Web,
             "control" => Door::Control,
             "cli" => Door::Cli,
+            "engine" => Door::Engine,
             _ => return None,
         })
     }
@@ -189,6 +193,7 @@ subject_type! {
     AppKeyType = "app_key",
     InstallationType = "installation",
     InstallationTokenType = "installation_token",
+    DeliveryType = "delivery",
     RepoType = "repo",
     RefType = "ref",
     PullType = "pull",
@@ -286,6 +291,15 @@ pub struct InstallationTokenSubject {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InstallationRef {
     pub id: i64,
+}
+
+/// One POST a world owes an app's webhook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeliverySubject {
+    #[serde(rename = "type")]
+    pub kind: DeliveryType,
+    pub id: i64,
+    pub app: AppRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -488,21 +502,34 @@ pub struct OAuthAppObject {
     pub created_unix: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AppObject {
-    pub id: i64,
-    pub slug: String,
-    pub name: String,
-    pub client_id: String,
-    /// The user or organization that owns the app.
-    pub owner: ActorRef,
-    pub bot: ActorRef,
-    /// The first is the one an authorization redirects to when its request
-    /// names none.
-    pub callback_urls: Vec<String>,
-    pub permissions: Permissions,
-    pub events: Vec<String>,
-    pub created_unix: i64,
+object! {
+    AppObject, AppChanges {
+        id: i64,
+        slug: String,
+        name: String,
+        client_id: String,
+        /// The user or organization that owns the app.
+        owner: ActorRef,
+        bot: ActorRef,
+        /// The first is the one an authorization redirects to when its request
+        /// names none.
+        callback_urls: Vec<String>,
+        permissions: Permissions,
+        events: Vec<String>,
+        created_unix: i64,
+        /// Where the app's deliveries go, or null for an app with no
+        /// webhook. Events appended before a world held webhooks carry
+        /// none of the three hook fields.
+        #[serde(default)]
+        hook_url: Option<String>,
+        /// Whether the hook makes deliveries.
+        #[serde(default)]
+        hook_active: bool,
+        /// How many secrets the hook has been issued. Deliveries are signed
+        /// with the newest, which is derived and never in an event.
+        #[serde(default)]
+        hook_secrets: i64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -513,17 +540,64 @@ pub struct AppKeyObject {
     pub created_unix: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct InstallationObject {
-    pub id: i64,
-    pub account: ActorRef,
-    pub repository_selection: RepositorySelection,
-    /// The repositories a `selected` installation lists, in id order. Empty
-    /// for `all`.
-    pub repositories: Vec<RepoRef>,
-    pub permissions: Permissions,
-    pub events: Vec<String>,
-    pub created_unix: i64,
+object! {
+    InstallationObject, InstallationChanges {
+        id: i64,
+        account: ActorRef,
+        repository_selection: RepositorySelection,
+        /// The repositories a `selected` installation lists, in id order. Empty
+        /// for `all`.
+        repositories: Vec<RepoRef>,
+        permissions: Permissions,
+        events: Vec<String>,
+        created_unix: i64,
+        /// When the installation was suspended, or null while it is not.
+        /// Events appended before a world could suspend one carry neither
+        /// suspension field.
+        #[serde(default)]
+        suspended_unix: Option<i64>,
+        /// Who suspended it.
+        #[serde(default)]
+        suspended_by: Option<ActorRef>,
+    }
+}
+
+object! {
+    DeliveryObject, DeliveryChanges {
+        id: i64,
+        /// The same for a delivery and every redelivery of it.
+        guid: String,
+        /// The event's name, in the words of the face that made the
+        /// delivery.
+        event: String,
+        action: Option<String>,
+        installation: Option<InstallationRef>,
+        /// The id of the repository the event is about.
+        repo: Option<i64>,
+        /// The hook's URL when the delivery was made.
+        url: String,
+        /// The request body, exactly as it is sent.
+        body: String,
+        /// The delivery this one sends again.
+        redelivery_of: Option<i64>,
+        created_unix: i64,
+        state: DeliveryState,
+        /// The world's clock when the attempt's result was recorded.
+        attempted_unix: Option<i64>,
+        /// The status the receiver answered with.
+        status_code: Option<i64>,
+        /// Which step failed, for an attempt that got no answer.
+        failure: Option<DeliveryFailure>,
+        failure_detail: Option<String>,
+        /// How long the attempt took, in real milliseconds.
+        duration_ms: Option<i64>,
+        /// The answer's headers, each a name and a value.
+        response_headers: Option<Vec<(String, String)>>,
+        /// The first of the answer's body, as text.
+        response_body: Option<String>,
+        /// Whether the answer's body went on past what was kept.
+        response_truncated: Option<bool>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -760,6 +834,10 @@ pub struct Rekeyed {
     /// carry none.
     #[serde(default)]
     pub installation_tokens: i64,
+    /// The hook secrets. Events appended before a world held any carry
+    /// none.
+    #[serde(default)]
+    pub hook_secrets: i64,
 }
 
 /// A body type with a subject and one more field per entry.
@@ -798,8 +876,14 @@ bodies! {
         changes: OAuthAuthorizationChanges,
     }
     AppCreated { subject: AppSubject, object: AppObject }
+    AppChanged { subject: AppSubject, changes: AppChanges }
     AppKeyCreated { subject: AppKeySubject, object: AppKeyObject }
     InstallationCreated { subject: InstallationSubject, object: InstallationObject }
+    InstallationChanged { subject: InstallationSubject, changes: InstallationChanges }
+    /// The installation as it was.
+    InstallationDeleted { subject: InstallationSubject, object: InstallationObject }
+    DeliveryCreated { subject: DeliverySubject, object: DeliveryObject }
+    DeliveryChanged { subject: DeliverySubject, changes: DeliveryChanges }
     InstallationTokenCreated {
         subject: InstallationTokenSubject,
         object: InstallationTokenObject,
@@ -904,11 +988,30 @@ event_types! {
     /// An app was registered, with its OAuth app and, unless a bot already
     /// held its slug, its bot.
     AppCreated(AppCreated) = "app:created",
+    /// An app's webhook was pointed at a URL, taken off one, or turned on
+    /// or off.
+    AppHookSet(AppChanged) = "app:hook_set",
+    /// A secret was issued for an app's webhook, replacing the one before.
+    AppHookSecretIssued(AppChanged) = "app:hook_secret_issued",
     AppKeyCreated(AppKeyCreated) = "app_key:created",
     /// An app was installed on an account.
     InstallationCreated(InstallationCreated) = "installation:created",
+    InstallationSuspended(InstallationChanged) = "installation:suspended",
+    InstallationUnsuspended(InstallationChanged) = "installation:unsuspended",
+    /// An installation was removed. Its tokens stop working with it.
+    InstallationDeleted(InstallationDeleted) = "installation:deleted",
     /// An app issued a token for one of its installations.
     InstallationTokenCreated(InstallationTokenCreated) = "installation_token:created",
+
+    /// The world owes a receiver a POST: a face made a delivery for a write
+    /// that had just landed, or an app asked for one to be sent again.
+    DeliveryCreated(DeliveryCreated) = "delivery:created",
+    /// The engine made a delivery's one attempt, and this is what came of
+    /// it.
+    DeliveryAttempted(DeliveryChanged) = "delivery:attempted",
+    /// A pending delivery will not be attempted: its world was restored or
+    /// copied.
+    DeliveryDropped(DeliveryChanged) = "delivery:dropped",
 
     RepoCreated(RepoCreated) = "repo:created",
     /// A push, or a merge, moved refs in the repository. On a push it is the

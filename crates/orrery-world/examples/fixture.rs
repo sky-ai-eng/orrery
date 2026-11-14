@@ -317,6 +317,8 @@ fn populate(w: &World) -> orrery_world::Result<()> {
             callback_urls: &[CALLBACK.to_string(), format!("{CALLBACK}/setup")],
             permissions: &permissions,
             events: &["push".to_string(), "pull_request".to_string()],
+            hook_url: Some("https://ci.test/hook"),
+            hook_active: true,
         },
         by(system.id),
     )?;

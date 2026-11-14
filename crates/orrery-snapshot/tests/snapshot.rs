@@ -403,6 +403,8 @@ fn seed(world: &World) -> Seeded {
                 callback_urls: &["https://helper.test/callback".to_string()],
                 permissions: &Permissions::new(),
                 events: &[],
+                hook_url: None,
+                hook_active: false,
             },
             by(alice.id),
         )
@@ -881,6 +883,8 @@ fn diff_reports_apps_and_installations() {
                 callback_urls: &["https://helper.test/callback".to_string()],
                 permissions: &Permissions::new(),
                 events: &[],
+                hook_url: None,
+                hook_active: false,
             },
             by(alice.id),
         )

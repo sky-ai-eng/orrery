@@ -191,6 +191,74 @@ const MIGRATIONS: &[&str] = &[
         repo_id  INTEGER NOT NULL REFERENCES repos(id),
         PRIMARY KEY (token_id, repo_id)
      ) STRICT;",
+    // 17: an app's webhook, suspending and removing an installation, and
+    // deliveries. An app's hook is where its deliveries go (`hook_url`,
+    // null for none), whether it sends them (`hook_active`), and the secret
+    // they are signed with, which is derived: `hook_secrets` counts the ones
+    // issued, and an app registered before this version holds none until one
+    // is issued. An installation is suspended while `suspended_clock_unix`
+    // is set. Removing an installation deletes its row, and a token is
+    // derived from its id, so a token's row outlives its installation's and
+    // no id is ever issued twice: the token tables are made again without
+    // the reference. A delivery is one POST the world owes a receiver: what
+    // it carries, and, once the one attempt is made, what came of it.
+    // `response_headers` is a JSON array of name and value pairs.
+    "ALTER TABLE apps ADD COLUMN hook_url TEXT;
+     ALTER TABLE apps ADD COLUMN hook_active INTEGER NOT NULL DEFAULT 0
+         CHECK (hook_active IN (0, 1));
+     ALTER TABLE apps ADD COLUMN hook_secret TEXT;
+     ALTER TABLE apps ADD COLUMN hook_secrets INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE app_installations ADD COLUMN suspended_clock_unix INTEGER;
+     ALTER TABLE app_installations ADD COLUMN suspended_by_id INTEGER REFERENCES actors(id);
+     CREATE TABLE app_installation_token_repos_kept AS
+        SELECT token_id, repo_id FROM app_installation_token_repos;
+     DROP TABLE app_installation_token_repos;
+     CREATE TABLE app_installation_tokens_kept (
+        id                 INTEGER PRIMARY KEY,
+        token              TEXT NOT NULL UNIQUE,
+        installation_id    INTEGER NOT NULL,
+        permissions        TEXT NOT NULL,
+        created_clock_unix INTEGER NOT NULL,
+        expires_clock_unix INTEGER NOT NULL
+     ) STRICT;
+     INSERT INTO app_installation_tokens_kept
+        SELECT id, token, installation_id, permissions, created_clock_unix, expires_clock_unix
+        FROM app_installation_tokens;
+     DROP TABLE app_installation_tokens;
+     ALTER TABLE app_installation_tokens_kept RENAME TO app_installation_tokens;
+     CREATE TABLE app_installation_token_repos (
+        token_id INTEGER NOT NULL REFERENCES app_installation_tokens(id),
+        repo_id  INTEGER NOT NULL REFERENCES repos(id),
+        PRIMARY KEY (token_id, repo_id)
+     ) STRICT;
+     INSERT INTO app_installation_token_repos
+        SELECT token_id, repo_id FROM app_installation_token_repos_kept;
+     DROP TABLE app_installation_token_repos_kept;
+     CREATE TABLE deliveries (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        app_id               INTEGER NOT NULL REFERENCES apps(id),
+        guid                 TEXT NOT NULL,
+        event                TEXT NOT NULL,
+        action               TEXT,
+        installation_id      INTEGER,
+        repo_id              INTEGER,
+        url                  TEXT NOT NULL,
+        body                 TEXT NOT NULL,
+        redelivery_of        INTEGER REFERENCES deliveries(id),
+        created_clock_unix   INTEGER NOT NULL,
+        state                TEXT NOT NULL
+            CHECK (state IN ('pending', 'answered', 'failed', 'dropped')),
+        attempted_clock_unix INTEGER,
+        status_code          INTEGER,
+        failure              TEXT,
+        failure_detail       TEXT,
+        duration_ms          INTEGER,
+        response_headers     TEXT,
+        response_body        TEXT,
+        response_truncated   INTEGER CHECK (response_truncated IN (0, 1))
+     ) STRICT;
+     CREATE INDEX deliveries_by_app ON deliveries (app_id, id);
+     CREATE INDEX deliveries_pending ON deliveries (id) WHERE state = 'pending';",
 ];
 
 /// The version this binary reads and writes.

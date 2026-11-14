@@ -10,6 +10,12 @@ use crate::clock::{KeepTime, host_unix_ms};
 use crate::events::*;
 use crate::{LogOrder, Result, Signal, World, WorldError, objects, queries};
 
+/// A write that has committed: who made it, and the events it appended.
+pub(crate) struct Landed {
+    pub(crate) by: Attribution,
+    pub(crate) events: Vec<EventBody>,
+}
+
 /// One write in progress: its transaction, and the events it has made.
 pub(crate) struct Write<'a> {
     pub(crate) tx: &'a Connection,
@@ -164,11 +170,20 @@ impl World {
         by: impl FnOnce(&Connection) -> Result<(Attribution, X)>,
         f: impl FnOnce(&mut Write<'_>, X) -> Result<T>,
     ) -> Result<T> {
-        self.write_locked(&self.lock(), keep, by, f)
+        if crate::deliveries::notifying() {
+            return Err(WorldError::WriteWhileNotifying);
+        }
+        let _order = self.order();
+        let (out, landed) = self.write_landing(&self.lock(), keep, by, f)?;
+        if let Some(landed) = landed {
+            self.notify(&landed)?;
+        }
+        Ok(out)
     }
 
     /// [`World::write_keeping`] on the world's connection, which the caller
-    /// has locked.
+    /// has locked. No face is told of the write, so it makes no delivery:
+    /// it is for the engine's own writes, which no webhook is about.
     pub(crate) fn write_locked<X, T>(
         &self,
         conn: &Connection,
@@ -176,6 +191,18 @@ impl World {
         by: impl FnOnce(&Connection) -> Result<(Attribution, X)>,
         f: impl FnOnce(&mut Write<'_>, X) -> Result<T>,
     ) -> Result<T> {
+        Ok(self.write_landing(conn, keep, by, f)?.0)
+    }
+
+    /// One write on the world's connection, which the caller has locked,
+    /// and what it appended, when it appended anything.
+    pub(crate) fn write_landing<X, T>(
+        &self,
+        conn: &Connection,
+        keep: KeepTime,
+        by: impl FnOnce(&Connection) -> Result<(Attribution, X)>,
+        f: impl FnOnce(&mut Write<'_>, X) -> Result<T>,
+    ) -> Result<(T, Option<Landed>)> {
         let tx = conn.unchecked_transaction()?;
         let kept = self.keep_time(&tx, keep)?;
         #[cfg(any(test, feature = "test-support"))]
@@ -196,10 +223,11 @@ impl World {
         audit.end(&tx, &events)?;
         if events.is_empty() && advanced {
             // Dropped uncommitted, the transaction rolls the advance back.
-            return Ok(out);
+            return Ok((out, None));
         }
         tx.commit()?;
-        Ok(out)
+        let landed = (!events.is_empty()).then_some(Landed { by, events });
+        Ok((out, landed))
     }
 
     /// Events with `seq > after_seq`, oldest first, at most `limit`. `seq` is
@@ -436,11 +464,12 @@ pub(crate) fn check_log_position(conn: &Connection, seq: i64) -> Result<()> {
 }
 
 /// What every read of the log projects, in the order `row_to_event` reads it.
-const EVENT_COLUMNS: &str = "seq, write_seq, write_events, clock_unix, wall_unix_ms, actor_id,
+pub(crate) const EVENT_COLUMNS: &str =
+    "seq, write_seq, write_events, clock_unix, wall_unix_ms, actor_id,
     (SELECT login FROM actors WHERE actors.id = action_log.actor_id), door, app_id,
     (SELECT client_id FROM oauth_apps WHERE oauth_apps.id = action_log.app_id), type, body";
 
-fn row_to_event(r: &Row<'_>) -> rusqlite::Result<Event> {
+pub(crate) fn row_to_event(r: &Row<'_>) -> rusqlite::Result<Event> {
     let door: String = r.get(7)?;
     let app_id: Option<i64> = r.get(8)?;
     let mut body: serde_json::Value =
