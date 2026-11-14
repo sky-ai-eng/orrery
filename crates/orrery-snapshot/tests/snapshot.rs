@@ -589,6 +589,7 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
             "oauth_app_secrets": 1,
             "oauth_codes": 1,
             "installation_tokens": 1,
+            "hook_secrets": 1,
         })
     );
     let wire = serde_json::to_string(&log).unwrap();

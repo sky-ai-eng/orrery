@@ -251,6 +251,10 @@ struct OutboundConfig {
     /// A PEM file of certificate authorities to trust as well as the public
     /// roots the binary ships.
     extra_ca_certs: Option<PathBuf>,
+    /// Whether the world sends the deliveries it makes; true when absent.
+    /// With `false` it makes them and sends none, as a world whose log is
+    /// being replayed must.
+    send: Option<bool>,
 }
 
 fn egress<'de, D: serde::Deserializer<'de>>(raw: D) -> Result<orrery_outbound::Egress, D::Error> {
@@ -666,7 +670,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         .with_context(|| format!("checking config {}", config_path.display()))?;
     // Made before the world is opened, so that a certificate file it can't
     // use stops `serve` before it opens or creates one.
-    // TODO(ORR-7): hand the client to the webhook sender, which posts each delivery with it.
+    let send = config.outbound.send.unwrap_or(true);
     let outbound = orrery_outbound::Client::new(
         config.outbound.egress,
         config.outbound.extra_ca_certs.as_deref(),
@@ -741,6 +745,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         orrery_server::Options {
             anonymous_git_reads: config.server.anonymous_git_reads.unwrap_or(true),
             config_sha256: Some(config_sha256),
+            outbound: send.then_some(outbound),
         },
     );
     let stop = routers.stop();

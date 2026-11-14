@@ -14,7 +14,7 @@ use axum::extract::{
 };
 use axum::http::{HeaderMap, Method, Response, StatusCode, header};
 use axum::middleware::{self, Next};
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, post, put};
 use base64::Engine as _;
 use orrery_world::{
     AccessLevel, App, Caller, ClockMode, Installation, OAuthApp, Permissions, Repo,
@@ -60,10 +60,26 @@ pub fn app_router(face: GithubFace) -> Router {
     let as_app = Router::new()
         .route("/api/v3/app", get(get_app))
         .route("/api/v3/app/installations", get(list_installations))
-        .route("/api/v3/app/installations/{id}", get(get_installation))
+        .route(
+            "/api/v3/app/installations/{id}",
+            get(get_installation).delete(delete_installation),
+        )
         .route(
             "/api/v3/app/installations/{id}/access_tokens",
             post(create_token),
+        )
+        .route(
+            "/api/v3/app/installations/{id}/suspended",
+            put(suspend_installation).delete(unsuspend_installation),
+        )
+        .route("/api/v3/app/hook/config", get(crate::webhooks::get_config))
+        .route(
+            "/api/v3/app/hook/deliveries",
+            get(crate::webhooks::list_deliveries),
+        )
+        .route(
+            "/api/v3/app/hook/deliveries/{id}/attempts",
+            post(crate::webhooks::redeliver),
         )
         .route("/api/v3/app/", any(not_mocked))
         .route("/api/v3/app/{*rest}", any(not_mocked))
@@ -407,6 +423,58 @@ async fn get_installation(
     json_response(StatusCode::OK, installation_json(&face, &installation))
 }
 
+/// Suspend an installation. GitHub answers `204` whether or not it was
+/// suspended already.
+async fn suspend_installation(
+    State(face): State<GithubFace>,
+    Extension(app): Extension<App>,
+    UrlPath(id): UrlPath<String>,
+) -> Response<Body> {
+    let installation = match own_installation(&face, &app, &id) {
+        Ok(i) => i,
+        Err(resp) => return *resp,
+    };
+    match face.world.suspend_installation(app.id, installation.id) {
+        Ok(_) => crate::no_content(),
+        Err(WorldError::NoSuchInstallation(_)) => github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => internal(e),
+    }
+}
+
+/// Lift an installation's suspension, `204` whether or not it had one.
+async fn unsuspend_installation(
+    State(face): State<GithubFace>,
+    Extension(app): Extension<App>,
+    UrlPath(id): UrlPath<String>,
+) -> Response<Body> {
+    let installation = match own_installation(&face, &app, &id) {
+        Ok(i) => i,
+        Err(resp) => return *resp,
+    };
+    match face.world.unsuspend_installation(app.id, installation.id) {
+        Ok(_) => crate::no_content(),
+        Err(WorldError::NoSuchInstallation(_)) => github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => internal(e),
+    }
+}
+
+/// Remove an installation: `204`, and `404` from then on.
+async fn delete_installation(
+    State(face): State<GithubFace>,
+    Extension(app): Extension<App>,
+    UrlPath(id): UrlPath<String>,
+) -> Response<Body> {
+    let installation = match own_installation(&face, &app, &id) {
+        Ok(i) => i,
+        Err(resp) => return *resp,
+    };
+    match face.world.delete_installation(app.id, installation.id) {
+        Ok(_) => crate::no_content(),
+        Err(WorldError::NoSuchInstallation(_)) => github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => internal(e),
+    }
+}
+
 /// The permission every installation token holds beside the ones it asks
 /// for, when its installation holds it.
 const METADATA: &str = "metadata";
@@ -478,6 +546,12 @@ async fn create_token(
         Ok(token) => token,
         Err(WorldError::NoSuchInstallation(_)) => {
             return github_error(StatusCode::NOT_FOUND, "Not Found");
+        }
+        Err(WorldError::InstallationSuspended(_)) => {
+            return github_error(
+                StatusCode::FORBIDDEN,
+                "This installation has been suspended",
+            );
         }
         Err(WorldError::InstallationRepository(_)) => {
             return github_error(
@@ -715,14 +789,18 @@ pub(crate) fn app_json(face: &GithubFace, app: &App) -> serde_json::Value {
     })
 }
 
-/// A time as GitHub writes an installation's: with milliseconds, where its
-/// other objects have none.
+/// A time as GitHub writes an installation's creation and update: with
+/// milliseconds, where its other objects, and an installation's own
+/// `suspended_at`, have none.
 fn rfc3339_millis(unix: i64) -> String {
     rfc3339(unix).replacen('Z', ".000Z", 1)
 }
 
 /// GitHub's installation object.
-fn installation_json(face: &GithubFace, installation: &Installation) -> serde_json::Value {
+pub(crate) fn installation_json(
+    face: &GithubFace,
+    installation: &Installation,
+) -> serde_json::Value {
     let base = face.base_url.trim_end_matches('/');
     let account = &installation.account;
     let html_url = match account.kind {
@@ -754,8 +832,8 @@ fn installation_json(face: &GithubFace, installation: &Installation) -> serde_js
         "single_file_name": serde_json::Value::Null,
         "has_multiple_single_files": false,
         "single_file_paths": [],
-        "suspended_by": serde_json::Value::Null,
-        "suspended_at": serde_json::Value::Null,
+        "suspended_by": installation.suspended.as_ref().map(|s| actor_json(&s.by)),
+        "suspended_at": installation.suspended.as_ref().map(|s| rfc3339(s.clock_unix)),
     })
 }
 

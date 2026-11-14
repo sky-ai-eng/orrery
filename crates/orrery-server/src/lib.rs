@@ -34,6 +34,7 @@ mod apps;
 mod control;
 mod list;
 mod log_stream;
+mod sender;
 mod snapshots;
 
 /// Where the control plane is mounted, on its own listener or the faces'.
@@ -77,6 +78,11 @@ pub struct Options {
     /// of the file it holds to learn whether the running process has read
     /// that file. `None` for a world started from no file.
     pub config_sha256: Option<String>,
+    /// What sends the world's webhook deliveries, or `None` for a world that
+    /// makes its deliveries and sends none of them, as one whose log is
+    /// being replayed does: each attempt's result is in the log, and the
+    /// replay writes it back.
+    pub outbound: Option<orrery_outbound::Client>,
 }
 
 impl Default for Options {
@@ -84,6 +90,7 @@ impl Default for Options {
         Self {
             anonymous_git_reads: true,
             config_sha256: None,
+            outbound: None,
         }
     }
 }
@@ -162,7 +169,17 @@ pub fn routers(
         git: git.clone(),
         base_url: base_url.clone(),
     };
+    // The GitHub face makes the deliveries of every write this world takes
+    // from here on, and of its newest write, if a process stopped between
+    // that write and them.
+    world.set_notifier(orrery_face_github::webhooks::notifier(github.clone()));
+    if let Err(e) = world.finish_last_write() {
+        tracing::error!(error = %e, "making the newest write's deliveries failed");
+    }
     let stopping = Arc::new(tokio::sync::watch::Sender::new(false));
+    if let Some(client) = options.outbound {
+        sender::start(world.clone(), client, stopping.subscribe());
+    }
     let stop = Stop {
         stopping: stopping.clone(),
         git: git.clone(),
@@ -276,6 +293,16 @@ async fn face_auth(State(state): State<AppState>, mut req: Request, next: Next) 
     };
     match state.world.caller_by_token(&token) {
         Ok(Some(caller)) => {
+            // GitHub knows a suspended installation's token and says why it
+            // refuses it, where an unknown token is bad credentials.
+            if caller.installation.as_ref().is_some_and(|i| i.suspended) {
+                return json(
+                    StatusCode::FORBIDDEN,
+                    serde_json::json!({
+                        "message": "This GitHub App installation is currently suspended.",
+                    }),
+                );
+            }
             req.extensions_mut().insert(caller.actor.clone());
             req.extensions_mut().insert(caller);
             next.run(req).await

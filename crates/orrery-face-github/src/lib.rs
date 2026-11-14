@@ -35,6 +35,7 @@ mod pulls;
 mod reads;
 mod render;
 mod signing;
+pub mod webhooks;
 
 pub use render::repo_json;
 

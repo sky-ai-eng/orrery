@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use orrery_world::{
     App, AppKey, Installation, NewApp, Permissions, RepositorySelection, WorldError,
     validate_app_callback_urls, validate_app_events, validate_app_name, validate_app_permissions,
-    validate_app_slug,
+    validate_app_slug, validate_hook_url,
 };
 
 use crate::control::{Fault, Fields, SYSTEM, errors, internal};
@@ -23,8 +23,9 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/apps", post(create_app))
         .route("/apps/list", post(list_apps).get(get_app_named_list))
-        .route("/apps/{slug}", get(get_app))
+        .route("/apps/{slug}", get(get_app).patch(patch_app))
         .route("/apps/{slug}/keys", post(add_key))
+        .route("/apps/{slug}/webhook-secrets", post(issue_webhook_secret))
         .route("/apps/{slug}/installations", post(create_installation))
         .route("/apps/{slug}/installations/list", post(list_installations))
         .route("/apps/{slug}/installations/{id}", get(get_installation))
@@ -43,6 +44,11 @@ struct AppBody {
     callback_urls: Vec<String>,
     permissions: Permissions,
     events: Vec<String>,
+    /// Where the app's deliveries go, or null for an app with no webhook.
+    webhook_url: Option<String>,
+    /// Whether the webhook makes deliveries. A fork starts with every
+    /// webhook off.
+    webhook_active: bool,
     keys: Vec<KeyBody>,
 }
 
@@ -82,6 +88,8 @@ fn app_body(state: &AppState, app: App) -> Result<AppBody, WorldError> {
         callback_urls: app.callback_urls,
         permissions: app.permissions,
         events: app.events,
+        webhook_url: app.hook.url,
+        webhook_active: app.hook.active,
     })
 }
 
@@ -131,8 +139,11 @@ fn no_such_app(slug: String) -> Response<Body> {
     )
 }
 
-/// Register an app. `permissions` and `events` default to none. The answer
-/// carries the first client secret, which no read returns again.
+/// Register an app. `permissions` and `events` default to none, and so does
+/// its webhook: `webhook_url` is where its deliveries go, and
+/// `webhook_active`, false unless given, whether it makes any. The answer
+/// carries the first client secret and the webhook's secret, which no read
+/// returns again.
 async fn create_app(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let slug: Option<String> = fields.required("slug");
@@ -162,6 +173,19 @@ async fn create_app(State(state): State<AppState>, body: Bytes) -> Response<Body
     if let Err(e) = validate_app_events(&events) {
         fields.fault(app_fault(e, "events"));
     }
+    let webhook_url: Option<String> = fields.optional("webhook_url");
+    if let Some(url) = &webhook_url
+        && let Err(e) = validate_hook_url(url)
+    {
+        fields.fault(app_fault(e, "webhook_url"));
+    }
+    let webhook_active: bool = fields.optional("webhook_active").unwrap_or(false);
+    if webhook_active && webhook_url.is_none() {
+        fields.fault(Fault::invalid(
+            "a webhook with no URL cannot be active".to_string(),
+            "webhook_active",
+        ));
+    }
     let read = slug.zip(name).zip(owner).zip(callback_urls);
     let (((slug, name), owner), callback_urls) = match fields.finish(read) {
         Ok(read) => read,
@@ -174,8 +198,8 @@ async fn create_app(State(state): State<AppState>, body: Bytes) -> Response<Body
         callback_urls: &callback_urls,
         permissions: &permissions,
         events: &events,
-        hook_url: None,
-        hook_active: false,
+        hook_url: webhook_url.as_deref(),
+        hook_active: webhook_active,
     };
     let registered = match state.world.create_app(&new, SYSTEM) {
         Ok(registered) => registered,
@@ -201,6 +225,7 @@ async fn create_app(State(state): State<AppState>, body: Bytes) -> Response<Body
         Ok(app) => {
             let mut body = serde_json::json!(app);
             body["client_secret"] = serde_json::json!(registered.client_secret);
+            body["webhook_secret"] = serde_json::json!(registered.hook_secret);
             json(StatusCode::CREATED, body)
         }
         Err(e) => internal(e),
@@ -250,6 +275,66 @@ fn read_app(state: &AppState, slug: String) -> Response<Body> {
     };
     match app_body(state, app) {
         Ok(app) => json(StatusCode::OK, serde_json::json!(app)),
+        Err(e) => internal(e),
+    }
+}
+
+/// Change an app's webhook: `webhook_url` points it at a URL, or with null
+/// takes it off one, and `webhook_active` turns it on or off. A field left
+/// out keeps its value. Answers the app as a read does.
+async fn patch_app(
+    State(state): State<AppState>,
+    UrlPath(slug): UrlPath<String>,
+    body: Bytes,
+) -> Response<Body> {
+    let mut fields = Fields::parse(&body);
+    let url: Option<Option<String>> = fields.patched("webhook_url");
+    if let Some(Some(url)) = &url
+        && let Err(e) = validate_hook_url(url)
+    {
+        fields.fault(app_fault(e, "webhook_url"));
+    }
+    let active: Option<bool> = fields.optional_not_null("webhook_active");
+    let (url, active) = match fields.finish(Some((url, active))) {
+        Ok(read) => read,
+        Err(resp) => return *resp,
+    };
+    let url = url.as_ref().map(|url| url.as_deref());
+    match state.world.set_app_hook(&slug, url, active, SYSTEM) {
+        Ok(app) => match app_body(&state, app) {
+            Ok(app) => json(StatusCode::OK, serde_json::json!(app)),
+            Err(e) => internal(e),
+        },
+        Err(WorldError::InvalidApp { field, message }) => errors(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            &message,
+            Some(field),
+        ),
+        Err(WorldError::NoSuchApp(slug)) => no_such_app(slug),
+        Err(e) => internal(e),
+    }
+}
+
+/// Issue a secret for the app's webhook, which replaces the one before: its
+/// deliveries are signed with the newest. GitHub's settings page sets one,
+/// and no API does. It takes no fields, and no read returns the secret
+/// again.
+async fn issue_webhook_secret(
+    State(state): State<AppState>,
+    UrlPath(slug): UrlPath<String>,
+    body: Bytes,
+) -> Response<Body> {
+    let fields = Fields::parse(&body);
+    if let Err(resp) = fields.finish(Some(())) {
+        return *resp;
+    }
+    match state.world.issue_app_hook_secret(&slug, SYSTEM) {
+        Ok(secret) => json(
+            StatusCode::CREATED,
+            serde_json::json!({ "slug": slug, "webhook_secret": secret }),
+        ),
+        Err(WorldError::NoSuchApp(slug)) => no_such_app(slug),
         Err(e) => internal(e),
     }
 }
