@@ -203,7 +203,40 @@ const MIGRATIONS: &[&str] = &[
     // the reference. A delivery is one POST the world owes a receiver: what
     // it carries, and, once the one attempt is made, what came of it.
     // `response_headers` is a JSON array of name and value pairs.
-    "ALTER TABLE apps ADD COLUMN hook_url TEXT;
+    //
+    // The engine records what came of a delivery through a door of its own,
+    // `engine`. The log's `door` column lists the doors it takes, and SQLite
+    // changes a column's check only by making the table again: the log is
+    // copied whole, with every `seq` and the newest `seq` issued, which a
+    // restore can have raised past the newest event's.
+    "CREATE TABLE action_log_kept (
+        seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+        clock_unix   INTEGER NOT NULL,
+        actor_id     INTEGER NOT NULL REFERENCES actors(id),
+        type         TEXT NOT NULL,
+        body         TEXT NOT NULL DEFAULT '{}',
+        wall_unix_ms INTEGER,
+        write_seq    INTEGER,
+        write_events INTEGER CHECK (write_events >= 1),
+        door         TEXT
+            CHECK (door IN ('rest', 'graphql', 'git', 'web', 'control', 'cli', 'engine')),
+        app_id       INTEGER REFERENCES oauth_apps(id)
+     ) STRICT;
+     INSERT INTO action_log_kept
+        SELECT seq, clock_unix, actor_id, type, body, wall_unix_ms, write_seq, write_events,
+               door, app_id
+        FROM action_log;
+     UPDATE sqlite_sequence
+        SET seq = (SELECT seq FROM sqlite_sequence WHERE name = 'action_log')
+        WHERE name = 'action_log_kept'
+          AND EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'action_log');
+     INSERT INTO sqlite_sequence (name, seq)
+        SELECT 'action_log_kept', seq FROM sqlite_sequence
+        WHERE name = 'action_log'
+          AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'action_log_kept');
+     DROP TABLE action_log;
+     ALTER TABLE action_log_kept RENAME TO action_log;
+     ALTER TABLE apps ADD COLUMN hook_url TEXT;
      ALTER TABLE apps ADD COLUMN hook_active INTEGER NOT NULL DEFAULT 0
          CHECK (hook_active IN (0, 1));
      ALTER TABLE apps ADD COLUMN hook_secret TEXT;

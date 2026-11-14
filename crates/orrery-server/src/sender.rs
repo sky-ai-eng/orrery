@@ -16,6 +16,9 @@ use orrery_world::{Delivery, DeliveryFailure, DeliveryOutcome, Signal, World, Wo
 /// none is pending, so this bounds a read, not what is sent.
 const BATCH: usize = 32;
 
+/// How long the loop waits after a result it could not record.
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Send the world's deliveries until `stopping` turns true. Without a
 /// runtime to run on there is nothing to send with, and the deliveries stay
 /// pending.
@@ -62,11 +65,21 @@ async fn run(
             if pending.is_empty() {
                 break;
             }
+            let mut recorded = true;
             for delivery in pending {
                 if *stopping.borrow() {
                     return;
                 }
-                send(&world, &client, delivery).await;
+                recorded &= send(&world, &client, delivery).await;
+            }
+            // A result that could not be recorded leaves its delivery
+            // pending. Reading it again at once would send it again at
+            // once, so the loop waits before it does.
+            if !recorded {
+                tokio::select! {
+                    () = tokio::time::sleep(RETRY_AFTER) => {}
+                    _ = stopping.wait_for(|stopping| *stopping) => return,
+                }
             }
         }
         tokio::select! {
@@ -76,15 +89,15 @@ async fn run(
     }
 }
 
-/// Make one delivery's attempt and record its result. A delivery a restore
-/// dropped or discarded while its attempt was in flight has nowhere to
-/// record one.
-async fn send(world: &World, client: &Client, delivery: Delivery) {
+/// Make one delivery's attempt and record its result, answering whether the
+/// delivery is no longer pending. A delivery a restore dropped or discarded
+/// while its attempt was in flight has nowhere to record one.
+async fn send(world: &World, client: &Client, delivery: Delivery) -> bool {
     let secret = match world.app_hook_secret(delivery.app_id) {
         Ok(secret) => secret,
         Err(e) => {
             tracing::error!(error = %e, delivery = delivery.id, "reading the hook's secret failed");
-            return;
+            return false;
         }
     };
     let mut headers = HeaderMap::new();
@@ -135,9 +148,10 @@ async fn send(world: &World, client: &Client, delivery: Delivery) {
     };
     let duration_ms = i64::try_from(attempt.elapsed.as_millis()).unwrap_or(i64::MAX);
     match world.record_delivery_attempt(delivery.id, duration_ms, &outcome) {
-        Ok(_) | Err(WorldError::NoSuchDelivery(_) | WorldError::DeliveryNotPending(_)) => {}
+        Ok(_) | Err(WorldError::NoSuchDelivery(_) | WorldError::DeliveryNotPending(_)) => true,
         Err(e) => {
             tracing::error!(error = %e, delivery = delivery.id, "recording an attempt failed");
+            false
         }
     }
 }
