@@ -115,6 +115,14 @@ pub(crate) fn oauth_token(secret: &WorldSecret, code_id: i64) -> String {
     )
 }
 
+/// The token with this id issued for an installation.
+pub(crate) fn installation_token(secret: &WorldSecret, token_id: i64) -> String {
+    format!(
+        "orrfake_{}",
+        hex::encode(&secret.derive(&format!("installation-token:{token_id}"))[..16])
+    )
+}
+
 pub(crate) fn oauth_code(secret: &WorldSecret, code_id: i64) -> String {
     hex::encode(&secret.derive(&format!("oauth-code:{code_id}"))[..10])
 }
@@ -151,7 +159,9 @@ pub(crate) fn world_secret(conn: &Connection) -> Result<WorldSecret> {
 impl World {
     /// Open the world at `root` — a fresh copy of another world's state — as
     /// a new world: give it `secret` and re-derive every credential it
-    /// inherited, so it accepts none of its source's. This is the only way a
+    /// inherited, so it accepts none of its source's. An app's keys stay:
+    /// each is the public half of a pair its caller holds, which no secret
+    /// of a world's derives. This is the only way a
     /// world is re-keyed, and only at its creation, so every event after its
     /// `world:rekeyed` was made under the secret it holds now. The `orrery`
     /// command's fork is the one caller, so the write is the system actor's,
@@ -229,6 +239,18 @@ impl World {
                 )?;
             }
 
+            let installation_tokens: Vec<i64> = queries::list(
+                tx,
+                "SELECT id FROM app_installation_tokens ORDER BY id",
+                |r| r.get(0),
+            )?;
+            for id in &installation_tokens {
+                tx.execute(
+                    "UPDATE app_installation_tokens SET token = ?1 WHERE id = ?2",
+                    params![installation_token(secret, *id), id],
+                )?;
+            }
+
             w.operation(EventBody::WorldRekeyed(events::WorldRekeyed {
                 subject: events::WorldSubject::default(),
                 rekeyed: events::Rekeyed {
@@ -236,6 +258,7 @@ impl World {
                     oauth_apps: apps.len() as i64,
                     oauth_app_secrets: app_secrets.len() as i64,
                     oauth_codes: codes.len() as i64,
+                    installation_tokens: installation_tokens.len() as i64,
                 },
             }));
             Ok(())

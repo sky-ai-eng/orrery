@@ -17,6 +17,8 @@ use std::sync::{Mutex, RwLock};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+mod app_keys;
+mod apps;
 #[cfg(any(test, feature = "test-support"))]
 mod audit;
 mod checks;
@@ -35,6 +37,11 @@ mod schema;
 mod signing;
 mod types;
 
+pub use app_keys::rsa_public_key_from_pem;
+pub use apps::{
+    INSTALLATION_TOKEN_TTL_SECONDS, validate_app_callback_urls, validate_app_events,
+    validate_app_name, validate_app_permissions, validate_app_slug,
+};
 pub use checks::{CheckRunPatch, NewCheckRun};
 pub use credentials::{OAUTH_CLIENT_ID_PREFIX, WorldSecret};
 pub use error::WorldError;
@@ -258,33 +265,7 @@ impl World {
         let by = Attribution::new(SYSTEM_ACTOR_ID, Door::Control);
         self.write(by, |w| {
             let conn = w.tx;
-            let clock = queries::clock(conn)?;
-            let actor = conn
-                .query_row(
-                    &format!(
-                        "INSERT INTO actors (login, kind, created_clock_unix) VALUES (?1, ?2, ?3)
-                     RETURNING {}",
-                        queries::ACTOR_COLUMNS
-                    ),
-                    params![login, kind.as_str(), clock],
-                    queries::row_to_actor,
-                )
-                .map_err(|e| match uniqueness_violation(&e) {
-                    true => WorldError::ActorExists(login.to_string()),
-                    false => WorldError::from(e),
-                })?;
-            let token = credentials::actor_token(
-                &credentials::world_secret(conn)?,
-                &actor.login,
-                actor.id,
-                0,
-            );
-            conn.execute(
-                "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![token, actor.id, credentials::TokenOrigin::Actor(0), clock],
-            )?;
-            identity::insert_email(conn, actor.id, &identity::default_email(&actor.login))?;
+            let (actor, token) = insert_actor(conn, login, kind)?;
             w.operation(EventBody::ActorCreated(events::ActorCreated {
                 subject: objects::actor_subject(conn, actor.id)?,
                 object: objects::actor_object(conn, actor.id)?,
@@ -374,7 +355,9 @@ impl World {
     }
 
     /// The caller `token` authenticates: the actor it acts as, and the
-    /// OAuth app whose authorization code was traded for it.
+    /// OAuth app whose authorization code was traded for it. An installation
+    /// token authenticates its app's bot until it expires on the clock, as
+    /// a read answers it.
     pub fn caller_by_token(&self, token: &str) -> Result<Option<Caller>> {
         let conn = self.lock();
         // The actor columns in `queries::ACTOR_COLUMNS`'s order, qualified,
@@ -393,7 +376,14 @@ impl World {
                 |r| Ok((queries::row_to_actor(r)?, r.get::<_, Option<i64>>(4)?)),
             )
             .optional()?;
-        Ok(found.map(|(actor, app_id)| Caller { actor, app_id }))
+        match found {
+            Some((actor, app_id)) => Ok(Some(Caller {
+                actor,
+                app_id,
+                installation: None,
+            })),
+            None => apps::caller_by_installation_token(&conn, token, self.clock_on(&conn)?),
+        }
     }
 
     pub fn actor_by_token(&self, token: &str) -> Result<Option<Actor>> {
@@ -722,6 +712,40 @@ fn raise_issued_seq(conn: &Connection, issued: i64) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Store an actor with the token and the address every actor starts with,
+/// and answer the actor and that token. The caller's write makes the event
+/// that carries it.
+pub(crate) fn insert_actor(
+    conn: &Connection,
+    login: &str,
+    kind: ActorKind,
+) -> Result<(Actor, String)> {
+    let clock = queries::clock(conn)?;
+    let actor = conn
+        .query_row(
+            &format!(
+                "INSERT INTO actors (login, kind, created_clock_unix) VALUES (?1, ?2, ?3)
+                 RETURNING {}",
+                queries::ACTOR_COLUMNS
+            ),
+            params![login, kind.as_str(), clock],
+            queries::row_to_actor,
+        )
+        .map_err(|e| match uniqueness_violation(&e) {
+            true => WorldError::ActorExists(login.to_string()),
+            false => WorldError::from(e),
+        })?;
+    let token =
+        credentials::actor_token(&credentials::world_secret(conn)?, &actor.login, actor.id, 0);
+    conn.execute(
+        "INSERT INTO tokens (token, actor_id, origin, created_clock_unix)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![token, actor.id, credentials::TokenOrigin::Actor(0), clock],
+    )?;
+    identity::insert_email(conn, actor.id, &identity::default_email(&actor.login))?;
+    Ok((actor, token))
 }
 
 /// Whether a write failed because a row with the same key already exists: a

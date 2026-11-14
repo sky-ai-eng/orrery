@@ -102,8 +102,8 @@ pub(crate) async fn create_check_run(
         },
         clock,
     );
-    match created {
-        Ok(run) => json_response(StatusCode::CREATED, check_run_json(&face, &repo, &run)),
+    match created.and_then(|run| check_run_json(&face, &repo, &run)) {
+        Ok(run) => json_response(StatusCode::CREATED, run),
         Err(e) => internal(e),
     }
 }
@@ -182,8 +182,8 @@ pub(crate) async fn patch_check_run(
         },
         clock,
     );
-    match updated {
-        Ok(run) => json_response(StatusCode::OK, check_run_json(&face, &repo, &run)),
+    match updated.and_then(|run| check_run_json(&face, &repo, &run)) {
+        Ok(run) => json_response(StatusCode::OK, run),
         Err(e) => internal(e),
     }
 }

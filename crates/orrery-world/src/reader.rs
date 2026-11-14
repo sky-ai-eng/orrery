@@ -11,7 +11,7 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::types::*;
-use crate::{Result, World, WorldError, identity, queries, schema};
+use crate::{Result, World, WorldError, apps, identity, queries, schema};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ViewMeta {
@@ -38,6 +38,8 @@ pub trait WorldView {
     fn list_actor_addresses(&self) -> Result<Vec<ActorAddress>>;
     fn list_oauth_apps(&self) -> Result<Vec<OAuthApp>>;
     fn list_oauth_authorizations(&self) -> Result<Vec<OAuthAuthorization>>;
+    fn list_apps(&self) -> Result<Vec<App>>;
+    fn list_installations(&self) -> Result<Vec<Installation>>;
     fn list_timeline(&self) -> Result<Vec<TimelineItem>>;
     fn list_org_members(&self) -> Result<Vec<OrgMembership>>;
     fn list_teams(&self) -> Result<Vec<Team>>;
@@ -101,6 +103,14 @@ impl WorldView for World {
 
     fn list_oauth_authorizations(&self) -> Result<Vec<OAuthAuthorization>> {
         self.with_conn(queries::list_oauth_authorizations)
+    }
+
+    fn list_apps(&self) -> Result<Vec<App>> {
+        self.with_conn(apps::list_apps)
+    }
+
+    fn list_installations(&self) -> Result<Vec<Installation>> {
+        self.with_conn(apps::list_installations)
     }
 
     fn list_timeline(&self) -> Result<Vec<TimelineItem>> {
@@ -224,6 +234,14 @@ impl WorldView for WorldReader {
 
     fn list_oauth_authorizations(&self) -> Result<Vec<OAuthAuthorization>> {
         queries::list_oauth_authorizations(&self.conn)
+    }
+
+    fn list_apps(&self) -> Result<Vec<App>> {
+        apps::list_apps(&self.conn)
+    }
+
+    fn list_installations(&self) -> Result<Vec<Installation>> {
+        apps::list_installations(&self.conn)
     }
 
     fn list_timeline(&self) -> Result<Vec<TimelineItem>> {

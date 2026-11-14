@@ -131,6 +131,66 @@ const MIGRATIONS: &[&str] = &[
     // world before this version was manual.
     "ALTER TABLE world ADD COLUMN clock_mode TEXT NOT NULL DEFAULT 'manual'
          CHECK (clock_mode IN ('manual', 'real'));",
+    // 16: apps, their keys, their installations, and installation tokens.
+    // An app is an OAuth app with a bot: it shares the OAuth app's id, and
+    // its name, client id, client secrets, and first callback URL are that
+    // row's. `app_callback_urls` holds the callback URLs after the first,
+    // `n` counting from 1. `permissions` is a JSON object of permission
+    // name to `read`, `write`, or `admin`, and `events` a JSON array of
+    // event names. A key is the public half only, as the base64 of its
+    // PKCS#1 DER. An installation covers every repository its account owns,
+    // or the ones `app_installation_repos` lists. A token reaches what its
+    // installation covers, or the repositories `app_installation_token_repos`
+    // lists for it. AUTOINCREMENT so an installation's id never comes back
+    // as another's.
+    "CREATE TABLE apps (
+        id          INTEGER PRIMARY KEY REFERENCES oauth_apps(id),
+        bot_id      INTEGER NOT NULL UNIQUE REFERENCES actors(id),
+        owner_id    INTEGER NOT NULL REFERENCES actors(id),
+        permissions TEXT NOT NULL,
+        events      TEXT NOT NULL
+     ) STRICT;
+     CREATE TABLE app_callback_urls (
+        app_id INTEGER NOT NULL REFERENCES apps(id),
+        n      INTEGER NOT NULL CHECK (n >= 1),
+        url    TEXT NOT NULL,
+        PRIMARY KEY (app_id, n)
+     ) STRICT;
+     CREATE TABLE app_keys (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        app_id             INTEGER NOT NULL REFERENCES apps(id),
+        public_key         TEXT NOT NULL,
+        created_clock_unix INTEGER NOT NULL,
+        UNIQUE (app_id, public_key)
+     ) STRICT;
+     CREATE TABLE app_installations (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        app_id               INTEGER NOT NULL REFERENCES apps(id),
+        account_id           INTEGER NOT NULL REFERENCES actors(id),
+        repository_selection TEXT NOT NULL CHECK (repository_selection IN ('all', 'selected')),
+        permissions          TEXT NOT NULL,
+        events               TEXT NOT NULL,
+        created_clock_unix   INTEGER NOT NULL,
+        UNIQUE (app_id, account_id)
+     ) STRICT;
+     CREATE TABLE app_installation_repos (
+        installation_id INTEGER NOT NULL REFERENCES app_installations(id),
+        repo_id         INTEGER NOT NULL REFERENCES repos(id),
+        PRIMARY KEY (installation_id, repo_id)
+     ) STRICT;
+     CREATE TABLE app_installation_tokens (
+        id                 INTEGER PRIMARY KEY,
+        token              TEXT NOT NULL UNIQUE,
+        installation_id    INTEGER NOT NULL REFERENCES app_installations(id),
+        permissions        TEXT NOT NULL,
+        created_clock_unix INTEGER NOT NULL,
+        expires_clock_unix INTEGER NOT NULL
+     ) STRICT;
+     CREATE TABLE app_installation_token_repos (
+        token_id INTEGER NOT NULL REFERENCES app_installation_tokens(id),
+        repo_id  INTEGER NOT NULL REFERENCES repos(id),
+        PRIMARY KEY (token_id, repo_id)
+     ) STRICT;",
 ];
 
 /// The version this binary reads and writes.

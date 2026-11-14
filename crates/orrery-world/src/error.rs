@@ -85,6 +85,38 @@ pub enum WorldError {
     OAuthBadCode,
     #[error("the redirect_uri does not match the one the code was issued for")]
     OAuthRedirectMismatch,
+    #[error("invalid app {field}: {message}")]
+    InvalidApp {
+        field: &'static str,
+        message: String,
+    },
+    #[error("an app with the slug {0:?} already exists")]
+    AppExists(String),
+    #[error(
+        "the login {0:?} is held by an account that is not a bot, so no app can take it as its slug"
+    )]
+    AppSlugTaken(String),
+    #[error("no app with the slug {0:?}")]
+    NoSuchApp(String),
+    #[error("not an RSA public key: {0}")]
+    InvalidAppKey(String),
+    #[error("the app already holds this key")]
+    AppKeyExists,
+    #[error("invalid installation {field}: {message}")]
+    InvalidInstallation {
+        field: &'static str,
+        message: String,
+    },
+    #[error("the app {app:?} is already installed on {account:?}")]
+    InstallationExists { app: String, account: String },
+    #[error("no installation with id {0}")]
+    NoSuchInstallation(i64),
+    #[error("the installation does not cover a repository named {0:?}")]
+    InstallationRepository(String),
+    #[error("the installation does not hold the permission {0:?}")]
+    InstallationPermission(String),
+    #[error("the installation holds the permission {0:?} below the level asked for")]
+    InstallationPermissionLevel(String),
     #[error("{0:?} is not an SSH public key in OpenSSH format")]
     InvalidSigningKey(String),
     #[error("the SSH key is already held as a signing key")]

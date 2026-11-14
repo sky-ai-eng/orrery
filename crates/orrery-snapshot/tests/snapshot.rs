@@ -7,9 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orrery_snapshot::{DiffSide, SnapshotError, diff};
 use orrery_world::{
-    ActorEmail, ActorKind, Attribution, DEFAULT_T0_UNIX, Door, EventBody, LogOrder, NewPull,
-    OrgRole, Pull, RefChange, RefMove, ReviewState, TeamRole, World, WorldError, WorldSecret,
-    WorldView,
+    ActorEmail, ActorKind, Attribution, DEFAULT_T0_UNIX, Door, EventBody, LogOrder, NewApp,
+    NewPull, OrgRole, Permissions, Pull, RefChange, RefMove, ReviewState, TeamRole, World,
+    WorldError, WorldSecret, WorldView,
 };
 
 /// A write by `actor_id` as the REST face makes it.
@@ -355,11 +355,25 @@ struct Seeded {
     issued_secret: String,
     oauth_token: String,
     pending_code: String,
+    installation_token: String,
+    helper_id: i64,
 }
 
+/// The public half of a 2048-bit RSA key, as `ssh-keygen -e -m PEM` writes it.
+const HELPER_KEY: &str = "-----BEGIN RSA PUBLIC KEY-----
+MIIBCgKCAQEAyQDurX+SGDbR9X9O5rwYXND5rbR9L5MHPsh5fy9PCvnjEtf9vd+g
+bv+MKb5isMFXGXS2Jwc/zZ4mitvK/TUBFZD5K4Q53vIVpt54aWggRB9a3KaePpA8
+hMrLDklc2JaVcUtOqR2U8okAqQhagx+VHkjnfr2FKrRaIcA/vRvx/o+9yqSP/6TP
+3Kp5kMpxMBuCIPs3kF2WzxnvSrw+91QpCljNv66agiv3iPnNWyeaOe5C/0YFg3PR
+LVJq03K/LT4cHaUGM/tSFJLGj9BwyxHT67koh9CtImSoshN5v/41kPYAuxUYzKXm
+Ur9JGENNAIaUkrl7Gr3CzFnUIFfuCpd9uQIDAQAB
+-----END RSA PUBLIC KEY-----
+";
+
 /// Alice with a token issued beside her first, an OAuth app with a client
-/// secret issued beside its first, a code she authorized and exchanged, and a
-/// second code still waiting to be.
+/// secret issued beside its first, a code she authorized and exchanged, a
+/// second code still waiting to be, and an app holding a key, installed on
+/// her with a token issued for the installation.
 fn seed(world: &World) -> Seeded {
     let (alice, alice_token) = world.create_actor("alice", ActorKind::User).unwrap();
     let (_, issued_token) = world.issue_actor_token("alice", by(alice.id)).unwrap();
@@ -380,6 +394,29 @@ fn seed(world: &World) -> Seeded {
         .unwrap()
         .token;
     let pending_code = issue();
+    let helper = world
+        .create_app(
+            &NewApp {
+                slug: "helper",
+                name: "Helper",
+                owner: "alice",
+                callback_urls: &["https://helper.test/callback".to_string()],
+                permissions: &Permissions::new(),
+                events: &[],
+            },
+            by(alice.id),
+        )
+        .unwrap();
+    world
+        .add_app_key("helper", HELPER_KEY, by(alice.id))
+        .unwrap();
+    let installation = world
+        .create_installation("helper", "alice", None, by(alice.id))
+        .unwrap();
+    let installation_token = world
+        .create_installation_token(helper.app.id, installation.id, None, None)
+        .unwrap()
+        .token;
     Seeded {
         alice,
         alice_token,
@@ -389,6 +426,8 @@ fn seed(world: &World) -> Seeded {
         issued_secret,
         oauth_token,
         pending_code,
+        installation_token,
+        helper_id: helper.app.id,
     }
 }
 
@@ -432,6 +471,25 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
             Some(&source.alice)
         );
     }
+
+    // The installation token: the source's is refused, and the re-derived
+    // one acts as the app's bot.
+    assert!(
+        fork.caller_by_token(&source.installation_token)
+            .unwrap()
+            .is_none(),
+        "the fork accepts the source's installation token"
+    );
+    let bot = fork
+        .caller_by_token(&twin.installation_token)
+        .unwrap()
+        .expect("the re-derived installation token");
+    assert_eq!(bot.actor.login, "helper");
+    // The app's key is the public half of a pair its caller holds, which
+    // no secret of a world's derives: the fork holds it as the source does.
+    let keys = fork.app_keys(source.helper_id).unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys, inst.world.app_keys(source.helper_id).unwrap());
 
     // The app keeps its public client id and gets the re-derived secret.
     assert_eq!(twin.client_id, source.client_id);
@@ -524,10 +582,11 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
     assert_eq!(
         serde_json::to_value(rekeys[0].1.rekeyed).unwrap(),
         serde_json::json!({
-            "tokens": 3,
-            "oauth_apps": 1,
+            "tokens": 4,
+            "oauth_apps": 2,
             "oauth_app_secrets": 1,
             "oauth_codes": 1,
+            "installation_tokens": 1,
         })
     );
     let wire = serde_json::to_string(&log).unwrap();
@@ -802,6 +861,64 @@ fn diff_reports_oauth_apps_and_authorizations_without_their_secrets() {
     ] {
         assert!(!wire.contains(secret), "diff leaks the {which}");
     }
+}
+
+#[test]
+fn diff_reports_apps_and_installations() {
+    let inst = Instance::new();
+    let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
+    inst.world
+        .create_repo(alice.id, "own", None, false, "main", by(alice.id))
+        .unwrap();
+    inst.snapshot("before");
+    let registered = inst
+        .world
+        .create_app(
+            &NewApp {
+                slug: "helper",
+                name: "Helper",
+                owner: "alice",
+                callback_urls: &["https://helper.test/callback".to_string()],
+                permissions: &Permissions::new(),
+                events: &[],
+            },
+            by(alice.id),
+        )
+        .unwrap();
+    inst.snapshot("registered");
+    let installation = inst
+        .world
+        .create_installation("helper", "alice", Some(&["own".to_string()]), by(alice.id))
+        .unwrap();
+    inst.world
+        .create_installation_token(registered.app.id, installation.id, None, None)
+        .unwrap();
+
+    let added = inst.diff("before", Some("registered"));
+    assert_eq!(added.apps_added.len(), 1);
+    assert_eq!(added.apps_added[0].slug, "helper");
+    assert_eq!(added.apps_added[0].client_id, registered.app.client_id);
+    assert_eq!(added.apps_added[0].owner, "alice");
+    assert!(added.installations_added.is_empty());
+    // The app's bot and its OAuth app are an actor and an OAuth app too.
+    assert_eq!(added.actors_added.len(), 1);
+    assert_eq!(added.actors_added[0].login, "helper");
+    assert_eq!(added.oauth_apps_added.len(), 1);
+
+    let installed = inst.diff("registered", None);
+    assert!(installed.apps_added.is_empty());
+    assert_eq!(installed.installations_added.len(), 1);
+    let entry = &installed.installations_added[0];
+    assert_eq!(
+        (entry.app.as_str(), entry.account.as_str()),
+        ("helper", "alice")
+    );
+    assert_eq!(entry.repository_selection, "selected");
+    assert_eq!(entry.repositories, ["alice/own"]);
+
+    let wire = serde_json::to_string(&inst.diff("before", None)).unwrap();
+    assert!(!wire.contains(&registered.client_secret));
+    assert!(!wire.contains("orrfake_secret_"));
 }
 
 #[test]

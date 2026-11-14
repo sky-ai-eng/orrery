@@ -40,7 +40,7 @@ async fn authorize_page(
         Ok(app) => app,
         Err(resp) => return *resp,
     };
-    let redirect_uri = match effective_redirect(&app, &params) {
+    let redirect_uri = match effective_redirect(&face, &app, &params) {
         Ok(uri) => uri,
         Err(resp) => return *resp,
     };
@@ -56,7 +56,7 @@ async fn authorize(State(face): State<GithubFace>, body: Bytes) -> Response<Body
         Ok(app) => app,
         Err(resp) => return *resp,
     };
-    let redirect_uri = match effective_redirect(&app, &params) {
+    let redirect_uri = match effective_redirect(&face, &app, &params) {
         Ok(uri) => uri,
         Err(resp) => return *resp,
     };
@@ -174,11 +174,14 @@ fn resolve_app(
 
 /// GitHub's rule for `redirect_uri`: optional, defaulting to the app's
 /// callback URL; when given, its scheme, host and port must equal the
-/// callback's and its path must be the callback's path or below it. A mismatch
-/// is sent back to the callback URL as `error=redirect_uri_mismatch`.
-/// GitHub's sub-domain allowance and loopback-port exception are not modeled:
-/// a redirect relying on either is refused.
+/// callback's and its path must be the callback's path or below it. A
+/// GitHub App holds several callback URLs: the first is the default, and a
+/// `redirect_uri` may match any of them. A mismatch is sent back to the
+/// default callback URL as `error=redirect_uri_mismatch`. GitHub's sub-domain
+/// allowance and loopback-port exception are not modeled: a redirect relying
+/// on either is refused.
 fn effective_redirect(
+    face: &GithubFace,
     app: &OAuthApp,
     params: &BTreeMap<String, String>,
 ) -> Result<String, Box<Response<Body>>> {
@@ -186,6 +189,16 @@ fn effective_redirect(
         return Ok(app.callback_url.clone());
     };
     if redirect_allowed(&app.callback_url, requested) {
+        return Ok(requested.clone());
+    }
+    let callbacks = match face.world.oauth_callback_urls(app.id) {
+        Ok(urls) => urls,
+        Err(e) => return Err(Box::new(internal(e))),
+    };
+    if callbacks
+        .iter()
+        .any(|callback| redirect_allowed(callback, requested))
+    {
         return Ok(requested.clone());
     }
     let mut back = vec![
@@ -355,7 +368,7 @@ fn with_query(url: &str, pairs: &[(&str, &str)]) -> String {
     out
 }
 
-fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
+pub(crate) fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
     let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, value) = auth.split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("basic") {

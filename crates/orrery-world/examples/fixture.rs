@@ -13,9 +13,10 @@
 use std::path::Path;
 
 use orrery_world::{
-    ActorEmail, ActorKind, Attribution, CheckConclusion, CheckRunPatch, CheckStatus, CommitFacts,
-    CommitSignature, DEFAULT_T0_UNIX, Door, NewCheckRun, NewPull, OrgRole, RefChange, RefMove,
-    ReviewState, SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, TeamRole, World, WorldSecret,
+    AccessLevel, ActorEmail, ActorKind, Attribution, CheckConclusion, CheckRunPatch, CheckStatus,
+    CommitFacts, CommitSignature, DEFAULT_T0_UNIX, Door, NewApp, NewCheckRun, NewPull, OrgRole,
+    Permissions, RefChange, RefMove, ReviewState, SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, TeamRole,
+    World, WorldSecret,
 };
 
 /// A write by `actor_id` as the REST face makes it.
@@ -32,6 +33,17 @@ const SIGNING_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF1ZZZ9YNYg8yl9pzBjnLU8mjxuB7NQXuUV2YGVC2wv3 alice@laptop";
 const RETIRED_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICXNiiZ0NcLB2s0gYXpNwyFmtzd28Zxng4mIlVSzlRIv";
+
+const APP_KEY: &str = "-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyQDurX+SGDbR9X9O5rwY
+XND5rbR9L5MHPsh5fy9PCvnjEtf9vd+gbv+MKb5isMFXGXS2Jwc/zZ4mitvK/TUB
+FZD5K4Q53vIVpt54aWggRB9a3KaePpA8hMrLDklc2JaVcUtOqR2U8okAqQhagx+V
+Hkjnfr2FKrRaIcA/vRvx/o+9yqSP/6TP3Kp5kMpxMBuCIPs3kF2WzxnvSrw+91Qp
+CljNv66agiv3iPnNWyeaOe5C/0YFg3PRLVJq03K/LT4cHaUGM/tSFJLGj9BwyxHT
+67koh9CtImSoshN5v/41kPYAuxUYzKXmUr9JGENNAIaUkrl7Gr3CzFnUIFfuCpd9
+uQIDAQAB
+-----END PUBLIC KEY-----
+";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dest = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -288,5 +300,35 @@ fn populate(w: &World) -> orrery_world::Result<()> {
     let code = w.issue_oauth_code(&app, &alice, CALLBACK, "user:email")?;
     w.exchange_oauth_code(&app.client_id, &issued, &code, Some(CALLBACK))?;
     w.issue_oauth_code(&app, &bob, CALLBACK, "read:org")?;
+
+    // An app with a second callback URL, a key, an installation on chosen
+    // repositories, and a token narrowed to one, so each of its tables has
+    // a row.
+    let permissions: Permissions = [
+        ("contents".to_string(), AccessLevel::Write),
+        ("metadata".to_string(), AccessLevel::Read),
+    ]
+    .into();
+    let registered = w.create_app(
+        &NewApp {
+            slug: "ci-bot",
+            name: "CI",
+            owner: "acme",
+            callback_urls: &[CALLBACK.to_string(), format!("{CALLBACK}/setup")],
+            permissions: &permissions,
+            events: &["push".to_string(), "pull_request".to_string()],
+        },
+        by(system.id),
+    )?;
+    w.add_app_key("ci-bot", APP_KEY, by(system.id))?;
+    let repositories = ["webapp".to_string()];
+    let installation =
+        w.create_installation("ci-bot", "acme", Some(&repositories), by(system.id))?;
+    w.create_installation_token(
+        registered.app.id,
+        installation.id,
+        Some(&repositories),
+        None,
+    )?;
     Ok(())
 }

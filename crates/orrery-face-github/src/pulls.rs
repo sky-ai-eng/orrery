@@ -1053,6 +1053,7 @@ mod tests {
         Caller {
             actor: actor.clone(),
             app_id: None,
+            installation: None,
         }
     }
 

@@ -377,10 +377,14 @@ pub(crate) fn comment_json(
     })
 }
 
-pub(crate) fn check_run_json(face: &GithubFace, repo: &Repo, run: &CheckRun) -> serde_json::Value {
+pub(crate) fn check_run_json(
+    face: &GithubFace,
+    repo: &Repo,
+    run: &CheckRun,
+) -> Result<serde_json::Value, WorldError> {
     let base = face.base_url.trim_end_matches('/');
     let full_name = repo.full_name();
-    serde_json::json!({
+    Ok(serde_json::json!({
         "id": run.id,
         "node_id": crate::nodeid::check(run.id),
         "name": run.name,
@@ -397,10 +401,16 @@ pub(crate) fn check_run_json(face: &GithubFace, repo: &Repo, run: &CheckRun) -> 
             "title": null, "summary": null, "text": null, "annotations_count": 0,
         })),
         "check_suite": serde_json::Value::Null,
-        "app": {
-            "slug": run.creator_login,
-            "name": run.creator_login,
-        },
+        "app": check_run_app(face, &run.creator_login)?,
+    }))
+}
+
+/// The App a check run names as its creator: the bot's App, as `GET /app`
+/// answers it, or the bot's login alone for a bot that has no App.
+fn check_run_app(face: &GithubFace, creator_login: &str) -> Result<serde_json::Value, WorldError> {
+    Ok(match face.world.app_by_slug(creator_login)? {
+        Some(app) => crate::apps::app_json(face, &app),
+        None => serde_json::json!({ "slug": creator_login, "name": creator_login }),
     })
 }
 

@@ -32,6 +32,10 @@ pub fn team(id: i64) -> String {
     format!("O_team_{id}")
 }
 
+pub fn app(id: i64) -> String {
+    format!("O_app_{id}")
+}
+
 /// A parsed node id — only the kinds the GraphQL face can resolve appear
 /// here; every other string (foreign ids, junk) parses to `None`, which the
 /// query layer renders as a null node, GitHub's own answer for an id that

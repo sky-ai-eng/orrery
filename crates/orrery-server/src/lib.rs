@@ -30,6 +30,7 @@ use orrery_face_git::GitFace;
 use orrery_face_github::GithubFace;
 use orrery_world::World;
 
+mod apps;
 mod control;
 mod list;
 mod log_stream;
@@ -189,6 +190,11 @@ pub fn routers(
     let oauth = orrery_face_github::oauth::web_router(github.clone())
         .method_not_allowed_fallback(not_mocked);
 
+    // A GitHub App's own routes authenticate with a JWT the App signs, and
+    // the client-credentials check with a client id and secret, never an
+    // API token.
+    let apps = orrery_face_github::apps::app_router(github.clone());
+
     // The method fallback is set before the auth layer so that it is behind
     // face auth, as the unmatched-path fallback under `/api/v3` is.
     let faces = Router::new()
@@ -202,7 +208,7 @@ pub fn routers(
         .layer(middleware::from_fn_with_state(state.clone(), face_auth));
 
     Routers {
-        faces: Router::new().merge(oauth).merge(faces),
+        faces: Router::new().merge(oauth).merge(apps).merge(faces),
         // Every path under the prefix is the control plane's. One that no
         // control route names answers 404 in the control plane's error shape,
         // and on a listener the faces share, a face route whose first segment

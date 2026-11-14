@@ -302,3 +302,78 @@ pub fn faults(answer: &serde_json::Value) -> Vec<(String, Option<String>)> {
 pub fn fault(reason: &str, field: Option<&str>) -> (String, Option<String>) {
     (reason.to_string(), field.map(str::to_string))
 }
+
+/// An RSA key pair as a GitHub App holds one: the private half signs the
+/// App's JWTs, and the public half is what a world is given.
+pub struct AppKey {
+    private: ring::signature::RsaKeyPair,
+    /// The public half as a PEM `PUBLIC KEY` block.
+    pub public_pem: String,
+}
+
+/// Make a 2048-bit RSA key pair with `ssh-keygen`.
+pub fn app_key() -> AppKey {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("key");
+    let run = |args: &[&str]| {
+        let out = Command::new("ssh-keygen")
+            .args(args)
+            .output()
+            .expect("spawn ssh-keygen");
+        assert!(
+            out.status.success(),
+            "ssh-keygen {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).expect("ssh-keygen output is text")
+    };
+    let path_str = path.to_str().expect("utf-8 path");
+    run(&[
+        "-q", "-t", "rsa", "-b", "2048", "-m", "PEM", "-N", "", "-f", path_str,
+    ]);
+    let public_pem = run(&["-e", "-m", "PKCS8", "-f", &format!("{path_str}.pub")]);
+    let private_pem = std::fs::read_to_string(&path).expect("read the private key");
+    let body: String = private_pem
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body)
+        .expect("the private key's PEM body is base64");
+    AppKey {
+        private: ring::signature::RsaKeyPair::from_der(&der).expect("a PKCS#1 RSA private key"),
+        public_pem,
+    }
+}
+
+impl AppKey {
+    /// A JWT with `header` and `claims`, signed RS256 with this key.
+    pub fn sign(&self, header: serde_json::Value, claims: serde_json::Value) -> String {
+        let encode = |bytes: &[u8]| {
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
+        };
+        let signed = format!(
+            "{}.{}",
+            encode(header.to_string().as_bytes()),
+            encode(claims.to_string().as_bytes())
+        );
+        let mut signature = vec![0; self.private.public().modulus_len()];
+        self.private
+            .sign(
+                &ring::signature::RSA_PKCS1_SHA256,
+                &ring::rand::SystemRandom::new(),
+                signed.as_bytes(),
+                &mut signature,
+            )
+            .expect("sign the JWT");
+        format!("{signed}.{}", encode(&signature))
+    }
+
+    /// The JWT a GitHub App sends: RS256, issued a minute before `now`, and
+    /// expiring nine minutes after it.
+    pub fn jwt(&self, iss: serde_json::Value, now: i64) -> String {
+        self.sign(
+            serde_json::json!({ "alg": "RS256", "typ": "JWT" }),
+            serde_json::json!({ "iss": iss, "iat": now - 60, "exp": now + 540 }),
+        )
+    }
+}

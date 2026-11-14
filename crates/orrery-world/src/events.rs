@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::types::{
-    ActorEmail, ActorKind, CheckConclusion, CheckStatus, ClockMode, OrgRole, PullState,
-    ReviewState, TeamRole,
+    ActorEmail, ActorKind, CheckConclusion, CheckStatus, ClockMode, OrgRole, Permissions,
+    PullState, RepositorySelection, ReviewState, TeamRole,
 };
 
 /// How a write reached the world.
@@ -57,16 +57,17 @@ impl Door {
     }
 }
 
-/// Who makes a write, through which door, and with which OAuth app: what
-/// every event of the write records as its `actor`, `door`, and `app`.
-/// Nothing in the world reads them back.
+/// Who makes a write, through which door, and with which app: what every
+/// event of the write records as its `actor`, `door`, and `app`. Nothing in
+/// the world reads them back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Attribution {
     pub actor_id: i64,
     pub door: Door,
-    /// The OAuth app the call came through: the one whose token
+    /// The app the call came through: the OAuth app whose token
     /// authenticated it, or whose authorize page or client credentials it
-    /// used.
+    /// used, or the app whose installation token or own signature
+    /// authenticated it.
     pub app_id: Option<i64>,
 }
 
@@ -102,7 +103,7 @@ pub struct Event {
     pub actor: ActorRef,
     /// How the change reached the world.
     pub door: Door,
-    /// The OAuth app the call came through, or null.
+    /// The app the call came through, or null.
     pub app: Option<AppRef>,
     #[serde(flatten)]
     pub body: EventBody,
@@ -184,6 +185,10 @@ subject_type! {
     ActorType = "actor",
     OAuthAppType = "oauth_app",
     OAuthAuthorizationType = "oauth_authorization",
+    AppType = "app",
+    AppKeyType = "app_key",
+    InstallationType = "installation",
+    InstallationTokenType = "installation_token",
     RepoType = "repo",
     RefType = "ref",
     PullType = "pull",
@@ -234,6 +239,53 @@ pub struct OAuthAuthorizationSubject {
     pub app: AppRef,
     /// The actor who granted it.
     pub actor: ActorRef,
+}
+
+/// An app: an OAuth app with a bot, which accounts install. Its `id` is its
+/// OAuth app's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AppSubject {
+    #[serde(rename = "type")]
+    pub kind: AppType,
+    pub id: i64,
+    /// The login of the app's bot.
+    pub slug: String,
+    pub client_id: String,
+}
+
+/// A public key an app's signatures are checked against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AppKeySubject {
+    #[serde(rename = "type")]
+    pub kind: AppKeyType,
+    pub id: i64,
+    pub app: AppRef,
+}
+
+/// An app installed on an account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InstallationSubject {
+    #[serde(rename = "type")]
+    pub kind: InstallationType,
+    pub id: i64,
+    pub app: AppRef,
+    /// The account the app is installed on.
+    pub account: ActorRef,
+}
+
+/// A token issued for an installation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InstallationTokenSubject {
+    #[serde(rename = "type")]
+    pub kind: InstallationTokenType,
+    pub id: i64,
+    pub installation: InstallationRef,
+    pub app: AppRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InstallationRef {
+    pub id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -434,6 +486,55 @@ pub struct OAuthAppObject {
     pub client_id: String,
     pub callback_url: String,
     pub created_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AppObject {
+    pub id: i64,
+    pub slug: String,
+    pub name: String,
+    pub client_id: String,
+    /// The user or organization that owns the app.
+    pub owner: ActorRef,
+    pub bot: ActorRef,
+    /// The first is the one an authorization redirects to when its request
+    /// names none.
+    pub callback_urls: Vec<String>,
+    pub permissions: Permissions,
+    pub events: Vec<String>,
+    pub created_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AppKeyObject {
+    pub id: i64,
+    /// The base64 of the key's PKCS#1 `RSAPublicKey` DER.
+    pub public_key: String,
+    pub created_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InstallationObject {
+    pub id: i64,
+    pub account: ActorRef,
+    pub repository_selection: RepositorySelection,
+    /// The repositories a `selected` installation lists, in id order. Empty
+    /// for `all`.
+    pub repositories: Vec<RepoRef>,
+    pub permissions: Permissions,
+    pub events: Vec<String>,
+    pub created_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InstallationTokenObject {
+    pub id: i64,
+    /// The repositories the token was narrowed to, in id order. Empty for
+    /// one that reaches everything its installation covers.
+    pub repositories: Vec<RepoRef>,
+    pub permissions: Permissions,
+    pub created_unix: i64,
+    pub expires_unix: i64,
 }
 
 object! {
@@ -655,6 +756,10 @@ pub struct Rekeyed {
     pub oauth_app_secrets: i64,
     /// The authorization codes not yet exchanged.
     pub oauth_codes: i64,
+    /// The installation tokens. Events appended before a world held any
+    /// carry none.
+    #[serde(default)]
+    pub installation_tokens: i64,
 }
 
 /// A body type with a subject and one more field per entry.
@@ -691,6 +796,13 @@ bodies! {
     OAuthAuthorizationChanged {
         subject: OAuthAuthorizationSubject,
         changes: OAuthAuthorizationChanges,
+    }
+    AppCreated { subject: AppSubject, object: AppObject }
+    AppKeyCreated { subject: AppKeySubject, object: AppKeyObject }
+    InstallationCreated { subject: InstallationSubject, object: InstallationObject }
+    InstallationTokenCreated {
+        subject: InstallationTokenSubject,
+        object: InstallationTokenObject,
     }
     RepoCreated { subject: RepoSubject, object: RepoObject }
     RepoChanged { subject: RepoSubject, changes: RepoChanges }
@@ -788,6 +900,15 @@ event_types! {
     /// The app traded the authorization's code for a token acting as the
     /// actor who granted it.
     OAuthAuthorizationExchanged(OAuthAuthorizationChanged) = "oauth_authorization:exchanged",
+
+    /// An app was registered, with its OAuth app and, unless a bot already
+    /// held its slug, its bot.
+    AppCreated(AppCreated) = "app:created",
+    AppKeyCreated(AppKeyCreated) = "app_key:created",
+    /// An app was installed on an account.
+    InstallationCreated(InstallationCreated) = "installation:created",
+    /// An app issued a token for one of its installations.
+    InstallationTokenCreated(InstallationTokenCreated) = "installation_token:created",
 
     RepoCreated(RepoCreated) = "repo:created",
     /// A push, or a merge, moved refs in the repository. On a push it is the

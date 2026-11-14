@@ -153,6 +153,18 @@ fn internal(e: impl std::fmt::Display) -> Error {
     Error::new(format!("internal: {e}"))
 }
 
+/// The caller the query runs as.
+fn caller<'a>(ctx: &Context<'a>) -> &'a world::Caller {
+    ctx.data_unchecked::<world::Caller>()
+}
+
+/// Whether the caller sees `repo`: an installation token does not see a
+/// private repository its installation does not cover, which then reads as
+/// one that does not exist.
+fn sees(caller: &world::Caller, repo: &world::Repo) -> bool {
+    !repo.private || caller.reaches(repo)
+}
+
 fn unresolved(id: &str) -> Error {
     Error::new(format!(
         "Could not resolve to a node with the global id of '{id}'"
@@ -1686,34 +1698,53 @@ enum Found {
     Review(world::Review),
 }
 
-fn find_node(face: &GithubFace, id: &str) -> Result<Option<Found>, Error> {
+/// The pull request with this id and its repository, when the caller sees
+/// the repository.
+fn find_pull(
+    face: &GithubFace,
+    caller: &world::Caller,
+    pull_id: i64,
+) -> Result<Option<(world::Pull, world::Repo)>, Error> {
+    let Some(pull) = face.world.pull_by_id(pull_id).map_err(internal)? else {
+        return Ok(None);
+    };
+    let repo = face
+        .world
+        .repo_by_id(pull.repo_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("pull's repo row missing"))?;
+    Ok(sees(caller, &repo).then_some((pull, repo)))
+}
+
+fn find_node(face: &GithubFace, caller: &world::Caller, id: &str) -> Result<Option<Found>, Error> {
     match nodeid::parse(id) {
         Some(NodeRef::Pull(pull_id)) => {
-            let Some(pull) = face.world.pull_by_id(pull_id).map_err(internal)? else {
-                return Ok(None);
-            };
-            let repo = face
-                .world
-                .repo_by_id(pull.repo_id)
-                .map_err(internal)?
-                .ok_or_else(|| internal("pull's repo row missing"))?;
-            Ok(Some(Found::Pull(pull, repo)))
+            Ok(find_pull(face, caller, pull_id)?.map(|(pull, repo)| Found::Pull(pull, repo)))
         }
         Some(NodeRef::Review(review_id)) => {
             let Some(review) = face.world.review_by_id(review_id).map_err(internal)? else {
                 return Ok(None);
             };
-            Ok(Some(Found::Review(review)))
+            // Only an installation token needs the review's repository to
+            // know whether it sees the review.
+            if caller.installation.is_none() {
+                return Ok(Some(Found::Review(review)));
+            }
+            Ok(find_pull(face, caller, review.pull_id)?.map(|_| Found::Review(review)))
         }
         None => Ok(None),
     }
 }
 
 /// The nodes `ids` name, in order, their pull requests sharing one batch.
-fn resolve_nodes(face: &GithubFace, ids: &[ID]) -> Result<Vec<Option<Node>>, Error> {
+fn resolve_nodes(
+    face: &GithubFace,
+    caller: &world::Caller,
+    ids: &[ID],
+) -> Result<Vec<Option<Node>>, Error> {
     let found: Vec<Option<Found>> = ids
         .iter()
-        .map(|id| find_node(face, id))
+        .map(|id| find_node(face, caller, id))
         .collect::<Result<_, Error>>()?;
     let pulls: Vec<(world::Pull, world::Repo)> = found
         .iter()
@@ -1741,11 +1772,13 @@ impl QueryRoot {
     /// Batch node lookup. An id that doesn't resolve yields a null entry —
     /// GitHub's shape, which a consumer refreshing a batch of ids skips.
     async fn nodes(&self, ctx: &Context<'_>, ids: Vec<ID>) -> Result<Vec<Option<Node>>, Error> {
-        resolve_nodes(face(ctx), &ids)
+        resolve_nodes(face(ctx), caller(ctx), &ids)
     }
 
     async fn node(&self, ctx: &Context<'_>, id: ID) -> Result<Option<Node>, Error> {
-        Ok(resolve_nodes(face(ctx), &[id])?.pop().flatten())
+        Ok(resolve_nodes(face(ctx), caller(ctx), &[id])?
+            .pop()
+            .flatten())
     }
 
     /// Null: rate limiting is off, as on a GHES configured without it.
@@ -1766,7 +1799,8 @@ impl QueryRoot {
                 "orrery: search qualifier {term:?} is not mocked (query: {query:?})"
             ))
         })?;
-        let matches = search::eval(face(ctx), &parsed).map_err(internal)?;
+        let mut matches = search::eval(face(ctx), &parsed).map_err(internal)?;
+        matches.retain(|(_, repo)| sees(caller(ctx), repo));
         let (matches, page_info) = take_first("search", matches, first)?;
         Ok(SearchResultItemConnection {
             page_info,
@@ -1804,7 +1838,9 @@ impl QueryRoot {
             .world
             .repo_by_owner_name(&owner, &name)
             .map_err(internal)?;
-        Ok(repo.map(|repo| Repository { repo }))
+        Ok(repo
+            .filter(|repo| sees(caller(ctx), repo))
+            .map(|repo| Repository { repo }))
     }
 }
 
@@ -1840,6 +1876,18 @@ fn set_draft(ctx: &Context<'_>, id: &ID, draft: bool) -> Result<PullRequest, Err
     let Some(NodeRef::Pull(pull_id)) = nodeid::parse(id) else {
         return Err(unresolved(id));
     };
+    // An installation token changes nothing in a repository it does not
+    // reach: a private one does not exist for it, and a public one it may
+    // only read.
+    if caller.installation.is_some() {
+        match find_pull(face, caller, pull_id)? {
+            Some((_, repo)) if !caller.reaches(&repo) => {
+                return Err(Error::new(crate::apps::NOT_ACCESSIBLE));
+            }
+            Some(_) => {}
+            None => return Err(unresolved(id)),
+        }
+    }
     let pull = face
         .world
         .set_pull_draft(pull_id, caller.via(world::Door::Graphql), draft)

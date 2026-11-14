@@ -124,6 +124,67 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
         ],
     ),
     (
+        "apps",
+        &[
+            ("id", Identity),
+            ("bot_id", Field("bot")),
+            ("owner_id", Field("owner")),
+            ("permissions", Field("permissions")),
+            ("events", Field("events")),
+        ],
+    ),
+    (
+        "app_callback_urls",
+        &[
+            ("app_id", Identity),
+            ("n", Field("callback_urls")),
+            ("url", Field("callback_urls")),
+        ],
+    ),
+    (
+        "app_keys",
+        &[
+            ("id", Identity),
+            ("app_id", Identity),
+            ("public_key", Field("public_key")),
+            ("created_clock_unix", Field("created_unix")),
+        ],
+    ),
+    (
+        "app_installations",
+        &[
+            ("id", Identity),
+            ("app_id", Identity),
+            ("account_id", Field("account")),
+            ("repository_selection", Field("repository_selection")),
+            ("permissions", Field("permissions")),
+            ("events", Field("events")),
+            ("created_clock_unix", Field("created_unix")),
+        ],
+    ),
+    (
+        "app_installation_repos",
+        &[
+            ("installation_id", Identity),
+            ("repo_id", Field("repositories")),
+        ],
+    ),
+    (
+        "app_installation_tokens",
+        &[
+            ("id", Identity),
+            ("token", Credential),
+            ("installation_id", Identity),
+            ("permissions", Field("permissions")),
+            ("created_clock_unix", Field("created_unix")),
+            ("expires_clock_unix", Field("expires_unix")),
+        ],
+    ),
+    (
+        "app_installation_token_repos",
+        &[("token_id", Identity), ("repo_id", Field("repositories"))],
+    ),
+    (
         "pulls",
         &[
             ("id", Identity),
@@ -491,6 +552,19 @@ fn subject_of(table: &str, row: &Row) -> (Subject, Option<String>) {
                 format!("{}:{}", int(row, "team_id"), int(row, "member_id")),
             ),
             None,
+        ),
+        "apps" => (s("app", int(row, "id")), None),
+        "app_keys" => (s("app_key", int(row, "id")), None),
+        "app_installations" => (s("installation", int(row, "id")), None),
+        "app_installation_tokens" => (s("installation_token", int(row, "id")), None),
+        "app_callback_urls" => (s("app", int(row, "app_id")), Some("callback_urls".into())),
+        "app_installation_repos" => (
+            s("installation", int(row, "installation_id")),
+            Some("repositories".into()),
+        ),
+        "app_installation_token_repos" => (
+            s("installation_token", int(row, "token_id")),
+            Some("repositories".into()),
         ),
         "actor_emails" => (s("actor", int(row, "actor_id")), Some("emails".into())),
         "pull_labels" => (s("pull", int(row, "pull_id")), Some("labels".into())),

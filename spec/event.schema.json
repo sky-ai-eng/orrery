@@ -1,5 +1,14 @@
 {
   "$defs": {
+    "AccessLevel": {
+      "description": "How far a permission reaches. Each level includes the ones before it.",
+      "enum": [
+        "read",
+        "write",
+        "admin"
+      ],
+      "type": "string"
+    },
     "ActorChanged": {
       "properties": {
         "changes": {
@@ -266,6 +275,145 @@
       ],
       "type": "string"
     },
+    "AppCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/AppObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/AppSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "AppKeyCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/AppKeyObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/AppKeySubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "AppKeyObject": {
+      "properties": {
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "public_key": {
+          "description": "The base64 of the key's PKCS#1 `RSAPublicKey` DER.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "public_key",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "AppKeySubject": {
+      "description": "A public key an app's signatures are checked against.",
+      "properties": {
+        "app": {
+          "$ref": "#/$defs/AppRef"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "type": {
+          "$ref": "#/$defs/AppKeyType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "app"
+      ],
+      "type": "object"
+    },
+    "AppKeyType": {
+      "enum": [
+        "app_key"
+      ],
+      "type": "string"
+    },
+    "AppObject": {
+      "properties": {
+        "bot": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "callback_urls": {
+          "description": "The first is the one an authorization redirects to when its request\nnames none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "events": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "The user or organization that owns the app."
+        },
+        "permissions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AccessLevel"
+          },
+          "type": "object"
+        },
+        "slug": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "slug",
+        "name",
+        "client_id",
+        "owner",
+        "bot",
+        "callback_urls",
+        "permissions",
+        "events",
+        "created_unix"
+      ],
+      "type": "object"
+    },
     "AppRef": {
       "properties": {
         "client_id": {
@@ -281,6 +429,38 @@
         "client_id"
       ],
       "type": "object"
+    },
+    "AppSubject": {
+      "description": "An app: an OAuth app with a bot, which accounts install. Its `id` is its\nOAuth app's.",
+      "properties": {
+        "client_id": {
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "slug": {
+          "description": "The login of the app's bot.",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/AppType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "slug",
+        "client_id"
+      ],
+      "type": "object"
+    },
+    "AppType": {
+      "enum": [
+        "app"
+      ],
+      "type": "string"
     },
     "Branch": {
       "description": "A pull's head or base: a branch, and the commit the pull holds for it.",
@@ -909,6 +1089,195 @@
           "type": "string"
         }
       ]
+    },
+    "InstallationCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/InstallationObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/InstallationSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "InstallationObject": {
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "events": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "permissions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AccessLevel"
+          },
+          "type": "object"
+        },
+        "repositories": {
+          "description": "The repositories a `selected` installation lists, in id order. Empty\nfor `all`.",
+          "items": {
+            "$ref": "#/$defs/RepoRef"
+          },
+          "type": "array"
+        },
+        "repository_selection": {
+          "$ref": "#/$defs/RepositorySelection"
+        }
+      },
+      "required": [
+        "id",
+        "account",
+        "repository_selection",
+        "repositories",
+        "permissions",
+        "events",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "InstallationRef": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "InstallationSubject": {
+      "description": "An app installed on an account.",
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "The account the app is installed on."
+        },
+        "app": {
+          "$ref": "#/$defs/AppRef"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "type": {
+          "$ref": "#/$defs/InstallationType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "app",
+        "account"
+      ],
+      "type": "object"
+    },
+    "InstallationTokenCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/InstallationTokenObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/InstallationTokenSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "InstallationTokenObject": {
+      "properties": {
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "expires_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "permissions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AccessLevel"
+          },
+          "type": "object"
+        },
+        "repositories": {
+          "description": "The repositories the token was narrowed to, in id order. Empty for\none that reaches everything its installation covers.",
+          "items": {
+            "$ref": "#/$defs/RepoRef"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "repositories",
+        "permissions",
+        "created_unix",
+        "expires_unix"
+      ],
+      "type": "object"
+    },
+    "InstallationTokenSubject": {
+      "description": "A token issued for an installation.",
+      "properties": {
+        "app": {
+          "$ref": "#/$defs/AppRef"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "installation": {
+          "$ref": "#/$defs/InstallationRef"
+        },
+        "type": {
+          "$ref": "#/$defs/InstallationTokenType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "installation",
+        "app"
+      ],
+      "type": "object"
+    },
+    "InstallationTokenType": {
+      "enum": [
+        "installation_token"
+      ],
+      "type": "string"
+    },
+    "InstallationType": {
+      "enum": [
+        "installation"
+      ],
+      "type": "string"
     },
     "OAuthAppCreated": {
       "properties": {
@@ -2211,6 +2580,12 @@
     "Rekeyed": {
       "description": "What `world:rekeyed` derived again under the world's new secret.",
       "properties": {
+        "installation_tokens": {
+          "default": 0,
+          "description": "The installation tokens. Events appended before a world held any\ncarry none.",
+          "format": "int64",
+          "type": "integer"
+        },
         "oauth_app_secrets": {
           "description": "The client secrets issued for apps since they were registered.",
           "format": "int64",
@@ -2552,6 +2927,21 @@
         "repo"
       ],
       "type": "string"
+    },
+    "RepositorySelection": {
+      "description": "Which of its account's repositories an installation covers.",
+      "oneOf": [
+        {
+          "const": "all",
+          "description": "Every repository the account owns, those created later included.",
+          "type": "string"
+        },
+        {
+          "const": "selected",
+          "description": "The repositories the installation lists.",
+          "type": "string"
+        }
+      ]
     },
     "ReviewObject": {
       "properties": {
@@ -3471,6 +3861,61 @@
       "type": "object"
     },
     {
+      "$ref": "#/$defs/AppCreated",
+      "description": "An app was registered, with its OAuth app and, unless a bot already\nheld its slug, its bot.",
+      "properties": {
+        "type": {
+          "const": "app:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/AppKeyCreated",
+      "properties": {
+        "type": {
+          "const": "app_key:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/InstallationCreated",
+      "description": "An app was installed on an account.",
+      "properties": {
+        "type": {
+          "const": "installation:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/InstallationTokenCreated",
+      "description": "An app issued a token for one of its installations.",
+      "properties": {
+        "type": {
+          "const": "installation_token:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
       "$ref": "#/$defs/RepoCreated",
       "properties": {
         "type": {
@@ -3937,7 +4382,7 @@
           "type": "null"
         }
       ],
-      "description": "The OAuth app the call came through, or null."
+      "description": "The app the call came through, or null."
     },
     "clock_unix": {
       "description": "The world clock when the write was made, in Unix seconds.",

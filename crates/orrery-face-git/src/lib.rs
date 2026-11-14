@@ -701,6 +701,10 @@ async fn receive_pack(
     }
 }
 
+/// GitHub's answer for a repository that does not exist, and for a private
+/// one an installation token does not reach, which must read the same.
+const REPOSITORY_NOT_FOUND: &str = "Repository not found.";
+
 #[allow(clippy::too_many_arguments)]
 async fn serve(
     face: Arc<GitFace>,
@@ -720,7 +724,7 @@ async fn serve(
     let name = repo_name.strip_suffix(".git").unwrap_or(repo_name);
     let repo = match face.world.repo_by_owner_name(owner, name) {
         Ok(Some(r)) => r,
-        Ok(None) => return plain(StatusCode::NOT_FOUND, "Not Found"),
+        Ok(None) => return plain(StatusCode::NOT_FOUND, REPOSITORY_NOT_FOUND),
         Err(e) => {
             tracing::error!(error = %e, "repo lookup failed");
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
@@ -736,6 +740,28 @@ async fn serve(
     // makes the face safe on its own terms.
     if caller.is_none() && (repo.private || is_push) {
         return plain_unauthorized();
+    }
+    // An installation token reaches the repositories its installation
+    // covers. A private repository outside them does not exist for it, and
+    // a public one can be fetched, as anyone can, but not pushed to.
+    if let Some(caller) = caller
+        && !caller.reaches(&repo)
+    {
+        if repo.private {
+            return plain(StatusCode::NOT_FOUND, REPOSITORY_NOT_FOUND);
+        }
+        let for_push = is_push
+            || (tail == "info/refs" && query.split('&').any(|kv| kv == "service=git-receive-pack"));
+        if for_push {
+            return plain(
+                StatusCode::FORBIDDEN,
+                &format!(
+                    "Permission to {}.git denied to {}[bot].",
+                    repo.full_name(),
+                    caller.actor.login
+                ),
+            );
+        }
     }
     // Fetch requests share the lock, so they never wait on each other. A
     // write waits for the ones already running, and new ones queue behind a
@@ -890,6 +916,7 @@ mod tests {
             alice: Caller {
                 actor: alice,
                 app_id: None,
+                installation: None,
             },
             bare,
             main,

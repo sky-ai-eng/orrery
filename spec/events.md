@@ -38,7 +38,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 3. **A write's operation comes first.** A write appends its operation's event, then one event for each consequence, in the order the engine made them, in one transaction. A reader holding `write.events` events from `write.seq` holds the whole write. A write that changes nothing appends nothing.
 4. **Every event has one subject:** the object it is about, by its stable id, its names at that moment, and the objects that contain it as top-level keys (`owner`, `repo`, `pull`, `team`). A reader can keep one repository's or one account's events without knowing every type, and an event still names its object after the object is renamed. A ref and a commit have no id, so a ref is named by its name and a commit by its sha.
 5. **Bodies carry values.** A create carries `object`, every stored field of the new object. A change carries `changes`, each field that changed as `{"from", "to"}`; a field holding a set, such as labels or requested reviewers, is its whole list before and after. A delete carries `object` as it was. Timestamps the engine sets, such as a pull's `updated_unix`, are fields like any other. Every value a write stores is in one of its events, so a reader learns each change from the log without knowing the engine's behavior. No event holds a credential: tokens, client secrets, and codes are derived from the world secret and the numbers the events carry.
-6. **Attribution** is who made the change (`actor`), how it reached the world (`door`: `rest`, `graphql`, `git`, `web` for the OAuth web flow, `control`, or `cli`), and the OAuth app the call came through (`app`, or `null`): the one whose token authenticated it, or whose authorize page or client credentials it used. Control-plane and CLI writes are the system actor's, and so is the advance a `real` world records before a write ([below](#the-clock-in-a-real-world)). A scenario driver is a client of the faces and the control plane, so it is not a door (`usage.md`).
+6. **Attribution** is who made the change (`actor`), how it reached the world (`door`: `rest`, `graphql`, `git`, `web` for the OAuth web flow, `control`, or `cli`), and the app the call came through (`app`, or `null`): the OAuth app whose token authenticated it, or whose authorize page or client credentials it used, or the app whose installation token authenticated it. An app issues an installation token as its bot, through itself. Control-plane and CLI writes are the system actor's, and so is the advance a `real` world records before a write ([below](#the-clock-in-a-real-world)). A scenario driver is a client of the faces and the control plane, so it is not a door (`usage.md`).
 7. **Shapes only grow.** Once a type ships it keeps its meaning and its fields. New fields and types are added, and none are removed. A reader skips a type it does not know.
 
 ## How the rules are checked
@@ -55,6 +55,10 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `actor` | `id`, `login`, `kind` | none |
 | `oauth_app` | `id`, `client_id`, `name` | none |
 | `oauth_authorization` | `id` | `app`, `actor` (who granted it) |
+| `app` | `id`, `slug`, `client_id` | none |
+| `app_key` | `id` | `app` |
+| `installation` | `id` | `app`, `account` (the account it is installed on) |
+| `installation_token` | `id` | `installation`, `app` |
 | `repo` | `id`, `name` | `owner` |
 | `ref` | `name` | `repo`, `owner` |
 | `pull` | `id`, `number` | `repo`, `owner` |
@@ -83,6 +87,10 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `oauth_app:secret_issued` | issuing a client secret | `n`, its number | none |
 | `oauth_authorization:created` | authorizing an app | `object` | none |
 | `oauth_authorization:exchanged` | trading the code for a token | `changes` | none |
+| `app:created` | registering an app | `object` | `actor:created` for its bot, unless a bot already held its slug; then `oauth_app:created`, since an app is an OAuth app under the same id |
+| `app_key:created` | adding a public key to an app | `object` | none |
+| `installation:created` | installing an app on an account | `object` | none |
+| `installation_token:created` | an app issuing a token for an installation | `object`: its permissions, the repositories it was narrowed to, and when it expires | none |
 | `repo:created` | creating a repository | `object` | none |
 | `repo:pushed` | a push, and a consequence of a merge | `changes` | for a push: a ref event per ref it moved, in ref-name order, then what [a push does to pull requests](#what-a-push-records), then a `commit:verified` per commit whose verdict it stores |
 | `ref:created` | a consequence of a push | `object`, `commits`, `commit_count` | |

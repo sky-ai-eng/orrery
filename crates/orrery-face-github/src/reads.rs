@@ -53,7 +53,7 @@ pub(crate) fn paginate<T>(
 ) -> Vec<T> {
     items
         .into_iter()
-        .skip((page - 1) * per_page)
+        .skip((page - 1).saturating_mul(per_page))
         .take(per_page)
         .collect()
 }
@@ -362,10 +362,14 @@ pub(crate) async fn list_check_runs_for_ref(
     match face.world.list_check_runs_for_sha(repo.id, &sha) {
         Ok(runs) => {
             let total = runs.len();
-            let items: Vec<serde_json::Value> = paginate(runs, per_page, page)
+            let items: Result<Vec<serde_json::Value>, _> = paginate(runs, per_page, page)
                 .iter()
                 .map(|r| check_run_json(&face, &repo, r))
                 .collect();
+            let items = match items {
+                Ok(items) => items,
+                Err(e) => return internal(e),
+            };
             json_response(
                 StatusCode::OK,
                 serde_json::json!({ "total_count": total, "check_runs": items }),
@@ -839,16 +843,7 @@ pub(crate) async fn get_org(
 /// installation token on the authenticated-user routes: there is no user
 /// behind it.
 pub(crate) fn refuse_integration(actor: &Actor) -> Option<Response<Body>> {
-    (actor.kind == orrery_world::ActorKind::Bot).then(|| {
-        json_response(
-            StatusCode::FORBIDDEN,
-            serde_json::json!({
-                "message": "Resource not accessible by integration",
-                "documentation_url": "https://docs.github.com/rest",
-                "status": "403",
-            }),
-        )
-    })
+    (actor.kind == orrery_world::ActorKind::Bot).then(crate::apps::not_accessible)
 }
 
 /// The actor's stored addresses, primary first. Every actor starts with one
