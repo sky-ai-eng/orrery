@@ -1287,3 +1287,192 @@ fn diff_reports_review_requests_added_and_removed() {
         serde_json::json!({ "team": "acme/release" })
     );
 }
+
+/// Owes every app whose webhook is active one delivery for each actor a
+/// write creates, as a face owes one for the events it sends.
+struct ForEachActor;
+
+impl orrery_world::Notifier for ForEachActor {
+    fn deliveries(
+        &self,
+        world: &World,
+        _by: Attribution,
+        events: &[EventBody],
+    ) -> Vec<orrery_world::NewDelivery> {
+        let apps = world.list_apps().unwrap();
+        let mut made = Vec::new();
+        for event in events {
+            let EventBody::ActorCreated(created) = event else {
+                continue;
+            };
+            for app in apps.iter().filter(|app| app.hook.active) {
+                made.push(orrery_world::NewDelivery {
+                    app_id: app.id,
+                    installation_id: None,
+                    repo_id: None,
+                    event: "actor".to_string(),
+                    action: Some("created".to_string()),
+                    body: format!("{{\"login\":{:?}}}", created.object.login),
+                });
+            }
+        }
+        made
+    }
+}
+
+/// A world whose one app has an active webhook, and that owes a delivery
+/// for every actor it creates from here on.
+fn hooked() -> (Instance, i64, String) {
+    let inst = Instance::new();
+    let (alice, _) = inst.world.create_actor("alice", ActorKind::User).unwrap();
+    let registered = inst
+        .world
+        .create_app(
+            &NewApp {
+                slug: "helper",
+                name: "Helper",
+                owner: "alice",
+                callback_urls: &["https://helper.test/callback".to_string()],
+                permissions: &Permissions::new(),
+                events: &[],
+                hook_url: Some("https://helper.test/hook"),
+                hook_active: true,
+            },
+            by(alice.id),
+        )
+        .unwrap();
+    inst.world.set_notifier(std::sync::Arc::new(ForEachActor));
+    (inst, registered.app.id, registered.hook_secret)
+}
+
+fn types(world: &World, after: i64) -> Vec<&'static str> {
+    world
+        .log_after(after, 100)
+        .unwrap()
+        .iter()
+        .map(|e| e.body.type_name())
+        .collect()
+}
+
+#[test]
+fn a_fork_starts_quiet() {
+    let (inst, app_id, secret) = hooked();
+    inst.world.create_actor("bob", ActorKind::User).unwrap();
+    let pending = inst.world.pending_deliveries(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    inst.snapshot("seed");
+    let last = inst.world.view_meta().unwrap().last_seq;
+
+    let dest = tempfile::tempdir().unwrap();
+    let fork_secret = WorldSecret::from_bytes([0xc3; 32]);
+    let root = orrery_snapshot::fork(&inst.snapshots(), "seed", dest.path(), &fork_secret).unwrap();
+    let fork = World::open(&root).unwrap();
+
+    // Its webhook is off, and the delivery it inherited will not be sent.
+    let app = fork.app_by_id(app_id).unwrap().unwrap();
+    assert!(!app.hook.active);
+    assert_eq!(app.hook.url.as_deref(), Some("https://helper.test/hook"));
+    assert!(fork.pending_deliveries(10).unwrap().is_empty());
+    assert_eq!(
+        fork.delivery_by_id(pending[0].id).unwrap().unwrap().state,
+        orrery_world::DeliveryState::Dropped
+    );
+    // The re-keying write says so, and re-derives the hook's secret.
+    assert_eq!(
+        types(&fork, last),
+        ["world:rekeyed", "app:hook_set", "delivery:dropped"]
+    );
+    let forked_secret = fork.app_hook_secret(app_id).unwrap().unwrap();
+    assert_ne!(forked_secret, secret);
+    // The source still owes its delivery.
+    assert_eq!(inst.world.pending_deliveries(10).unwrap().len(), 1);
+
+    // The fork owes nothing until its webhook is turned on.
+    fork.set_notifier(std::sync::Arc::new(ForEachActor));
+    fork.create_actor("carol", ActorKind::User).unwrap();
+    assert!(fork.pending_deliveries(10).unwrap().is_empty());
+    let system = Attribution::new(orrery_world::SYSTEM_ACTOR_ID, Door::Control);
+    fork.set_app_hook("helper", None, Some(true), system)
+        .unwrap();
+    fork.create_actor("dave", ActorKind::User).unwrap();
+    let owed = fork.pending_deliveries(10).unwrap();
+    assert_eq!(owed.len(), 1);
+    assert_eq!(owed[0].body, "{\"login\":\"dave\"}");
+    // A GUID is derived under the world's secret, so the fork's is not one
+    // its source ever gives a receiver.
+    inst.world.create_actor("erin", ActorKind::User).unwrap();
+    let source = inst.world.pending_deliveries(10).unwrap();
+    assert_eq!(source[1].id, owed[0].id);
+    assert_ne!(source[1].guid, owed[0].guid);
+}
+
+#[test]
+fn a_restore_drops_pending_deliveries_and_issues_no_id_twice() {
+    let (inst, _, _) = hooked();
+    inst.world.create_actor("bob", ActorKind::User).unwrap();
+    inst.snapshot("one-pending");
+    inst.world.create_actor("carol", ActorKind::User).unwrap();
+    let before = inst.world.pending_deliveries(10).unwrap();
+    assert_eq!(before.len(), 2);
+    let last = inst.world.view_meta().unwrap().last_seq;
+
+    orrery_snapshot::restore(&inst.world, &inst.snapshots(), "one-pending").unwrap();
+    // The delivery the snapshot held pending is dropped, by the system
+    // actor through the control plane, and the later one is gone.
+    assert!(inst.world.pending_deliveries(10).unwrap().is_empty());
+    assert_eq!(
+        inst.world
+            .delivery_by_id(before[0].id)
+            .unwrap()
+            .unwrap()
+            .state,
+        orrery_world::DeliveryState::Dropped
+    );
+    assert!(inst.world.delivery_by_id(before[1].id).unwrap().is_none());
+    let after = inst.world.log_after(last, 10).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].body.type_name(), "delivery:dropped");
+    assert_eq!(
+        (after[0].actor.login.as_str(), after[0].door),
+        ("orrery", Door::Control)
+    );
+    // A result that arrives for the dropped delivery has nowhere to go.
+    let failed = orrery_world::DeliveryOutcome::Failed {
+        step: orrery_world::DeliveryFailure::Timeout,
+        detail: String::new(),
+    };
+    assert!(matches!(
+        inst.world.record_delivery_attempt(before[0].id, 5, &failed),
+        Err(WorldError::DeliveryNotPending(_))
+    ));
+
+    // The next delivery takes an id, and so a GUID, no receiver has seen.
+    inst.world.create_actor("dave", ActorKind::User).unwrap();
+    let next = inst.world.pending_deliveries(10).unwrap();
+    assert_eq!(next.len(), 1);
+    assert!(next[0].id > before[1].id);
+    assert!(before.iter().all(|d| d.guid != next[0].guid));
+
+    // An attempt's result is the delivery's, and is recorded once.
+    let answered = orrery_world::DeliveryOutcome::Answered {
+        status_code: 204,
+        headers: vec![("content-length".to_string(), "0".to_string())],
+        body: String::new(),
+        truncated: false,
+    };
+    let recorded = inst
+        .world
+        .record_delivery_attempt(next[0].id, 12, &answered)
+        .unwrap();
+    assert_eq!(recorded.state, orrery_world::DeliveryState::Answered);
+    assert_eq!(recorded.attempt.unwrap().duration_ms, 12);
+    assert!(matches!(
+        inst.world
+            .record_delivery_attempt(next[0].id, 12, &answered),
+        Err(WorldError::DeliveryNotPending(_))
+    ));
+    let diff = inst.diff("one-pending", None);
+    assert_eq!(diff.deliveries_added.len(), 1);
+    assert_eq!(diff.deliveries_added[0].state, "answered");
+    assert_eq!(diff.deliveries_added[0].app, "helper");
+}

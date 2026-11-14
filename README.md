@@ -55,7 +55,7 @@ curl -s -X POST localhost:4180/_orrery/diff -d '{"from":"before"}'
 Orrery has two doors, and every operation goes through exactly one of them.
 
 - **The face** is GitHub: the REST API under `/api/v3`, GraphQL at `/api/graphql`, git at `/{owner}/{repo}.git`, and the OAuth web flow under `/login/oauth`. Orrery presents itself as a GitHub Enterprise Server, so a client that takes a GitHub base URL needs nothing else. Every call is made by an actor holding a token, including CI, which on GitHub is an App posting check runs.
-- **The control plane**, under `/_orrery`, holds what GitHub has no API for: creating actors and issuing their tokens, setting their email addresses, registering OAuth apps and GitHub Apps, installing an App, the clock, snapshots, restore, and diff.
+- **The control plane**, under `/_orrery`, holds what GitHub has no API for: creating actors and issuing their tokens, setting their email addresses, registering OAuth apps and GitHub Apps, installing an App and setting its webhook, the clock, snapshots, restore, and diff.
 
 A world is a directory: a SQLite database and bare git repositories. A snapshot is a copy of it, `orrery fork` turns a snapshot into a new instance, and deleting the directory deletes the world. Every credential in a world is fake, so a snapshot is safe to share.
 

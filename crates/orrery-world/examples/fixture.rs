@@ -323,9 +323,26 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         by(system.id),
     )?;
     w.add_app_key("ci-bot", APP_KEY, by(system.id))?;
+    // A delivery for the installation, as a face would make one, so that
+    // `deliveries` holds one that was answered and one still pending.
+    w.set_notifier(std::sync::Arc::new(OnInstallation));
     let repositories = ["webapp".to_string()];
     let installation =
         w.create_installation("ci-bot", "acme", Some(&repositories), by(system.id))?;
+    let owed = w.pending_deliveries(1)?;
+    w.record_delivery_attempt(
+        owed[0].id,
+        12,
+        &orrery_world::DeliveryOutcome::Answered {
+            status_code: 204,
+            headers: vec![("content-length".to_string(), "0".to_string())],
+            body: String::new(),
+            truncated: false,
+        },
+    )?;
+    w.redeliver(registered.app.id, owed[0].id)?;
+    w.suspend_installation(registered.app.id, installation.id)?;
+    w.unsuspend_installation(registered.app.id, installation.id)?;
     w.create_installation_token(
         registered.app.id,
         installation.id,
@@ -333,4 +350,33 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         None,
     )?;
     Ok(())
+}
+
+/// Owes the installation's app one delivery when it is installed.
+struct OnInstallation;
+
+impl orrery_world::Notifier for OnInstallation {
+    fn deliveries(
+        &self,
+        _world: &World,
+        _by: orrery_world::Attribution,
+        events: &[orrery_world::EventBody],
+    ) -> Vec<orrery_world::NewDelivery> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                orrery_world::EventBody::InstallationCreated(created) => {
+                    Some(orrery_world::NewDelivery {
+                        app_id: created.subject.app.id,
+                        installation_id: Some(created.subject.id),
+                        repo_id: None,
+                        event: "installation".to_string(),
+                        action: Some("created".to_string()),
+                        body: "{\"action\":\"created\"}".to_string(),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }

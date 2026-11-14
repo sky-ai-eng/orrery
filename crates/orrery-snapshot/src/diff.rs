@@ -152,6 +152,16 @@ pub struct InstallationAdded {
     pub repositories: Vec<String>,
 }
 
+/// A delivery a world made: the app it is owed to, the event in the words
+/// of the face that made it, and where it stands.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeliveryAdded {
+    pub app: String,
+    pub event: String,
+    pub action: Option<String>,
+    pub state: String,
+}
+
 /// An actor's authorization of an OAuth app. The code itself is never
 /// reported.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -266,6 +276,8 @@ pub struct WorldDiff {
     pub authorizations_exchanged: Vec<Authorization>,
     pub apps_added: Vec<AppAdded>,
     pub installations_added: Vec<InstallationAdded>,
+    pub installations_removed: Vec<InstallationAdded>,
+    pub deliveries_added: Vec<DeliveryAdded>,
     pub repos_created: Vec<String>,
     pub repos_deleted: Vec<String>,
     pub default_branch_changes: Vec<DefaultBranchChange>,
@@ -396,26 +408,54 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
             owner: a.owner.login,
         })
         .collect();
-    let from_installations: BTreeSet<i64> = from
-        .view
-        .list_installations()?
+    let installation = |i: orrery_world::Installation| InstallationAdded {
+        repositories: i
+            .repositories
+            .iter()
+            .map(|name| format!("{}/{name}", i.account.login))
+            .collect(),
+        app: i.app_slug,
+        account: i.account.login,
+        repository_selection: i.repository_selection.as_str().to_string(),
+    };
+    let from_installations = from.view.list_installations()?;
+    let to_installations = to.view.list_installations()?;
+    let held = |side: &[orrery_world::Installation]| -> BTreeSet<i64> {
+        side.iter().map(|i| i.id).collect()
+    };
+    let (before, after) = (held(&from_installations), held(&to_installations));
+    let installations_added = to_installations
         .into_iter()
-        .map(|i| i.id)
+        .filter(|i| !before.contains(&i.id))
+        .map(installation)
         .collect();
-    let installations_added = to
-        .view
-        .list_installations()?
+    let installations_removed = from_installations
         .into_iter()
-        .filter(|i| !from_installations.contains(&i.id))
-        .map(|i| InstallationAdded {
-            repositories: i
-                .repositories
-                .iter()
-                .map(|name| format!("{}/{name}", i.account.login))
-                .collect(),
-            app: i.app_slug,
-            account: i.account.login,
-            repository_selection: i.repository_selection.as_str().to_string(),
+        .filter(|i| !after.contains(&i.id))
+        .map(installation)
+        .collect();
+    let app_slugs: BTreeMap<i64, String> = to
+        .view
+        .list_apps()?
+        .into_iter()
+        .map(|a| (a.id, a.slug))
+        .collect();
+    let from_deliveries: BTreeSet<i64> = from
+        .view
+        .list_deliveries()?
+        .into_iter()
+        .map(|d| d.id)
+        .collect();
+    let deliveries_added = to
+        .view
+        .list_deliveries()?
+        .into_iter()
+        .filter(|d| !from_deliveries.contains(&d.id))
+        .map(|d| DeliveryAdded {
+            app: app_slugs.get(&d.app_id).cloned().unwrap_or_default(),
+            event: d.event,
+            action: d.action,
+            state: d.state.as_str().to_string(),
         })
         .collect();
 
@@ -865,6 +905,8 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         authorizations_exchanged,
         apps_added,
         installations_added,
+        installations_removed,
+        deliveries_added,
         repos_created,
         repos_deleted,
         default_branch_changes,

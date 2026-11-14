@@ -38,7 +38,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 3. **A write's operation comes first.** A write appends its operation's event, then one event for each consequence, in the order the engine made them, in one transaction. A reader holding `write.events` events from `write.seq` holds the whole write. A write that changes nothing appends nothing.
 4. **Every event has one subject:** the object it is about, by its stable id, its names at that moment, and the objects that contain it as top-level keys (`owner`, `repo`, `pull`, `team`). A reader can keep one repository's or one account's events without knowing every type, and an event still names its object after the object is renamed. A ref and a commit have no id, so a ref is named by its name and a commit by its sha.
 5. **Bodies carry values.** A create carries `object`, every stored field of the new object. A change carries `changes`, each field that changed as `{"from", "to"}`; a field holding a set, such as labels or requested reviewers, is its whole list before and after. A delete carries `object` as it was. Timestamps the engine sets, such as a pull's `updated_unix`, are fields like any other. Every value a write stores is in one of its events, so a reader learns each change from the log without knowing the engine's behavior. No event holds a credential: tokens, client secrets, and codes are derived from the world secret and the numbers the events carry.
-6. **Attribution** is who made the change (`actor`), how it reached the world (`door`: `rest`, `graphql`, `git`, `web` for the OAuth web flow, `control`, or `cli`), and the app the call came through (`app`, or `null`): the OAuth app whose token authenticated it, or whose authorize page or client credentials it used, or the app whose installation token authenticated it. An app issues an installation token as its bot, through itself. Control-plane and CLI writes are the system actor's, and so is the advance a `real` world records before a write ([below](#the-clock-in-a-real-world)). A scenario driver is a client of the faces and the control plane, so it is not a door (`usage.md`).
+6. **Attribution** is who made the change (`actor`), how it reached the world (`door`: `rest`, `graphql`, `git`, `web` for the OAuth web flow, `control`, `cli`, or `engine` for the engine recording what came of a delivery it sent), and the app the call came through (`app`, or `null`): the OAuth app whose token authenticated it, or whose authorize page or client credentials it used, or the app whose installation token authenticated it. An app issues an installation token as its bot, through itself. Control-plane and CLI writes are the system actor's, and so is the advance a `real` world records before a write ([below](#the-clock-in-a-real-world)). A scenario driver is a client of the faces and the control plane, so it is not a door (`usage.md`).
 7. **Shapes only grow.** Once a type ships it keeps its meaning and its fields. New fields and types are added, and none are removed. A reader skips a type it does not know.
 
 ## How the rules are checked
@@ -59,6 +59,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `app_key` | `id` | `app` |
 | `installation` | `id` | `app`, `account` (the account it is installed on) |
 | `installation_token` | `id` | `installation`, `app` |
+| `delivery` | `id` | `app` |
 | `repo` | `id`, `name` | `owner` |
 | `ref` | `name` | `repo`, `owner` |
 | `pull` | `id`, `number` | `repo`, `owner` |
@@ -88,9 +89,16 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `oauth_authorization:created` | authorizing an app | `object` | none |
 | `oauth_authorization:exchanged` | trading the code for a token | `changes` | none |
 | `app:created` | registering an app | `object` | `actor:created` for its bot, unless a bot already held its slug; then `oauth_app:created`, since an app is an OAuth app under the same id |
+| `app:hook_set` | pointing an app's webhook at a URL, taking it off one, or turning it on or off; a consequence of forking a world, which turns every webhook off | `changes` | none |
+| `app:hook_secret_issued` | issuing a secret for an app's webhook | `changes`: `hook_secrets`, how many it has been issued | none |
 | `app_key:created` | adding a public key to an app | `object` | none |
 | `installation:created` | installing an app on an account | `object` | none |
+| `installation:suspended`, `installation:unsuspended` | an app suspending one of its installations, or lifting the suspension | `changes` | none |
+| `installation:deleted` | an app removing one of its installations | `object`, as it was | none |
 | `installation_token:created` | an app issuing a token for an installation | `object`: its permissions, the repositories it was narrowed to, and when it expires | none |
+| `delivery:created` | a face making a delivery for the write before this one ([below](#deliveries)); an app asking for a delivery again | `object`: the event, the URL, and the request body, exactly as it is sent | one `delivery:created` for each other delivery the same write is owed |
+| `delivery:attempted` | the engine, after a delivery's one attempt | `changes`: the state, the receiver's status, headers, and body, or which step failed, and how long it took | none |
+| `delivery:dropped` | a restore, for each delivery its snapshot held pending; a consequence of forking a world | `changes` | one `delivery:dropped` for each other |
 | `repo:created` | creating a repository | `object` | none |
 | `repo:pushed` | a push, and a consequence of a merge | `changes` | for a push: a ref event per ref it moved, in ref-name order, then what [a push does to pull requests](#what-a-push-records), then a `commit:verified` per commit whose verdict it stores |
 | `ref:created` | a consequence of a push | `object`, `commits`, `commit_count` | |
@@ -135,6 +143,14 @@ A push's ref events come first, then what the moves did to pull requests (`surfa
 A pull request whose `updated_unix` moves without another change gets a `pull:updated` before its item.
 
 Last come the verdicts the push stores: a `commit:verified` for each commit the ref events list, each once, in the order they list them, whose signature is `valid` and that has no stored verdict yet (`surface-github.md` §1.10).
+
+### Deliveries
+
+A delivery is one POST a world owes an app's webhook (`usage.md`, "What a world sends"). The log holds it when it is made, and again when its attempt is recorded.
+
+- **A delivery is made in the write directly after the one it is for.** When a write lands, the engine hands its events to the face, and stores the deliveries the face answers as one more write, by the same actor through the same door, at the same clock. No other write lands between the two. So a delivery's body is rendered from the world exactly as its write left it, and re-executing that write makes the same deliveries again: a replay never re-executes a `delivery:created` itself, unless an app asked for the delivery again (`POST /app/hook/deliveries/{id}/attempts`).
+- **The attempt's result is the one thing in a log that came from outside the world.** `delivery:attempted` carries all of it, so a replay writes the result back from the log and sends nothing (`usage.md`, "Time").
+- **A body is stored as it is sent.** Its signature is not stored: it is made when the delivery is sent, under the secret the webhook has then, and no event carries the secret.
 
 ### The clock in a real world
 

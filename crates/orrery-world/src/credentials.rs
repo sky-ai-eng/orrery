@@ -311,8 +311,6 @@ impl World {
                     }));
                 }
             }
-            crate::deliveries::drop_pending(w, None)?;
-
             w.operation(EventBody::WorldRekeyed(events::WorldRekeyed {
                 subject: events::WorldSubject::default(),
                 rekeyed: events::Rekeyed {
@@ -324,6 +322,7 @@ impl World {
                     hook_secrets,
                 },
             }));
+            crate::deliveries::drop_pending(w, None)?;
             Ok(())
         })
     }

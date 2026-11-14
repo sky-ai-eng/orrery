@@ -404,6 +404,17 @@ fn created(w: &mut Write<'_>, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Every delivery, in id order.
+pub(crate) fn list_deliveries(conn: &Connection) -> Result<Vec<Delivery>> {
+    let rows = conn
+        .prepare(&format!(
+            "SELECT {DELIVERY_COLUMNS} FROM deliveries ORDER BY id"
+        ))?
+        .query_map([], row_to_delivery)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 fn delivery(conn: &Connection, id: i64) -> Result<Option<Delivery>> {
     Ok(conn
         .query_row(
