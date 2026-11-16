@@ -129,6 +129,8 @@ pub enum WorldError {
     HookInactive,
     #[error("a notifier wrote to the world it was reading for")]
     WriteWhileNotifying,
+    #[error("a notifier panicked while making a write's deliveries")]
+    NotifierPanicked,
     #[error("{0:?} is not an SSH public key in OpenSSH format")]
     InvalidSigningKey(String),
     #[error("the SSH key is already held as a signing key")]

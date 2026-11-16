@@ -34,6 +34,11 @@ pub trait Notifier: Send + Sync {
     /// off. It reads the world freely and must not write to it: a write
     /// from here is refused.
     fn deliveries(&self, world: &World, by: Attribution, events: &[EventBody]) -> Vec<NewDelivery>;
+
+    /// Told that a write landed and its deliveries could not be made or
+    /// stored. The write stands, so this is the only place the loss is
+    /// said: the world itself reports nothing to an operator.
+    fn lost(&self, _error: &WorldError) {}
 }
 
 /// Which attempted deliveries a list holds.
@@ -90,23 +95,40 @@ impl World {
     /// Register the face that makes deliveries for this world's writes.
     /// One face does: a second call replaces the first.
     pub fn set_notifier(&self, notifier: Arc<dyn Notifier>) {
-        *self.notifier.write().expect("notifier lock poisoned") = Some(notifier);
+        *self
+            .notifier
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(notifier);
     }
 
-    /// Make the deliveries of a write that has landed. The caller holds the
-    /// write-order lock and not the connection.
-    pub(crate) fn notify(&self, landed: &Landed) -> Result<()> {
+    /// Make the deliveries of a write that has landed, telling the notifier
+    /// when they could not be. The write is in the log whatever becomes of
+    /// them, so its caller is never failed for them: it would undo work the
+    /// log holds. The caller holds the write-order lock and not the
+    /// connection.
+    pub(crate) fn notify(&self, landed: &Landed) {
         let notifier = self
             .notifier
             .read()
-            .expect("notifier lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let Some(notifier) = notifier else {
-            return Ok(());
+            return;
         };
+        if let Err(e) = self.make_deliveries(notifier.as_ref(), landed) {
+            notifier.lost(&e);
+        }
+    }
+
+    fn make_deliveries(&self, notifier: &dyn Notifier, landed: &Landed) -> Result<()> {
+        // A notifier that panics would otherwise take the write's thread
+        // with it, after the write has landed.
         let new = {
             let _notifying = Notifying::begin();
-            notifier.deliveries(self, landed.by, &landed.events)
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                notifier.deliveries(self, landed.by, &landed.events)
+            }))
+            .map_err(|_| WorldError::NotifierPanicked)?
         };
         if new.is_empty() {
             return Ok(());
@@ -130,8 +152,8 @@ impl World {
                     let Some((Some(url), true)) = hook else {
                         continue;
                     };
-                    let id = insert(w.tx, delivery, &url, None)?;
-                    created(w, id)?;
+                    let stored = insert(w.tx, delivery, &url, None)?;
+                    created(w, stored.id)?;
                 }
                 Ok(())
             },
@@ -141,7 +163,9 @@ impl World {
     /// Make the deliveries of the newest write in the log, when a process
     /// stopped between that write and them. A write's deliveries are always
     /// the write directly after it, so only the newest can be without its
-    /// own, and making them again for a write that made none makes none.
+    /// own, and making them again for a write that made none makes none. A
+    /// write's `write_seq` is its first event's `seq`, so its events are
+    /// read from the end of the log without scanning it.
     pub fn finish_last_write(&self) -> Result<()> {
         let _order = self.order();
         let landed = {
@@ -149,7 +173,7 @@ impl World {
             let events = conn
                 .prepare(&format!(
                     "SELECT {} FROM action_log
-                     WHERE write_seq = (SELECT write_seq FROM action_log ORDER BY seq DESC LIMIT 1)
+                     WHERE seq >= (SELECT write_seq FROM action_log ORDER BY seq DESC LIMIT 1)
                      ORDER BY seq",
                     crate::log::EVENT_COLUMNS
                 ))?
@@ -164,7 +188,8 @@ impl World {
                 events: events.into_iter().map(|event| event.body).collect(),
             }
         };
-        self.notify(&landed)
+        self.notify(&landed);
+        Ok(())
     }
 
     /// The deliveries whose attempt has not been made, oldest first, at most
@@ -206,18 +231,21 @@ impl World {
             }
             let before = objects::delivery_object(tx, id)?;
             let clock = queries::clock(tx)?;
-            match outcome {
+            let recorded = match outcome {
                 DeliveryOutcome::Answered {
                     status_code,
                     headers,
                     body,
                     truncated,
-                } => tx.execute(
-                    "UPDATE deliveries
-                     SET state = 'answered', attempted_clock_unix = ?1, duration_ms = ?2,
-                         status_code = ?3, response_headers = ?4, response_body = ?5,
-                         response_truncated = ?6
-                     WHERE id = ?7",
+                } => tx.query_row(
+                    &format!(
+                        "UPDATE deliveries
+                         SET state = 'answered', attempted_clock_unix = ?1, duration_ms = ?2,
+                             status_code = ?3, response_headers = ?4, response_body = ?5,
+                             response_truncated = ?6
+                         WHERE id = ?7
+                         RETURNING {DELIVERY_COLUMNS}"
+                    ),
                     params![
                         clock,
                         duration_ms,
@@ -227,13 +255,18 @@ impl World {
                         truncated,
                         id
                     ],
+                    row_to_delivery,
                 )?,
-                DeliveryOutcome::Failed { step, detail } => tx.execute(
-                    "UPDATE deliveries
-                     SET state = 'failed', attempted_clock_unix = ?1, duration_ms = ?2,
-                         failure = ?3, failure_detail = ?4
-                     WHERE id = ?5",
+                DeliveryOutcome::Failed { step, detail } => tx.query_row(
+                    &format!(
+                        "UPDATE deliveries
+                         SET state = 'failed', attempted_clock_unix = ?1, duration_ms = ?2,
+                             failure = ?3, failure_detail = ?4
+                         WHERE id = ?5
+                         RETURNING {DELIVERY_COLUMNS}"
+                    ),
                     params![clock, duration_ms, step.as_str(), detail, id],
+                    row_to_delivery,
                 )?,
             };
             w.operation(EventBody::DeliveryAttempted(events::DeliveryChanged {
@@ -243,18 +276,21 @@ impl World {
                     &objects::delivery_object(tx, id)?,
                 ),
             }));
-            delivery(tx, id)?.ok_or(WorldError::NoSuchDelivery(id))
+            Ok(recorded)
         })
     }
 
     /// Owe the receiver one of an app's deliveries again: a new delivery
     /// with the same GUID, event, and body, to the URL the hook has now.
     /// The app asks with its own signature, so the write is its bot's,
-    /// through the app. An inactive hook sends nothing, this included.
+    /// through the app. An inactive hook sends nothing, this included. Only
+    /// a delivery whose attempt was made can be asked for again: one that is
+    /// pending is still owed, and one that was dropped was never sent, and
+    /// an app's list holds neither.
     pub fn redeliver(&self, app_id: i64, delivery_id: i64) -> Result<Delivery> {
         let by = |tx: &Connection| -> Result<(Attribution, Delivery)> {
             let original = delivery(tx, delivery_id)?
-                .filter(|d| d.app_id == app_id)
+                .filter(|d| d.app_id == app_id && d.attempt.is_some())
                 .ok_or(WorldError::NoSuchDelivery(delivery_id))?;
             let bot_id: i64 = tx.query_row(
                 "SELECT bot_id FROM apps WHERE id = ?1",
@@ -283,9 +319,9 @@ impl World {
                 body: original.body.clone(),
             };
             let first = original.redelivery_of.unwrap_or(original.id);
-            let id = insert(tx, &again, &url, Some((first, &original.guid)))?;
-            created(w, id)?;
-            delivery(tx, id)?.ok_or(WorldError::NoSuchDelivery(id))
+            let stored = insert(tx, &again, &url, Some((first, &original.guid)))?;
+            created(w, stored.id)?;
+            Ok(stored)
         })
     }
 
@@ -338,13 +374,6 @@ impl World {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
-
-    /// Drop every pending delivery, so none is attempted: what a restore
-    /// does with the ones its snapshot held, which were owed by a world
-    /// that has since moved on. Answers how many it dropped.
-    pub fn drop_pending_deliveries(&self, by: Attribution) -> Result<usize> {
-        self.write(by, |w| drop_pending(w, None))
-    }
 }
 
 /// Drop the pending deliveries, of one app or of every app, each as an
@@ -384,36 +413,43 @@ fn insert(
     new: &NewDelivery,
     url: &str,
     again: Option<(i64, &str)>,
-) -> Result<i64> {
-    let id: i64 = tx.query_row(
-        "INSERT INTO deliveries (app_id, guid, event, action, installation_id, repo_id, url,
-                                 body, redelivery_of, created_clock_unix, state)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending')
-         RETURNING id",
-        params![
-            new.app_id,
-            again.map_or("", |(_, guid)| guid),
-            new.event,
-            new.action,
-            new.installation_id,
-            new.repo_id,
-            url,
-            new.body,
-            again.map(|(first, _)| first),
-            queries::clock(tx)?
-        ],
-        |r| r.get(0),
-    )?;
-    if again.is_none() {
-        tx.execute(
-            "UPDATE deliveries SET guid = ?1 WHERE id = ?2",
-            params![
-                credentials::delivery_guid(&credentials::world_secret(tx)?, id),
-                id
-            ],
-        )?;
+) -> Result<Delivery> {
+    let columns = "app_id, guid, event, action, installation_id, repo_id, url, body, \
+                   redelivery_of, created_clock_unix, state";
+    let values = params![
+        new.app_id,
+        again.map_or("", |(_, guid)| guid),
+        new.event,
+        new.action,
+        new.installation_id,
+        new.repo_id,
+        url,
+        new.body,
+        again.map(|(first, _)| first),
+        queries::clock(tx)?
+    ];
+    let insert = format!(
+        "INSERT INTO deliveries ({columns})
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending')"
+    );
+    if again.is_some() {
+        return Ok(tx.query_row(
+            &format!("{insert} RETURNING {DELIVERY_COLUMNS}"),
+            values,
+            row_to_delivery,
+        )?);
     }
-    Ok(id)
+    // A new delivery's GUID is derived from its id, which the insert
+    // issues, so the row is whole only after the GUID is set.
+    let id: i64 = tx.query_row(&format!("{insert} RETURNING id"), values, |r| r.get(0))?;
+    Ok(tx.query_row(
+        &format!("UPDATE deliveries SET guid = ?1 WHERE id = ?2 RETURNING {DELIVERY_COLUMNS}"),
+        params![
+            credentials::delivery_guid(&credentials::world_secret(tx)?, id),
+            id
+        ],
+        row_to_delivery,
+    )?)
 }
 
 /// The event for a delivery the write has just stored: its operation when

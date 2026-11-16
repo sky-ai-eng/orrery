@@ -122,19 +122,18 @@ impl World {
         })
     }
 
-    /// Point an app's webhook at a URL or take it off one, and turn it on
-    /// or off. `url` and `active` each change what they name and leave the
-    /// other as it is: `Some(None)` for `url` takes the hook off its URL.
-    /// A hook is active only while it has a URL. A change that changes
-    /// nothing writes nothing.
+    /// Point an app's webhook at a URL, and turn it on or off. `url` and
+    /// `active` each change what they name and leave the other as it is. A
+    /// hook is active only while it has a URL. A change that changes nothing
+    /// writes nothing.
     pub fn set_app_hook(
         &self,
         slug: &str,
-        url: Option<Option<&str>>,
+        url: Option<&str>,
         active: Option<bool>,
         by: Attribution,
     ) -> Result<App> {
-        if let Some(Some(url)) = url {
+        if let Some(url) = url {
             validate_hook_url(url)?;
         }
         self.write(by, |w| {
@@ -142,7 +141,7 @@ impl World {
             let app = app_where(tx, "b.login = ?1", &slug)?
                 .ok_or_else(|| WorldError::NoSuchApp(slug.to_string()))?;
             let url = match url {
-                Some(url) => url.map(str::to_string),
+                Some(url) => Some(url.to_string()),
                 None => app.hook.url.clone(),
             };
             let active = active.unwrap_or(app.hook.active);
@@ -1018,8 +1017,6 @@ pub fn validate_app_name(name: &str) -> Result<()> {
     })
 }
 
-/// The URLs an app's authorizations redirect to: at least one, each held to
-/// an OAuth app's rule, and none twice.
 /// A webhook's URL: an absolute `http` or `https` URL with a host, the two
 /// schemes a delivery can be sent to.
 pub fn validate_hook_url(url: &str) -> Result<()> {
@@ -1036,6 +1033,8 @@ pub fn validate_hook_url(url: &str) -> Result<()> {
     }
 }
 
+/// The URLs an app's authorizations redirect to: at least one, each held to
+/// an OAuth app's rule, and none twice.
 pub fn validate_app_callback_urls(callback_urls: &[String]) -> Result<()> {
     if callback_urls.is_empty() || callback_urls.len() > MAX_CALLBACK_URLS {
         return Err(invalid_app(

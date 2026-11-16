@@ -10,13 +10,16 @@ use std::sync::Arc;
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use orrery_outbound::{Client, Failure, Request};
-use orrery_world::{Delivery, DeliveryFailure, DeliveryOutcome, Signal, World, WorldError};
+use orrery_world::{
+    Delivery, DeliveryFailure, DeliveryOutcome, DeliveryState, Signal, World, WorldError,
+};
 
 /// How many pending deliveries one read takes. The loop reads again until
 /// none is pending, so this bounds a read, not what is sent.
 const BATCH: usize = 32;
 
-/// How long the loop waits after a result it could not record.
+/// How long the loop waits before it tries again what the world refused: a
+/// read, or the record of a result.
 const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Send the world's deliveries until `stopping` turns true. Without a
@@ -54,7 +57,7 @@ async fn run(
     mut stopping: tokio::sync::watch::Receiver<bool>,
 ) {
     loop {
-        loop {
+        'pending: loop {
             let pending = match world.pending_deliveries(BATCH) {
                 Ok(pending) => pending,
                 Err(e) => {
@@ -65,20 +68,51 @@ async fn run(
             if pending.is_empty() {
                 break;
             }
-            let mut recorded = true;
-            for delivery in pending {
+            for read in pending {
                 if *stopping.borrow() {
                     return;
                 }
-                recorded &= send(&world, &client, delivery).await;
-            }
-            // A result that could not be recorded leaves its delivery
-            // pending. Reading it again at once would send it again at
-            // once, so the loop waits before it does.
-            if !recorded {
-                tokio::select! {
-                    () = tokio::time::sleep(RETRY_AFTER) => {}
-                    _ = stopping.wait_for(|stopping| *stopping) => return,
+                // The batch was read before the attempts ahead of this one,
+                // each of which takes real time. A restore since then
+                // dropped the delivery, so it is read again and sent only
+                // while it is still owed.
+                let delivery = match world.delivery_by_id(read.id) {
+                    Ok(Some(delivery)) if delivery.state == DeliveryState::Pending => delivery,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        tracing::error!(error = %e, delivery = read.id, "reading a delivery failed");
+                        if stopped(&mut stopping, RETRY_AFTER).await {
+                            return;
+                        }
+                        continue 'pending;
+                    }
+                };
+                let id = delivery.id;
+                let Some((duration_ms, outcome)) = attempt(&world, &client, delivery).await else {
+                    if stopped(&mut stopping, RETRY_AFTER).await {
+                        return;
+                    }
+                    continue 'pending;
+                };
+                // The attempt was made, and a delivery has one. When its
+                // result cannot be recorded, the record is what is tried
+                // again, never the attempt.
+                loop {
+                    match world.record_delivery_attempt(id, duration_ms, &outcome) {
+                        // A delivery a restore dropped or discarded while
+                        // its attempt was in flight has nowhere to record
+                        // one.
+                        Ok(_)
+                        | Err(WorldError::NoSuchDelivery(_) | WorldError::DeliveryNotPending(_)) => {
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, delivery = id, "recording an attempt failed");
+                            if stopped(&mut stopping, RETRY_AFTER).await {
+                                return;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -89,15 +123,29 @@ async fn run(
     }
 }
 
-/// Make one delivery's attempt and record its result, answering whether the
-/// delivery is no longer pending. A delivery a restore dropped or discarded
-/// while its attempt was in flight has nowhere to record one.
-async fn send(world: &World, client: &Client, delivery: Delivery) -> bool {
+/// Wait `pause`, answering whether the sender was told to stop meanwhile.
+async fn stopped(
+    stopping: &mut tokio::sync::watch::Receiver<bool>,
+    pause: std::time::Duration,
+) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(pause) => false,
+        _ = stopping.wait_for(|stopping| *stopping) => true,
+    }
+}
+
+/// Make one delivery's attempt, answering how long it took and what came of
+/// it, or `None` when it could not be made for want of the hook's secret.
+async fn attempt(
+    world: &World,
+    client: &Client,
+    delivery: Delivery,
+) -> Option<(i64, DeliveryOutcome)> {
     let secret = match world.app_hook_secret(delivery.app_id) {
         Ok(secret) => secret,
         Err(e) => {
             tracing::error!(error = %e, delivery = delivery.id, "reading the hook's secret failed");
-            return false;
+            return None;
         }
     };
     let mut headers = HeaderMap::new();
@@ -147,11 +195,5 @@ async fn send(world: &World, client: &Client, delivery: Delivery) -> bool {
         },
     };
     let duration_ms = i64::try_from(attempt.elapsed.as_millis()).unwrap_or(i64::MAX);
-    match world.record_delivery_attempt(delivery.id, duration_ms, &outcome) {
-        Ok(_) | Err(WorldError::NoSuchDelivery(_) | WorldError::DeliveryNotPending(_)) => true,
-        Err(e) => {
-            tracing::error!(error = %e, delivery = delivery.id, "recording an attempt failed");
-            false
-        }
-    }
+    Some((duration_ms, outcome))
 }

@@ -176,7 +176,7 @@ impl World {
         let _order = self.order();
         let (out, landed) = self.write_landing(&self.lock(), keep, by, f)?;
         if let Some(landed) = landed {
-            self.notify(&landed)?;
+            self.notify(&landed);
         }
         Ok(out)
     }

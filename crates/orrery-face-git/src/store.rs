@@ -326,6 +326,17 @@ pub fn added_commits(
     Ok((newest, count))
 }
 
+/// Every path the tree of `rev` holds, in the tree's own order: the files a
+/// commit with no parent added.
+pub fn tree_paths(bare: &Path, rev: &str) -> Result<Vec<String>, GitFaceError> {
+    let out = run(hermetic_git(bare).args(["ls-tree", "-r", "--name-only", "-z", rev]))?;
+    Ok(out
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// Whether `ancestor` is reachable from `descendant`, a commit counting as its
 /// own ancestor: `git merge-base --is-ancestor`, whose exit code 1 is "no".
 /// An object that is not a commit, such as a tree a tag points at, is no

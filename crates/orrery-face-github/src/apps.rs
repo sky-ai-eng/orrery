@@ -72,7 +72,10 @@ pub fn app_router(face: GithubFace) -> Router {
             "/api/v3/app/installations/{id}/suspended",
             put(suspend_installation).delete(unsuspend_installation),
         )
-        .route("/api/v3/app/hook/config", get(crate::webhooks::get_config))
+        .route(
+            "/api/v3/app/hook/config",
+            get(crate::webhooks::get_config).patch(crate::webhooks::patch_config),
+        )
         .route(
             "/api/v3/app/hook/deliveries",
             get(crate::webhooks::list_deliveries),

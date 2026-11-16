@@ -89,7 +89,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `oauth_authorization:created` | authorizing an app | `object` | none |
 | `oauth_authorization:exchanged` | trading the code for a token | `changes` | none |
 | `app:created` | registering an app | `object` | `actor:created` for its bot, unless a bot already held its slug; then `oauth_app:created`, since an app is an OAuth app under the same id |
-| `app:hook_set` | pointing an app's webhook at a URL, taking it off one, or turning it on or off; a consequence of forking a world, which turns every webhook off | `changes` | none |
+| `app:hook_set` | pointing an app's webhook at a URL, which the app does through its face, or turning it on or off; a consequence of forking a world, which turns every webhook off | `changes` | none |
 | `app:hook_secret_issued` | issuing a secret for an app's webhook | `changes`: `hook_secrets`, how many it has been issued | none |
 | `app_key:created` | adding a public key to an app | `object` | none |
 | `installation:created` | installing an app on an account | `object` | none |

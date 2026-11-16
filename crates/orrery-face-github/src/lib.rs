@@ -454,6 +454,14 @@ pub(crate) fn invalid_request(detail: &str) -> Response<Body> {
     )
 }
 
+/// A value as GitHub's schema messages spell it: JSON, but `nil` for null.
+pub(crate) fn schema_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "nil".to_string(),
+        other => other.to_string(),
+    }
+}
+
 pub(crate) fn internal(e: impl std::fmt::Display) -> Response<Body> {
     tracing::error!(error = %e, "github face internal error");
     github_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")

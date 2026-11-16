@@ -20,8 +20,8 @@ use crate::render::{
 };
 use crate::{
     GithubFace, github_error, internal, invalid_request, json_response, media,
-    orrery_unsupported_field, resolve_repo, validation_custom, validation_custom_field,
-    validation_invalid, validation_invalid_message, validation_missing,
+    orrery_unsupported_field, resolve_repo, schema_value, validation_custom,
+    validation_custom_field, validation_invalid, validation_invalid_message, validation_missing,
 };
 
 #[derive(serde::Deserialize)]
@@ -959,14 +959,6 @@ fn reviewers_body(body: &Bytes, link: usize) -> Result<ReviewersBody, Box<Respon
         reviewers: names("reviewers")?,
         team_reviewers: names("team_reviewers")?,
     })
-}
-
-/// A value as GitHub's schema messages spell it: JSON, but `nil` for null.
-fn schema_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "nil".to_string(),
-        other => other.to_string(),
-    }
 }
 
 /// `POST /repos/{o}/{r}/pulls/{n}/requested_reviewers`: 201 with the pull.

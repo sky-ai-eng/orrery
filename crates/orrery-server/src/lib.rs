@@ -172,7 +172,7 @@ pub fn routers(
     // The GitHub face makes the deliveries of every write this world takes
     // from here on, and of its newest write, if a process stopped between
     // that write and them.
-    world.set_notifier(orrery_face_github::webhooks::notifier(github.clone()));
+    world.set_notifier(orrery_face_github::webhooks::notifier(&github));
     if let Err(e) = world.finish_last_write() {
         tracing::error!(error = %e, "making the newest write's deliveries failed");
     }

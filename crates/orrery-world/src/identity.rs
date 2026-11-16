@@ -23,7 +23,6 @@ const OAUTH_APP_COLUMNS: &str =
 const LISTED_OAUTH_APP_SELECT: &str = "SELECT name, client_id, callback_url FROM oauth_apps";
 
 impl World {
-    /// An actor's addresses, primary first.
     /// The login of the account that holds `email`: the one that has
     /// verified it, when one has, and the oldest account otherwise. `None`
     /// for an address no account holds.
@@ -39,6 +38,7 @@ impl World {
             .optional()?)
     }
 
+    /// An actor's addresses, primary first.
     pub fn actor_emails(&self, actor_id: i64) -> Result<Vec<ActorEmail>> {
         emails_of(&self.lock(), actor_id)
     }

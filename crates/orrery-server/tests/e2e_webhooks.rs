@@ -424,6 +424,18 @@ async fn a_receiver_gets_a_signed_delivery_for_each_event() {
     assert!(created["installation"]["created_at"].is_string());
     assert_eq!(created["repositories"][0]["full_name"], "acme/web");
 
+    // push: a commit with no parent adds every file it holds.
+    let first = payload(1);
+    assert_eq!(first["ref"], "refs/heads/main");
+    assert_eq!(
+        first["commits"][0]["added"],
+        serde_json::json!(["README.md"])
+    );
+    assert_eq!(
+        first["head_commit"]["added"],
+        serde_json::json!(["README.md"])
+    );
+
     // push: the branch, and the commit it added.
     let pushed = payload(2);
     assert_eq!(pushed["ref"], "refs/heads/feature");
@@ -717,6 +729,16 @@ async fn an_app_reads_its_deliveries_and_asks_for_one_again() {
     let (_, _, page) = call("GET", &format!("{list}?status=success"), &s.jwt(), None);
     assert_eq!(page, serde_json::json!([]));
 
+    // A cursor that names more deliveries than a page holds goes back over
+    // a page of them and no further.
+    let (status, _, page) = call(
+        "GET",
+        &format!("{list}?cursor=v1_p1l18446744073709551615"),
+        &s.jwt(),
+        None,
+    );
+    assert_eq!(status, 200, "{page}");
+
     // What GitHub refuses.
     for (query, message) in [
         (
@@ -971,9 +993,165 @@ async fn a_world_that_does_not_send_makes_its_deliveries_and_keeps_them() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(s.receiver.got.lock().unwrap().is_empty());
-    // A delivery that was never attempted is in no list.
+    // A delivery that was never attempted is in no list, and so cannot be
+    // asked for again.
     let list = format!("{}/app/hook/deliveries", s.api);
     assert_eq!(call("GET", &list, &s.jwt(), None).2, serde_json::json!([]));
+    let pending = items[made]["subject"]["id"].as_i64().unwrap();
+    let (status, _, refused) = call(
+        "POST",
+        &format!("{list}/{pending}/attempts"),
+        &s.jwt(),
+        None,
+    );
+    assert_eq!(status, 404, "{refused}");
+    let after = control_post(
+        &s.base,
+        "/_orrery/log/list",
+        serde_json::json!({ "page_size": 0 }),
+    );
+    assert_eq!(after["total_count"], log["total_count"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_run_created_complete_sends_both_actions() {
+    let s = setup_with(sending(), 204).await;
+    let api = &s.api;
+    let token = s.token(s.install());
+    let head_sha = s.push("feature");
+    face_ok(
+        "POST",
+        &format!("{api}/repos/acme/web/check-runs"),
+        &token,
+        serde_json::json!({
+            "name": "build", "head_sha": head_sha, "status": "completed", "conclusion": "success",
+        }),
+    );
+    let got = s.receiver.wait(5).await;
+    let kinds: Vec<(String, Option<String>)> = got[3..].iter().map(Received::kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            ("check_run".to_string(), Some("created".to_string())),
+            ("check_run".to_string(), Some("completed".to_string())),
+        ]
+    );
+    for received in &got[3..] {
+        let payload = received.json();
+        assert_eq!(payload["check_run"]["status"], "completed");
+        assert_eq!(payload["check_run"]["conclusion"], "success");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_points_its_own_webhook() {
+    let s = setup_with(orrery_server::Options::default(), 204).await;
+    let config = format!("{}/app/hook/config", s.api);
+    let patch = |body: serde_json::Value| {
+        let (status, _, answer) = call("PATCH", &config, &s.jwt(), Some(body));
+        (status, answer)
+    };
+    let (status, same) = patch(serde_json::json!({}));
+    assert_eq!(status, 200, "{same}");
+    assert_eq!(same["url"], s.receiver.url);
+    assert_eq!(same["secret"], "********");
+
+    let (status, moved) = patch(serde_json::json!({
+        "url": "https://x.test/hook?a=1", "content_type": "json", "insecure_ssl": "0",
+    }));
+    assert_eq!(status, 200, "{moved}");
+    assert_eq!(
+        moved,
+        serde_json::json!({
+            "content_type": "json", "insecure_ssl": "0", "secret": "********",
+            "url": "https://x.test/hook?a=1",
+        })
+    );
+    assert_eq!(call("GET", &config, &s.jwt(), None).2, moved);
+    // The App's bot made the change, through the App.
+    let log = control_post(
+        &s.base,
+        "/_orrery/log/list",
+        serde_json::json!({ "page_size": 500 }),
+    );
+    let set = log["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|e| e["type"] == "app:hook_set")
+        .unwrap();
+    assert_eq!(set["actor"]["login"], "helper");
+    assert_eq!(set["door"], "rest");
+
+    // GitHub's schema refusals, then its faults with the URL.
+    for (body, message) in [
+        (
+            serde_json::json!({ "zzz": 1, "url": "nope" }),
+            "Invalid request.\n\n\"zzz\" is not a permitted key.",
+        ),
+        (
+            serde_json::json!({ "url": null }),
+            "Invalid request.\n\nFor 'properties/url', nil is not a string.",
+        ),
+        (
+            serde_json::json!({ "url": "nope", "insecure_ssl": 0 }),
+            "Invalid request.\n\nFor 'properties/insecure_ssl', 0 is not a string.",
+        ),
+        (
+            serde_json::json!([]),
+            "Invalid request.\n\nFor 'links/2/schema', [] is not an object.",
+        ),
+        (
+            serde_json::json!({ "url": "https://x.test/a b" }),
+            "Invalid request.\n\nhttps://x.test/a b is not a valid uri.",
+        ),
+    ] {
+        let (status, refused) = patch(body);
+        assert_eq!(status, 422, "{refused}");
+        assert_eq!(refused["message"], message);
+    }
+    for (url, faults) in [
+        (
+            "",
+            serde_json::json!([
+                "Config attribute records value can't be blank",
+                "Url cannot be blank"
+            ]),
+        ),
+        ("nope", serde_json::json!(["Url is missing a scheme"])),
+        (
+            "ftp://x.test/hook",
+            serde_json::json!(["Url scheme is invalid"]),
+        ),
+        ("https://", serde_json::json!(["Url host is invalid"])),
+        ("https:///x", serde_json::json!(["Url host is invalid"])),
+    ] {
+        let (status, refused) = patch(serde_json::json!({ "url": url }));
+        assert_eq!(status, 400, "{refused}");
+        assert_eq!(refused["message"], faults);
+    }
+    // What a world does not do is refused by name.
+    for (body, field) in [
+        (serde_json::json!({ "secret": "s3cret" }), "secret"),
+        (
+            serde_json::json!({ "content_type": "form" }),
+            "content_type",
+        ),
+        (serde_json::json!({ "insecure_ssl": "1" }), "insecure_ssl"),
+    ] {
+        let (status, refused) = patch(body);
+        assert_eq!(status, 422, "{refused}");
+        assert_eq!(refused["orrery"]["field"], field);
+    }
+    assert_eq!(call("GET", &config, &s.jwt(), None).2, moved);
+    // Only the App changes it, with its own signature.
+    let (status, _, _) = call(
+        "PATCH",
+        &config,
+        &bearer(&s.alice),
+        Some(serde_json::json!({ "url": "https://y.test/hook" })),
+    );
+    assert_eq!(status, 401);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1036,34 +1214,42 @@ async fn the_control_plane_sets_an_apps_webhook() {
     assert_eq!(read["webhook_url"], serde_json::Value::Null);
     assert!(!read.to_string().contains("whsec"));
 
-    // PATCH changes the field it names and keeps the other.
-    let patch = |body: serde_json::Value| call("PATCH", &one, "", Some(body));
-    let (status, _, on) = patch(serde_json::json!({ "webhook_active": true }));
+    // PATCH turns a webhook on and off. One with no URL cannot be on, and
+    // where it points is the App's to change, on the face.
+    let patch = |url: &str, body: serde_json::Value| call("PATCH", url, "", Some(body));
+    let (status, _, on) = patch(&one, serde_json::json!({ "webhook_active": true }));
     assert_eq!(status, 400, "{on}");
     assert_eq!(
         faults(&on),
         [fault("INVALID_ARGUMENT", Some("webhook_active"))]
     );
-    let (status, _, set) = patch(serde_json::json!({ "webhook_url": "https://x.test/hook" }));
-    assert_eq!(status, 200, "{set}");
-    assert_eq!(set["webhook_url"], "https://x.test/hook");
-    assert_eq!(set["webhook_active"], false);
-    let (_, _, on) = patch(serde_json::json!({ "webhook_active": true }));
+    let (status, hooked) = register(new(
+        "hooked",
+        serde_json::json!({ "webhook_url": "https://x.test/hook" }),
+    ));
+    assert_eq!(status, 201, "{hooked}");
+    assert_eq!(hooked["webhook_active"], false);
+    let hooked = format!("{base}/_orrery/apps/hooked");
+    let (status, _, on) = patch(&hooked, serde_json::json!({ "webhook_active": true }));
+    assert_eq!(status, 200, "{on}");
     assert_eq!(on["webhook_active"], true);
     assert_eq!(on["webhook_url"], "https://x.test/hook");
-    let (status, _, cleared) = patch(serde_json::json!({ "webhook_url": null }));
-    assert_eq!(status, 400, "{cleared}");
-    let (_, _, off) = patch(serde_json::json!({ "webhook_active": false, "webhook_url": null }));
-    assert_eq!(off["webhook_url"], serde_json::Value::Null);
+    let (_, _, same) = patch(&hooked, serde_json::json!({}));
+    assert_eq!(same, on);
+    let (_, _, off) = patch(&hooked, serde_json::json!({ "webhook_active": false }));
+    assert_eq!(off["webhook_active"], false);
     for (body, field) in [
         (
             serde_json::json!({ "webhook_active": null }),
             "webhook_active",
         ),
-        (serde_json::json!({ "webhook_url": 3 }), "webhook_url"),
+        (
+            serde_json::json!({ "webhook_url": "https://y.test/hook" }),
+            "webhook_url",
+        ),
         (serde_json::json!({ "name": "x" }), "name"),
     ] {
-        let (status, _, refused) = patch(body);
+        let (status, _, refused) = patch(&hooked, body);
         assert_eq!(status, 400, "{refused}");
         assert_eq!(faults(&refused)[0].1.as_deref(), Some(field));
     }
@@ -1096,4 +1282,28 @@ async fn the_control_plane_sets_an_apps_webhook() {
         .0,
         404
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_world_is_released_when_its_server_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let world = std::sync::Arc::new(
+        orrery_world::World::create(
+            &dir.path().join("world"),
+            orrery_world::DEFAULT_T0_UNIX,
+            &orrery_world::WorldSecret::LOCAL,
+        )
+        .unwrap(),
+    );
+    let routers = orrery_server::routers(
+        world.clone(),
+        "http://127.0.0.1:1".to_string(),
+        dir.path().join("snapshots"),
+        orrery_server::Options::default(),
+    );
+    assert!(std::sync::Arc::strong_count(&world) > 1);
+    drop(routers);
+    // The world keeps the face that makes its deliveries, and the face
+    // must not keep the world.
+    assert_eq!(std::sync::Arc::strong_count(&world), 1);
 }

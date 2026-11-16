@@ -7,14 +7,14 @@
 //! covering the repository. A payload is rendered here, from the world as
 //! the write left it, with the renderers the REST routes answer with.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
 use axum::http::{Response, StatusCode, header};
 use base64::Engine as _;
-use orrery_face_git::store;
-use orrery_world::events::{self, EventBody};
+use orrery_face_git::{GitFace, store};
+use orrery_world::events::{self, Door, EventBody};
 use orrery_world::{
     Actor, App, Attribution, CheckRun, CheckStatus, Delivery, DeliveryFailure, DeliveryFilter,
     DeliveryOutcome, Installation, NewDelivery, Notifier, Pull, PullState, Repo,
@@ -25,7 +25,7 @@ use crate::render::{
     Mergeability, actor_json, check_run_json, comment_json, full_pull_json, label_json, pull_json,
     repo_json, review_json, rfc3339, team_json, user_json,
 };
-use crate::{GithubFace, github_error, internal, invalid_request, json_response};
+use crate::{GithubFace, github_error, internal, invalid_request, json_response, schema_value};
 
 /// What GitHub's sender calls itself: its name, then seven hex digits of
 /// the build it runs, which here are zeros.
@@ -39,6 +39,10 @@ const DEFAULT_PER_PAGE: usize = 30;
 // ---- the routes an App reads its webhook by ----
 
 pub(crate) async fn get_config(Extension(app): Extension<App>) -> Response<Body> {
+    json_response(StatusCode::OK, config_json(&app))
+}
+
+fn config_json(app: &App) -> serde_json::Value {
     let mut config = serde_json::json!({
         "content_type": "json",
         "insecure_ssl": "0",
@@ -47,7 +51,109 @@ pub(crate) async fn get_config(Extension(app): Extension<App>) -> Response<Body>
     if app.hook.has_secret {
         config["secret"] = "********".into();
     }
-    json_response(StatusCode::OK, config)
+    config
+}
+
+/// Point the App's webhook at a URL, as the App does with its own
+/// signature: `200` with the configuration. GitHub checks the body against
+/// its schema first, then the URL. A world sends JSON, checks a receiver's
+/// certificate, and derives a webhook's secret, so it takes `content_type`
+/// and `insecure_ssl` only at the values it has and refuses `secret` by
+/// name.
+pub(crate) async fn patch_config(
+    State(face): State<GithubFace>,
+    Extension(app): Extension<App>,
+    body: Bytes,
+) -> Response<Body> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return invalid_request("For 'links/2/schema', nil is not an object.");
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON");
+    };
+    let Some(fields) = value.as_object() else {
+        return invalid_request(&format!(
+            "For 'links/2/schema', {} is not an object.",
+            schema_value(&value)
+        ));
+    };
+    const KEYS: [&str; 4] = ["url", "content_type", "insecure_ssl", "secret"];
+    if let Some(key) = fields.keys().find(|key| !KEYS.contains(&key.as_str())) {
+        return invalid_request(&format!("\"{key}\" is not a permitted key."));
+    }
+    let text = |key: &str| -> Result<Option<&str>, Box<Response<Body>>> {
+        match fields.get(key) {
+            None => Ok(None),
+            Some(value) => match value.as_str() {
+                Some(text) => Ok(Some(text)),
+                None => Err(Box::new(invalid_request(&format!(
+                    "For 'properties/{key}', {} is not a string.",
+                    schema_value(value)
+                )))),
+            },
+        }
+    };
+    let read = || -> Result<Option<&str>, Box<Response<Body>>> {
+        let url = text("url")?;
+        let fixed = [
+            ("content_type", text("content_type")?, "json"),
+            ("insecure_ssl", text("insecure_ssl")?, "0"),
+            ("secret", text("secret")?, ""),
+        ];
+        for (key, given, held) in fixed {
+            if given.is_some_and(|given| key == "secret" || given != held) {
+                return Err(Box::new(crate::orrery_unsupported_field("AppHook", key)));
+            }
+        }
+        Ok(url)
+    };
+    let url = match read() {
+        Ok(url) => url,
+        Err(resp) => return *resp,
+    };
+    let Some(url) = url else {
+        return json_response(StatusCode::OK, config_json(&app));
+    };
+    if url.contains(char::is_whitespace) {
+        return invalid_request(&format!("{url} is not a valid uri."));
+    }
+    if let Some(faults) = url_faults(url) {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "message": faults }),
+        );
+    }
+    let by = Attribution::new(app.bot.id, Door::Rest).with_app(Some(app.id));
+    match face.world.set_app_hook(&app.slug, Some(url), None, by) {
+        Ok(app) => json_response(StatusCode::OK, config_json(&app)),
+        Err(WorldError::InvalidApp { message, .. }) => github_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("orrery: {message}"),
+        ),
+        Err(e) => internal(e),
+    }
+}
+
+/// GitHub's faults with a webhook's URL, which it answers as a list. A
+/// world matches the scheme in lower case, where GitHub takes any case.
+fn url_faults(url: &str) -> Option<Vec<&'static str>> {
+    if url.is_empty() {
+        return Some(vec![
+            "Config attribute records value can't be blank",
+            "Url cannot be blank",
+        ]);
+    }
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return Some(vec!["Url is missing a scheme"]);
+    };
+    if !matches!(scheme, "http" | "https") {
+        return Some(vec!["Url scheme is invalid"]);
+    }
+    let host = rest
+        .strip_prefix("//")
+        .map(|rest| rest.split(['/', '?', '#']).next().unwrap_or_default())
+        .unwrap_or_default();
+    host.is_empty().then(|| vec!["Url host is invalid"])
 }
 
 /// An App's attempted deliveries, newest first. GitHub pages them by a
@@ -167,9 +273,11 @@ impl Cursor {
         match rest.strip_prefix('p') {
             Some(backwards) => {
                 let (id, back) = backwards.split_once('l')?;
+                // GitHub writes a page's size here, which is never more
+                // than the most a page holds.
                 Some(Cursor::Before {
                     id: id.parse().ok()?,
-                    back: back.parse().ok()?,
+                    back: back.parse::<usize>().ok()?.min(MAX_PER_PAGE),
                 })
             }
             None => rest.parse().ok().map(Cursor::At),
@@ -245,7 +353,7 @@ pub(crate) async fn redeliver(
         Err(WorldError::HookInactive) => github_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "orrery: this App's webhook is inactive, so the world sends nothing for it; \
-             turn it on with PATCH /_orrery/apps/{slug}/webhook",
+             turn it on with PATCH /_orrery/apps/{slug}",
         ),
         Err(e) => internal(e),
     }
@@ -293,24 +401,63 @@ pub fn delivery_headers(delivery: &Delivery, secret: Option<&str>) -> Vec<(&'sta
 
 // ---- the deliveries a write makes ----
 
-/// Makes an App's deliveries for the writes a world takes.
+/// Makes an App's deliveries for the writes a world takes. The world keeps
+/// this, and a face keeps its world, so this holds the face's parts weakly:
+/// held strongly, a world would keep itself alive after its server is gone.
 pub struct Webhooks {
+    world: Weak<World>,
+    git: Weak<GitFace>,
+    base_url: String,
+}
+
+/// The notifier to register with the world the face serves. It makes
+/// deliveries for as long as something else holds the face's parts.
+pub fn notifier(face: &GithubFace) -> Arc<dyn Notifier> {
+    Arc::new(Webhooks {
+        world: Arc::downgrade(&face.world),
+        git: Arc::downgrade(&face.git),
+        base_url: face.base_url.clone(),
+    })
+}
+
+/// The face a write's payloads are rendered with.
+struct Rendering {
     face: GithubFace,
 }
 
-/// The notifier to register with the world the face serves.
-pub fn notifier(face: GithubFace) -> Arc<dyn Notifier> {
-    Arc::new(Webhooks { face })
+/// One payload to deliver, before it is addressed to an App: GitHub's
+/// action and the payload, which every App receives alike but for its own
+/// `installation`.
+struct Outgoing {
+    action: Option<String>,
+    payload: serde_json::Value,
 }
 
-/// One event to deliver, before it is addressed to an App: GitHub's event
-/// name and action, the repository it is about, and the payload, which
-/// every App receives alike but for its own `installation`.
-struct Outgoing {
-    event: &'static str,
-    action: Option<String>,
-    repo: Option<Repo>,
-    payload: serde_json::Value,
+/// GitHub's name for the event one of a world's events sends, and the
+/// repository it is about; `None` for an event that sends nothing.
+fn addressed(event: &EventBody) -> Option<(&'static str, i64)> {
+    Some(match event {
+        EventBody::PullOpened(e) => ("pull_request", e.subject.repo.id),
+        EventBody::PullEdited(e)
+        | EventBody::PullHeadMoved(e)
+        | EventBody::PullLabeled(e)
+        | EventBody::PullUnlabeled(e)
+        | EventBody::PullReviewRequested(e)
+        | EventBody::PullReviewRequestRemoved(e) => ("pull_request", e.subject.repo.id),
+        EventBody::PullClosed(e)
+        | EventBody::PullMerged(e)
+        | EventBody::PullReopened(e)
+        | EventBody::PullReadyForReview(e)
+        | EventBody::PullConvertedToDraft(e) => ("pull_request", e.subject.repo.id),
+        EventBody::ReviewSubmitted(e) => ("pull_request_review", e.subject.repo.id),
+        EventBody::CommentCreated(e) => ("issue_comment", e.subject.repo.id),
+        EventBody::CheckRunCreated(e) => ("check_run", e.subject.repo.id),
+        EventBody::CheckRunUpdated(e) => ("check_run", e.subject.repo.id),
+        EventBody::RefCreated(e) => ("push", e.subject.repo.id),
+        EventBody::RefUpdated(e) => ("push", e.subject.repo.id),
+        EventBody::RefDeleted(e) => ("push", e.subject.repo.id),
+        _ => return None,
+    })
 }
 
 /// An event about one installation, which only that installation's App
@@ -322,7 +469,17 @@ struct OfInstallation {
 
 impl Notifier for Webhooks {
     fn deliveries(&self, world: &World, by: Attribution, events: &[EventBody]) -> Vec<NewDelivery> {
-        match self.made(world, by, events) {
+        let (Some(served), Some(git)) = (self.world.upgrade(), self.git.upgrade()) else {
+            return Vec::new();
+        };
+        let rendering = Rendering {
+            face: GithubFace {
+                world: served,
+                git,
+                base_url: self.base_url.clone(),
+            },
+        };
+        match rendering.made(world, by, events) {
             Ok(made) => made,
             Err(e) => {
                 tracing::error!(error = %e, "making a write's deliveries failed");
@@ -330,9 +487,13 @@ impl Notifier for Webhooks {
             }
         }
     }
+
+    fn lost(&self, error: &WorldError) {
+        tracing::error!(error = %error, "a write landed and its deliveries could not be stored");
+    }
 }
 
-impl Webhooks {
+impl Rendering {
     fn made(
         &self,
         world: &World,
@@ -358,17 +519,25 @@ impl Webhooks {
                 made.push(self.installation_delivery(world, app, &of, sender.as_ref(), by)?);
                 continue;
             }
+            // Rendering a payload reads the repository's git, and every
+            // other write waits for it, so nothing is rendered until an
+            // App is known to receive it.
+            let Some((name, repo_id)) = addressed(event) else {
+                continue;
+            };
+            let Some(repo) = world.repo_by_id(repo_id)? else {
+                continue;
+            };
+            let receivers: Vec<&Installation> = installations
+                .iter()
+                .filter(|i| receives(i, &repo, name))
+                .filter(|i| apps.iter().any(|app| app.id == i.app_id))
+                .collect();
+            if receivers.is_empty() {
+                continue;
+            }
             for outgoing in self.outgoing(world, event, sender.as_ref())? {
-                let Some(repo) = &outgoing.repo else {
-                    continue;
-                };
-                for installation in installations
-                    .iter()
-                    .filter(|i| receives(i, repo, &outgoing))
-                {
-                    if !apps.iter().any(|app| app.id == installation.app_id) {
-                        continue;
-                    }
+                for installation in &receivers {
                     let mut payload = outgoing.payload.clone();
                     payload["installation"] = serde_json::json!({
                         "id": installation.id,
@@ -378,7 +547,7 @@ impl Webhooks {
                         app_id: installation.app_id,
                         installation_id: Some(installation.id),
                         repo_id: Some(repo.id),
-                        event: outgoing.event.to_string(),
+                        event: name.to_string(),
                         action: outgoing.action.clone(),
                         body: payload.to_string(),
                     });
@@ -519,9 +688,7 @@ impl Webhooks {
             });
             more(&mut payload);
             Ok(vec![Outgoing {
-                event: "pull_request",
                 action: Some(action.to_string()),
-                repo: Some(repo),
                 payload,
             }])
         };
@@ -605,10 +772,6 @@ impl Webhooks {
                     true => "review_requested",
                     false => "review_request_removed",
                 };
-                let moved = |from: usize, to: usize| match requested {
-                    true => to > from,
-                    false => from > to,
-                };
                 let mut out = Vec::new();
                 if let Some(reviewers) = &e.changes.requested_reviewers {
                     let (old, new) = (&reviewers.from, &reviewers.to);
@@ -616,12 +779,10 @@ impl Webhooks {
                         true => (new, old),
                         false => (old, new),
                     };
-                    if moved(old.len(), new.len()) || gone != kept {
-                        for reviewer in gone.iter().filter(|r| !kept.contains(r)) {
-                            out.extend(pull_event(&e.subject, action, &|payload| {
-                                payload["requested_reviewer"] = user_json(face, &reviewer.login);
-                            })?);
-                        }
+                    for reviewer in gone.iter().filter(|r| !kept.contains(r)) {
+                        out.extend(pull_event(&e.subject, action, &|payload| {
+                            payload["requested_reviewer"] = user_json(face, &reviewer.login);
+                        })?);
                     }
                 }
                 if let Some(teams) = &e.changes.requested_teams {
@@ -667,7 +828,6 @@ impl Webhooks {
                     }
                 }
                 Ok(vec![Outgoing {
-                    event: "pull_request_review",
                     action: Some("submitted".to_string()),
                     payload: serde_json::json!({
                         "action": "submitted",
@@ -676,7 +836,6 @@ impl Webhooks {
                         "repository": repo_json(face, &repo, &owner),
                         "sender": sender,
                     }),
-                    repo: Some(repo),
                 }])
             }
             EventBody::CommentCreated(e) => {
@@ -698,7 +857,6 @@ impl Webhooks {
                 comment["performed_via_github_app"] = serde_json::Value::Null;
                 comment["minimized"] = serde_json::Value::Null;
                 Ok(vec![Outgoing {
-                    event: "issue_comment",
                     action: Some("created".to_string()),
                     payload: serde_json::json!({
                         "action": "created",
@@ -707,11 +865,16 @@ impl Webhooks {
                         "repository": repo_json(face, &repo, &owner),
                         "sender": sender,
                     }),
-                    repo: Some(repo),
                 }])
             }
+            // GitHub sends both for a run that is created already complete.
             EventBody::CheckRunCreated(e) => {
-                self.check_run(world, e.subject.id, e.subject.repo.id, "created", sender)
+                let (id, repo_id) = (e.subject.id, e.subject.repo.id);
+                let mut out = self.check_run(world, id, repo_id, "created", sender.clone())?;
+                if e.object.status == CheckStatus::Completed {
+                    out.extend(self.check_run(world, id, repo_id, "completed", sender)?);
+                }
+                Ok(out)
             }
             // GitHub sends `completed` when a run completes, and nothing
             // for any other update.
@@ -774,7 +937,6 @@ impl Webhooks {
         let mut check_run = check_run_json(face, &repo, &run)?;
         check_run["pull_requests"] = self.pulls_of(world, &repo, &run)?;
         Ok(vec![Outgoing {
-            event: "check_run",
             action: Some(action.to_string()),
             payload: serde_json::json!({
                 "action": action,
@@ -782,7 +944,6 @@ impl Webhooks {
                 "repository": repo_json(face, &repo, &owner),
                 "sender": sender,
             }),
-            repo: Some(repo),
         }])
     }
 
@@ -913,7 +1074,6 @@ impl Webhooks {
             None => serde_json::Value::Null,
         };
         Ok(vec![Outgoing {
-            event: "push",
             action: None,
             payload: serde_json::json!({
                 "ref": subject.name,
@@ -930,7 +1090,6 @@ impl Webhooks {
                 "commits": commits,
                 "head_commit": head_commit,
             }),
-            repo: Some(repo),
         }])
     }
 }
@@ -948,9 +1107,9 @@ struct Pushed<'a> {
 /// Whether an installation's App is sent an event about `repo`: the
 /// installation covers the repository, subscribes to the event, and is not
 /// suspended.
-fn receives(installation: &Installation, repo: &Repo, outgoing: &Outgoing) -> bool {
+fn receives(installation: &Installation, repo: &Repo, event: &str) -> bool {
     installation.suspended.is_none()
-        && installation.events.iter().any(|e| e == outgoing.event)
+        && installation.events.iter().any(|e| e == event)
         && installation
             .account
             .login
@@ -1080,9 +1239,6 @@ fn issue_json(face: &GithubFace, repo: &Repo, pull: &Pull, comments: usize) -> s
     })
 }
 
-/// Each of `shas` as a push's payload carries a commit, in their order:
-/// its id and tree, its message, who wrote and committed it and when, and
-/// the files it added, removed, and modified against its first parent.
 /// The commits a push added that no other branch or tag reaches: what
 /// GitHub calls distinct. `None` when git could not say, and for a ref that
 /// was deleted.
@@ -1102,21 +1258,16 @@ fn distinct_commits(
         .map(|(_, sha)| sha.as_str())
         .collect();
     others.extend(pushed.before);
-    let out = store::hermetic_git(bare)
-        .args(["rev-list", after, "--not"])
-        .args(others)
-        .output()
-        .ok()?;
-    out.status.success().then(|| {
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect()
-    })
+    let others: Vec<&str> = others.into_iter().collect();
+    let (commits, _) = store::added_commits(bare, after, &others, usize::MAX).ok()?;
+    Some(commits.into_iter().collect())
 }
 
-/// `distinct` holds the commits to call distinct, or `None` to call every
-/// one distinct.
+/// Each of `shas` as a push's payload carries a commit, in their order:
+/// its id and tree, its message, who wrote and committed it and when, and
+/// the files it added, removed, and modified against its first parent, or
+/// every file it holds as added when it has no parent. `distinct` holds the
+/// commits to call distinct, or `None` to call every one distinct.
 fn commit_payloads(
     world: &World,
     bare: &std::path::Path,
@@ -1157,8 +1308,9 @@ fn commit_payloads(
     let mut commits = Vec::with_capacity(records.len());
     for f in &records {
         let (mut added, mut removed, mut modified) = (Vec::new(), Vec::new(), Vec::new());
-        let has_parent = !f[2].is_empty();
-        if has_parent && let Some(Ok(files)) = changed.next() {
+        if f[2].is_empty() {
+            added = store::tree_paths(bare, f[0]).map_err(|e| e.to_string())?;
+        } else if let Some(Ok(files)) = changed.next() {
             for file in files {
                 match file.status {
                     store::FileStatus::Added => added.push(file.path),

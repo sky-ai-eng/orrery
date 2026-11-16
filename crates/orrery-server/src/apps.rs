@@ -279,28 +279,23 @@ fn read_app(state: &AppState, slug: String) -> Response<Body> {
     }
 }
 
-/// Change an app's webhook: `webhook_url` points it at a URL, or with null
-/// takes it off one, and `webhook_active` turns it on or off. A field left
-/// out keeps its value. Answers the app as a read does.
+/// Turn an app's webhook on or off with `webhook_active`, which GitHub does
+/// on the app's settings page and by no API. Where the webhook points is
+/// the app's own to change, with its signature, on the face (`PATCH
+/// /app/hook/config`). A field left out keeps its value. Answers the app as
+/// a read does.
 async fn patch_app(
     State(state): State<AppState>,
     UrlPath(slug): UrlPath<String>,
     body: Bytes,
 ) -> Response<Body> {
     let mut fields = Fields::parse(&body);
-    let url: Option<Option<String>> = fields.patched("webhook_url");
-    if let Some(Some(url)) = &url
-        && let Err(e) = validate_hook_url(url)
-    {
-        fields.fault(app_fault(e, "webhook_url"));
-    }
     let active: Option<bool> = fields.optional_not_null("webhook_active");
-    let (url, active) = match fields.finish(Some((url, active))) {
+    let active = match fields.finish(Some(active)) {
         Ok(read) => read,
         Err(resp) => return *resp,
     };
-    let url = url.as_ref().map(|url| url.as_deref());
-    match state.world.set_app_hook(&slug, url, active, SYSTEM) {
+    match state.world.set_app_hook(&slug, None, active, SYSTEM) {
         Ok(app) => match app_body(&state, app) {
             Ok(app) => json(StatusCode::OK, serde_json::json!(app)),
             Err(e) => internal(e),
@@ -317,9 +312,9 @@ async fn patch_app(
 }
 
 /// Issue a secret for the app's webhook, which replaces the one before: its
-/// deliveries are signed with the newest. GitHub's settings page sets one,
-/// and no API does. It takes no fields, and no read returns the secret
-/// again.
+/// deliveries are signed with the newest. A world derives the secret, where
+/// GitHub takes one the app's owner chooses, so issuing one is the world's
+/// own operation. It takes no fields, and no read returns the secret again.
 async fn issue_webhook_secret(
     State(state): State<AppState>,
     UrlPath(slug): UrlPath<String>,

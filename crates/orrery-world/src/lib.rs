@@ -673,8 +673,13 @@ impl World {
         self.conn.lock().expect("world.db mutex poisoned")
     }
 
+    /// The write-order lock. It guards no data, only who writes next, so a
+    /// thread that panicked while holding it left nothing half-written
+    /// behind it.
     fn order(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.order.lock().expect("write order mutex poisoned")
+        self.order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(crate) fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
