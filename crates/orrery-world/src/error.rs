@@ -60,6 +60,8 @@ pub enum WorldError {
     InvalidTeamName(String),
     #[error("{0:?} cannot be requested to review this pull")]
     InvalidReviewer(String),
+    #[error("the team {0:?} cannot be requested to review this pull")]
+    InvalidReviewTeam(String),
     #[error("a review cannot be requested from the pull's author")]
     ReviewerIsAuthor,
     #[error("invalid state transition: {0}")]

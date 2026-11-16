@@ -25,7 +25,7 @@ use crate::render::{
     Mergeability, actor_json, check_run_json, comment_json, full_pull_json, label_json, pull_json,
     repo_json, review_json, rfc3339, team_json, user_json,
 };
-use crate::{GithubFace, github_error, internal, json_response};
+use crate::{GithubFace, github_error, internal, invalid_request, json_response};
 
 /// What GitHub's sender calls itself: its name, then seven hex digits of
 /// the build it runs, which here are zeros.
@@ -48,13 +48,6 @@ pub(crate) async fn get_config(Extension(app): Extension<App>) -> Response<Body>
         config["secret"] = "********".into();
     }
     json_response(StatusCode::OK, config)
-}
-
-fn invalid_request(detail: &str) -> Response<Body> {
-    github_error(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        &format!("Invalid request.\n\n{detail}"),
-    )
 }
 
 /// An App's attempted deliveries, newest first. GitHub pages them by a

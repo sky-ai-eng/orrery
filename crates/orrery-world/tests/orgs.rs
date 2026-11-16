@@ -339,24 +339,28 @@ fn an_invalid_reviewer_refuses_the_whole_request() {
     let f = fixture();
     let pull = open_pull(&f);
     f.w.create_actor("ci", ActorKind::Bot).unwrap();
-    for (users, teams) in [
-        (vec!["bob", "ghost"], vec![]),
-        (vec!["bob", "ci"], vec![]),
-        (vec!["bob", "acme"], vec![]),
-        (vec!["bob"], vec!["no-such-team"]),
-    ] {
-        assert!(
-            matches!(
-                f.w.request_reviewers(pull.id, by(f.alice), &users, &teams),
-                Err(WorldError::InvalidReviewer(_))
-            ),
-            "{users:?} {teams:?} accepted"
-        );
-    }
     assert!(matches!(
-        f.w.request_reviewers(pull.id, by(f.bob), &["bob", "alice"], &[]),
+        f.w.request_reviewers(pull.id, by(f.alice), &["bob", "acme"], &[]),
+        Err(WorldError::InvalidReviewer(_))
+    ));
+    assert!(matches!(
+        f.w.request_reviewers(pull.id, by(f.alice), &["bob"], &["no-such-team"]),
+        Err(WorldError::InvalidReviewTeam(_))
+    ));
+    // The author is refused before an organization, and a team before both.
+    assert!(matches!(
+        f.w.request_reviewers(pull.id, by(f.bob), &["acme", "alice"], &[]),
         Err(WorldError::ReviewerIsAuthor)
     ));
+    assert!(matches!(
+        f.w.request_reviewers(pull.id, by(f.bob), &["alice"], &["no-such-team"]),
+        Err(WorldError::InvalidReviewTeam(_))
+    ));
+    // A login that names nobody, and a bot's, are skipped.
+    let same =
+        f.w.request_reviewers(pull.id, by(f.alice), &["ghost", "ci"], &[])
+            .unwrap();
+    assert_eq!(same, pull);
     assert_eq!(
         f.w.pull_by_id(pull.id).unwrap().unwrap(),
         pull,
@@ -386,7 +390,7 @@ fn an_invalid_reviewer_refuses_the_whole_request() {
         .unwrap();
     assert!(matches!(
         f.w.request_reviewers(theirs.id, by(f.bob), &[], &["platform"]),
-        Err(WorldError::InvalidReviewer(_))
+        Err(WorldError::InvalidReviewTeam(_))
     ));
 }
 

@@ -261,10 +261,12 @@ impl World {
     }
 
     /// Request reviews, GitHub's `POST …/pulls/{n}/requested_reviewers`.
-    /// Every name is checked before anything is written: a user must be a
-    /// person other than the pull's author, and a team must belong to the
-    /// organization that owns the repository. A reviewer already pending is
-    /// skipped, so only a new request is logged and lands on the timeline.
+    /// Every name is checked before anything is written, in the order
+    /// GitHub's refusals take: a team must belong to the organization that
+    /// owns the repository, no login may be the pull's author, and none may
+    /// be an organization. A login that names nobody, or a bot, is skipped,
+    /// as is a reviewer already pending, so only a new request is logged and
+    /// lands on the timeline.
     pub fn request_reviewers(
         &self,
         pull_id: i64,
@@ -275,20 +277,26 @@ impl World {
         self.write(by, |w| {
             let tx = w.tx;
             let before = queries::require_pull(tx, pull_id)?;
-            let user_ids = users
-                .iter()
-                .map(|login| {
-                    let id = reviewer_user_id(tx, login)?;
-                    if login.eq_ignore_ascii_case(&before.author_login) {
-                        return Err(WorldError::ReviewerIsAuthor);
-                    }
-                    Ok(id)
-                })
-                .collect::<Result<Vec<i64>>>()?;
             let team_ids = teams
                 .iter()
                 .map(|slug| reviewer_team_id(tx, before.repo_id, slug))
                 .collect::<Result<Vec<i64>>>()?;
+            if users
+                .iter()
+                .any(|login| login.eq_ignore_ascii_case(&before.author_login))
+            {
+                return Err(WorldError::ReviewerIsAuthor);
+            }
+            let mut user_ids = Vec::new();
+            for login in users {
+                match reviewer_kind(tx, login)? {
+                    Some((id, ActorKind::User)) => user_ids.push(id),
+                    Some((_, ActorKind::Org)) => {
+                        return Err(WorldError::InvalidReviewer(login.to_string()));
+                    }
+                    Some(_) | None => {}
+                }
+            }
             let mut added: Vec<RequestedReviewer> = Vec::new();
             let pull = w.pull_operation(pull_id, EventBody::PullReviewRequested, |tx| {
                 for id in &user_ids {
@@ -793,16 +801,16 @@ fn record_timeline(w: &mut Write<'_>, pull_id: i64, kind: &TimelineKind) -> Resu
     Ok(())
 }
 
-/// A user who can be asked for a review: a person, not a bot or an
-/// organization.
-fn reviewer_user_id(conn: &Connection, login: &str) -> Result<i64> {
-    conn.query_row(
-        "SELECT id FROM actors WHERE login = ?1 AND kind = 'user'",
-        params![login],
-        |r| r.get(0),
-    )
-    .optional()?
-    .ok_or_else(|| WorldError::InvalidReviewer(login.to_string()))
+/// Whose login this is, when it is anyone's. Only a person can be asked for
+/// a review.
+fn reviewer_kind(conn: &Connection, login: &str) -> Result<Option<(i64, ActorKind)>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, kind FROM actors WHERE login = ?1",
+            params![login],
+            |r| Ok((r.get(0)?, ActorKind::from_db(&r.get::<_, String>(1)?))),
+        )
+        .optional()?)
 }
 
 /// A team of the organization that owns the pull's repository; a repository
@@ -815,7 +823,7 @@ fn reviewer_team_id(conn: &Connection, repo_id: i64, slug: &str) -> Result<i64> 
         |r| r.get(0),
     )
     .optional()?
-    .ok_or_else(|| WorldError::InvalidReviewer(slug.to_string()))
+    .ok_or_else(|| WorldError::InvalidReviewTeam(slug.to_string()))
 }
 
 fn insert_request(

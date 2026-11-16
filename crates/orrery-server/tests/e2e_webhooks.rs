@@ -51,6 +51,11 @@ fn call(
             .delete(url)
             .header("authorization", authorization)
             .call(),
+        ("DELETE", Some(body)) => http
+            .delete(url)
+            .header("authorization", authorization)
+            .force_send_body()
+            .send_json(body),
         (other, _) => panic!("unsupported call {other}"),
     }
     .unwrap_or_else(|e| panic!("{method} {url} transport error: {e:?}"));
@@ -502,6 +507,117 @@ async fn a_receiver_gets_a_signed_delivery_for_each_event() {
         !log.to_string().contains(&s.secret),
         "no event carries the secret"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_request_is_delivered_once_for_each_new_reviewer() {
+    let s = setup_with(sending(), 204).await;
+    let api = &s.api;
+    s.install();
+    s.push("feature");
+    mint_actor(&s.base, "bob", "user");
+    mint_actor(&s.base, "carol", "user");
+    mint_actor(&s.base, "ci", "bot");
+    let pull = face_ok(
+        "POST",
+        &format!("{api}/repos/acme/web/pulls"),
+        &s.alice,
+        serde_json::json!({ "title": "A change", "head": "feature", "base": "main" }),
+    );
+    let reviewers = format!(
+        "{api}/repos/acme/web/pulls/{}/requested_reviewers",
+        pull["number"]
+    );
+    let ask = |method: &str, body: serde_json::Value| {
+        let (status, _, answer) = call(method, &reviewers, &bearer(&s.alice), Some(body));
+        (status, answer)
+    };
+    // With no body at all, GitHub names the schema it wanted.
+    let (status, _, bare) = call("POST", &reviewers, &bearer(&s.alice), None);
+    assert_eq!(status, 422);
+    assert_eq!(
+        bare["message"],
+        "Invalid request.\n\nFor 'links/0/schema', nil is not an object."
+    );
+    let pending = |answer: &serde_json::Value| -> Vec<String> {
+        answer["requested_reviewers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["login"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // A login that names nobody, and a bot's, are skipped, as on GitHub, and
+    // a login matches whatever its case.
+    let (status, asked) = ask(
+        "POST",
+        serde_json::json!({ "reviewers": ["BOB", "ghost", "ci", "carol"] }),
+    );
+    assert_eq!(status, 201, "{asked}");
+    assert_eq!(pending(&asked), ["bob", "carol"]);
+    // Asking someone already asked sends nothing.
+    let (status, again) = ask("POST", serde_json::json!({ "reviewers": ["bob"] }));
+    assert_eq!(status, 201, "{again}");
+    // Nor does withdrawing a request that was never made.
+    let (status, none) = ask("DELETE", serde_json::json!({ "reviewers": ["ghost"] }));
+    assert_eq!(status, 200, "{none}");
+    let (status, withdrawn) = ask("DELETE", serde_json::json!({ "reviewers": ["Bob"] }));
+    assert_eq!(status, 200, "{withdrawn}");
+    assert_eq!(pending(&withdrawn), ["carol"]);
+
+    let expected: Vec<(&str, Option<&str>)> = vec![
+        ("installation", Some("created")),
+        ("push", None),
+        ("push", None),
+        ("pull_request", Some("opened")),
+        ("pull_request", Some("review_requested")),
+        ("pull_request", Some("review_requested")),
+        ("pull_request", Some("review_request_removed")),
+    ];
+    let got = s.receiver.wait(expected.len()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let got_all = s.receiver.wait(expected.len()).await;
+    assert_eq!(
+        got_all.len(),
+        expected.len(),
+        "a delivery nothing asked for"
+    );
+    let kinds: Vec<(String, Option<String>)> = got.iter().map(Received::kind).collect();
+    let want: Vec<(String, Option<String>)> = expected
+        .iter()
+        .map(|(e, a)| (e.to_string(), a.map(str::to_string)))
+        .collect();
+    assert_eq!(kinds, want);
+
+    let keys = |payload: &serde_json::Value| -> Vec<String> {
+        let mut keys: Vec<String> = payload.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    let (first, second, removed) = (got[4].json(), got[5].json(), got[6].json());
+    for payload in [&first, &second, &removed] {
+        assert_eq!(
+            keys(payload),
+            [
+                "action",
+                "installation",
+                "number",
+                "pull_request",
+                "repository",
+                "requested_reviewer",
+                "sender"
+            ]
+        );
+        assert_eq!(payload["sender"]["login"], "alice");
+        assert_eq!(payload["requested_reviewer"]["type"], "User");
+    }
+    assert_eq!(first["requested_reviewer"]["login"], "bob");
+    assert_eq!(second["requested_reviewer"]["login"], "carol");
+    assert_eq!(removed["requested_reviewer"]["login"], "bob");
+    // The pull request in each is the one the write left.
+    assert_eq!(pending(&first["pull_request"]), ["bob", "carol"]);
+    assert_eq!(pending(&removed["pull_request"]), ["carol"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -445,6 +445,15 @@ pub(crate) fn github_error(status: StatusCode, message: &str) -> Response<Body> 
     json_response(status, serde_json::json!({ "message": message }))
 }
 
+/// GitHub's `422` for a request its schema refuses, which names the fault
+/// in prose after a blank line.
+pub(crate) fn invalid_request(detail: &str) -> Response<Body> {
+    github_error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        &format!("Invalid request.\n\n{detail}"),
+    )
+}
+
 pub(crate) fn internal(e: impl std::fmt::Display) -> Response<Body> {
     tracing::error!(error = %e, "github face internal error");
     github_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
