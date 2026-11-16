@@ -19,9 +19,9 @@ use crate::render::{
     review_json,
 };
 use crate::{
-    GithubFace, github_error, internal, json_response, media, orrery_unsupported_field,
-    resolve_repo, validation_custom, validation_custom_field, validation_invalid,
-    validation_invalid_message, validation_missing,
+    GithubFace, github_error, internal, invalid_request, json_response, media,
+    orrery_unsupported_field, resolve_repo, schema_value, validation_custom,
+    validation_custom_field, validation_invalid, validation_invalid_message, validation_missing,
 };
 
 #[derive(serde::Deserialize)]
@@ -904,15 +904,67 @@ pub(crate) async fn remove_label(
     }
 }
 
-#[derive(serde::Deserialize, Default)]
+/// The body of the two review-request calls: `reviewers` and
+/// `team_reviewers`, each absent or a list of names.
 struct ReviewersBody {
     reviewers: Option<Vec<String>>,
     team_reviewers: Option<Vec<String>>,
 }
 
+/// Decode a review-request body as GitHub's schema does. `link` is the
+/// schema GitHub names when the call has no body at all, which differs
+/// between the two calls.
+fn reviewers_body(body: &Bytes, link: usize) -> Result<ReviewersBody, Box<Response<Body>>> {
+    let refuse = |detail: &str| Box::new(invalid_request(detail));
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Err(refuse(&format!(
+            "For 'links/{link}/schema', nil is not an object."
+        )));
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Err(Box::new(github_error(
+            StatusCode::BAD_REQUEST,
+            "Problems parsing JSON",
+        )));
+    };
+    let Some(fields) = value.as_object() else {
+        return Err(refuse(&format!(
+            "For 'links/{link}/schema', {} is not an object.",
+            schema_value(&value)
+        )));
+    };
+    let names = |field: &str| -> Result<Option<Vec<String>>, Box<Response<Body>>> {
+        let Some(value) = fields.get(field) else {
+            return Ok(None);
+        };
+        let Some(items) = value.as_array() else {
+            return Err(refuse(&format!(
+                "For 'properties/{field}', {} is not an array.",
+                schema_value(value)
+            )));
+        };
+        items
+            .iter()
+            .map(|item| match item.as_str() {
+                Some(name) => Ok(name.to_string()),
+                None => Err(refuse(&format!(
+                    "For 'items', {} is not a string.",
+                    schema_value(item)
+                ))),
+            })
+            .collect::<Result<Vec<String>, _>>()
+            .map(Some)
+    };
+    Ok(ReviewersBody {
+        reviewers: names("reviewers")?,
+        team_reviewers: names("team_reviewers")?,
+    })
+}
+
 /// `POST /repos/{o}/{r}/pulls/{n}/requested_reviewers`: 201 with the pull.
-/// GitHub refuses the pull's author, and refuses anyone or any team that
-/// cannot review the repository with one message naming none of them.
+/// GitHub wants one of the two lists and accepts an empty one. It refuses a
+/// team first, then the pull's author, then an account that cannot review,
+/// each with a message naming no one.
 pub(crate) async fn request_reviewers(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, number)): UrlPath<(String, String, String)>,
@@ -933,36 +985,39 @@ pub(crate) async fn request_reviewers(
     if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
         return refused;
     }
-    let parsed: ReviewersBody = match serde_json::from_slice(&body) {
+    let parsed = match reviewers_body(&body, 0) {
         Ok(p) => p,
-        Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
+        Err(resp) => return *resp,
     };
+    if parsed.reviewers.is_none() && parsed.team_reviewers.is_none() {
+        return invalid_request(
+            "No subschema in \"anyOf\" matched.\n\"reviewers\" wasn't supplied.\n\"team_reviewers\" wasn't supplied.",
+        );
+    }
     let users = parsed.reviewers.unwrap_or_default();
     let teams = parsed.team_reviewers.unwrap_or_default();
-    if users.is_empty() && teams.is_empty() {
-        return validation_missing("PullRequest", "reviewers");
-    }
     let users: Vec<&str> = users.iter().map(String::as_str).collect();
     let teams: Vec<&str> = teams.iter().map(String::as_str).collect();
+    let not_collaborators = |who: &str| {
+        github_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!(
+                "Reviews may only be requested from collaborators. One or more of the {who} you specified is not a collaborator of the {} repository.",
+                repo.full_name()
+            ),
+        )
+    };
     match face.world.request_reviewers(pull.id, by, &users, &teams) {
         Ok(pull) => json_response(
             StatusCode::CREATED,
             pull_json(&face, &repo, &owner_actor, &pull),
         ),
-        Err(WorldError::ReviewerIsAuthor) => json_response(
+        Err(WorldError::ReviewerIsAuthor) => github_error(
             StatusCode::UNPROCESSABLE_ENTITY,
-            serde_json::json!({
-                "message": "Validation Failed",
-                "errors": ["Review cannot be requested from pull request author."],
-            }),
+            "Review cannot be requested from pull request author.",
         ),
-        Err(WorldError::InvalidReviewer(_)) => github_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            &format!(
-                "Reviews may only be requested from collaborators. One or more of the users or teams you specified is not a collaborator of the {} repository.",
-                repo.full_name()
-            ),
-        ),
+        Err(WorldError::InvalidReviewTeam(_)) => not_collaborators("teams"),
+        Err(WorldError::InvalidReviewer(_)) => not_collaborators("users or teams"),
         Err(e) => internal(e),
     }
 }
@@ -990,16 +1045,12 @@ pub(crate) async fn remove_review_requests(
     if let Some(refused) = media::refuse_unrendered(&headers, "PullRequest") {
         return refused;
     }
-    let parsed: ReviewersBody = if body.iter().all(u8::is_ascii_whitespace) {
-        ReviewersBody::default()
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(p) => p,
-            Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
-        }
+    let parsed = match reviewers_body(&body, 2) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
     };
     let Some(users) = parsed.reviewers else {
-        return validation_missing("PullRequest", "reviewers");
+        return invalid_request("\"reviewers\" wasn't supplied.");
     };
     let teams = parsed.team_reviewers.unwrap_or_default();
     let users: Vec<&str> = users.iter().map(String::as_str).collect();

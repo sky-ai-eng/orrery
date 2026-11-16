@@ -603,35 +603,63 @@ async fn review_requests_round_trip() {
     );
     assert_eq!(listed[0]["requested_teams"][0]["slug"], "platform");
 
-    let (status, err) = call(
-        "POST",
-        &reviewers,
-        &s.alice,
-        Some(serde_json::json!({ "reviewers": ["alice"] })),
-    );
-    assert_eq!(status, 422);
+    // The refusals, which GitHub makes in this order: a team, the author,
+    // then an account that cannot review.
+    let refused = |body: serde_json::Value| {
+        let (status, err) = call("POST", &reviewers, &s.alice, Some(body));
+        assert_eq!(status, 422, "{err}");
+        assert!(err.get("errors").is_none(), "{err}");
+        err["message"].as_str().unwrap().to_string()
+    };
+    let not_collaborators = |who: &str| {
+        format!(
+            "Reviews may only be requested from collaborators. One or more of the {who} you specified is not a collaborator of the acme/webapp repository."
+        )
+    };
     assert_eq!(
-        err["errors"][0],
+        refused(serde_json::json!({ "reviewers": ["alice"], "team_reviewers": ["no-such-team"] })),
+        not_collaborators("teams")
+    );
+    assert_eq!(
+        refused(serde_json::json!({ "reviewers": ["acme", "Alice"] })),
         "Review cannot be requested from pull request author."
     );
-    let (status, err) = call(
-        "POST",
-        &reviewers,
-        &s.alice,
-        Some(serde_json::json!({ "reviewers": ["ghost"] })),
-    );
-    assert_eq!(status, 422);
-    assert!(
-        err["message"]
-            .as_str()
-            .unwrap()
-            .starts_with("Reviews may only be requested from collaborators."),
-        "{err}"
-    );
     assert_eq!(
-        call("POST", &reviewers, &s.alice, Some(serde_json::json!({}))).0,
-        422
+        refused(serde_json::json!({ "reviewers": ["bob", "acme"] })),
+        not_collaborators("users or teams")
     );
+    // What GitHub's schema refuses, in its words.
+    for (body, message) in [
+        (
+            serde_json::json!({}),
+            "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n\"reviewers\" wasn't supplied.\n\"team_reviewers\" wasn't supplied.",
+        ),
+        (
+            serde_json::json!({ "reviewers": "bob" }),
+            "Invalid request.\n\nFor 'properties/reviewers', \"bob\" is not an array.",
+        ),
+        (
+            serde_json::json!({ "reviewers": null }),
+            "Invalid request.\n\nFor 'properties/reviewers', nil is not an array.",
+        ),
+        (
+            serde_json::json!({ "reviewers": [1] }),
+            "Invalid request.\n\nFor 'items', 1 is not a string.",
+        ),
+    ] {
+        assert_eq!(refused(body), message);
+    }
+    // An empty list is a request for nobody, and a login that names nobody
+    // is skipped.
+    for body in [
+        serde_json::json!({ "reviewers": [] }),
+        serde_json::json!({ "team_reviewers": [] }),
+        serde_json::json!({ "reviewers": ["ghost"] }),
+    ] {
+        let (status, same) = call("POST", &reviewers, &s.alice, Some(body));
+        assert_eq!(status, 201, "{same}");
+        assert_eq!(same["updated_at"], pull["updated_at"]);
+    }
 
     let resp = gql(
         &s.inst.base,
@@ -704,10 +732,22 @@ async fn review_requests_round_trip() {
     assert_eq!(status, 200, "{pull}");
     assert_eq!(pull["requested_reviewers"], serde_json::json!([]));
     assert_eq!(pull["requested_teams"][0]["slug"], "platform");
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({ "team_reviewers": [] }),
+    ] {
+        let (status, err) = call("DELETE", &reviewers, &s.alice, Some(body));
+        assert_eq!(status, 422);
+        assert_eq!(
+            err["message"],
+            "Invalid request.\n\n\"reviewers\" wasn't supplied."
+        );
+    }
+    let (status, err) = call("DELETE", &reviewers, &s.alice, None);
+    assert_eq!(status, 422);
     assert_eq!(
-        call("DELETE", &reviewers, &s.alice, Some(serde_json::json!({}))).0,
-        422,
-        "reviewers is required"
+        err["message"],
+        "Invalid request.\n\nFor 'links/2/schema', nil is not an object."
     );
     let all = gql(
         &s.inst.base,

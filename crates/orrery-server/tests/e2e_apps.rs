@@ -307,10 +307,10 @@ async fn an_app_reads_itself_and_its_installations() {
     }
 
     // A path under /app that Orrery does not serve says so, to an App alone.
-    let hook = format!("{api}/app/hook/config");
+    let hook = format!("{api}/app/hook/deliveries/1");
     let (status, _, body) = call("GET", &hook, &s.jwt(), None);
     assert_eq!(status, 501, "{body}");
-    assert_eq!(body["orrery"]["path"], "/api/v3/app/hook/config");
+    assert_eq!(body["orrery"]["path"], "/api/v3/app/hook/deliveries/1");
     let (status, _, _) = call("GET", &hook, &bearer(&s.alice), None);
     assert_eq!(status, 401);
     let (status, _, body) = call("POST", &format!("{api}/app"), &s.jwt(), None);

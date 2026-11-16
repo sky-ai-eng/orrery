@@ -35,6 +35,7 @@ mod pulls;
 mod reads;
 mod render;
 mod signing;
+pub mod webhooks;
 
 pub use render::repo_json;
 
@@ -442,6 +443,23 @@ pub(crate) fn no_content() -> Response<Body> {
 
 pub(crate) fn github_error(status: StatusCode, message: &str) -> Response<Body> {
     json_response(status, serde_json::json!({ "message": message }))
+}
+
+/// GitHub's `422` for a request its schema refuses, which names the fault
+/// in prose after a blank line.
+pub(crate) fn invalid_request(detail: &str) -> Response<Body> {
+    github_error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        &format!("Invalid request.\n\n{detail}"),
+    )
+}
+
+/// A value as GitHub's schema messages spell it: JSON, but `nil` for null.
+pub(crate) fn schema_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "nil".to_string(),
+        other => other.to_string(),
+    }
 }
 
 pub(crate) fn internal(e: impl std::fmt::Display) -> Response<Body> {
