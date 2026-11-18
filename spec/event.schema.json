@@ -624,6 +624,88 @@
       ],
       "type": "object"
     },
+    "AppKeyChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/AppKeyChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/AppKeySubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "AppKeyChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "public_key": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "AppKeyCreated": {
       "properties": {
         "object": {
@@ -4164,6 +4246,12 @@
     "Rekeyed": {
       "description": "What `world:rekeyed` derived again under the world's new secret.",
       "properties": {
+        "app_keys": {
+          "default": 0,
+          "description": "The keys a world derived for the apps registered from a manifest.\nA key a caller sent is not derived, and stays.",
+          "format": "int64",
+          "type": "integer"
+        },
         "app_manifest_codes": {
           "default": 0,
           "description": "The manifest codes not yet traded. Events appended before a world\nheld any carry none.",
@@ -5503,6 +5591,20 @@
       "properties": {
         "type": {
           "const": "app_key:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/AppKeyChanged",
+      "description": "A key a world derived was derived again under the world's new\nsecret: a consequence of forking a world.",
+      "properties": {
+        "type": {
+          "const": "app_key:rederived",
           "type": "string"
         }
       },

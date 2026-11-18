@@ -223,6 +223,8 @@ struct ServerConfig {
     control_listen: Option<Listen>,
     /// Defaults to true; see `orrery_server::Options::anonymous_git_reads`.
     anonymous_git_reads: Option<bool>,
+    /// Defaults to true; see `orrery_server::Options::app_pages`.
+    app_pages: Option<bool>,
 }
 
 impl ServerConfig {
@@ -744,6 +746,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         config.instance.dir.join("snapshots"),
         orrery_server::Options {
             anonymous_git_reads: config.server.anonymous_git_reads.unwrap_or(true),
+            app_pages: config.server.app_pages.unwrap_or(true),
             config_sha256: Some(config_sha256),
             outbound: send.then_some(outbound),
         },

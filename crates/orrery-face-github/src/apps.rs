@@ -350,13 +350,17 @@ async fn list_installations(
 
 /// `GET /user/installations`: the installations of the token's App that its
 /// user reaches, `{total_count, installations}`. GitHub answers this only
-/// to a token a user gave an App, and refuses any other.
+/// to a token a user gave an App, and refuses any other. A bot's token has
+/// no user behind it, and is refused as the other `/user` routes refuse it.
 pub(crate) async fn list_user_installations(
     State(face): State<GithubFace>,
     Extension(caller): Extension<Caller>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
+    if let Some(refused) = crate::reads::refuse_integration(&caller.actor) {
+        return refused;
+    }
     if let Some(refused) = media::refuse_unrendered(&headers, "Installation") {
         return refused;
     }

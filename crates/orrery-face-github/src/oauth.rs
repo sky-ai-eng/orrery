@@ -346,12 +346,18 @@ pub(crate) fn html(status: StatusCode, body: &str) -> Response<Body> {
         .expect("static response parts are valid")
 }
 
+/// A `302` to `location`. A URL a header cannot carry is a stored value
+/// the world should have refused, and is answered as a failure, never a
+/// panic: the write that led here has landed.
 pub(crate) fn redirect(location: &str) -> Response<Body> {
-    Response::builder()
+    match Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
         .body(Body::empty())
-        .expect("static response parts are valid")
+    {
+        Ok(resp) => resp,
+        Err(e) => internal(format!("a redirect to {location:?} cannot be sent: {e}")),
+    }
 }
 
 pub(crate) fn with_query(url: &str, pairs: &[(&str, &str)]) -> String {

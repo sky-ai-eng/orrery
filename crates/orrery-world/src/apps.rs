@@ -111,18 +111,28 @@ impl World {
     /// world's clock. The call carries no credential but the code, so the
     /// write is the person's who registered the app, through the app.
     pub fn convert_app_manifest(&self, code: &str) -> Result<ConvertedApp> {
+        let held = |tx: &Connection| -> Result<(i64, i64, i64)> {
+            tx.query_row(
+                "SELECT id, app_id, actor_id FROM app_manifest_codes
+                 WHERE code = ?1 AND converted_clock_unix IS NULL
+                   AND created_clock_unix + ?2 > ?3",
+                params![code, MANIFEST_CODE_TTL_SECONDS, queries::clock(tx)?],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| WorldError::NoSuchAppManifest(code.to_string()))
+        };
+        // A key takes long enough to derive that every other read and write
+        // would wait on it, so it is derived before the write, for the app
+        // and under the secret read here. The write uses it when both are
+        // still what it finds, and derives its own otherwise.
+        let (ahead_app, ahead_secret) = self.with_conn(|conn| {
+            let (_, app_id, _) = held(conn)?;
+            Ok((app_id, credentials::world_secret(conn)?))
+        })?;
+        let ahead = credentials::app_key_pair(&ahead_secret, ahead_app);
         let by = |tx: &Connection| -> Result<(Attribution, (i64, i64))> {
-            let found: Option<(i64, i64, i64)> = tx
-                .query_row(
-                    "SELECT id, app_id, actor_id FROM app_manifest_codes
-                     WHERE code = ?1 AND converted_clock_unix IS NULL
-                       AND created_clock_unix + ?2 > ?3",
-                    params![code, MANIFEST_CODE_TTL_SECONDS, queries::clock(tx)?],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
-            let (id, app_id, actor_id) =
-                found.ok_or_else(|| WorldError::NoSuchAppManifest(code.to_string()))?;
+            let (id, app_id, actor_id) = held(tx)?;
             let by = Attribution::new(actor_id, Door::Rest).with_app(Some(app_id));
             Ok((by, (id, app_id)))
         };
@@ -143,7 +153,11 @@ impl World {
                     ),
                 },
             ));
-            let pair = credentials::app_key_pair(&credentials::world_secret(tx)?, app_id);
+            let secret = credentials::world_secret(tx)?;
+            let pair = match app_id == ahead_app && secret == ahead_secret {
+                true => ahead,
+                false => credentials::app_key_pair(&secret, app_id),
+            };
             let key = tx.query_row(
                 "INSERT INTO app_keys (app_id, public_key, created_clock_unix)
                  VALUES (?1, ?2, ?3)
@@ -1202,7 +1216,11 @@ pub fn validate_hook_url(url: &str) -> Result<()> {
         .or_else(|| url.strip_prefix("http://"));
     let host = rest.map(|rest| rest.split(['/', '?', '#']).next().unwrap_or_default());
     match host {
-        Some(host) if !host.is_empty() && !url.contains(char::is_whitespace) => Ok(()),
+        Some(host)
+            if !host.is_empty() && !url.contains(|c: char| c.is_whitespace() || c.is_control()) =>
+        {
+            Ok(())
+        }
         _ => Err(invalid_app(
             "webhook_url",
             format!("{url:?} is not an http or https URL with a host"),

@@ -26,36 +26,67 @@ use crate::{GithubFace, github_error, internal, json_response, parse_form};
 /// The longest name GitHub gives an App.
 const MAX_NAME: usize = 34;
 
-pub fn web_router(face: GithubFace) -> Router {
-    Router::new()
-        .route("/settings/apps/new", post(register))
-        .route(
-            "/organizations/{org}/settings/apps/new",
-            post(register_for_org),
-        )
-        .route(
-            "/apps/{slug}/installations/new",
-            get(install_page).post(install),
-        )
-        .route(
-            "/apps/{slug}/installations/new/permissions",
-            get(install_page).post(install),
-        )
+/// The pages, and the call that trades a manifest's code. With `pages`
+/// off, each page answers that this world does not serve it: a page signs
+/// a person in by their login alone, which a world whose faces anyone can
+/// reach cannot offer. The trade stays, and finds no code to trade.
+pub fn web_router(face: GithubFace, pages: bool) -> Router {
+    let conversions =
+        Router::new().route("/api/v3/app-manifests/{code}/conversions", post(convert));
+    let pages = match pages {
+        true => Router::new()
+            .route("/settings/apps/new", post(register))
+            .route(
+                "/organizations/{org}/settings/apps/new",
+                post(register_for_org),
+            )
+            .route(
+                "/apps/{slug}/installations/new",
+                get(install_page).post(install),
+            )
+            .route(
+                "/apps/{slug}/installations/new/permissions",
+                get(install_page).post(install),
+            ),
+        false => Router::new()
+            .route("/settings/apps/new", post(closed))
+            .route("/organizations/{org}/settings/apps/new", post(closed))
+            .route("/apps/{slug}/installations/new", get(closed).post(closed))
+            .route(
+                "/apps/{slug}/installations/new/permissions",
+                get(closed).post(closed),
+            ),
+    };
+    pages
+        .merge(conversions)
         .route("/settings/installations/{id}", get(installation_page))
         .route(
             "/organizations/{org}/settings/installations/{id}",
             get(org_installation_page),
         )
-        .route("/api/v3/app-manifests/{code}/conversions", post(convert))
         .with_state(face)
+}
+
+/// What a page answers in a world that does not serve it.
+async fn closed() -> Response<Body> {
+    html(
+        StatusCode::FORBIDDEN,
+        &page(
+            "Not served",
+            "<h1>Not served</h1><p>orrery: this world does not serve the pages that register \
+             and install a GitHub App (server.app_pages = false). Register and install an App \
+             on the control plane.</p>",
+        ),
+    )
 }
 
 // ---- registering an App from a manifest ----
 
-/// What a manifest asks for, as the fields a world keeps. GitHub's manifest
-/// also carries `url`, `description`, and `public`, which a world has no
-/// use for, and `setup_on_update`, which is about a page a world does not
-/// serve.
+/// What a manifest asks for, as the fields a world reads. `url` is the
+/// App's home page, which GitHub requires and a world keeps only as a
+/// callback URL of last resort. GitHub's manifest also carries
+/// `description` and `public`, which a world has no use for, and
+/// `setup_on_update`, which is about a page a world does not serve.
 #[derive(serde::Deserialize)]
 struct Manifest {
     name: Option<String>,
@@ -137,12 +168,16 @@ fn registration(
         }
     };
     let state = parse_form(query.as_bytes()).get("state").cloned();
-    let name = form
-        .get("name")
-        .filter(|name| !name.is_empty())
-        .cloned()
-        .or(manifest.name.clone())
-        .unwrap_or_default();
+    // The page a person confirms on posts the name back, and they may have
+    // changed it. The caller's own post carries none.
+    let name = match form.get("name") {
+        Some(name) => name.trim().to_string(),
+        None => manifest.name.clone().unwrap_or_default(),
+    };
+    let back = manifest
+        .redirect_url
+        .as_deref()
+        .filter(|url| !url.is_empty());
     let again = |status: StatusCode, error: Option<&str>| {
         html(status, &registration_form(org, query, raw, &name, error))
     };
@@ -166,21 +201,32 @@ fn registration(
             Some("Name is too long (maximum is 34 characters)"),
         );
     }
-    if manifest.url.as_deref().unwrap_or("").is_empty() {
+    let home = manifest.url.as_deref().unwrap_or("");
+    if home.is_empty() {
         return again(StatusCode::UNPROCESSABLE_ENTITY, Some("Url can't be blank"));
+    }
+    // The person is redirected there once the App is registered, so it is
+    // checked before anything is.
+    if back.is_some_and(|url| orrery_world::validate_hook_url(url).is_err()) {
+        return again(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("Redirect url must be an http or https URL"),
+        );
+    }
+    // An App that asks for authorization on install sends the person to its
+    // callback URL with a code, so it has to name one of its own.
+    if manifest.request_oauth_on_install && manifest.callback_urls.is_empty() {
+        return again(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("Callback url can't be blank for an App that requests authorization on install"),
+        );
     }
     // An App here holds at least one callback URL, where GitHub lets one
     // have none: a manifest that names none is given the URL it sends the
     // person back to, or else its home page.
     let callback_urls = match manifest.callback_urls.is_empty() {
         false => manifest.callback_urls.clone(),
-        true => vec![
-            manifest
-                .redirect_url
-                .clone()
-                .or(manifest.url.clone())
-                .unwrap_or_default(),
-        ],
+        true => vec![back.unwrap_or(home).to_string()],
     };
     let slug = slug_of(&name);
     let owner = org.unwrap_or(&person);
@@ -213,11 +259,7 @@ fn registration(
         }
         Err(e) => return internal(e),
     };
-    let Some(back) = manifest
-        .redirect_url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-    else {
+    let Some(back) = back else {
         // With nowhere to send the person, GitHub shows them the App.
         return html(
             StatusCode::OK,
@@ -321,9 +363,9 @@ async fn convert(State(face): State<GithubFace>, UrlPath(code): UrlPath<String>)
 
 // ---- installing an App ----
 
-/// The account `target_id` names, when the query or the form carries one.
-/// GitHub's `…/installations/new/permissions?target_id=` is the install page
-/// with its account chosen.
+/// The account the URL's `target_id` names, when it carries one. GitHub's
+/// `…/installations/new/permissions?target_id=` is the install page with its
+/// account chosen.
 fn target(
     face: &GithubFace,
     params: &BTreeMap<String, String>,
@@ -516,17 +558,12 @@ fn sent_on(
     }
 }
 
-/// The page of an installation, where GitHub puts it: under the
-/// organization's settings, or the person's own.
+/// The page of an installation: the `html_url` its REST object gives.
 fn installation_url(face: &GithubFace, installation: &Installation) -> String {
-    let base = face.base_url.trim_end_matches('/');
-    match installation.account.kind {
-        ActorKind::Org => format!(
-            "{base}/organizations/{}/settings/installations/{}",
-            installation.account.login, installation.id
-        ),
-        _ => format!("{base}/settings/installations/{}", installation.id),
-    }
+    crate::apps::installation_json(face, installation)["html_url"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn install_form(
@@ -553,6 +590,12 @@ fn install_form(
             kept("account")
         ),
     };
+    // A form shown again keeps the choice the person made: one that fell
+    // back to every repository would install on more than they chose.
+    let (all, selected) = match form.get("repository_selection").map(String::as_str) {
+        Some("selected") => ("", " checked"),
+        _ => (" checked", ""),
+    };
     let title = format!("Install {}", app.name);
     page(
         &title,
@@ -562,8 +605,8 @@ fn install_form(
 <label for="login">Username</label>
 <input id="login" name="login" type="text" autocomplete="username" value="{login}" autofocus>
 {account_field}
-<label><input type="radio" name="repository_selection" value="all" checked> All repositories</label>
-<label><input type="radio" name="repository_selection" value="selected"> Only select repositories</label>
+<label><input type="radio" name="repository_selection" value="all"{all}> All repositories</label>
+<label><input type="radio" name="repository_selection" value="selected"{selected}> Only select repositories</label>
 <label for="repositories">Repositories</label>
 <input id="repositories" name="repositories" type="text" value="{repositories}">
 <button type="submit" name="setup_action" value="install">Install</button>
@@ -574,6 +617,8 @@ fn install_form(
             action = escape(&action),
             login = kept("login"),
             repositories = kept("repositories"),
+            all = all,
+            selected = selected,
         ),
     )
 }

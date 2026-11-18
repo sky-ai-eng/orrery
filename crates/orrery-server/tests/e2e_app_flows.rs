@@ -693,3 +693,204 @@ async fn the_control_plane_sets_where_an_install_sends_a_person() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_manifest_page_refuses_what_would_strand_the_person() {
+    let inst = boot().await;
+    let base = &inst.base;
+    mint_actor(base, "alice", "user");
+    let form = format!("{base}/settings/apps/new");
+    let registered = |slug: &str| get(&format!("{base}/_orrery/apps/{slug}"), None).0 == 200;
+
+    // The person is sent to `redirect_url`, so one a redirect cannot carry,
+    // or that is no web address, is refused before the App is registered.
+    for (name, redirect) in [
+        ("Scripted", "javascript:alert(1)"),
+        ("Split", "https://x.test/cb\nx"),
+        ("Bare", "nope"),
+    ] {
+        let manifest = serde_json::json!({
+            "name": name,
+            "url": "https://x.test",
+            "redirect_url": redirect,
+            "callback_urls": ["https://x.test/callback"],
+        })
+        .to_string();
+        let (status, to, page) = post_form(&form, &[("manifest", &manifest), ("login", "alice")]);
+        assert_eq!(status, 422, "{redirect}: {to:?}");
+        assert!(
+            page.contains("Redirect url must be an http or https URL"),
+            "{page}"
+        );
+        assert!(!registered(&name.to_lowercase()), "{name}");
+    }
+
+    // An empty `redirect_url` is none: the App is registered, its callback
+    // URL is its home page, and the person is shown a page.
+    let nowhere = serde_json::json!({
+        "name": "Nowhere", "url": "https://x.test", "redirect_url": "",
+    })
+    .to_string();
+    let (status, to, page) = post_form(&form, &[("manifest", &nowhere), ("login", "alice")]);
+    assert_eq!((status, to), (200, None), "{page}");
+    assert!(page.contains("Registered."), "{page}");
+    let (_, _, read) = get(&format!("{base}/_orrery/apps/nowhere"), None);
+    assert_eq!(read["callback_urls"], serde_json::json!(["https://x.test"]));
+
+    // A name the person cleared on the page is blank, whatever the manifest
+    // named, and one they changed is the App's.
+    let named = serde_json::json!({ "name": "Named", "url": "https://x.test" }).to_string();
+    let (status, _, page) = post_form(
+        &form,
+        &[("manifest", &named), ("name", ""), ("login", "alice")],
+    );
+    assert_eq!(status, 422);
+    assert!(page.contains("Name can&#39;t be blank"), "{page}");
+    assert!(!registered("named"));
+    let (status, _, _) = post_form(
+        &form,
+        &[
+            ("manifest", &named),
+            ("name", "Renamed"),
+            ("login", "alice"),
+        ],
+    );
+    assert_eq!(status, 200);
+    assert!(registered("renamed") && !registered("named"));
+
+    // An App that asks for authorization on install sends the person to a
+    // callback URL with a code, so it names one of its own: the URL the
+    // manifest's own code goes back to cannot stand in.
+    let asks = serde_json::json!({
+        "name": "Asks",
+        "url": "https://x.test",
+        "redirect_url": "https://x.test/manifest",
+        "request_oauth_on_install": true,
+    })
+    .to_string();
+    let (status, _, page) = post_form(&form, &[("manifest", &asks), ("login", "alice")]);
+    assert_eq!(status, 422);
+    assert!(page.contains("Callback url can&#39;t be blank"), "{page}");
+    assert!(!registered("asks"));
+
+    // The control plane holds a setup URL to the same rule.
+    let mut refused = agent()
+        .post(&format!("{base}/_orrery/apps"))
+        .send_json(serde_json::json!({
+            "slug": "control",
+            "name": "control",
+            "owner": "alice",
+            "callback_urls": ["https://x.test/callback"],
+            "setup_url": "https://x.test/s\u{1}etup",
+        }))
+        .unwrap();
+    assert_eq!(refused.status(), 400);
+    let refused: serde_json::Value = refused.body_mut().read_json().unwrap();
+    assert_eq!(
+        common::faults(&refused),
+        [common::fault("INVALID_ARGUMENT", Some("setup_url"))]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_install_form_shown_again_keeps_the_repositories_chosen() {
+    let (inst, _, _) = installable().await;
+    let base = &inst.base;
+    let page_url = format!("{base}/apps/plain/installations/new");
+    let (status, _, page) = post_form(
+        &page_url,
+        &[
+            ("login", "alice"),
+            ("account", "acme"),
+            ("repository_selection", "selected"),
+            ("repositories", "nope"),
+        ],
+    );
+    assert_eq!(status, 422);
+    // Shown again with every repository chosen, a corrected form would
+    // install on more than the person asked for.
+    assert!(page.contains("value=\"selected\" checked"), "{page}");
+    assert!(!page.contains("value=\"all\" checked"), "{page}");
+    assert!(page.contains("value=\"nope\""), "{page}");
+    let mut fresh = agent().get(&page_url).call().unwrap();
+    assert!(
+        fresh
+            .body_mut()
+            .read_to_string()
+            .unwrap()
+            .contains("value=\"all\" checked")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bots_token_lists_no_user_installations() {
+    let inst = boot().await;
+    let base = &inst.base;
+    let ci = mint_actor(base, "ci", "bot");
+    let (status, _, refused) = get(
+        &format!("{base}/api/v3/user/installations"),
+        Some(&format!("token {ci}")),
+    );
+    assert_eq!(status, 403);
+    assert_eq!(refused["message"], "Resource not accessible by integration");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_world_can_serve_no_app_pages() {
+    let inst = common::boot_with(orrery_server::Options {
+        app_pages: false,
+        ..Default::default()
+    })
+    .await;
+    let base = &inst.base;
+    mint_actor(base, "alice", "user");
+    control_post(
+        base,
+        "/_orrery/apps",
+        serde_json::json!({
+            "slug": "helper",
+            "name": "helper",
+            "owner": "alice",
+            "callback_urls": ["https://helper.test/callback"],
+        }),
+    );
+    let manifest = manifest("Helper App");
+    for path in [
+        "/settings/apps/new",
+        "/organizations/acme/settings/apps/new",
+    ] {
+        let (status, to, page) = post_form(
+            &format!("{base}{path}"),
+            &[("manifest", &manifest), ("login", "alice")],
+        );
+        assert_eq!((status, to), (403, None), "{path}");
+        assert!(page.contains("server.app_pages = false"), "{page}");
+    }
+    for path in [
+        "/apps/helper/installations/new",
+        "/apps/helper/installations/new/permissions?target_id=1",
+    ] {
+        let url = format!("{base}{path}");
+        assert_eq!(agent().get(&url).call().unwrap().status(), 403, "{path}");
+        let (status, _, _) = post_form(&url, &[("login", "alice")]);
+        assert_eq!(status, 403, "{path}");
+    }
+    // Nothing was registered or installed, and there is no code to trade.
+    assert_eq!(get(&format!("{base}/_orrery/apps/helper-app"), None).0, 404);
+    assert!(installations(base, "helper").is_empty());
+    assert_eq!(
+        agent()
+            .post(&format!("{base}/api/v3/app-manifests/0000/conversions"))
+            .send_empty()
+            .unwrap()
+            .status(),
+        404
+    );
+    // The control plane still registers and installs.
+    control_post(
+        base,
+        "/_orrery/apps/helper/installations",
+        serde_json::json!({ "account": "alice" }),
+    );
+    assert_eq!(installations(base, "helper").len(), 1);
+}

@@ -567,12 +567,13 @@ object! {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AppKeyObject {
-    pub id: i64,
-    /// The base64 of the key's PKCS#1 `RSAPublicKey` DER.
-    pub public_key: String,
-    pub created_unix: i64,
+object! {
+    AppKeyObject, AppKeyChanges {
+        id: i64,
+        /// The base64 of the key's PKCS#1 `RSAPublicKey` DER.
+        public_key: String,
+        created_unix: i64,
+    }
 }
 
 object! {
@@ -881,6 +882,10 @@ pub struct Rekeyed {
     /// held any carry none.
     #[serde(default)]
     pub app_manifest_codes: i64,
+    /// The keys a world derived for the apps registered from a manifest.
+    /// A key a caller sent is not derived, and stays.
+    #[serde(default)]
+    pub app_keys: i64,
 }
 
 /// A body type with a subject and one more field per entry.
@@ -921,6 +926,7 @@ bodies! {
     AppCreated { subject: AppSubject, object: AppObject }
     AppChanged { subject: AppSubject, changes: AppChanges }
     AppKeyCreated { subject: AppKeySubject, object: AppKeyObject }
+    AppKeyChanged { subject: AppKeySubject, changes: AppKeyChanges }
     AppManifestCreated { subject: AppManifestSubject, object: AppManifestObject }
     AppManifestChanged { subject: AppManifestSubject, changes: AppManifestChanges }
     InstallationCreated { subject: InstallationSubject, object: InstallationObject }
@@ -1039,6 +1045,9 @@ event_types! {
     /// A secret was issued for an app's webhook, replacing the one before.
     AppHookSecretIssued(AppChanged) = "app:hook_secret_issued",
     AppKeyCreated(AppKeyCreated) = "app_key:created",
+    /// A key a world derived was derived again under the world's new
+    /// secret: a consequence of forking a world.
+    AppKeyRederived(AppKeyChanged) = "app_key:rederived",
     /// A person registered an app from a manifest, which issued a code.
     AppManifestCreated(AppManifestCreated) = "app_manifest:created",
     /// The code was traded for the app's credentials, which made the app's

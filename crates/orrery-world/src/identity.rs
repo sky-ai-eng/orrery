@@ -564,6 +564,8 @@ fn is_absolute_http_url(s: &str) -> bool {
         .or_else(|| s.strip_prefix("http://"))
         .is_some_and(|rest| {
             let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-            !host.is_empty() && !host.chars().any(char::is_whitespace)
+            // A person is redirected to it, and a redirect's header takes
+            // neither.
+            !host.is_empty() && !s.chars().any(|c| c.is_whitespace() || c.is_control())
         })
 }
