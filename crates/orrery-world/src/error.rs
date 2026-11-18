@@ -58,6 +58,8 @@ pub enum WorldError {
     TeamExists(String),
     #[error("invalid team name {0:?}: it must hold at least one letter or digit")]
     InvalidTeamName(String),
+    #[error("no manifest code {0:?} that is unspent and not expired")]
+    NoSuchAppManifest(String),
     #[error("{0:?} cannot be requested to review this pull")]
     InvalidReviewer(String),
     #[error("the team {0:?} cannot be requested to review this pull")]

@@ -140,6 +140,19 @@ pub(crate) fn oauth_client_secret(secret: &WorldSecret, app_id: i64, n: i64) -> 
     )
 }
 
+/// The code registering an app from a manifest hands back, 40 characters as
+/// GitHub's is.
+pub(crate) fn app_manifest_code(secret: &WorldSecret, code_id: i64) -> String {
+    hex::encode(&secret.derive(&format!("app-manifest-code:{code_id}"))[..20])
+}
+
+/// The key pair an app registered from a manifest is given. A world keeps
+/// the public half and can make the pair again, so it never holds a private
+/// key.
+pub(crate) fn app_key_pair(secret: &WorldSecret, app_id: i64) -> crate::rsa_key::KeyPair {
+    crate::rsa_key::derive(&secret.derive(&format!("app-key:{app_id}")))
+}
+
 /// The `n`th secret issued for an app's webhook, counting from 1.
 pub(crate) fn hook_secret(secret: &WorldSecret, app_id: i64, n: i64) -> String {
     format!(
@@ -271,6 +284,18 @@ impl World {
                 )?;
             }
 
+            let manifest_codes: Vec<i64> = queries::list(
+                tx,
+                "SELECT id FROM app_manifest_codes WHERE converted_clock_unix IS NULL ORDER BY id",
+                |r| r.get(0),
+            )?;
+            for id in &manifest_codes {
+                tx.execute(
+                    "UPDATE app_manifest_codes SET code = ?1 WHERE id = ?2",
+                    params![app_manifest_code(secret, *id), id],
+                )?;
+            }
+
             let installation_tokens: Vec<i64> = queries::list(
                 tx,
                 "SELECT id FROM app_installation_tokens ORDER BY id",
@@ -325,6 +350,7 @@ impl World {
                     oauth_codes: codes.len() as i64,
                     installation_tokens: installation_tokens.len() as i64,
                     hook_secrets,
+                    app_manifest_codes: manifest_codes.len() as i64,
                 },
             }));
             crate::deliveries::drop_pending(w, None)?;

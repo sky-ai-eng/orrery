@@ -319,10 +319,34 @@ fn populate(w: &World) -> orrery_world::Result<()> {
             events: &["push".to_string(), "pull_request".to_string()],
             hook_url: Some("https://ci.test/hook"),
             hook_active: true,
+            setup_url: None,
+            request_oauth_on_install: false,
         },
         by(system.id),
     )?;
     w.add_app_key("ci-bot", APP_KEY, by(system.id))?;
+    // Two apps a person registered from a manifest: one whose code was
+    // traded, which gave it a key, and one whose code is still held.
+    for (slug, traded) in [("from-manifest", true), ("manifest-pending", false)] {
+        let made = w.create_app_from_manifest(
+            &NewApp {
+                slug,
+                name: slug,
+                owner: "alice",
+                callback_urls: &[CALLBACK.to_string()],
+                permissions: &permissions,
+                events: &[],
+                hook_url: None,
+                hook_active: false,
+                setup_url: Some("https://ci.test/setup"),
+                request_oauth_on_install: false,
+            },
+            Attribution::new(alice.id, Door::Web),
+        )?;
+        if traded {
+            w.convert_app_manifest(&made.code)?;
+        }
+    }
     // A delivery for the installation, as a face would make one, so that
     // `deliveries` holds one that was answered and one still pending.
     w.set_notifier(std::sync::Arc::new(OnInstallation));

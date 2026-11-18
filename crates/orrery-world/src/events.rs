@@ -191,6 +191,7 @@ subject_type! {
     OAuthAuthorizationType = "oauth_authorization",
     AppType = "app",
     AppKeyType = "app_key",
+    AppManifestType = "app_manifest",
     InstallationType = "installation",
     InstallationTokenType = "installation_token",
     DeliveryType = "delivery",
@@ -256,6 +257,19 @@ pub struct AppSubject {
     /// The login of the app's bot.
     pub slug: String,
     pub client_id: String,
+}
+
+/// An app's registration from a manifest: issued when a person registers
+/// the app, converted when the code it issued is traded for the app's
+/// credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AppManifestSubject {
+    #[serde(rename = "type")]
+    pub kind: AppManifestType,
+    pub id: i64,
+    pub app: AppRef,
+    /// The actor who registered the app.
+    pub actor: ActorRef,
 }
 
 /// A public key an app's signatures are checked against.
@@ -529,6 +543,27 @@ object! {
         /// with the newest, which is derived and never in an event.
         #[serde(default)]
         hook_secrets: i64,
+        /// Where a person is sent once they have installed the app, or
+        /// null for nowhere. Events appended before a world held the
+        /// browser flows carry neither this nor the next.
+        #[serde(default)]
+        setup_url: Option<String>,
+        /// Whether a person who installs the app is sent through its
+        /// authorization.
+        #[serde(default)]
+        request_oauth_on_install: bool,
+    }
+}
+
+object! {
+    AppManifestObject, AppManifestChanges {
+        id: i64,
+        app: AppRef,
+        actor: ActorRef,
+        created_unix: i64,
+        /// When the code was traded for the app's credentials, or null
+        /// while it has not been.
+        converted_unix: Option<i64>,
     }
 }
 
@@ -842,6 +877,10 @@ pub struct Rekeyed {
     /// none.
     #[serde(default)]
     pub hook_secrets: i64,
+    /// The manifest codes not yet traded. Events appended before a world
+    /// held any carry none.
+    #[serde(default)]
+    pub app_manifest_codes: i64,
 }
 
 /// A body type with a subject and one more field per entry.
@@ -882,6 +921,8 @@ bodies! {
     AppCreated { subject: AppSubject, object: AppObject }
     AppChanged { subject: AppSubject, changes: AppChanges }
     AppKeyCreated { subject: AppKeySubject, object: AppKeyObject }
+    AppManifestCreated { subject: AppManifestSubject, object: AppManifestObject }
+    AppManifestChanged { subject: AppManifestSubject, changes: AppManifestChanges }
     InstallationCreated { subject: InstallationSubject, object: InstallationObject }
     InstallationChanged { subject: InstallationSubject, changes: InstallationChanges }
     /// The installation as it was.
@@ -998,6 +1039,11 @@ event_types! {
     /// A secret was issued for an app's webhook, replacing the one before.
     AppHookSecretIssued(AppChanged) = "app:hook_secret_issued",
     AppKeyCreated(AppKeyCreated) = "app_key:created",
+    /// A person registered an app from a manifest, which issued a code.
+    AppManifestCreated(AppManifestCreated) = "app_manifest:created",
+    /// The code was traded for the app's credentials, which made the app's
+    /// first key.
+    AppManifestConverted(AppManifestChanged) = "app_manifest:converted",
     /// An app was installed on an account.
     InstallationCreated(InstallationCreated) = "installation:created",
     InstallationSuspended(InstallationChanged) = "installation:suspended",

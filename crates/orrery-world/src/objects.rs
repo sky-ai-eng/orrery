@@ -670,7 +670,8 @@ pub(crate) fn app_object(conn: &Connection, id: i64) -> Result<AppObject> {
     let mut object = conn.query_row(
         "SELECT a.id, b.login, o.name, o.client_id, w.id, w.login, b.id, b.login,
                 o.callback_url, a.permissions, a.events, o.created_clock_unix,
-                a.hook_url, a.hook_active, a.hook_secrets
+                a.hook_url, a.hook_active, a.hook_secrets, a.setup_url,
+                a.request_oauth_on_install
          FROM apps a
          JOIN oauth_apps o ON o.id = a.id
          JOIN actors b ON b.id = a.bot_id
@@ -692,6 +693,8 @@ pub(crate) fn app_object(conn: &Connection, id: i64) -> Result<AppObject> {
                 hook_url: r.get(12)?,
                 hook_active: r.get(13)?,
                 hook_secrets: r.get(14)?,
+                setup_url: r.get(15)?,
+                request_oauth_on_install: r.get(16)?,
             })
         },
     )?;
@@ -702,6 +705,39 @@ pub(crate) fn app_object(conn: &Connection, id: i64) -> Result<AppObject> {
         |r| r.get::<_, String>(0),
     )?);
     Ok(object)
+}
+
+pub(crate) fn app_manifest_subject(conn: &Connection, id: i64) -> Result<AppManifestSubject> {
+    let object = app_manifest_object(conn, id)?;
+    Ok(AppManifestSubject {
+        kind: AppManifestType::Tag,
+        id,
+        app: object.app,
+        actor: object.actor,
+    })
+}
+
+pub(crate) fn app_manifest_object(conn: &Connection, id: i64) -> Result<AppManifestObject> {
+    Ok(conn.query_row(
+        "SELECT c.id, p.id, p.client_id, a.id, a.login, c.created_clock_unix,
+                c.converted_clock_unix
+         FROM app_manifest_codes c JOIN oauth_apps p ON p.id = c.app_id
+         JOIN actors a ON a.id = c.actor_id
+         WHERE c.id = ?1",
+        params![id],
+        |r| {
+            Ok(AppManifestObject {
+                id: r.get(0)?,
+                app: AppRef {
+                    id: r.get(1)?,
+                    client_id: r.get(2)?,
+                },
+                actor: actor_ref_at(r, 3)?,
+                created_unix: r.get(5)?,
+                converted_unix: r.get(6)?,
+            })
+        },
+    )?)
 }
 
 pub(crate) fn app_key_subject(conn: &Connection, id: i64) -> Result<AppKeySubject> {

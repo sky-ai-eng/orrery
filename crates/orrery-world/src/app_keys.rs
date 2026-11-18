@@ -163,7 +163,7 @@ fn bits(magnitude: &[u8]) -> usize {
 
 /// Refuse anything but an `RSAPublicKey` an RS256 signature can be checked
 /// against, so that a key a world takes is one its JWTs verify under.
-fn check_rsa_public_key(der: &[u8]) -> Result<()> {
+pub(crate) fn check_rsa_public_key(der: &[u8]) -> Result<()> {
     let (key, after) = tagged(der, SEQUENCE, "RSAPublicKey")?;
     if !after.is_empty() {
         return Err(invalid("bytes follow its RSAPublicKey"));

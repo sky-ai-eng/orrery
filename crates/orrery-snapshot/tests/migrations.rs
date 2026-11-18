@@ -281,13 +281,21 @@ fn every_fixture_migrates_opens_and_diffs() {
             .into_iter()
             .map(|e| e.body.type_name().to_string())
             .collect();
-        assert_eq!(since, ["world:rekeyed"], "fixture v{version}");
+        // The re-key is one write: its own event, then one for each
+        // webhook it turned off and each delivery it dropped.
+        assert_eq!(since[0], "world:rekeyed", "fixture v{version}");
+        assert!(
+            since[1..]
+                .iter()
+                .all(|kind| kind == "app:hook_set" || kind == "delivery:dropped"),
+            "fixture v{version}: {since:?}"
+        );
         world
             .create_actor("after-migration", ActorKind::User)
             .unwrap();
         let after = diff::diff(snapshot.side(), to()).unwrap();
         assert_eq!(changed(&after), ["actors_added"], "fixture v{version}");
-        assert_eq!(after.log.appended, 2);
+        assert_eq!(after.log.appended, since.len() as i64 + 1);
         drop(snapshot);
 
         assert_unchanged(&snapshots.join(&name), &pristine, &name);

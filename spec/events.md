@@ -57,6 +57,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `oauth_authorization` | `id` | `app`, `actor` (who granted it) |
 | `app` | `id`, `slug`, `client_id` | none |
 | `app_key` | `id` | `app` |
+| `app_manifest` | `id` | `app`, `actor` (who registered the app) |
 | `installation` | `id` | `app`, `account` (the account it is installed on) |
 | `installation_token` | `id` | `installation`, `app` |
 | `delivery` | `id` | `app` |
@@ -88,10 +89,12 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `oauth_app:secret_issued` | issuing a client secret | `n`, its number | none |
 | `oauth_authorization:created` | authorizing an app | `object` | none |
 | `oauth_authorization:exchanged` | trading the code for a token | `changes` | none |
-| `app:created` | registering an app | `object` | `actor:created` for its bot, unless a bot already held its slug; then `oauth_app:created`, since an app is an OAuth app under the same id |
+| `app:created` | registering an app | `object` | `actor:created` for its bot, unless a bot already held its slug; then `oauth_app:created`, since an app is an OAuth app under the same id; then `app_manifest:created`, when a person registered it from a manifest |
 | `app:hook_set` | pointing an app's webhook at a URL, which the app does through its face, or turning it on or off; a consequence of forking a world, which turns every webhook off | `changes` | none |
 | `app:hook_secret_issued` | issuing a secret for an app's webhook | `changes`: `hook_secrets`, how many it has been issued | none |
 | `app_key:created` | adding a public key to an app | `object` | none |
+| `app_manifest:created` | a consequence of `app:created`, for an app a person registered from a manifest: the code its registration issued | `object` | none |
+| `app_manifest:converted` | trading a manifest's code for its app's credentials | `changes` | `app_key:created`, for the key the app is given, whose public half the world keeps |
 | `installation:created` | installing an app on an account | `object` | none |
 | `installation:suspended`, `installation:unsuspended` | an app suspending one of its installations, or lifting the suspension | `changes` | none |
 | `installation:deleted` | an app removing one of its installations | `object`, as it was | none |

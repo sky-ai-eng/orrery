@@ -405,6 +405,8 @@ fn seed(world: &World) -> Seeded {
                 events: &[],
                 hook_url: None,
                 hook_active: false,
+                setup_url: None,
+                request_oauth_on_install: false,
             },
             by(alice.id),
         )
@@ -590,6 +592,7 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
             "oauth_codes": 1,
             "installation_tokens": 1,
             "hook_secrets": 1,
+            "app_manifest_codes": 0,
         })
     );
     let wire = serde_json::to_string(&log).unwrap();
@@ -886,6 +889,8 @@ fn diff_reports_apps_and_installations() {
                 events: &[],
                 hook_url: None,
                 hook_active: false,
+                setup_url: None,
+                request_oauth_on_install: false,
             },
             by(alice.id),
         )
@@ -1320,6 +1325,85 @@ impl orrery_world::Notifier for ForEachActor {
     }
 }
 
+/// Alice, and an app she registered from a manifest, whose code is still
+/// held.
+fn with_manifest(world: &World) -> orrery_world::ManifestApp {
+    let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
+    world
+        .create_app_from_manifest(
+            &NewApp {
+                slug: "helper",
+                name: "Helper",
+                owner: "alice",
+                callback_urls: &["https://helper.test/callback".to_string()],
+                permissions: &Permissions::new(),
+                events: &[],
+                hook_url: None,
+                hook_active: false,
+                setup_url: None,
+                request_oauth_on_install: false,
+            },
+            Attribution::new(alice.id, Door::Web),
+        )
+        .unwrap()
+}
+
+#[test]
+fn a_fork_derives_a_held_manifest_code_again_and_gives_the_key_it_checks() {
+    let inst = Instance::new();
+    let source = with_manifest(&inst.world);
+    inst.snapshot("seed");
+    // A twin: the same history under the fork's secret holds the code and
+    // the key the fork must derive.
+    let fork_secret = WorldSecret::from_bytes([0xc3; 32]);
+    let twin_dir = tempfile::tempdir().unwrap();
+    let twin_world = World::create(
+        &twin_dir.path().join("world"),
+        DEFAULT_T0_UNIX,
+        &fork_secret,
+    )
+    .unwrap();
+    let twin = with_manifest(&twin_world);
+    let dest = tempfile::tempdir().unwrap();
+    let root = orrery_snapshot::fork(&inst.snapshots(), "seed", dest.path(), &fork_secret).unwrap();
+    let fork = World::open(&root).unwrap();
+
+    // The source's code is dead in the fork, and the re-derived one trades.
+    assert_ne!(source.code, twin.code);
+    assert!(matches!(
+        fork.convert_app_manifest(&source.code),
+        Err(WorldError::NoSuchAppManifest(_))
+    ));
+    let rekeyed = fork
+        .log_after(0, 100)
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.body {
+            EventBody::WorldRekeyed(r) => Some(r.rekeyed),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(rekeyed.app_manifest_codes, 1);
+    let given = fork.convert_app_manifest(&twin.code).unwrap();
+
+    // The key is made when the code is traded, under the secret the world
+    // has then: the fork's is its twin's, and not the one the source gives
+    // for the same app.
+    let held = fork.app_keys(source.app.id).unwrap();
+    assert_eq!(held.len(), 1);
+    let twins = twin_world.convert_app_manifest(&twin.code).unwrap();
+    assert_eq!(given.private_key_pem, twins.private_key_pem);
+    assert_eq!(held, twin_world.app_keys(twin.app.id).unwrap());
+    let sources = inst.world.convert_app_manifest(&source.code).unwrap();
+    assert_ne!(given.private_key_pem, sources.private_key_pem);
+    assert_ne!(held, inst.world.app_keys(source.app.id).unwrap());
+    // A code is traded once.
+    assert!(matches!(
+        fork.convert_app_manifest(&twin.code),
+        Err(WorldError::NoSuchAppManifest(_))
+    ));
+}
+
 /// A world whose one app has an active webhook, and that owes a delivery
 /// for every actor it creates from here on.
 fn hooked() -> (Instance, i64, String) {
@@ -1337,6 +1421,8 @@ fn hooked() -> (Instance, i64, String) {
                 events: &[],
                 hook_url: Some("https://helper.test/hook"),
                 hook_active: true,
+                setup_url: None,
+                request_oauth_on_install: false,
             },
             by(alice.id),
         )

@@ -40,6 +40,8 @@ hmac = "0.12"
 httparse = "1"
 jiff = "0.2"
 libc = "0.2"
+# The arithmetic an RSA key is derived with (orrery-world's `rsa_key`).
+num-bigint = "0.4"
 rusqlite = { version = "0.37", features = ["bundled"] }
 # Checks the signature on a GitHub App's JWT. rustls already brings it in.
 ring = "0.17"
@@ -76,3 +78,9 @@ tempfile = "3"
 [workspace.lints.clippy]
 disallowed_methods = "deny"
 disallowed_types = "deny"
+
+# Deriving an RSA key is a search for two primes, which takes seconds on
+# unoptimized arithmetic and a fraction of one on optimized. Tests derive a
+# key for each app a manifest makes.
+[profile.dev.package.num-bigint]
+opt-level = 3
