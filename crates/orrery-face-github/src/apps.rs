@@ -348,6 +348,55 @@ async fn list_installations(
     with_link(resp, &url, &query, total as usize)
 }
 
+/// `GET /user/installations`: the installations of the token's App that its
+/// user reaches, `{total_count, installations}`. GitHub answers this only
+/// to a token a user gave an App, and refuses any other.
+pub(crate) async fn list_user_installations(
+    State(face): State<GithubFace>,
+    Extension(caller): Extension<Caller>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if let Some(refused) = media::refuse_unrendered(&headers, "Installation") {
+        return refused;
+    }
+    let app = match caller.app_id.filter(|_| caller.installation.is_none()) {
+        Some(id) => match face.world.app_by_id(id) {
+            Ok(app) => app,
+            Err(e) => return internal(e),
+        },
+        None => None,
+    };
+    let Some(app) = app else {
+        return github_error(
+            StatusCode::FORBIDDEN,
+            "You must authenticate with an access token authorized to a GitHub App in order to list installations",
+        );
+    };
+    let query = query.unwrap_or_default();
+    let (per_page, page) = page_params(&query);
+    let (installations, total) = match face.world.installations_reached(
+        app.id,
+        caller.actor.id,
+        (page - 1).saturating_mul(per_page),
+        per_page,
+    ) {
+        Ok(found) => found,
+        Err(e) => return internal(e),
+    };
+    let items: Vec<_> = installations
+        .iter()
+        .map(|i| installation_json(&face, i))
+        .collect();
+    let resp = json_response(
+        StatusCode::OK,
+        serde_json::json!({ "total_count": total, "installations": items }),
+    );
+    let base = face.base_url.trim_end_matches('/');
+    let url = format!("{base}/api/v3/user/installations");
+    with_link(resp, &url, &query, total as usize)
+}
+
 /// `resp` with GitHub's `Link` header for the page `query` asks of `total`
 /// items at `url`, when the list is more than that page.
 fn with_link(mut resp: Response<Body>, url: &str, query: &str, total: usize) -> Response<Body> {

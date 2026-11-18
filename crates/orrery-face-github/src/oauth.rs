@@ -283,14 +283,14 @@ fn authorize_form(
     )
 }
 
-fn page(title: &str, body: &str) -> String {
+pub(crate) fn page(title: &str, body: &str) -> String {
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>{}</title></head><body>{body}</body></html>",
         escape(title)
     )
 }
 
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -338,7 +338,7 @@ fn token_response(as_json: bool, fields: &[(&str, &str)]) -> Response<Body> {
         .expect("static response parts are valid")
 }
 
-fn html(status: StatusCode, body: &str) -> Response<Body> {
+pub(crate) fn html(status: StatusCode, body: &str) -> Response<Body> {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
@@ -346,7 +346,7 @@ fn html(status: StatusCode, body: &str) -> Response<Body> {
         .expect("static response parts are valid")
 }
 
-fn redirect(location: &str) -> Response<Body> {
+pub(crate) fn redirect(location: &str) -> Response<Body> {
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -354,7 +354,7 @@ fn redirect(location: &str) -> Response<Body> {
         .expect("static response parts are valid")
 }
 
-fn with_query(url: &str, pairs: &[(&str, &str)]) -> String {
+pub(crate) fn with_query(url: &str, pairs: &[(&str, &str)]) -> String {
     let (base, fragment) = match url.split_once('#') {
         Some((b, f)) => (b, Some(f)),
         None => (url, None),

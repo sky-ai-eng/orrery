@@ -207,6 +207,12 @@ pub fn routers(
     let oauth = orrery_face_github::oauth::web_router(github.clone())
         .method_not_allowed_fallback(not_mocked);
 
+    // The pages a person registers and installs a GitHub App on are on the
+    // web host too, and the call that trades a manifest's code carries no
+    // credential but the code.
+    let app_flows = orrery_face_github::app_flows::web_router(github.clone())
+        .method_not_allowed_fallback(not_mocked);
+
     // A GitHub App's own routes authenticate with a JWT the App signs, and
     // the client-credentials check with a client id and secret, never an
     // API token.
@@ -225,7 +231,11 @@ pub fn routers(
         .layer(middleware::from_fn_with_state(state.clone(), face_auth));
 
     Routers {
-        faces: Router::new().merge(oauth).merge(apps).merge(faces),
+        faces: Router::new()
+            .merge(oauth)
+            .merge(app_flows)
+            .merge(apps)
+            .merge(faces),
         // Every path under the prefix is the control plane's. One that no
         // control route names answers 404 in the control plane's error shape,
         // and on a listener the faces share, a face route whose first segment
