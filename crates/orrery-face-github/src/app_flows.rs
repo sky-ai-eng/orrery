@@ -2,82 +2,54 @@
 //! from a manifest, and installing one on an account. They are on the web
 //! host, as the OAuth pages are, and carry no API token.
 //!
-//! Each page is a stand-in for GitHub's. A world has no passwords and no
-//! browser sessions (rule 12), so a page asks for a login, and naming an
-//! existing user is what signing in means, as on the authorize page. What
-//! GitHub decides from who is signed in and what they may do, a page asks
-//! for: the account to install on, the repositories, and whether the person
-//! may install or can only ask to.
+//! Each page is a stand-in for GitHub's. A world has no browser sessions
+//! (rule 12), so a page's form signs the person in, as the authorize page's
+//! does ([`SignIn`]). What GitHub decides from who is signed in and what
+//! they may do, a page asks for: the account to install on, the
+//! repositories, and whether the person may install or can only ask to.
 
 use std::collections::BTreeMap;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Path as UrlPath, RawQuery, State};
+use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
 use axum::http::{Response, StatusCode};
 use axum::routing::{get, post};
 use orrery_world::{
     Actor, ActorKind, App, Attribution, Door, Installation, NewApp, Permissions, WorldError,
 };
 
-use crate::oauth::{escape, html, page, redirect, with_query};
+use crate::oauth::{
+    NOT_SIGNED_IN, SignIn, escape, html, page, redirect, sign_in_fields, signed_in, with_query,
+};
 use crate::{GithubFace, github_error, internal, json_response, parse_form};
 
 /// The longest name GitHub gives an App.
 const MAX_NAME: usize = 34;
 
-/// The pages, and the call that trades a manifest's code. With `pages`
-/// off, each page answers that this world does not serve it: a page signs
-/// a person in by their login alone, which a world whose faces anyone can
-/// reach cannot offer. The trade stays, and finds no code to trade.
-pub fn web_router(face: GithubFace, pages: bool) -> Router {
-    let conversions =
-        Router::new().route("/api/v3/app-manifests/{code}/conversions", post(convert));
-    let pages = match pages {
-        true => Router::new()
-            .route("/settings/apps/new", post(register))
-            .route(
-                "/organizations/{org}/settings/apps/new",
-                post(register_for_org),
-            )
-            .route(
-                "/apps/{slug}/installations/new",
-                get(install_page).post(install),
-            )
-            .route(
-                "/apps/{slug}/installations/new/permissions",
-                get(install_page).post(install),
-            ),
-        false => Router::new()
-            .route("/settings/apps/new", post(closed))
-            .route("/organizations/{org}/settings/apps/new", post(closed))
-            .route("/apps/{slug}/installations/new", get(closed).post(closed))
-            .route(
-                "/apps/{slug}/installations/new/permissions",
-                get(closed).post(closed),
-            ),
-    };
-    pages
-        .merge(conversions)
+pub fn web_router(face: GithubFace, sign_in: SignIn) -> Router {
+    Router::new()
+        .route("/settings/apps/new", post(register))
+        .route(
+            "/organizations/{org}/settings/apps/new",
+            post(register_for_org),
+        )
+        .route(
+            "/apps/{slug}/installations/new",
+            get(install_page).post(install),
+        )
+        .route(
+            "/apps/{slug}/installations/new/permissions",
+            get(install_page).post(install),
+        )
         .route("/settings/installations/{id}", get(installation_page))
         .route(
             "/organizations/{org}/settings/installations/{id}",
             get(org_installation_page),
         )
+        .route("/api/v3/app-manifests/{code}/conversions", post(convert))
+        .layer(Extension(sign_in))
         .with_state(face)
-}
-
-/// What a page answers in a world that does not serve it.
-async fn closed() -> Response<Body> {
-    html(
-        StatusCode::FORBIDDEN,
-        &page(
-            "Not served",
-            "<h1>Not served</h1><p>orrery: this world does not serve the pages that register \
-             and install a GitHub App (server.app_pages = false). Register and install an App \
-             on the control plane.</p>",
-        ),
-    )
 }
 
 // ---- registering an App from a manifest ----
@@ -118,21 +90,24 @@ fn yes() -> bool {
 
 async fn register(
     State(face): State<GithubFace>,
+    Extension(sign_in): Extension<SignIn>,
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response<Body> {
-    registration(&face, None, query.as_deref().unwrap_or(""), &body)
+    registration(&face, sign_in, None, query.as_deref().unwrap_or(""), &body)
 }
 
 async fn register_for_org(
     State(face): State<GithubFace>,
+    Extension(sign_in): Extension<SignIn>,
     UrlPath(org): UrlPath<String>,
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response<Body> {
     match face.world.actor_by_login(&org) {
         Ok(Some(actor)) if actor.kind == ActorKind::Org => {
-            registration(&face, Some(&actor), query.as_deref().unwrap_or(""), &body)
+            let query = query.as_deref().unwrap_or("");
+            registration(&face, sign_in, Some(&actor), query, &body)
         }
         Ok(_) => not_found(),
         Err(e) => internal(e),
@@ -141,11 +116,12 @@ async fn register_for_org(
 
 /// The manifest form's post. The caller's page posts the manifest alone,
 /// and the answer is the page a person confirms on. That page posts the
-/// manifest back with a login, which registers the App and sends the person
+/// manifest back signed in, which registers the App and sends the person
 /// to the manifest's `redirect_url` with the code its caller trades for the
 /// App's credentials.
 fn registration(
     face: &GithubFace,
+    sign_in: SignIn,
     org: Option<&Actor>,
     query: &str,
     body: &[u8],
@@ -179,14 +155,25 @@ fn registration(
         .as_deref()
         .filter(|url| !url.is_empty());
     let again = |status: StatusCode, error: Option<&str>| {
-        html(status, &registration_form(org, query, raw, &name, error))
+        let login = form.get("login").map(String::as_str).unwrap_or("");
+        html(
+            status,
+            &registration_form(
+                org,
+                query,
+                raw,
+                &name,
+                sign_in_fields(sign_in, login),
+                error,
+            ),
+        )
     };
-    let Some(login) = form.get("login") else {
+    if !form.contains_key("login") {
         return again(StatusCode::OK, None);
-    };
-    let person = match face.world.actor_by_login(login) {
-        Ok(Some(actor)) if actor.kind == ActorKind::User => actor,
-        Ok(_) => return again(StatusCode::OK, Some("Incorrect username or password.")),
+    }
+    let person = match signed_in(face, sign_in, &form) {
+        Ok(Some(person)) => person,
+        Ok(None) => return again(StatusCode::OK, Some(NOT_SIGNED_IN)),
         Err(e) => return internal(e),
     };
     if name.is_empty() {
@@ -295,6 +282,7 @@ fn registration_form(
     query: &str,
     manifest: &str,
     name: &str,
+    sign_in: String,
     error: Option<&str>,
 ) -> String {
     let action = match org {
@@ -317,8 +305,7 @@ fn registration_form(
 <input type="hidden" name="manifest" value="{manifest}">
 <label for="name">GitHub App name</label>
 <input id="name" name="name" type="text" value="{name}">
-<label for="login">Username</label>
-<input id="login" name="login" type="text" autocomplete="username" autofocus>
+{sign_in}
 <button type="submit">Create GitHub App</button>
 </form>"#,
             title = escape(&title),
@@ -326,6 +313,7 @@ fn registration_form(
             action = escape(&action),
             manifest = escape(manifest),
             name = escape(name),
+            sign_in = sign_in,
         ),
     )
 }
@@ -396,6 +384,7 @@ fn app_by_slug(face: &GithubFace, slug: &str) -> Result<App, Box<Response<Body>>
 
 async fn install_page(
     State(face): State<GithubFace>,
+    Extension(sign_in): Extension<SignIn>,
     UrlPath(slug): UrlPath<String>,
     RawQuery(query): RawQuery,
 ) -> Response<Body> {
@@ -410,18 +399,26 @@ async fn install_page(
     };
     html(
         StatusCode::OK,
-        &install_form(&app, &query, account.as_ref(), &BTreeMap::new(), None),
+        &install_form(
+            &app,
+            &query,
+            account.as_ref(),
+            &BTreeMap::new(),
+            sign_in,
+            None,
+        ),
     )
 }
 
 /// The install page's post: installs the App on the account for the person
-/// named, or, with `setup_action=request`, only asks to, which is what
+/// signed in, or, with `setup_action=request`, only asks to, which is what
 /// GitHub lets a person do who may not install on that account. Then the
 /// person is sent on as GitHub sends them: through the App's authorization
 /// to its callback URL when it asks for that, else to its setup URL, else
 /// to the installation's own page.
 async fn install(
     State(face): State<GithubFace>,
+    Extension(sign_in): Extension<SignIn>,
     UrlPath(slug): UrlPath<String>,
     RawQuery(query): RawQuery,
     body: Bytes,
@@ -440,13 +437,13 @@ async fn install(
     let again = |status: StatusCode, error: &str| {
         html(
             status,
-            &install_form(&app, &query, chosen.as_ref(), &form, Some(error)),
+            &install_form(&app, &query, chosen.as_ref(), &form, sign_in, Some(error)),
         )
     };
     let field = |name: &str| form.get(name).map(String::as_str).unwrap_or("").trim();
-    let person = match face.world.actor_by_login(field("login")) {
-        Ok(Some(actor)) if actor.kind == ActorKind::User => actor,
-        Ok(_) => return again(StatusCode::OK, "Incorrect username or password."),
+    let person = match signed_in(&face, sign_in, &form) {
+        Ok(Some(person)) => person,
+        Ok(None) => return again(StatusCode::OK, NOT_SIGNED_IN),
         Err(e) => return internal(e),
     };
     // The account is the one the URL chose, else the one the form names,
@@ -571,6 +568,7 @@ fn install_form(
     query: &str,
     account: Option<&Actor>,
     form: &BTreeMap<String, String>,
+    sign_in: SignIn,
     error: Option<&str>,
 ) -> String {
     let path = match account {
@@ -602,8 +600,7 @@ fn install_form(
         &format!(
             r#"<h1>{title}</h1>{flash}
 <form method="post" action="{action}">
-<label for="login">Username</label>
-<input id="login" name="login" type="text" autocomplete="username" value="{login}" autofocus>
+{sign_in}
 {account_field}
 <label><input type="radio" name="repository_selection" value="all"{all}> All repositories</label>
 <label><input type="radio" name="repository_selection" value="selected"{selected}> Only select repositories</label>
@@ -615,7 +612,7 @@ fn install_form(
             title = escape(&title),
             flash = flash(error),
             action = escape(&action),
-            login = kept("login"),
+            sign_in = sign_in_fields(sign_in, form.get("login").map(String::as_str).unwrap_or("")),
             repositories = kept("repositories"),
             all = all,
             selected = selected,

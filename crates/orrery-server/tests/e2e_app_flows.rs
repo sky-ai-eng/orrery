@@ -835,62 +835,134 @@ async fn a_bots_token_lists_no_user_installations() {
     assert_eq!(refused["message"], "Resource not accessible by integration");
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_world_can_serve_no_app_pages() {
+/// A world whose pages ask for a token, with alice, bob, and the App
+/// `helper`, which asks for authorization on install: alice's token, bob's,
+/// and what registering the App answered.
+async fn token_sign_in() -> (common::Instance, String, String, serde_json::Value) {
     let inst = common::boot_with(orrery_server::Options {
-        app_pages: false,
+        page_sign_in: orrery_server::SignIn::Token,
         ..Default::default()
     })
     .await;
-    let base = &inst.base;
-    mint_actor(base, "alice", "user");
-    control_post(
-        base,
+    let base = inst.base.clone();
+    let alice = mint_actor(&base, "alice", "user");
+    let bob = mint_actor(&base, "bob", "user");
+    let helper = control_post(
+        &base,
         "/_orrery/apps",
         serde_json::json!({
             "slug": "helper",
             "name": "helper",
             "owner": "alice",
             "callback_urls": ["https://helper.test/callback"],
+            "request_oauth_on_install": true,
         }),
     );
+    (inst, alice, bob, helper)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_world_can_ask_for_a_token_to_sign_in_on_its_pages() {
+    let (inst, alice, bob, helper) = token_sign_in().await;
+    let base = &inst.base;
     let manifest = manifest("Helper App");
-    for path in [
-        "/settings/apps/new",
-        "/organizations/acme/settings/apps/new",
+    let client_id = helper["client_id"].as_str().unwrap();
+    let install = format!("{base}/apps/helper/installations/new");
+    let register = format!("{base}/settings/apps/new");
+    let authorize = format!("{base}/login/oauth/authorize");
+
+    // Each page asks for the token.
+    let (_, _, page) = post_form(&register, &[("manifest", &manifest)]);
+    assert!(page.contains("name=\"password\""), "{page}");
+    for url in [
+        install.clone(),
+        format!("{authorize}?client_id={client_id}"),
     ] {
-        let (status, to, page) = post_form(
-            &format!("{base}{path}"),
-            &[("manifest", &manifest), ("login", "alice")],
-        );
-        assert_eq!((status, to), (403, None), "{path}");
-        assert!(page.contains("server.app_pages = false"), "{page}");
+        let mut page = agent().get(&url).call().unwrap();
+        assert_eq!(page.status(), 200, "{url}");
+        let page = page.body_mut().read_to_string().unwrap();
+        assert!(page.contains("name=\"password\""), "{url}: {page}");
     }
-    for path in [
-        "/apps/helper/installations/new",
-        "/apps/helper/installations/new/permissions?target_id=1",
-    ] {
-        let url = format!("{base}{path}");
-        assert_eq!(agent().get(&url).call().unwrap().status(), 403, "{path}");
-        let (status, _, _) = post_form(&url, &[("login", "alice")]);
-        assert_eq!(status, 403, "{path}");
+
+    // A login alone signs in nobody, nor does it with anyone else's token,
+    // and nothing is registered, installed, or authorized.
+    let wrong: [Vec<(&str, &str)>; 3] = [
+        vec![("login", "alice")],
+        vec![("login", "alice"), ("password", &bob)],
+        vec![("login", "alice"), ("password", "orrfake_nope")],
+    ];
+    for sign_in in &wrong {
+        let mut fields = sign_in.clone();
+        fields.push(("manifest", &manifest));
+        let (status, to, page) = post_form(&register, &fields);
+        assert_eq!((status, to), (200, None), "{sign_in:?}");
+        assert!(page.contains("Incorrect username or password."), "{page}");
+
+        let (status, to, page) = post_form(&install, sign_in);
+        assert_eq!((status, to), (200, None), "{sign_in:?}");
+        assert!(page.contains("Incorrect username or password."), "{page}");
+
+        let mut fields = sign_in.clone();
+        fields.push(("client_id", client_id));
+        let (status, to, page) = post_form(&authorize, &fields);
+        assert_eq!((status, to), (200, None), "{sign_in:?}");
+        assert!(page.contains("Incorrect username or password."), "{page}");
+        // The page shown again keeps the login and never the token.
+        assert!(!page.contains(&bob), "{page}");
     }
-    // Nothing was registered or installed, and there is no code to trade.
     assert_eq!(get(&format!("{base}/_orrery/apps/helper-app"), None).0, 404);
     assert!(installations(base, "helper").is_empty());
-    assert_eq!(
-        agent()
-            .post(&format!("{base}/api/v3/app-manifests/0000/conversions"))
-            .send_empty()
-            .unwrap()
-            .status(),
-        404
+
+    // With their own token a person signs in on each.
+    let own = [("login", "alice"), ("password", alice.as_str())];
+    let (status, to, _) = post_form(
+        &register,
+        &[own[0], own[1], ("manifest", manifest.as_str())],
     );
-    // The control plane still registers and installs.
-    control_post(
-        base,
-        "/_orrery/apps/helper/installations",
-        serde_json::json!({ "account": "alice" }),
+    assert_eq!(status, 302, "{to:?}");
+    assert!(query_value(&to.unwrap(), "code").is_some());
+    let (status, to, _) = post_form(&authorize, &[own[0], own[1], ("client_id", client_id)]);
+    assert_eq!(status, 302);
+    let authorized = to.unwrap();
+    assert!(
+        authorized.starts_with("https://helper.test/callback?code="),
+        "{authorized}"
     );
+    let (status, to, _) = post_form(&install, &own);
+    assert_eq!(status, 302);
+    let installed = to.unwrap();
     assert_eq!(installations(base, "helper").len(), 1);
+
+    // A token an App was given acts as the person through that App, and is
+    // not theirs to sign in with: the holder of one App's secret cannot
+    // turn it into an authorization of another.
+    let mut exchanged = agent()
+        .post(&format!("{base}/login/oauth/access_token"))
+        .header("accept", "application/json")
+        .send_form([
+            ("client_id", client_id),
+            ("client_secret", helper["client_secret"].as_str().unwrap()),
+            ("code", query_value(&installed, "code").unwrap().as_str()),
+        ])
+        .unwrap();
+    let given: serde_json::Value = exchanged.body_mut().read_json().unwrap();
+    let given = given["access_token"].as_str().unwrap();
+    assert_eq!(
+        get(
+            &format!("{base}/api/v3/user"),
+            Some(&format!("token {given}"))
+        )
+        .2["login"],
+        "alice"
+    );
+    let (status, to, page) = post_form(
+        &authorize,
+        &[
+            ("login", "alice"),
+            ("password", given),
+            ("client_id", client_id),
+        ],
+    );
+    assert_eq!((status, to), (200, None));
+    assert!(page.contains("Incorrect username or password."), "{page}");
 }

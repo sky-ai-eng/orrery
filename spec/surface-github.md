@@ -285,7 +285,9 @@ Every payload but `installation`'s also carries `installation`, `{id, node_id}`.
 
 ## 2. Web pages
 
-The pages a person's browser is sent to, on the web host, without a token. A world has no passwords and no browser sessions (rule 12), so each is Orrery's stand-in for GitHub's page: a form that asks for a login, and naming a user actor is what signing in means.
+The pages a person's browser is sent to, on the web host, without an `Authorization` header. A world has no browser sessions (rule 12), so each is Orrery's stand-in for GitHub's page, and its form signs the person in.
+
+**Signing in.** A form carries `login`, a user's login. A world set to ask for one (`page_sign_in = "token"`; `usage.md`, "Door two: the control plane") shows a `password` field too, which must be a token the control plane issued that user: any other value signs in nobody, a token an app was given for them included. A form that signs in nobody is answered with the page again, `200`, and "Incorrect username or password.", and changes nothing. A page shown again keeps the login and never the token. Below, "signed in" means this.
 
 ### 2.1 OAuth web flow
 
@@ -294,7 +296,7 @@ GitHub's OAuth web flow. An OAuth app is registered on the control plane (`POST 
 | Route | Behavior |
 | --- | --- |
 | `GET /login/oauth/authorize` | `client_id, redirect_uri?, scope?, state?`. An unknown `client_id` is a `404` page. `redirect_uri` defaults to the app's callback; when given, its scheme, host, and port must equal the callback's and its path must be the callback's or below it, else a `302` to the callback with `error=redirect_uri_mismatch`, `error_description`, `error_uri`, and `state`. GitHub's sub-domain allowance and loopback-port exception are not modeled. Answers Orrery's stand-in for GitHub's sign-in and consent pages: a form asking for a login. |
-| `POST /login/oauth/authorize` | The same fields as a form, plus `login`, naming a user actor (rule 12: no passwords exist). Any other login re-renders the page with "Incorrect username or password." Success is a `302` to `redirect_uri` with `code` and `state`. |
+| `POST /login/oauth/authorize` | The same fields as a form, signed in. Success is a `302` to `redirect_uri` with `code` and `state`. |
 | `POST /login/oauth/access_token` | `client_id, client_secret, code, redirect_uri?` from the query, a form body, or a JSON body; the client pair may instead be HTTP Basic. Success is `access_token` (a new token for the actor who authorized), `token_type=bearer`, and `scope`, form-encoded unless `Accept: application/json`; `application/xml` is not mocked. Refusals are `200` with `error, error_description, error_uri`: `incorrect_client_credentials`, `bad_verification_code` (unknown, spent, or older than 10 minutes on the world clock), and `redirect_uri_mismatch` (a `redirect_uri` that differs from the one the code was issued for). A code is spent by its first successful exchange. |
 
 Scopes are recorded and echoed, not enforced: no route checks a token's scopes. The token reads the identity routes in §1.1.
@@ -305,10 +307,8 @@ Scopes are recorded and echoed, not enforced: no route checks a token's scopes. 
 
 | Route | Behavior |
 | --- | --- |
-| `POST /settings/apps/new?state=`, `POST /organizations/{org}/settings/apps/new?state=` | A form with one field, `manifest`, the App as JSON. Answers the page a person confirms on, which registers nothing: a form holding the manifest, the App's name, and a login. Posting that form, with `login` naming a user, registers the App, owned by that user or by `{org}`, and is a `302` to the manifest's `redirect_url` with `code` and, when the URL carried one, `state`. With no `redirect_url` it answers a page. Any other login shows the page again with "Incorrect username or password." An `{org}` that is not an organization is a `404` page. The page is shown again with `422` for a name that is blank ("Name can't be blank"), longer than 34 characters ("Name is too long (maximum is 34 characters)"), or taken ("Name is already in use"), for a manifest with no `url` ("Url can't be blank"), for a `redirect_url` that is not an `http` or `https` URL a redirect can carry, for `request_oauth_on_install` with no `callback_urls`, and for anything the control plane refuses of an App. A refused manifest registers nothing. A `manifest` that is not JSON is a `422` page. |
+| `POST /settings/apps/new?state=`, `POST /organizations/{org}/settings/apps/new?state=` | A form with one field, `manifest`, the App as JSON. Answers the page a person confirms on, which registers nothing: a form holding the manifest, the App's name, and the sign-in. Posting that form signed in registers the App, owned by that user or by `{org}`, and is a `302` to the manifest's `redirect_url` with `code` and, when the URL carried one, `state`. With no `redirect_url` it answers a page. An `{org}` that is not an organization is a `404` page. The page is shown again with `422` for a name that is blank ("Name can't be blank"), longer than 34 characters ("Name is too long (maximum is 34 characters)"), or taken ("Name is already in use"), for a manifest with no `url` ("Url can't be blank"), for a `redirect_url` that is not an `http` or `https` URL a redirect can carry, for `request_oauth_on_install` with no `callback_urls`, and for anything the control plane refuses of an App. A refused manifest registers nothing. A `manifest` that is not JSON is a `422` page. |
 | `POST /app-manifests/{code}/conversions` | No credential but the code, and no body. `201` with the App as `GET /app` answers it, without `installations_count`, plus `client_secret`, `webhook_secret`, and `pem`, the App's private key as PKCS#1 PEM (`BEGIN RSA PRIVATE KEY`), 2048 bits. A code is traded once, within an hour of the world's clock: a code that is unknown, traded, or older is `404` "Not Found". |
-
-A world can serve none of these pages (`app_pages = false`; `usage.md`, "Door two: the control plane"): each then answers `403`, and a conversion finds no code.
 
 The manifest's fields: `name`, `url`, `redirect_url`, `callback_urls`, `setup_url`, `request_oauth_on_install`, `default_permissions`, `default_events`, and `hook_attributes` (`url`, and `active`, true unless given). The App's slug is its name in lower case with every run of other characters a hyphen. `description`, `public`, and `setup_on_update` are accepted and kept nowhere. The App is registered when the person confirms, by them through the `web` door, and it is the App `POST /_orrery/apps` registers. It has a webhook secret whether or not its webhook is active, as on GitHub.
 
@@ -318,9 +318,9 @@ The private key is derived from the world's secret when the code is traded, and 
 
 | Route | Behavior |
 | --- | --- |
-| `GET /apps/{slug}/installations/new?state=` | The install page: a form asking for a login, the account to install on (the person's own unless named), all of the account's repositories or the ones named, and whether to install or only ask to. An unknown App is a `404` page. |
+| `GET /apps/{slug}/installations/new?state=` | The install page: a form with the sign-in, the account to install on (the person's own unless named), all of the account's repositories or the ones named, and whether to install or only ask to. An unknown App is a `404` page. |
 | `GET /apps/{slug}/installations/new/permissions?target_id=&state=` | The same page with the account chosen: `target_id` is a user's or an organization's id, and any other is a `404` page. |
-| `POST` to either | Installs the App on the account, by the person through the `web` door, and sends them on (below). A login that is not a user's shows the page again with "Incorrect username or password." An account or a repository that does not exist shows it again with `422`. An account that already has the App is a `302` to its installation's page. |
+| `POST` to either | Signed in, installs the App on the account, by the person through the `web` door, and sends them on (below). An account or a repository that does not exist shows it again with `422`. An account that already has the App is a `302` to its installation's page. |
 | `GET /settings/installations/{id}`, `GET /organizations/{org}/settings/installations/{id}` | A page naming the installation, at the path its `html_url` gives. Any other id is a `404` page. |
 
 Where a person is sent once they have installed the App, each a `302`:

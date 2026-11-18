@@ -3,36 +3,107 @@
 //! trades the resulting code at. Neither carries an API token, so these
 //! routes mount outside face auth.
 //!
-//! The authorize page signs an actor in by login alone. A world has no
-//! passwords and no browser sessions (rule 12: every credential in it is
-//! fake), so naming an existing user actor is what signing in means here.
+//! A page signs a person in on the form it shows them ([`SignIn`]). A world
+//! has no passwords and no browser sessions (rule 12: every credential in
+//! it is fake), so by default naming an existing user actor is what signing
+//! in means. A world anyone can reach asks for a token of theirs as well.
 
 use std::collections::BTreeMap;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{RawQuery, State};
+use axum::extract::{Extension, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode, header};
 use axum::routing::{get, post};
 use base64::Engine as _;
-use orrery_world::{ActorKind, OAuthApp, WorldError};
+use orrery_world::{Actor, ActorKind, OAuthApp, WorldError};
 
 use crate::{GithubFace, header_str, internal, parse_form};
 
 const ERROR_DOC: &str = "https://docs.github.com/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors";
 
-pub fn web_router(face: GithubFace) -> Router {
+/// How a page that stands in for one of GitHub's signs a person in. On
+/// GitHub a browser session says who they are. A world has none, so the
+/// page's own form does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SignIn {
+    /// By the login they name. Whoever can reach the page can then act as
+    /// any user, which suits a world only its own harness reaches.
+    #[default]
+    Login,
+    /// By their login and, as `password`, a token the control plane issued
+    /// them. A world whose faces are on the public internet takes this:
+    /// only someone the world's owner gave a token can sign in.
+    Token,
+}
+
+pub fn web_router(face: GithubFace, sign_in: SignIn) -> Router {
     Router::new()
         .route(
             "/login/oauth/authorize",
             get(authorize_page).post(authorize),
         )
         .route("/login/oauth/access_token", post(access_token))
+        .layer(Extension(sign_in))
         .with_state(face)
+}
+
+/// The user a page's form signs in, or `None` for a form that signs in
+/// nobody, which every page answers alike: "Incorrect username or
+/// password." A bot and an organization are no one to sign in. Under
+/// [`SignIn::Token`] the `password` must be a token of the user's own: one
+/// an app was given acts as them through that app, and is not theirs to
+/// sign in with.
+pub(crate) fn signed_in(
+    face: &GithubFace,
+    sign_in: SignIn,
+    form: &BTreeMap<String, String>,
+) -> Result<Option<Actor>, WorldError> {
+    let field = |name: &str| form.get(name).map(String::as_str).unwrap_or("").trim();
+    let Some(user) = face
+        .world
+        .actor_by_login(field("login"))?
+        .filter(|actor| actor.kind == ActorKind::User)
+    else {
+        return Ok(None);
+    };
+    if sign_in == SignIn::Login {
+        return Ok(Some(user));
+    }
+    let holder = face.world.caller_by_token(field("password"))?;
+    Ok(holder
+        .filter(|caller| {
+            caller.actor.id == user.id && caller.app_id.is_none() && caller.installation.is_none()
+        })
+        .map(|_| user))
+}
+
+/// What every page answers a form that signed in nobody.
+pub(crate) const NOT_SIGNED_IN: &str = "Incorrect username or password.";
+
+/// The inputs a page's form signs a person in with: their login, kept as
+/// `login` when the form is shown again, and a token when the world asks
+/// for one, never kept.
+pub(crate) fn sign_in_fields(sign_in: SignIn, login: &str) -> String {
+    let mut fields = format!(
+        r#"<label for="login">Username</label>
+<input id="login" name="login" type="text" autocomplete="username" value="{}" autofocus>"#,
+        escape(login)
+    );
+    if sign_in == SignIn::Token {
+        fields.push_str(
+            r#"
+<label for="password">Token</label>
+<input id="password" name="password" type="password" autocomplete="current-password">"#,
+        );
+    }
+    fields
 }
 
 async fn authorize_page(
     State(face): State<GithubFace>,
+    Extension(sign_in): Extension<SignIn>,
     RawQuery(query): RawQuery,
 ) -> Response<Body> {
     let params = parse_form(query.as_deref().unwrap_or("").as_bytes());
@@ -46,11 +117,15 @@ async fn authorize_page(
     };
     html(
         StatusCode::OK,
-        &authorize_form(&app, &redirect_uri, &params, None),
+        &authorize_form(&app, &redirect_uri, &params, sign_in, None),
     )
 }
 
-async fn authorize(State(face): State<GithubFace>, body: Bytes) -> Response<Body> {
+async fn authorize(
+    State(face): State<GithubFace>,
+    Extension(sign_in): Extension<SignIn>,
+    body: Bytes,
+) -> Response<Body> {
     let params = parse_form(&body);
     let app = match resolve_app(&face, &params) {
         Ok(app) => app,
@@ -60,18 +135,12 @@ async fn authorize(State(face): State<GithubFace>, body: Bytes) -> Response<Body
         Ok(uri) => uri,
         Err(resp) => return *resp,
     };
-    let login = params.get("login").map(String::as_str).unwrap_or("");
-    let actor = match face.world.actor_by_login(login) {
-        Ok(Some(a)) if a.kind == ActorKind::User => a,
-        Ok(_) => {
+    let actor = match signed_in(&face, sign_in, &params) {
+        Ok(Some(actor)) => actor,
+        Ok(None) => {
             return html(
                 StatusCode::OK,
-                &authorize_form(
-                    &app,
-                    &redirect_uri,
-                    &params,
-                    Some("Incorrect username or password."),
-                ),
+                &authorize_form(&app, &redirect_uri, &params, sign_in, Some(NOT_SIGNED_IN)),
             );
         }
         Err(e) => return internal(e),
@@ -247,6 +316,7 @@ fn authorize_form(
     app: &OAuthApp,
     redirect_uri: &str,
     params: &BTreeMap<String, String>,
+    sign_in: SignIn,
     error: Option<&str>,
 ) -> String {
     let hidden = |name: &str, value: &str| {
@@ -273,12 +343,12 @@ fn authorize_form(
             r#"<h1>Authorize {name}</h1>{flash}
 <form method="post" action="/login/oauth/authorize">
 {fields}
-<label for="login">Username</label>
-<input id="login" name="login" type="text" autocomplete="username" autofocus>
+{sign_in}
 <button type="submit">Authorize</button>
 </form>"#,
             name = escape(&app.name),
             fields = fields.join("\n"),
+            sign_in = sign_in_fields(sign_in, ""),
         ),
     )
 }
