@@ -256,6 +256,113 @@ async fn a_manifest_registers_an_app_whose_credentials_work() {
     );
 }
 
+/// A manifest with the fields, permissions, and events a caller that runs
+/// as an App commonly sends, and a name that is not already a slug.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_manifest_registers_and_converts() {
+    let inst = boot().await;
+    let base = &inst.base;
+    let api = format!("{base}/api/v3");
+    mint_actor(base, "alice", "user");
+    mint_actor(base, "acme", "org");
+    let manifest = serde_json::json!({
+        "name": "Review Helper (Acme Corp)",
+        "url": "https://www.helper.test",
+        "redirect_url": "http://127.0.0.1:9/api/orgs/7/github/app/register/callback",
+        "callback_urls": [
+            "http://127.0.0.1:9/api/orgs/7/github/app/register/callback",
+            "http://127.0.0.1:9/api/orgs/7/github/connect/callback",
+        ],
+        "public": false,
+        "default_permissions": {
+            "emails": "read",
+            "issues": "write",
+            "pull_requests": "write",
+            "contents": "write",
+            "metadata": "read",
+            "checks": "read",
+            "actions": "read",
+            "statuses": "read",
+            "members": "read",
+            "vulnerability_alerts": "read",
+        },
+        "default_events": [
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+            "issue_comment",
+            "push",
+            "check_run",
+            "check_suite",
+            "dependabot_alert",
+        ],
+        "hook_attributes": { "url": "https://example.com/unused-webhook", "active": false },
+    })
+    .to_string();
+    // The state a caller signs is an opaque string with characters a URL
+    // escapes, and comes back as it was sent.
+    let state = "eyJvcmciOiI3In0=.c2lnbmF0dXJl+/==";
+    let form = format!(
+        "{base}/organizations/acme/settings/apps/new?state={}",
+        state
+            .replace('+', "%2B")
+            .replace('/', "%2F")
+            .replace('=', "%3D")
+    );
+    let (status, back, page) = post_form(&form, &[("manifest", &manifest), ("login", "alice")]);
+    assert_eq!(status, 302, "{page}");
+    let back = back.unwrap();
+    let returned = query_value(&back, "state").unwrap();
+    assert_eq!(
+        returned
+            .replace("%2B", "+")
+            .replace("%2F", "/")
+            .replace("%3D", "="),
+        state
+    );
+    let code = query_value(&back, "code").unwrap();
+    let mut converted = agent()
+        .post(&format!("{api}/app-manifests/{code}/conversions"))
+        .header("accept", "application/vnd.github+json")
+        .send_empty()
+        .unwrap();
+    assert_eq!(converted.status(), 201);
+    let app: serde_json::Value = converted.body_mut().read_json().unwrap();
+    assert!(app["id"].is_i64());
+    assert_eq!(app["slug"], "review-helper-acme-corp");
+    assert_eq!(app["owner"]["login"], "acme");
+    for key in ["client_id", "client_secret", "pem", "webhook_secret"] {
+        assert!(!app[key].as_str().unwrap().trim().is_empty(), "{key}");
+    }
+    assert_eq!(app["permissions"]["vulnerability_alerts"], "read");
+    assert_eq!(app["events"].as_array().unwrap().len(), 8);
+    // The App's bot is found by the name GitHub gives it.
+    let jwt = format!(
+        "Bearer {}",
+        app_key_from_pem(app["pem"].as_str().unwrap())
+            .jwt(app["id"].clone(), inst.world.clock().unwrap())
+    );
+    assert_eq!(get(&format!("{api}/app"), Some(&jwt)).0, 200);
+    let alice = mint_actor(base, "reader", "user");
+    let (status, _, bot) = get(
+        &format!("{api}/users/review-helper-acme-corp%5Bbot%5D"),
+        Some(&format!("Bearer {alice}")),
+    );
+    assert_eq!(status, 200, "{bot}");
+    assert_eq!(bot["type"], "Bot");
+    // And the install page is at the slug the conversion answered.
+    assert_eq!(
+        agent()
+            .get(&format!(
+                "{base}/apps/review-helper-acme-corp/installations/new"
+            ))
+            .call()
+            .unwrap()
+            .status(),
+        200
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_manifest_registers_an_app_for_an_organization_and_its_code_expires() {
     let inst = boot().await;
@@ -545,10 +652,14 @@ async fn an_app_that_asks_for_authorization_on_install_gets_a_code() {
             ("client_id", signin["client_id"].as_str().unwrap()),
             ("client_secret", signin["client_secret"].as_str().unwrap()),
             ("code", query_value(&to, "code").unwrap().as_str()),
+            // A caller may name the URL it was sent to, as it does for a
+            // code an authorization gave it.
+            ("redirect_uri", "https://signin.test/callback"),
         ])
         .unwrap();
     let token: serde_json::Value = exchanged.body_mut().read_json().unwrap();
-    let as_alice = format!("token {}", token["access_token"].as_str().unwrap());
+    assert!(token["error"].is_null(), "{token}");
+    let as_alice = format!("Bearer {}", token["access_token"].as_str().unwrap());
     let (_, _, me) = get(&format!("{api}/user"), Some(&as_alice));
     assert_eq!(me["login"], "alice");
 
