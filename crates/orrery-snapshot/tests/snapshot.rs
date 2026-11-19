@@ -1131,6 +1131,77 @@ fn diff_reports_dependency_alerts_and_which_repositories_have_them() {
 }
 
 #[test]
+fn diff_reports_check_suites_and_what_they_come_to() {
+    use orrery_world::{CheckConclusion, CheckRunPatch, CheckStatus, NewCheckRun};
+    let inst = Instance::new();
+    let w = &inst.world;
+    let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+    let (ci, _) = w.create_actor("ci", ActorKind::Bot).unwrap();
+    let bot = Attribution::new(ci.id, Door::Rest);
+    let repo = w
+        .create_repo(alice.id, "web", None, false, "main", by(alice.id))
+        .unwrap();
+    let at = w.clock().unwrap();
+    let run = |sha: &'static str| NewCheckRun {
+        repo_id: repo.id,
+        head_sha: sha,
+        name: "build",
+        status: CheckStatus::Queued,
+        conclusion: None,
+        details_url: None,
+        external_id: None,
+        output: None,
+        started_clock_unix: None,
+        completed_clock_unix: None,
+    };
+    const ONE: &str = "1111111111111111111111111111111111111111";
+    const TWO: &str = "2222222222222222222222222222222222222222";
+    let first = w.create_check_run(bot, run(ONE), at).unwrap();
+    inst.snapshot("before");
+    let none = inst.diff("before", None);
+    assert!(none.check_suites_added.is_empty());
+    assert!(none.check_suites_updated.is_empty());
+
+    let patch = CheckRunPatch {
+        status: Some(CheckStatus::Completed),
+        conclusion: Some(CheckConclusion::Failure),
+        ..Default::default()
+    };
+    w.update_check_run(first.id, bot, patch, at).unwrap();
+    w.create_check_run(bot, run(TWO), at).unwrap();
+
+    let d = inst.diff("before", None);
+    let view = |changes: &[orrery_snapshot::diff::CheckSuiteChange]| -> Vec<(String, String, String, String, Option<String>)> {
+        changes
+            .iter()
+            .map(|c| {
+                (
+                    c.repo.clone(),
+                    c.head_sha.clone(),
+                    c.creator.clone(),
+                    c.status.clone(),
+                    c.conclusion.clone(),
+                )
+            })
+            .collect()
+    };
+    let row = |sha: &str, status: &str, conclusion: Option<&str>| {
+        (
+            "alice/web".to_string(),
+            sha.to_string(),
+            "ci".to_string(),
+            status.to_string(),
+            conclusion.map(str::to_string),
+        )
+    };
+    assert_eq!(view(&d.check_suites_added), [row(TWO, "queued", None)]);
+    assert_eq!(
+        view(&d.check_suites_updated),
+        [row(ONE, "completed", Some("failure"))]
+    );
+}
+
+#[test]
 fn diff_reports_org_memberships_and_roles() {
     let inst = Instance::new();
     let (admin, _) = inst.world.create_actor("admin", ActorKind::User).unwrap();
