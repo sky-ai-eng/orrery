@@ -358,6 +358,61 @@ const MIGRATIONS: &[&str] = &[
         update_error_title        TEXT,
         UNIQUE (repo_id, number)
      ) STRICT;",
+    // 20: check suites. A suite holds the check runs one creator made on
+    // one commit. It is made by the push that brings the commit to a
+    // branch's tip, for each app installed on the repository that may write
+    // checks, and it then records the branch, what the branch pointed at
+    // before, and who pushed. A check run on a commit its creator has no
+    // suite for makes one that records none of the three. `status` and
+    // `conclusion` are what the suite's check runs come to, counting the
+    // newest run of each name, and are stored so that a change to them is
+    // an event of its own. Each check run made before this version joins a
+    // suite of its creator's on its commit.
+    "CREATE TABLE check_suites (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id            INTEGER NOT NULL REFERENCES repos(id),
+        head_sha           TEXT NOT NULL,
+        head_branch        TEXT,
+        before_sha         TEXT,
+        creator_id         INTEGER NOT NULL REFERENCES actors(id),
+        pusher_id          INTEGER REFERENCES actors(id),
+        status             TEXT NOT NULL CHECK (status IN ('queued', 'in_progress', 'completed')),
+        conclusion         TEXT CHECK (conclusion IN ('success', 'failure', 'neutral', 'cancelled',
+                                                      'skipped', 'stale', 'timed_out', 'action_required')),
+        created_clock_unix INTEGER NOT NULL,
+        updated_clock_unix INTEGER NOT NULL
+     ) STRICT;
+     CREATE INDEX check_suites_by_commit ON check_suites (repo_id, head_sha);
+     INSERT INTO check_suites (repo_id, head_sha, creator_id, status, created_clock_unix,
+                               updated_clock_unix)
+         SELECT repo_id, head_sha, creator_id, 'queued', MIN(created_clock_unix),
+                MAX(MAX(created_clock_unix), COALESCE(MAX(completed_clock_unix), 0))
+         FROM check_runs GROUP BY repo_id, head_sha, creator_id ORDER BY MIN(id);
+     ALTER TABLE check_runs ADD COLUMN suite_id INTEGER REFERENCES check_suites(id);
+     UPDATE check_runs SET suite_id =
+         (SELECT s.id FROM check_suites s
+          WHERE s.repo_id = check_runs.repo_id AND s.head_sha = check_runs.head_sha
+            AND s.creator_id = check_runs.creator_id);
+     CREATE INDEX check_runs_by_suite ON check_runs (suite_id);
+     CREATE TEMP TABLE newest_check_runs AS
+         SELECT suite_id, status, conclusion FROM check_runs c
+         WHERE id = (SELECT MAX(id) FROM check_runs n
+                     WHERE n.suite_id = c.suite_id AND n.name = c.name);
+     UPDATE check_suites SET status = CASE
+         WHEN EXISTS (SELECT 1 FROM newest_check_runs r
+                      WHERE r.suite_id = check_suites.id AND r.status = 'in_progress') THEN 'in_progress'
+         WHEN EXISTS (SELECT 1 FROM newest_check_runs r
+                      WHERE r.suite_id = check_suites.id AND r.status = 'queued') THEN 'queued'
+         ELSE 'completed' END;
+     UPDATE check_suites SET conclusion =
+         (SELECT r.conclusion FROM newest_check_runs r WHERE r.suite_id = check_suites.id
+          ORDER BY CASE r.conclusion
+              WHEN 'action_required' THEN 0 WHEN 'timed_out' THEN 1 WHEN 'failure' THEN 2
+              WHEN 'cancelled' THEN 3 WHEN 'success' THEN 4 WHEN 'neutral' THEN 5
+              WHEN 'stale' THEN 6 ELSE 7 END
+          LIMIT 1)
+         WHERE status = 'completed';
+     DROP TABLE newest_check_runs;",
 ];
 
 /// The version this binary reads and writes.

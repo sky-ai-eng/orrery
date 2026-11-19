@@ -58,7 +58,12 @@ pub(crate) const COMMENT_COLUMNS: &str = "id, pull_id,
 pub(crate) const CHECK_RUN_COLUMNS: &str = "id, repo_id, head_sha, name, status, conclusion,
     details_url, external_id, output,
     (SELECT login FROM actors WHERE actors.id = check_runs.creator_id),
-    started_clock_unix, completed_clock_unix, created_clock_unix";
+    started_clock_unix, completed_clock_unix, created_clock_unix, suite_id";
+
+pub(crate) const CHECK_SUITE_COLUMNS: &str = "id, repo_id, head_sha, head_branch, before_sha,
+    (SELECT login FROM actors WHERE actors.id = check_suites.creator_id),
+    (SELECT login FROM actors WHERE actors.id = check_suites.pusher_id),
+    status, conclusion, created_clock_unix, updated_clock_unix";
 
 pub(crate) fn row_to_actor(r: &Row<'_>) -> rusqlite::Result<Actor> {
     Ok(Actor {
@@ -189,6 +194,25 @@ pub(crate) fn row_to_check_run(r: &Row<'_>) -> rusqlite::Result<CheckRun> {
         started_clock_unix: r.get(10)?,
         completed_clock_unix: r.get(11)?,
         created_clock_unix: r.get(12)?,
+        suite_id: r.get(13)?,
+    })
+}
+
+pub(crate) fn row_to_check_suite(r: &Row<'_>) -> rusqlite::Result<CheckSuite> {
+    Ok(CheckSuite {
+        id: r.get(0)?,
+        repo_id: r.get(1)?,
+        head_sha: r.get(2)?,
+        head_branch: r.get(3)?,
+        before_sha: r.get(4)?,
+        creator_login: r.get(5)?,
+        pusher_login: r.get(6)?,
+        status: CheckStatus::from_db(&r.get::<_, String>(7)?),
+        conclusion: r
+            .get::<_, Option<String>>(8)?
+            .map(|s| CheckConclusion::from_db(&s)),
+        created_clock_unix: r.get(9)?,
+        updated_clock_unix: r.get(10)?,
     })
 }
 
@@ -531,6 +555,47 @@ pub(crate) fn pull_by_id(conn: &Connection, id: i64) -> Result<Option<Pull>> {
 
 pub(crate) fn require_pull(conn: &Connection, id: i64) -> Result<Pull> {
     pull_by_id(conn, id)?.ok_or(WorldError::NoSuchPull(id))
+}
+
+pub(crate) fn list_check_suites(conn: &Connection) -> Result<Vec<CheckSuite>> {
+    list(
+        conn,
+        &format!("SELECT {CHECK_SUITE_COLUMNS} FROM check_suites ORDER BY id"),
+        row_to_check_suite,
+    )
+}
+
+/// The suites on one commit, oldest first.
+pub(crate) fn list_check_suites_for_sha(
+    conn: &Connection,
+    repo_id: i64,
+    head_sha: &str,
+) -> Result<Vec<CheckSuite>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CHECK_SUITE_COLUMNS} FROM check_suites
+         WHERE repo_id = ?1 AND head_sha = ?2 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(params![repo_id, head_sha], row_to_check_suite)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn check_suite_by_id(conn: &Connection, id: i64) -> Result<Option<CheckSuite>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {CHECK_SUITE_COLUMNS} FROM check_suites WHERE id = ?1"),
+            params![id],
+            row_to_check_suite,
+        )
+        .optional()?)
+}
+
+/// A suite's check runs, oldest first.
+pub(crate) fn list_check_runs_for_suite(conn: &Connection, suite_id: i64) -> Result<Vec<CheckRun>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CHECK_RUN_COLUMNS} FROM check_runs WHERE suite_id = ?1 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(params![suite_id], row_to_check_run)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 pub(crate) fn check_run_by_id(conn: &Connection, id: i64) -> Result<Option<CheckRun>> {

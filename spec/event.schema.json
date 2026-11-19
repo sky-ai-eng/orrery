@@ -1443,6 +1443,29 @@
             "object",
             "null"
           ]
+        },
+        "suite_id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -1524,6 +1547,15 @@
         },
         "status": {
           "$ref": "#/$defs/CheckStatus"
+        },
+        "suite_id": {
+          "default": null,
+          "description": "The suite it is in. Events appended before a world held suites\ncarry none.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1579,6 +1611,369 @@
         "queued",
         "in_progress",
         "completed"
+      ],
+      "type": "string"
+    },
+    "CheckSuiteChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/CheckSuiteChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/CheckSuiteSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "CheckSuiteChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "before_sha": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "conclusion": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckConclusion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckConclusion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "creator": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "head_branch": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "head_sha": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "pusher": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActorRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActorRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/CheckStatus"
+            },
+            "to": {
+              "$ref": "#/$defs/CheckStatus"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "updated_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CheckSuiteCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/CheckSuiteObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/CheckSuiteSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "CheckSuiteObject": {
+      "properties": {
+        "before_sha": {
+          "description": "What that branch pointed at before the push.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conclusion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckConclusion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "creator": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "Whose check runs it holds."
+        },
+        "head_branch": {
+          "description": "The branch whose push made the suite, or null for a suite a\ncheck run made.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_sha": {
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "pusher": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who made that push."
+        },
+        "status": {
+          "$ref": "#/$defs/CheckStatus",
+          "description": "What its check runs come to, counting the newest of each name."
+        },
+        "updated_unix": {
+          "description": "When its status or conclusion last changed.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "head_sha",
+        "creator",
+        "status",
+        "created_unix",
+        "updated_unix"
+      ],
+      "type": "object"
+    },
+    "CheckSuiteSubject": {
+      "description": "The check runs one creator made on one commit.",
+      "properties": {
+        "head_sha": {
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "type": {
+          "$ref": "#/$defs/CheckSuiteType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "head_sha",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "CheckSuiteType": {
+      "enum": [
+        "check_suite"
       ],
       "type": "string"
     },
@@ -6961,6 +7356,34 @@
       "properties": {
         "type": {
           "const": "check_run:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CheckSuiteCreated",
+      "description": "A push brought a commit to a branch's tip, or a check run was made\non a commit its creator had no suite for.",
+      "properties": {
+        "type": {
+          "const": "check_suite:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CheckSuiteChanged",
+      "description": "A suite's check runs came to something else.",
+      "properties": {
+        "type": {
+          "const": "check_suite:updated",
           "type": "string"
         }
       },
