@@ -359,13 +359,50 @@ async fn the_list_pages_by_cursor_and_answers_an_unchanged_page_304() {
     assert_eq!(changed.status, 200);
     assert_eq!(numbers(&changed), [4, 3]);
 
+    // A page whose alerts are the same and that has gained a next page is
+    // not the same answer: a caller told it was would never read that page.
+    let two = get("state=open&per_page=4&direction=asc");
+    assert!(two.link.is_none());
+    control_post(
+        base,
+        "/_orrery/repos/acme/web/dependabot-alerts",
+        serde_json::json!({
+            "ecosystem": "go", "package": "example.com/other", "manifest_path": "go.mod",
+            "ghsa_id": "GHSA-0000-0000-0003", "summary": "A fifth", "severity": "low",
+            "vulnerable_version_range": "< 2",
+        }),
+    );
+    let grown = call(
+        "GET",
+        &format!("{list}?state=open&per_page=4&direction=asc"),
+        &alice,
+        None,
+        two.etag.as_deref(),
+    );
+    assert_eq!(grown.status, 200);
+    assert_eq!(numbers(&grown), numbers(&two));
+    assert!(grown.link.is_some());
+    agent()
+        .patch(&format!(
+            "{base}/_orrery/repos/acme/web/dependabot-alerts/5"
+        ))
+        .send_json(serde_json::json!({ "state": "fixed" }))
+        .unwrap();
+    assert_eq!(numbers(&get("state=fixed")), [5]);
+    let list = format!("{list}?state=open,dismissed");
+    let get = |query: &str| call("GET", &format!("{list}&{query}"), &alice, None, None);
+
     // The filters, and the default page.
     assert_eq!(numbers(&get("")), [4, 3, 2, 1]);
     assert_eq!(numbers(&get("severity=high,critical")), [3, 1]);
     assert_eq!(numbers(&get("severity=bogus")), [4, 3, 2, 1], "no filter");
     assert_eq!(numbers(&get("state=bogus")), [] as [i64; 0]);
     assert_eq!(numbers(&get("state=OPEN,dismissed")), [4, 3, 2, 1]);
-    assert_eq!(numbers(&get("ecosystem=npm")), [2, 1]);
+    assert_eq!(numbers(&get("ecosystem=NPM")), [2, 1], "in any case");
+    assert_eq!(numbers(&get("ecosystem=bogus")), [4, 3, 2, 1], "no filter");
+    assert_eq!(numbers(&get("scope=runtime,Development")), [2, 1]);
+    assert_eq!(numbers(&get("scope=bogus")), [] as [i64; 0]);
+    assert_eq!(numbers(&get("sort=bogus&direction=bogus")), [4, 3, 2, 1]);
     assert_eq!(numbers(&get("package=django,lodash")), [3, 1]);
     assert_eq!(numbers(&get("manifest=go.mod")), [4]);
     assert_eq!(numbers(&get("scope=development")), [2]);
@@ -399,14 +436,21 @@ async fn the_list_pages_by_cursor_and_answers_an_unchanged_page_304() {
         assert_eq!(refused.status, status, "{query}");
         assert_eq!(refused.json["message"], message, "{query}");
     }
-    // And a filter a world cannot apply is refused by name.
-    let unsupported = get("has=patch");
-    assert_eq!(unsupported.status, 422);
-    assert_eq!(unsupported.json["orrery"]["field"], "has");
+    // And what a world cannot apply is refused by name.
+    for (query, field) in [
+        ("has=patch", "has"),
+        ("assignee=alice", "assignee"),
+        ("epss_percentage=%3E0.5", "epss_percentage"),
+        ("sort=epss_percentage", "sort"),
+    ] {
+        let unsupported = get(query);
+        assert_eq!(unsupported.status, 422, "{query}");
+        assert_eq!(unsupported.json["orrery"]["field"], field, "{query}");
+    }
     // A page of no size is empty and names itself as the next.
     let none = get("per_page=0");
     assert_eq!((none.status, numbers(&none)), (200, vec![]));
-    assert!(none.link.unwrap().ends_with("?per_page=0>; rel=\"next\""));
+    assert!(none.link.unwrap().ends_with("&per_page=0>; rel=\"next\""));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -464,6 +508,40 @@ async fn a_person_dismisses_and_reopens_an_alert_and_github_fixes_one() {
             "Invalid request.\n\nInvalid input: data matches no possible input. See `documentation_url`.\nInvalid input: \"zzz\" is not a permitted key.",
         ),
         (
+            serde_json::json!({ "state": 5 }),
+            422,
+            "Invalid request.\n\nInvalid property /state: `5` is not of type `string`.",
+        ),
+        (
+            serde_json::json!({ "state": null }),
+            422,
+            "Invalid request.\n\nInvalid property /state: data cannot be null.",
+        ),
+        (
+            serde_json::json!({ "state": "open", "dismissed_reason": 5 }),
+            422,
+            "Invalid request.\n\nInvalid property /dismissed_reason: `5` is not of type `string`.",
+        ),
+        (
+            serde_json::json!({
+                "state": "dismissed", "dismissed_reason": "not_used", "dismissed_comment": { "text": "x" },
+            }),
+            422,
+            "Invalid request.\n\nInvalid property /dismissed_comment: `{\"text\" => \"x\"}` is not of type `string`.",
+        ),
+        (
+            serde_json::json!({
+                "state": "dismissed", "dismissed_reason": "not_used", "dismissed_comment": "x".repeat(281),
+            }),
+            422,
+            "Invalid request.\n\nInvalid property /dismissed_comment: Only 280 characters are allowed; 281 were supplied.",
+        ),
+        (
+            serde_json::json!([]),
+            422,
+            "Invalid request.\n\nInvalid input: `[]` is not of type `object`.",
+        ),
+        (
             serde_json::json!({ "state": "open" }),
             409,
             "Alert 1 is already open",
@@ -478,6 +556,11 @@ async fn a_person_dismisses_and_reopens_an_alert_and_github_fixes_one() {
         assert_eq!(refused.status, status, "{body}");
         assert_eq!(refused.json["message"], message, "{body}");
     }
+
+    // GitHub assigns an alert here too, which a world does not keep.
+    let assigned = patch(&one, serde_json::json!({ "assignees": [] }));
+    assert_eq!(assigned.status, 422);
+    assert_eq!(assigned.json["orrery"]["field"], "assignees");
 
     // Dismissed, by the person, with their reason.
     control_post(
@@ -610,6 +693,26 @@ async fn a_person_dismisses_and_reopens_an_alert_and_github_fixes_one() {
     }
     let (status, unchanged) = control(3, serde_json::json!({}));
     assert_eq!((status, &unchanged["state"]), (200, &"open".into()));
+    // With alerts off there is nothing to read here either.
+    assert_eq!(
+        call(
+            "DELETE",
+            &format!("{api}/repos/acme/web/vulnerability-alerts"),
+            &alice,
+            None,
+            None
+        )
+        .status,
+        204
+    );
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({ "state": "fixed" }),
+    ] {
+        let (status, refused) = control(3, body);
+        assert_eq!(status, 400, "{refused}");
+        assert_eq!(faults(&refused)[0].0, "FAILED_PRECONDITION");
+    }
 
     // Every move is in the log, by who made it.
     let log = control_post(
@@ -648,11 +751,13 @@ async fn graphql_says_what_the_updater_did_about_each_open_alert() {
     let (inst, alice) = seeded().await;
     let base = &inst.base;
     three_alerts(base);
-    let update = |number: i64, method: &str, body: Option<serde_json::Value>| {
+    // What the updater did is said by a route of its own for each thing it
+    // can have done, and taken back by a `DELETE`.
+    let update = |number: i64, did: &str, body: serde_json::Value| {
         let url = format!("{base}/_orrery/repos/acme/web/dependabot-alerts/{number}/update");
-        let mut resp = match (method, body) {
-            ("PUT", Some(body)) => agent().put(&url).send_json(body),
-            _ => agent().delete(&url).call(),
+        let mut resp = match did {
+            "" => agent().delete(&url).call(),
+            did => agent().put(&format!("{url}/{did}")).send_json(body),
         }
         .unwrap();
         let status = resp.status().as_u16();
@@ -660,16 +765,16 @@ async fn graphql_says_what_the_updater_did_about_each_open_alert() {
         (status, json)
     };
     // One has started, one failed, and one has had nothing done.
-    let (status, pending) = update(1, "PUT", Some(serde_json::json!({})));
+    let (status, pending) = update(1, "pending", serde_json::json!({}));
     assert_eq!(status, 200, "{pending}");
     assert_eq!(
         pending["update"],
         serde_json::json!({ "pull_request": null, "error": null })
     );
     let failed = serde_json::json!({
-        "error": { "type": "dependency_file_not_found", "title": "Dependabot couldn't find a package.json" },
+        "type": "dependency_file_not_found", "title": "Dependabot couldn't find a package.json",
     });
-    let (status, errored) = update(2, "PUT", Some(failed));
+    let (status, errored) = update(2, "error", failed);
     assert_eq!(status, 200, "{errored}");
     assert_eq!(
         errored["update"]["error"]["type"],
@@ -720,7 +825,7 @@ async fn graphql_says_what_the_updater_did_about_each_open_alert() {
     );
 
     // Taken back, nothing was done. An alert that is not open is not listed.
-    let (status, cleared) = update(2, "DELETE", None);
+    let (status, cleared) = update(2, "", serde_json::Value::Null);
     assert_eq!(
         (status, &cleared["update"]),
         (200, &serde_json::Value::Null)
@@ -739,21 +844,36 @@ async fn graphql_says_what_the_updater_did_about_each_open_alert() {
         ])
     );
 
-    // An update names a pull request of the repository, or an error.
-    for (body, field) in [
-        (serde_json::json!({ "pull_request": 99 }), "pull_request"),
+    // Each route takes its own fields and no others.
+    for (did, body, field) in [
         (
-            serde_json::json!({ "pull_request": 1, "error": { "type": "t", "title": "x" } }),
-            "error",
+            "pull-request",
+            serde_json::json!({ "number": 99 }),
+            "number",
         ),
-        (serde_json::json!({ "error": { "type": "t" } }), "error"),
-        (serde_json::json!({ "zzz": 1 }), "zzz"),
+        ("pull-request", serde_json::json!({}), "number"),
+        (
+            "pull-request",
+            serde_json::json!({ "number": 1, "type": "t" }),
+            "type",
+        ),
+        ("error", serde_json::json!({ "type": "t" }), "title"),
+        (
+            "error",
+            serde_json::json!({ "type": " ", "title": "x" }),
+            "type",
+        ),
+        ("pending", serde_json::json!({ "number": 1 }), "number"),
     ] {
-        let (status, refused) = update(3, "PUT", Some(body.clone()));
-        assert_eq!(status, 400, "{body}: {refused}");
-        assert_eq!(faults(&refused)[0].1.as_deref(), Some(field), "{body}");
+        let (status, refused) = update(3, did, body.clone());
+        assert_eq!(status, 400, "{did} {body}: {refused}");
+        assert_eq!(
+            faults(&refused)[0].1.as_deref(),
+            Some(field),
+            "{did} {body}"
+        );
     }
-    assert_eq!(update(99, "PUT", Some(serde_json::json!({}))).0, 404);
+    assert_eq!(update(99, "pending", serde_json::json!({})).0, 404);
 
     // A repository whose alerts are off lists none.
     let off = call(
@@ -770,4 +890,182 @@ async fn graphql_says_what_the_updater_did_about_each_open_alert() {
         off.json["data"]["repository"]["vulnerabilityAlerts"]["nodes"],
         serde_json::json!([])
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_reads_alerts_only_where_it_is_installed() {
+    let inst = boot().await;
+    let base = &inst.base;
+    let api = format!("{base}/api/v3");
+    let alice = mint_actor(base, "alice", "user");
+    mint_actor(base, "acme", "org");
+    // Two repositories anyone can read, each with an alert. The App is
+    // installed on one.
+    for name in ["web", "site"] {
+        face_ok(
+            "POST",
+            &format!("{api}/orgs/acme/repos"),
+            &alice,
+            serde_json::json!({ "name": name, "private": false }),
+        );
+        let on = format!("{api}/repos/acme/{name}/vulnerability-alerts");
+        assert_eq!(call("PUT", &on, &alice, None, None).status, 204);
+        control_post(
+            base,
+            &format!("/_orrery/repos/acme/{name}/dependabot-alerts"),
+            lodash(),
+        );
+    }
+    let app = control_post(
+        base,
+        "/_orrery/apps",
+        serde_json::json!({
+            "slug": "helper", "name": "Helper", "owner": "acme",
+            "callback_urls": ["https://app.test/callback"],
+        }),
+    );
+    let key = common::app_key();
+    control_post(
+        base,
+        "/_orrery/apps/helper/keys",
+        serde_json::json!({ "public_key": key.public_pem }),
+    );
+    let installation = control_post(
+        base,
+        "/_orrery/apps/helper/installations",
+        serde_json::json!({ "account": "acme", "repositories": ["web"] }),
+    );
+    let jwt = key.jwt(app["id"].clone(), inst.world.clock().unwrap());
+    let issued = call(
+        "POST",
+        &format!(
+            "{api}/app/installations/{}/access_tokens",
+            installation["id"]
+        ),
+        &jwt,
+        Some(serde_json::json!({})),
+        None,
+    );
+    assert_eq!(issued.status, 201, "{}", issued.json);
+    let token = issued.json["token"].as_str().unwrap();
+
+    let web = format!("{api}/repos/acme/web");
+    let site = format!("{api}/repos/acme/site");
+    assert_eq!(
+        numbers(&call(
+            "GET",
+            &format!("{web}/dependabot/alerts"),
+            token,
+            None,
+            None
+        )),
+        [1]
+    );
+    // The other repository's code is the token's to read, and its alerts
+    // are not, by any path to them.
+    assert_eq!(call("GET", &site, token, None, None).status, 200);
+    let site_id = call("GET", &site, &alice, None, None).json["id"].clone();
+    for url in [
+        format!("{site}/dependabot/alerts"),
+        format!("{site}/dependabot/alerts/1"),
+        format!("{site}/vulnerability-alerts"),
+        format!("{api}/repositories/{site_id}/dependabot/alerts"),
+    ] {
+        let refused = call("GET", &url, token, None, None);
+        assert_eq!(refused.status, 403, "{url}: {}", refused.json);
+        assert_eq!(
+            refused.json["message"], "Resource not accessible by integration",
+            "{url}"
+        );
+    }
+    let ask = |name: &str| {
+        let answer = call(
+            "POST",
+            &format!("{base}/api/graphql"),
+            token,
+            Some(serde_json::json!({
+                "query": format!(
+                    "{{ repository(owner: \"acme\", name: \"{name}\") {{ vulnerabilityAlerts(first: 5) {{ nodes {{ number }} }} }} }}"
+                ),
+            })),
+            None,
+        );
+        answer.json["data"]["repository"]["vulnerabilityAlerts"]["nodes"].clone()
+    };
+    assert_eq!(ask("web"), serde_json::json!([{ "number": 1 }]));
+    assert_eq!(ask("site"), serde_json::json!([]));
+    // A person's token reads both.
+    assert_eq!(
+        numbers(&call(
+            "GET",
+            &format!("{site}/dependabot/alerts"),
+            &alice,
+            None,
+            None
+        )),
+        [1]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_control_plane_makes_only_a_whole_alert() {
+    let (inst, _) = seeded().await;
+    let make = |more: serde_json::Value| {
+        let mut body = lodash();
+        for (key, value) in more.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        let mut resp = agent()
+            .post(&format!(
+                "{}/_orrery/repos/acme/web/dependabot-alerts",
+                inst.base
+            ))
+            .send_json(body)
+            .unwrap();
+        let status = resp.status().as_u16();
+        let json: serde_json::Value = resp.body_mut().read_json().unwrap();
+        (status, json)
+    };
+    // A value left out is none, and a blank one is not a value.
+    for field in [
+        "ecosystem",
+        "package",
+        "manifest_path",
+        "ghsa_id",
+        "summary",
+        "vulnerable_version_range",
+        "cve_id",
+        "version_requirement",
+        "first_patched_version",
+    ] {
+        let (status, refused) = make(serde_json::json!({ field: " " }));
+        assert_eq!(status, 400, "{field}: {refused}");
+        assert_eq!(faults(&refused)[0].1.as_deref(), Some(field));
+    }
+    for (more, field) in [
+        (serde_json::json!({ "severity": "moderate" }), "severity"),
+        (serde_json::json!({ "scope": "test" }), "scope"),
+        (serde_json::json!({ "zzz": 1 }), "zzz"),
+    ] {
+        let (status, refused) = make(more.clone());
+        assert_eq!(status, 400, "{more}: {refused}");
+        assert_eq!(faults(&refused)[0].1.as_deref(), Some(field), "{more}");
+    }
+    let (status, made) = make(serde_json::json!({
+        "cve_id": null, "first_patched_version": null, "scope": null, "description": "",
+    }));
+    assert_eq!(status, 201, "{made}");
+    for field in ["cve_id", "first_patched_version", "scope"] {
+        assert!(made[field].is_null(), "{field}");
+    }
+    // No such repository.
+    let mut missing = agent()
+        .post(&format!(
+            "{}/_orrery/repos/acme/nope/dependabot-alerts",
+            inst.base
+        ))
+        .send_json(lodash())
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+    let _: serde_json::Value = missing.body_mut().read_json().unwrap();
 }

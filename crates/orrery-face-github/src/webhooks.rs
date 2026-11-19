@@ -891,51 +891,28 @@ impl Rendering {
                 }
                 _ => Ok(Vec::new()),
             },
-            EventBody::DependencyAlertCreated(e) => self.alert(
-                world,
-                about(e.subject.repo.id)?,
-                e.subject.number,
-                "created",
-                None,
-            ),
-            EventBody::DependencyAlertDismissed(e) => {
-                let person = Some(sender);
-                self.alert(
-                    world,
-                    about(e.subject.repo.id)?,
-                    e.subject.number,
-                    "dismissed",
-                    person,
-                )
-            }
-            EventBody::DependencyAlertReopened(e) => {
-                let person = Some(sender);
-                self.alert(
-                    world,
-                    about(e.subject.repo.id)?,
-                    e.subject.number,
-                    "reopened",
-                    person,
-                )
-            }
-            EventBody::DependencyAlertFixed(e) => self.alert(
-                world,
-                about(e.subject.repo.id)?,
-                e.subject.number,
-                "fixed",
-                None,
-            ),
-            EventBody::DependencyAlertAutoDismissed(e) => {
+            EventBody::DependencyAlertCreated(e) => {
                 let about = about(e.subject.repo.id)?;
-                self.alert(world, about, e.subject.number, "auto_dismissed", None)
+                self.alert(world, about, e.subject.number, "created", None)
             }
-            EventBody::DependencyAlertReintroduced(e) => {
+            // A person dismisses and reopens an alert. GitHub makes every
+            // other move itself.
+            EventBody::DependencyAlertDismissed(e)
+            | EventBody::DependencyAlertReopened(e)
+            | EventBody::DependencyAlertFixed(e)
+            | EventBody::DependencyAlertAutoDismissed(e)
+            | EventBody::DependencyAlertReintroduced(e)
+            | EventBody::DependencyAlertAutoReopened(e) => {
+                let (action, person) = match event {
+                    EventBody::DependencyAlertDismissed(_) => ("dismissed", Some(sender)),
+                    EventBody::DependencyAlertReopened(_) => ("reopened", Some(sender)),
+                    EventBody::DependencyAlertFixed(_) => ("fixed", None),
+                    EventBody::DependencyAlertAutoDismissed(_) => ("auto_dismissed", None),
+                    EventBody::DependencyAlertReintroduced(_) => ("reintroduced", None),
+                    _ => ("auto_reopened", None),
+                };
                 let about = about(e.subject.repo.id)?;
-                self.alert(world, about, e.subject.number, "reintroduced", None)
-            }
-            EventBody::DependencyAlertAutoReopened(e) => {
-                let about = about(e.subject.repo.id)?;
-                self.alert(world, about, e.subject.number, "auto_reopened", None)
+                self.alert(world, about, e.subject.number, action, person)
             }
             EventBody::RefCreated(e) => {
                 let commits = Pushed {
@@ -1018,13 +995,17 @@ impl Rendering {
         let Some(alert) = world.dependency_alert(repo.id, number)? else {
             return Ok(Vec::new());
         };
+        // GitHub's organization is no actor of the world, so its node id is
+        // GitHub's own, never one a world's actor could hold.
         let sender = person.unwrap_or_else(|| {
-            actor_json(&Actor {
+            let mut github = actor_json(&Actor {
                 id: 9919,
                 login: "github".to_string(),
                 kind: orrery_world::ActorKind::Org,
                 created_clock_unix: 0,
-            })
+            });
+            github["node_id"] = "MDEyOk9yZ2FuaXphdGlvbjk5MTk=".into();
+            github
         });
         Ok(vec![Outgoing {
             action: Some(action.to_string()),

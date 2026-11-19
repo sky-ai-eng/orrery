@@ -1,7 +1,8 @@
 //! The control plane's routes for Dependabot alerts: what GitHub does to an
 //! alert itself, and offers no API for. It makes one when a scan finds a
 //! vulnerable dependency, marks one fixed or dismisses one by rule, opens
-//! one again, and reports what its updater did. A person's dismissal and
+//! one again, and reports what its updater did, each of which is a route of
+//! its own. A person's dismissal and
 //! reopening, the reads, and the switch that turns a repository's alerts on
 //! are the GitHub face's.
 
@@ -9,7 +10,7 @@ use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{Response, StatusCode};
-use axum::routing::{patch, post, put};
+use axum::routing::{delete, patch, post, put};
 use orrery_world::{
     AlertScope, AlertSeverity, AlertState, AlertTransition, AlertUpdate, DependencyAlert,
     NewAlertUpdate, NewDependencyAlert, Repo, WorldError,
@@ -19,19 +20,20 @@ use crate::control::{Fault, Fields, SYSTEM, errors, internal};
 use crate::{AppState, json};
 
 pub(crate) fn router() -> Router<AppState> {
+    const ALERT: &str = "/repos/{owner}/{repo}/dependabot-alerts/{number}";
     Router::new()
         .route(
             "/repos/{owner}/{repo}/dependabot-alerts",
             post(create_alert),
         )
+        .route(ALERT, patch(patch_alert))
+        .route(&format!("{ALERT}/update"), delete(delete_update))
+        .route(&format!("{ALERT}/update/pending"), put(put_update_pending))
         .route(
-            "/repos/{owner}/{repo}/dependabot-alerts/{number}",
-            patch(patch_alert),
+            &format!("{ALERT}/update/pull-request"),
+            put(put_update_pull_request),
         )
-        .route(
-            "/repos/{owner}/{repo}/dependabot-alerts/{number}/update",
-            put(put_update).delete(delete_update),
-        )
+        .route(&format!("{ALERT}/update/error"), put(put_update_error))
 }
 
 /// An alert as the control plane answers it.
@@ -64,8 +66,7 @@ struct UpdateBody {
     error: Option<UpdateError>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(serde::Serialize)]
 struct UpdateError {
     /// GitHub's name for what failed, such as `dependency_file_not_found`.
     r#type: String,
@@ -141,7 +142,7 @@ fn answered(status: StatusCode, written: Result<DependencyAlert, WorldError>) ->
             StatusCode::BAD_REQUEST,
             "INVALID_ARGUMENT",
             &format!("the repository has no pull request numbered {number}"),
-            Some("pull_request"),
+            Some("number"),
         ),
         Err(WorldError::DependencyAlertsOff(_)) => errors(
             StatusCode::BAD_REQUEST,
@@ -187,10 +188,22 @@ async fn create_alert(
     let range = text(&mut fields, "vulnerable_version_range");
     let severity: Option<AlertSeverity> = fields.required("severity");
     let scope: Option<AlertScope> = fields.optional("scope");
-    let version_requirement: Option<String> = fields.optional("version_requirement");
-    let cve_id: Option<String> = fields.optional("cve_id");
+    // One left out is none. A blank one is not a value: it would be
+    // answered as a CVE, or a patched version, with no name.
+    let named = |fields: &mut Fields, name: &'static str| -> Option<String> {
+        let value: Option<String> = fields.optional(name);
+        if value.as_deref().is_some_and(|v| v.trim().is_empty()) {
+            fields.fault(Fault::invalid(
+                format!("{name} cannot be blank; leave it out for none"),
+                name,
+            ));
+        }
+        value
+    };
+    let version_requirement = named(&mut fields, "version_requirement");
+    let cve_id = named(&mut fields, "cve_id");
+    let first_patched_version = named(&mut fields, "first_patched_version");
     let description: Option<String> = fields.optional("description");
-    let first_patched_version: Option<String> = fields.optional("first_patched_version");
     let read = ecosystem
         .zip(package)
         .zip(manifest_path)
@@ -274,6 +287,9 @@ async fn patch_alert(
         Some(transition) => state
             .world
             .move_dependency_alert(repo.id, number, &transition, SYSTEM),
+        // With nothing to change, the alert as it stands, where a change
+        // would be taken.
+        None if !repo.dependency_alerts => Err(WorldError::DependencyAlertsOff(repo.id)),
         None => state
             .world
             .dependency_alert(repo.id, number)
@@ -282,34 +298,61 @@ async fn patch_alert(
     answered(StatusCode::OK, written)
 }
 
-/// Say what Dependabot's updater did about an alert: opened `pull_request`,
-/// a pull request of the repository by its number, or reported `error`.
-/// With neither, it has started and done neither yet. An updater does one
-/// or the other, so both is refused.
-async fn put_update(
+/// Say that Dependabot's updater has started on an alert, and has neither
+/// opened a pull request nor failed. It takes no fields.
+async fn put_update_pending(
+    State(state): State<AppState>,
+    UrlPath((owner, name, number)): UrlPath<(String, String, String)>,
+    body: Bytes,
+) -> Response<Body> {
+    let fields = Fields::parse(&body);
+    if let Err(resp) = fields.finish(Some(())) {
+        return *resp;
+    }
+    set_update(&state, &owner, &name, &number, &NewAlertUpdate::Pending)
+}
+
+/// Say that Dependabot's updater opened a pull request for an alert:
+/// `number`, a pull request of the alert's repository.
+async fn put_update_pull_request(
+    State(state): State<AppState>,
+    UrlPath((owner, name, alert)): UrlPath<(String, String, String)>,
+    body: Bytes,
+) -> Response<Body> {
+    let mut fields = Fields::parse(&body);
+    let number: Option<i64> = fields.required("number");
+    let number = match fields.finish(number) {
+        Ok(number) => number,
+        Err(resp) => return *resp,
+    };
+    let update = NewAlertUpdate::PullRequest { number };
+    set_update(&state, &owner, &name, &alert, &update)
+}
+
+/// Say that Dependabot's updater could not update an alert's dependency:
+/// `type`, GitHub's name for what failed, such as
+/// `dependency_file_not_found`, and `title`, what it says of it.
+async fn put_update_error(
     State(state): State<AppState>,
     UrlPath((owner, name, number)): UrlPath<(String, String, String)>,
     body: Bytes,
 ) -> Response<Body> {
     let mut fields = Fields::parse(&body);
-    let pull_request: Option<i64> = fields.optional("pull_request");
-    let error: Option<UpdateError> = fields.optional("error");
-    if pull_request.is_some() && error.is_some() {
-        fields.fault(Fault::invalid(
-            "an update names a pull request or an error, not both".to_string(),
-            "error",
-        ));
-    }
-    if let Err(resp) = fields.finish(Some(())) {
-        return *resp;
-    }
-    let update = match (pull_request, &error) {
-        (Some(number), _) => NewAlertUpdate::PullRequest { number },
-        (None, Some(error)) => NewAlertUpdate::Error {
-            error_type: &error.r#type,
-            title: &error.title,
-        },
-        (None, None) => NewAlertUpdate::Pending,
+    let mut text = |name: &'static str| -> Option<String> {
+        let value: Option<String> = fields.required(name);
+        if value.as_deref().is_some_and(|v| v.trim().is_empty()) {
+            fields.fault(Fault::invalid(format!("{name} cannot be blank"), name));
+        }
+        value
+    };
+    let read = text("type").zip(text("title"));
+    let (error_type, title) = match fields.finish(read) {
+        Ok(read) => read,
+        Err(resp) => return *resp,
+    };
+    let update = NewAlertUpdate::Error {
+        error_type: &error_type,
+        title: &title,
     };
     set_update(&state, &owner, &name, &number, &update)
 }

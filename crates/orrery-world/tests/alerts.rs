@@ -345,6 +345,24 @@ fn the_updater_is_recorded_and_a_read_is_ordered_and_bounded() {
         ..AlertQuery::default()
     };
     assert_eq!(read(&oldest, 10), [1, 2, 3, 4]);
+    // Oldest first, past a position and ahead of one.
+    let second = oldest.position(&w.dependency_alert(repo, 2).unwrap().unwrap());
+    let past = AlertQuery {
+        after: Some(second),
+        ..oldest.clone()
+    };
+    assert_eq!(read(&past, 10), [3, 4]);
+    assert_eq!(read(&past, 1), [3]);
+    let ahead = AlertQuery {
+        before: Some(oldest.position(&w.dependency_alert(repo, 4).unwrap().unwrap())),
+        ..oldest.clone()
+    };
+    assert_eq!(
+        read(&ahead, 2),
+        [2, 3],
+        "the two nearest, still oldest first"
+    );
+    assert_eq!(read(&ahead, 10), [1, 2, 3]);
 
     // By when each was last updated: a move brings an alert to the front.
     w.move_dependency_alert(repo, 1, &AlertTransition::Fix, SYSTEM)
@@ -361,14 +379,12 @@ fn the_updater_is_recorded_and_a_read_is_ordered_and_bounded() {
         ..AlertQuery::default()
     };
     assert_eq!(read(&high, 10), [4, 2]);
-    assert_eq!(w.dependency_alert_count(repo, &high).unwrap(), 2);
     let open = AlertQuery {
         states: Some(vec![AlertState::Open]),
         after: Some(at),
         ..AlertQuery::default()
     };
     assert_eq!(read(&open, 10), [2]);
-    assert_eq!(w.dependency_alert_count(repo, &open).unwrap(), 3);
     let none = AlertQuery {
         states: Some(Vec::new()),
         ..AlertQuery::default()
@@ -376,9 +392,9 @@ fn the_updater_is_recorded_and_a_read_is_ordered_and_bounded() {
     assert_eq!(read(&none, 10), [] as [i64; 0]);
     let packages = AlertQuery {
         packages: Some(vec!["a".to_string(), "c".to_string()]),
-        ecosystems: Some(vec!["npm".to_string()]),
+        ecosystems: Some(vec!["NPM".to_string()]),
         manifests: Some(vec!["package-lock.json".to_string()]),
-        scope: Some(AlertScope::Runtime),
+        scopes: Some(vec![AlertScope::Runtime, AlertScope::Development]),
         ..AlertQuery::default()
     };
     assert_eq!(read(&packages, 10), [3, 1]);

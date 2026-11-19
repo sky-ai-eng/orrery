@@ -26,6 +26,14 @@ const DISABLED: &str = "Dependabot alerts are disabled for this repository.";
 const MAX_PER_PAGE: usize = 100;
 const DEFAULT_PER_PAGE: usize = 30;
 
+/// The ecosystems GitHub filters the list by.
+const ECOSYSTEMS: [&str; 9] = [
+    "composer", "go", "maven", "npm", "nuget", "pip", "pub", "rubygems", "rust",
+];
+
+/// The longest comment GitHub takes with a dismissal, in characters.
+const MAX_COMMENT: usize = 280;
+
 /// GitHub's alert object. A world keeps the package, the advisory's
 /// identity and severity, and the one vulnerable range it was given: the
 /// rest of an advisory (its references, scores, and weaknesses) is rendered
@@ -102,18 +110,29 @@ fn disabled() -> Response<Body> {
     github_error(StatusCode::FORBIDDEN, DISABLED)
 }
 
+/// The refusal of an installation token that does not reach `repo`. A
+/// public repository's code is anyone's to read, and its alerts are not: an
+/// App reads them only where it is installed.
+fn unreached(caller: &Caller, repo: &Repo) -> Option<Response<Body>> {
+    (!caller.reaches(repo)).then(crate::apps::not_accessible)
+}
+
 // ---- the switch ----
 
 /// `GET /repos/{o}/{r}/vulnerability-alerts`: `204` while alerts are on.
 pub(crate) async fn alerts_enabled(
     State(face): State<GithubFace>,
     UrlPath((owner, name)): UrlPath<(String, String)>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
 ) -> Response<Body> {
     let repo = match resolve_repo(&face, &owner, &name) {
         Ok((repo, _)) => repo,
         Err(resp) => return *resp,
     };
+    if let Some(refused) = unreached(&caller, &repo) {
+        return refused;
+    }
     if let Some(refused) = media::refuse_unrendered(&headers, "Repository") {
         return refused;
     }
@@ -173,6 +192,7 @@ fn switch(face: &GithubFace, repo: &Repo, on: bool, caller: &Caller) -> Response
 pub(crate) async fn list_alerts(
     State(face): State<GithubFace>,
     UrlPath((owner, name)): UrlPath<(String, String)>,
+    Extension(caller): Extension<Caller>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
@@ -180,6 +200,9 @@ pub(crate) async fn list_alerts(
         Ok((repo, _)) => repo,
         Err(resp) => return *resp,
     };
+    if let Some(refused) = unreached(&caller, &repo) {
+        return refused;
+    }
     if let Some(refused) = media::refuse_unrendered(&headers, "DependabotAlert") {
         return refused;
     }
@@ -191,6 +214,7 @@ pub(crate) async fn list_alerts(
 pub(crate) async fn list_alerts_by_id(
     State(face): State<GithubFace>,
     UrlPath(id): UrlPath<String>,
+    Extension(caller): Extension<Caller>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response<Body> {
@@ -199,6 +223,9 @@ pub(crate) async fn list_alerts_by_id(
         Ok(Ok(None)) | Err(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Ok(Err(e)) => return internal(e),
     };
+    if let Some(refused) = unreached(&caller, &repo) {
+        return refused;
+    }
     if let Some(refused) = media::refuse_unrendered(&headers, "DependabotAlert") {
         return refused;
     }
@@ -289,10 +316,28 @@ fn listing(face: &GithubFace, repo: &Repo, raw_query: &str, headers: &HeaderMap)
                 let severities = listed(&value, AlertSeverity::parse);
                 query.severities = (!severities.is_empty()).then_some(severities);
             }
-            "ecosystem" => query.ecosystems = Some(listed(&value, |w| Some(w.to_string()))),
+            // An ecosystem GitHub does not know is no filter either.
+            "ecosystem" => {
+                let known = listed(&value, |word| {
+                    let word = word.to_ascii_lowercase();
+                    ECOSYSTEMS.contains(&word.as_str()).then_some(word)
+                });
+                query.ecosystems = (!known.is_empty()).then_some(known);
+            }
             "package" => query.packages = Some(listed(&value, |w| Some(w.to_string()))),
             "manifest" => query.manifests = Some(listed(&value, |w| Some(w.to_string()))),
-            "scope" => query.scope = AlertScope::parse(&value),
+            // A scope it does not know matches no alert.
+            "scope" => {
+                query.scopes = Some(listed(&value, |word| {
+                    AlertScope::parse(&word.to_ascii_lowercase())
+                }));
+            }
+            // GitHub orders by an advisory's exploit score too, which a
+            // world keeps nothing of. Any other order it does not know is
+            // the default.
+            "sort" if value == "epss_percentage" => {
+                return crate::orrery_unsupported_field("DependabotAlert", "sort");
+            }
             "sort" => query.by_updated = value == "updated",
             "direction" => query.ascending = value == "asc",
             // Filters on what a world keeps nothing of. Ignoring one would
@@ -375,7 +420,19 @@ fn listing(face: &GithubFace, repo: &Repo, raw_query: &str, headers: &HeaderMap)
 
     let items: Vec<_> = page.iter().map(|a| alert_json(face, repo, a)).collect();
     let body = serde_json::Value::Array(items).to_string();
-    let etag = format!("\"{}\"", hex::encode(Sha256::digest(&body)));
+    // The tag covers the links with the body: a page whose alerts are the
+    // same and that has gained a next page is another answer, and a caller
+    // told nothing changed would never ask for that page.
+    let links = links.join(", ");
+    let etag = format!(
+        "\"{}\"",
+        hex::encode(
+            Sha256::new()
+                .chain_update(&body)
+                .chain_update(&links)
+                .finalize()
+        )
+    );
     let matched = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -388,7 +445,7 @@ fn listing(face: &GithubFace, repo: &Repo, raw_query: &str, headers: &HeaderMap)
         .header(header::ETAG, etag)
         .header(header::CONTENT_TYPE, "application/json; charset=utf-8");
     if !links.is_empty() && !matched {
-        resp = resp.header(header::LINK, links.join(", "));
+        resp = resp.header(header::LINK, links);
     }
     match resp.body(match matched {
         true => Body::empty(),
@@ -401,15 +458,43 @@ fn listing(face: &GithubFace, repo: &Repo, raw_query: &str, headers: &HeaderMap)
 
 // ---- one alert ----
 
-/// The alert a path names, or GitHub's refusal: for alerts that are off, a
-/// number that is not one, and a number no alert has.
+/// A value as GitHub's refusals of a body spell it, which is how Ruby
+/// prints one: a hash's keys point at their values with `=>`.
+fn ruby(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "nil".to_string(),
+        serde_json::Value::Array(items) => {
+            format!(
+                "[{}]",
+                items.iter().map(ruby).collect::<Vec<_>>().join(", ")
+            )
+        }
+        serde_json::Value::Object(fields) => format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .map(|(key, value)| format!("{} => {}", serde_json::json!(key), ruby(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => other.to_string(),
+    }
+}
+
+/// The alert a path names, or GitHub's refusal: for a token that does not
+/// reach the repository, alerts that are off, a number that is not one, and
+/// a number no alert has.
 fn alert_at(
     face: &GithubFace,
+    caller: &Caller,
     owner: &str,
     name: &str,
     number: &str,
 ) -> Result<(Repo, DependencyAlert), Box<Response<Body>>> {
     let (repo, _) = resolve_repo(face, owner, name)?;
+    if let Some(refused) = unreached(caller, &repo) {
+        return Err(Box::new(refused));
+    }
     if !repo.dependency_alerts {
         return Err(Box::new(disabled()));
     }
@@ -437,9 +522,10 @@ fn no_alert(number: i64) -> Response<Body> {
 pub(crate) async fn get_alert(
     State(face): State<GithubFace>,
     UrlPath((owner, name, number)): UrlPath<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
     headers: HeaderMap,
 ) -> Response<Body> {
-    let (repo, alert) = match alert_at(&face, &owner, &name, &number) {
+    let (repo, alert) = match alert_at(&face, &caller, &owner, &name, &number) {
         Ok(found) => found,
         Err(resp) => return *resp,
     };
@@ -459,7 +545,7 @@ pub(crate) async fn update_alert(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    let (repo, alert) = match alert_at(&face, &owner, &name, &number) {
+    let (repo, alert) = match alert_at(&face, &caller, &owner, &name, &number) {
         Ok(found) => found,
         Err(resp) => return *resp,
     };
@@ -471,27 +557,53 @@ pub(crate) async fn update_alert(
     };
     const NO_INPUT: &str =
         "Invalid input: data matches no possible input. See `documentation_url`.";
-    let empty = serde_json::Map::new();
-    let fields = value.as_object().unwrap_or(&empty);
+    let Some(fields) = value.as_object() else {
+        return invalid_request(&format!(
+            "Invalid input: `{}` is not of type `object`.",
+            ruby(&value)
+        ));
+    };
+    // A world keeps nobody an alert is assigned to, which GitHub takes
+    // here.
+    if fields.contains_key("assignees") {
+        return crate::orrery_unsupported_field("DependabotAlert", "assignees");
+    }
     const KEYS: [&str; 3] = ["state", "dismissed_reason", "dismissed_comment"];
     if let Some(key) = fields.keys().find(|key| !KEYS.contains(&key.as_str())) {
         return invalid_request(&format!(
             "{NO_INPUT}\nInvalid input: \"{key}\" is not a permitted key."
         ));
     }
-    let text = |key: &str| fields.get(key).and_then(serde_json::Value::as_str);
+    // Each is a string when it is there at all.
+    let mut text: [Option<&str>; 3] = [None; 3];
+    for (slot, key) in text.iter_mut().zip(KEYS) {
+        *slot = match fields.get(key) {
+            None => None,
+            Some(serde_json::Value::String(given)) => Some(given.as_str()),
+            Some(serde_json::Value::Null) => {
+                return invalid_request(&format!("Invalid property /{key}: data cannot be null."));
+            }
+            Some(other) => {
+                return invalid_request(&format!(
+                    "Invalid property /{key}: `{}` is not of type `string`.",
+                    ruby(other)
+                ));
+            }
+        };
+    }
+    let [state, reason, comment] = text;
     let not_possible = |key: &str, given: &str, values: &str| {
         invalid_request(&format!(
             "Invalid property /{key}: `{given}` is not a possible value. Must be one of the following: {values}."
         ))
     };
-    let Some(state) = text("state") else {
+    let Some(state) = state else {
         return invalid_request(NO_INPUT);
     };
     if !matches!(state, "dismissed" | "open") {
         return not_possible("state", state, "dismissed, open");
     }
-    let reason = match text("dismissed_reason") {
+    let reason = match reason {
         Some(given) => match DismissReason::parse(given) {
             Some(reason) => Some(reason),
             None => {
@@ -504,11 +616,16 @@ pub(crate) async fn update_alert(
         },
         None => None,
     };
+    if let Some(n) = comment
+        .map(|c| c.chars().count())
+        .filter(|n| *n > MAX_COMMENT)
+    {
+        return invalid_request(&format!(
+            "Invalid property /dismissed_comment: Only {MAX_COMMENT} characters are allowed; {n} were supplied."
+        ));
+    }
     let transition = match (state, reason) {
-        ("dismissed", Some(reason)) => AlertTransition::Dismiss {
-            reason,
-            comment: text("dismissed_comment"),
-        },
+        ("dismissed", Some(reason)) => AlertTransition::Dismiss { reason, comment },
         ("dismissed", None) => {
             return github_error(
                 StatusCode::BAD_REQUEST,

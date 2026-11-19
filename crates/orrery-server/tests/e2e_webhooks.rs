@@ -688,10 +688,10 @@ async fn an_app_is_told_of_each_move_of_a_dependabot_alert() {
         assert_eq!(status, 200, "{moved}");
     }
     // What the updater did is not a move, and sends nothing.
-    let update = format!("{}{alerts}/1/update", s.base);
+    let update = format!("{}{alerts}/1/update/pull-request", s.base);
     let mut said = agent()
         .put(&update)
-        .send_json(serde_json::json!({ "pull_request": pull["number"] }))
+        .send_json(serde_json::json!({ "number": pull["number"] }))
         .unwrap();
     assert_eq!(said.status(), 200);
     let said: serde_json::Value = said.body_mut().read_json().unwrap();
@@ -758,6 +758,12 @@ async fn an_app_is_told_of_each_move_of_a_dependabot_alert() {
     // A person's move is theirs, and GitHub's own is its organization's.
     assert_eq!(payload(0)["sender"]["login"], "github");
     assert_eq!(payload(0)["sender"]["type"], "Organization");
+    // GitHub's organization is no actor of the world, under GitHub's ids.
+    assert_eq!(payload(0)["sender"]["id"], 9919);
+    assert_eq!(
+        payload(0)["sender"]["node_id"],
+        "MDEyOk9yZ2FuaXphdGlvbjk5MTk="
+    );
     assert_eq!(payload(0)["alert"]["state"], "open");
     assert_eq!(payload(1)["sender"]["login"], "alice");
     assert_eq!(payload(1)["alert"]["state"], "dismissed");

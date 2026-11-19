@@ -496,7 +496,7 @@ impl Repository {
 
     /// The repository's Dependabot alerts in `states`, or in any state,
     /// oldest first. A repository whose alerts are off has none to list, as
-    /// on GitHub.
+    /// on GitHub, and neither has one an installation token does not reach.
     async fn vulnerability_alerts(
         &self,
         ctx: &Context<'_>,
@@ -505,7 +505,10 @@ impl Repository {
         after: Option<String>,
     ) -> Result<RepositoryVulnerabilityAlertConnection, Error> {
         use RepositoryVulnerabilityAlertState as State;
-        let query = world::AlertQuery {
+        page_size("vulnerabilityAlerts", first, None)?;
+        let cap = first.unwrap_or_default() as usize;
+        let world = &face(ctx).world;
+        let mut query = world::AlertQuery {
             states: states.map(|states| {
                 states
                     .into_iter()
@@ -520,24 +523,36 @@ impl Repository {
             ascending: true,
             ..world::AlertQuery::default()
         };
-        let mut alerts = match self.repo.dependency_alerts {
-            true => face(ctx)
-                .world
-                .dependency_alerts(self.repo.id, &query, usize::MAX)
+        // A cursor names the alert a page ended at, by its number.
+        if let Some(a) = after {
+            let ended_at = match cursor_id(&a) {
+                Some(number) => world
+                    .dependency_alert(self.repo.id, number)
+                    .map_err(internal)?,
+                None => None,
+            };
+            let ended_at = ended_at.ok_or_else(|| {
+                Error::new(format!("`{a}` does not appear to be a valid cursor."))
+            })?;
+            query.after = Some(query.position(&ended_at));
+        }
+        let readable = self.repo.dependency_alerts && caller(ctx).reaches(&self.repo);
+        // One past the page says whether another follows.
+        let mut alerts = match readable {
+            true => world
+                .dependency_alerts(self.repo.id, &query, cap.saturating_add(1))
                 .map_err(internal)?,
             false => Vec::new(),
         };
-        if let Some(a) = after {
-            let bound = cursor_id(&a).ok_or_else(|| {
-                Error::new(format!("`{a}` does not appear to be a valid cursor."))
-            })?;
-            alerts.retain(|alert| alert.id > bound);
-        }
-        let (alerts, mut page_info) = take_first("vulnerabilityAlerts", alerts, first)?;
-        page_info.start_cursor = alerts.first().map(|a| cursor(a.id));
-        page_info.end_cursor = alerts.last().map(|a| cursor(a.id));
+        let has_next_page = alerts.len() > cap;
+        alerts.truncate(cap);
         Ok(RepositoryVulnerabilityAlertConnection {
-            page_info,
+            page_info: PageInfo {
+                has_next_page,
+                start_cursor: alerts.first().map(|a| cursor(a.number)),
+                end_cursor: alerts.last().map(|a| cursor(a.number)),
+                ..PageInfo::default()
+            },
             nodes: alerts
                 .into_iter()
                 .map(|alert| RepositoryVulnerabilityAlert {

@@ -14,18 +14,20 @@ use crate::log::Write;
 use crate::types::*;
 use crate::{Result, World, WorldError, objects, queries};
 
-/// An alert's columns, in the order [`row_to_alert`] reads them: the
-/// dismisser's and the update's pull request's columns come from joins.
-const ALERT_SELECT: &str = "SELECT a.id, a.repo_id, a.number, a.state, a.ecosystem, a.package,
-        a.manifest_path, a.scope, a.version_requirement, a.advisory_id, a.cve_id, a.summary,
-        a.description, a.severity, a.vulnerable_version_range, a.first_patched_version,
-        a.created_clock_unix, a.updated_clock_unix, a.dismissed_clock_unix, d.id, d.login,
-        d.kind, d.created_clock_unix, a.dismissed_reason, a.dismissed_comment,
-        a.fixed_clock_unix, a.auto_dismissed_clock_unix, a.update_state, p.id, p.number,
-        a.update_error_type, a.update_error_title
-     FROM dependency_alerts a
-     LEFT JOIN actors d ON d.id = a.dismissed_by_id
-     LEFT JOIN pulls p ON p.id = a.update_pull_id";
+/// An alert's columns, in the order [`row_to_alert`] reads them. The
+/// dismisser and the update's pull request are read by subselect, so the
+/// same list serves a read and a write's `RETURNING`.
+const ALERT_COLUMNS: &str = "id, repo_id, number, state, ecosystem, package, manifest_path, scope,
+    version_requirement, advisory_id, cve_id, summary, description, severity,
+    vulnerable_version_range, first_patched_version, created_clock_unix, updated_clock_unix,
+    dismissed_clock_unix, dismissed_by_id,
+    (SELECT login FROM actors WHERE actors.id = dependency_alerts.dismissed_by_id),
+    (SELECT kind FROM actors WHERE actors.id = dependency_alerts.dismissed_by_id),
+    (SELECT created_clock_unix FROM actors WHERE actors.id = dependency_alerts.dismissed_by_id),
+    dismissed_reason, dismissed_comment, fixed_clock_unix, auto_dismissed_clock_unix,
+    update_state, update_pull_id,
+    (SELECT number FROM pulls WHERE pulls.id = dependency_alerts.update_pull_id),
+    update_error_type, update_error_title";
 
 /// A new alert, as the vendor would report one.
 #[derive(Debug, Clone)]
@@ -54,7 +56,7 @@ pub struct AlertQuery {
     pub ecosystems: Option<Vec<String>>,
     pub packages: Option<Vec<String>>,
     pub manifests: Option<Vec<String>>,
-    pub scope: Option<AlertScope>,
+    pub scopes: Option<Vec<AlertScope>>,
     /// Ordered by when each was last updated, where the default is by when
     /// each was made. An alert's number breaks a tie either way.
     pub by_updated: bool,
@@ -101,7 +103,7 @@ impl AlertQuery {
                 .collect();
             sql.push_str(&match marks.is_empty() {
                 true => " AND 0".to_string(),
-                false => format!(" AND a.{column} IN ({})", marks.join(", ")),
+                false => format!(" AND {column} IN ({})", marks.join(", ")),
             });
         };
         if let Some(states) = &self.states {
@@ -116,8 +118,12 @@ impl AlertQuery {
                 severities.iter().map(|s| s.as_str().to_string()).collect(),
             );
         }
+        // An ecosystem is matched whatever its case, as GitHub matches one.
         if let Some(ecosystems) = &self.ecosystems {
-            any_of("ecosystem", ecosystems.clone());
+            any_of(
+                "LOWER(ecosystem)",
+                ecosystems.iter().map(|e| e.to_lowercase()).collect(),
+            );
         }
         if let Some(packages) = &self.packages {
             any_of("package", packages.clone());
@@ -125,8 +131,11 @@ impl AlertQuery {
         if let Some(manifests) = &self.manifests {
             any_of("manifest_path", manifests.clone());
         }
-        if let Some(scope) = self.scope {
-            any_of("scope", vec![scope.as_str().to_string()]);
+        if let Some(scopes) = &self.scopes {
+            any_of(
+                "scope",
+                scopes.iter().map(|s| s.as_str().to_string()).collect(),
+            );
         }
         (sql, values)
     }
@@ -172,8 +181,9 @@ impl World {
             let tx = w.tx;
             require_alerts_on(tx, repo_id)?;
             let clock = queries::clock(tx)?;
-            let id: i64 = tx.query_row(
-                "INSERT INTO dependency_alerts (
+            let made = tx.query_row(
+                &format!(
+                    "INSERT INTO dependency_alerts (
                      repo_id, number, state, ecosystem, package, manifest_path, scope,
                      version_requirement, advisory_id, cve_id, summary, description, severity,
                      vulnerable_version_range, first_patched_version, created_clock_unix,
@@ -182,7 +192,8 @@ impl World {
                               WHERE repo_id = ?1),
                          'open', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14,
                          'none')
-                 RETURNING id",
+                 RETURNING {ALERT_COLUMNS}"
+                ),
                 params![
                     repo_id,
                     new.ecosystem,
@@ -199,15 +210,15 @@ impl World {
                     new.first_patched_version,
                     clock
                 ],
-                |r| r.get(0),
+                row_to_alert,
             )?;
             w.operation(EventBody::DependencyAlertCreated(
                 events::DependencyAlertCreated {
-                    subject: objects::dependency_alert_subject(tx, id)?,
-                    object: objects::dependency_alert_object(tx, id)?,
+                    subject: objects::dependency_alert_subject(tx, made.id)?,
+                    object: objects::dependency_alert_object(tx, made.id)?,
                 },
             ));
-            alert_by_id(tx, id)
+            Ok(made)
         })
     }
 
@@ -261,14 +272,17 @@ impl World {
                 _ => None,
             };
             let before = objects::dependency_alert_object(tx, alert.id)?;
-            tx.execute(
-                "UPDATE dependency_alerts
-                 SET state = ?1, updated_clock_unix = ?2,
-                     dismissed_clock_unix = ?3, dismissed_by_id = ?4, dismissed_reason = ?5,
-                     dismissed_comment = ?6,
-                     fixed_clock_unix = CASE ?1 WHEN 'fixed' THEN ?2 END,
-                     auto_dismissed_clock_unix = CASE ?1 WHEN 'auto_dismissed' THEN ?2 END
-                 WHERE id = ?7",
+            let moved = tx.query_row(
+                &format!(
+                    "UPDATE dependency_alerts
+                     SET state = ?1, updated_clock_unix = ?2,
+                         dismissed_clock_unix = ?3, dismissed_by_id = ?4, dismissed_reason = ?5,
+                         dismissed_comment = ?6,
+                         fixed_clock_unix = CASE ?1 WHEN 'fixed' THEN ?2 END,
+                         auto_dismissed_clock_unix = CASE ?1 WHEN 'auto_dismissed' THEN ?2 END
+                     WHERE id = ?7
+                     RETURNING {ALERT_COLUMNS}"
+                ),
                 params![
                     to.as_str(),
                     clock,
@@ -278,9 +292,10 @@ impl World {
                     dismissal.and_then(|d| d.3),
                     alert.id
                 ],
+                row_to_alert,
             )?;
             changed(w, alert.id, &before, event)?;
-            alert_by_id(tx, alert.id)
+            Ok(moved)
         })
     }
 
@@ -320,15 +335,19 @@ impl World {
                 }
             };
             let before = objects::dependency_alert_object(tx, alert.id)?;
-            tx.execute(
-                "UPDATE dependency_alerts
-                 SET update_state = ?1, update_pull_id = ?2, update_error_type = ?3,
-                     update_error_title = ?4
-                 WHERE id = ?5",
+            let recorded = tx.query_row(
+                &format!(
+                    "UPDATE dependency_alerts
+                     SET update_state = ?1, update_pull_id = ?2, update_error_type = ?3,
+                         update_error_title = ?4
+                     WHERE id = ?5
+                     RETURNING {ALERT_COLUMNS}"
+                ),
                 params![state, pull_id, error_type, error_title, alert.id],
+                row_to_alert,
             )?;
             changed(w, alert.id, &before, EventBody::DependencyAlertUpdateSet)?;
-            alert_by_id(tx, alert.id)
+            Ok(recorded)
         })
     }
 
@@ -347,8 +366,8 @@ impl World {
     ) -> Result<Vec<DependencyAlert>> {
         let (filter, values) = query.filter();
         let column = match query.by_updated {
-            true => "a.updated_clock_unix",
-            false => "a.created_clock_unix",
+            true => "updated_clock_unix",
+            false => "created_clock_unix",
         };
         // A page that ends before a position is read backwards from it, and
         // turned round.
@@ -360,7 +379,7 @@ impl World {
         };
         let n = values.len();
         let bound = match from {
-            Some(_) => format!(" AND ({column}, a.number) {past} (?{}, ?{})", n + 2, n + 3),
+            Some(_) => format!(" AND ({column}, number) {past} (?{}, ?{})", n + 2, n + 3),
             None => String::new(),
         };
         let direction = match query.ascending != backwards {
@@ -368,8 +387,8 @@ impl World {
             false => "DESC",
         };
         let sql = format!(
-            "{ALERT_SELECT} WHERE a.repo_id = ?1{filter}{bound}
-             ORDER BY {column} {direction}, a.number {direction} LIMIT {}",
+            "SELECT {ALERT_COLUMNS} FROM dependency_alerts WHERE repo_id = ?1{filter}{bound}
+             ORDER BY {column} {direction}, number {direction} LIMIT {}",
             // SQLite counts a limit in 64 signed bits.
             limit.min(i64::MAX as usize)
         );
@@ -394,28 +413,14 @@ impl World {
             Ok(alerts)
         })
     }
-
-    /// How many of a repository's alerts `query`'s filters keep, wherever it
-    /// starts.
-    pub fn dependency_alert_count(&self, repo_id: i64, query: &AlertQuery) -> Result<i64> {
-        let (filter, values) = query.filter();
-        let sql = format!("SELECT COUNT(*) FROM dependency_alerts a WHERE a.repo_id = ?1{filter}");
-        let mut bind: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(repo_id)];
-        bind.extend(
-            values
-                .into_iter()
-                .map(|v| Box::new(v) as Box<dyn rusqlite::ToSql>),
-        );
-        self.with_conn(|conn| {
-            Ok(conn.query_row(&sql, rusqlite::params_from_iter(bind.iter()), |r| r.get(0))?)
-        })
-    }
 }
 
 /// Every alert, in id order: what a view of the whole world reads.
 pub(crate) fn list_alerts(conn: &Connection) -> Result<Vec<DependencyAlert>> {
     Ok(conn
-        .prepare(&format!("{ALERT_SELECT} ORDER BY a.id"))?
+        .prepare(&format!(
+            "SELECT {ALERT_COLUMNS} FROM dependency_alerts ORDER BY id"
+        ))?
         .query_map([], row_to_alert)?
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -466,7 +471,9 @@ fn alert_by_number(
 ) -> Result<Option<DependencyAlert>> {
     Ok(conn
         .query_row(
-            &format!("{ALERT_SELECT} WHERE a.repo_id = ?1 AND a.number = ?2"),
+            &format!(
+                "SELECT {ALERT_COLUMNS} FROM dependency_alerts WHERE repo_id = ?1 AND number = ?2"
+            ),
             params![repo_id, number],
             row_to_alert,
         )
@@ -475,7 +482,7 @@ fn alert_by_number(
 
 pub(crate) fn alert_by_id(conn: &Connection, id: i64) -> Result<DependencyAlert> {
     Ok(conn.query_row(
-        &format!("{ALERT_SELECT} WHERE a.id = ?1"),
+        &format!("SELECT {ALERT_COLUMNS} FROM dependency_alerts WHERE id = ?1"),
         params![id],
         row_to_alert,
     )?)
