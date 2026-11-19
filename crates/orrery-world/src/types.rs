@@ -132,6 +132,9 @@ pub struct Repo {
     pub default_branch: String,
     pub created_clock_unix: i64,
     pub pushed_at_clock_unix: Option<i64>,
+    /// Whether the repository has dependency alerts. A repository starts
+    /// with them off.
+    pub dependency_alerts: bool,
 }
 
 impl Repo {
@@ -979,4 +982,153 @@ pub struct NewDelivery {
     pub event: String,
     pub action: Option<String>,
     pub body: String,
+}
+
+/// A value stored as a lowercase word: its spellings, and how it is read
+/// back from a world, whose columns hold only those.
+macro_rules! word {
+    ($(#[$meta:meta])* $name:ident { $($variant:ident = $word:literal),+ $(,)? }) => {
+        $(#[$meta])*
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+            schemars::JsonSchema,
+        )]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $($name::$variant => $word),+
+                }
+            }
+
+            /// The value `word` spells, if it spells one.
+            pub fn parse(word: &str) -> Option<$name> {
+                match word {
+                    $($word => Some($name::$variant),)+
+                    _ => None,
+                }
+            }
+
+            pub(crate) fn from_db(word: &str) -> $name {
+                $name::parse(word).expect("a column's check admits only these words")
+            }
+        }
+    };
+}
+
+word! {
+    /// Where a dependency alert stands.
+    AlertState { Open = "open", Dismissed = "dismissed", Fixed = "fixed", AutoDismissed = "auto_dismissed" }
+}
+
+word! {
+    AlertSeverity { Low = "low", Medium = "medium", High = "high", Critical = "critical" }
+}
+
+word! {
+    /// Whether a vulnerable dependency is needed to run or only to develop.
+    AlertScope { Runtime = "runtime", Development = "development" }
+}
+
+word! {
+    /// Why a person dismissed an alert.
+    DismissReason {
+        FixStarted = "fix_started",
+        Inaccurate = "inaccurate",
+        NoBandwidth = "no_bandwidth",
+        NotUsed = "not_used",
+        TolerableRisk = "tolerable_risk",
+    }
+}
+
+word! {
+    /// What the vendor's updater did about an alert.
+    AlertUpdateState { None = "none", Pending = "pending", PullRequest = "pull_request", Error = "error" }
+}
+
+/// A vulnerable dependency a repository holds, and what has been done about
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DependencyAlert {
+    pub id: i64,
+    pub repo_id: i64,
+    /// Counted from 1 within the repository.
+    pub number: i64,
+    pub state: AlertState,
+    pub ecosystem: String,
+    pub package: String,
+    pub manifest_path: String,
+    pub scope: Option<AlertScope>,
+    /// The version the manifest asks for, when the alert was given one.
+    pub version_requirement: Option<String>,
+    /// The advisory's id, such as a GHSA id.
+    pub advisory_id: String,
+    pub cve_id: Option<String>,
+    pub summary: String,
+    pub description: String,
+    pub severity: AlertSeverity,
+    pub vulnerable_version_range: String,
+    pub first_patched_version: Option<String>,
+    pub created_clock_unix: i64,
+    pub updated_clock_unix: i64,
+    /// Held only while the alert is dismissed.
+    pub dismissed: Option<AlertDismissal>,
+    pub fixed_clock_unix: Option<i64>,
+    pub auto_dismissed_clock_unix: Option<i64>,
+    pub update: AlertUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AlertDismissal {
+    pub clock_unix: i64,
+    pub by: Actor,
+    pub reason: DismissReason,
+    pub comment: Option<String>,
+}
+
+/// What the vendor's updater did about an alert.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum AlertUpdate {
+    /// Nothing: it has not tried.
+    None,
+    /// It has started, and has neither opened a pull request nor failed.
+    Pending,
+    /// It opened this pull request.
+    PullRequest { pull_id: i64, number: i64 },
+    /// It could not update the dependency.
+    Error { error_type: String, title: String },
+}
+
+/// What to record of the updater, with a pull request named by its number
+/// in the alert's repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewAlertUpdate<'a> {
+    None,
+    Pending,
+    PullRequest { number: i64 },
+    Error { error_type: &'a str, title: &'a str },
+}
+
+/// A move of an alert from one state to another. The first two are a
+/// person's, and the rest the vendor's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertTransition<'a> {
+    /// Open to dismissed.
+    Dismiss {
+        reason: DismissReason,
+        comment: Option<&'a str>,
+    },
+    /// Dismissed, by a person or by a rule, to open.
+    Reopen,
+    /// To fixed, from any other state: the dependency is no longer
+    /// vulnerable.
+    Fix,
+    /// Open to auto-dismissed, by a rule of the vendor's.
+    AutoDismiss,
+    /// Fixed, or auto-dismissed, back to open.
+    Reintroduce,
 }

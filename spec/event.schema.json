@@ -275,6 +275,43 @@
       ],
       "type": "string"
     },
+    "AlertScope": {
+      "description": "Whether a vulnerable dependency is needed to run or only to develop.",
+      "enum": [
+        "runtime",
+        "development"
+      ],
+      "type": "string"
+    },
+    "AlertSeverity": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
+      "type": "string"
+    },
+    "AlertState": {
+      "description": "Where a dependency alert stands.",
+      "enum": [
+        "open",
+        "dismissed",
+        "fixed",
+        "auto_dismissed"
+      ],
+      "type": "string"
+    },
+    "AlertUpdateState": {
+      "description": "What the vendor's updater did about an alert.",
+      "enum": [
+        "none",
+        "pending",
+        "pull_request",
+        "error"
+      ],
+      "type": "string"
+    },
     "AppChanged": {
       "properties": {
         "changes": {
@@ -2419,6 +2456,844 @@
       ],
       "type": "string"
     },
+    "DependencyAlertChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/DependencyAlertChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/DependencyAlertSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "DependencyAlertChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "advisory_id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "auto_dismissed_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "cve_id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "description": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "dismissed_by": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActorRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActorRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "dismissed_comment": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "dismissed_reason": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DismissReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DismissReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "dismissed_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "ecosystem": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "first_patched_version": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "fixed_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "manifest_path": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "number": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "package": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "scope": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AlertScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AlertScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "severity": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/AlertSeverity"
+            },
+            "to": {
+              "$ref": "#/$defs/AlertSeverity"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/AlertState"
+            },
+            "to": {
+              "$ref": "#/$defs/AlertState"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "summary": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "update_error_title": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "update_error_type": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "update_pull": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PullRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PullRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "update_state": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/AlertUpdateState"
+            },
+            "to": {
+              "$ref": "#/$defs/AlertUpdateState"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "updated_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "version_requirement": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "vulnerable_version_range": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DependencyAlertCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/DependencyAlertObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/DependencyAlertSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "DependencyAlertObject": {
+      "properties": {
+        "advisory_id": {
+          "description": "The advisory's id, such as a GHSA id.",
+          "type": "string"
+        },
+        "auto_dismissed_unix": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cve_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "dismissed_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dismissed_comment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dismissed_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DismissReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dismissed_unix": {
+          "description": "When the alert was dismissed, who by, and why: each null unless\nthe alert is dismissed.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ecosystem": {
+          "type": "string"
+        },
+        "first_patched_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fixed_unix": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "manifest_path": {
+          "type": "string"
+        },
+        "number": {
+          "description": "Counted from 1 within the repository.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "package": {
+          "type": "string"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlertScope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/AlertSeverity"
+        },
+        "state": {
+          "$ref": "#/$defs/AlertState"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "update_error_title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "update_error_type": {
+          "description": "The error it reported, when it reported one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "update_pull": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PullRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The pull request it opened, when it opened one."
+        },
+        "update_state": {
+          "$ref": "#/$defs/AlertUpdateState",
+          "description": "What the vendor's updater did about the alert."
+        },
+        "updated_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "version_requirement": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vulnerable_version_range": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "number",
+        "state",
+        "ecosystem",
+        "package",
+        "manifest_path",
+        "advisory_id",
+        "summary",
+        "description",
+        "severity",
+        "vulnerable_version_range",
+        "created_unix",
+        "updated_unix",
+        "update_state"
+      ],
+      "type": "object"
+    },
+    "DependencyAlertSubject": {
+      "description": "A vulnerable dependency a repository holds.",
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "type": {
+          "$ref": "#/$defs/DependencyAlertType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "number",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "DependencyAlertType": {
+      "enum": [
+        "dependency_alert"
+      ],
+      "type": "string"
+    },
+    "DismissReason": {
+      "description": "Why a person dismissed an alert.",
+      "enum": [
+        "fix_started",
+        "inaccurate",
+        "no_bandwidth",
+        "not_used",
+        "tolerable_risk"
+      ],
+      "type": "string"
+    },
     "Door": {
       "description": "How a write reached the world.",
       "oneOf": [
@@ -4375,6 +5250,25 @@
             "null"
           ]
         },
+        "dependency_alerts": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "boolean"
+            },
+            "to": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "description": {
           "description": "A field's value before and after a change.",
           "properties": {
@@ -4526,6 +5420,11 @@
         },
         "default_branch": {
           "type": "string"
+        },
+        "dependency_alerts": {
+          "default": false,
+          "description": "Whether the repository has dependency alerts. Events appended\nbefore a world held any carry none, and mean off.",
+          "type": "boolean"
         },
         "description": {
           "type": [
@@ -5779,6 +6678,20 @@
       "type": "object"
     },
     {
+      "$ref": "#/$defs/RepoChanged",
+      "description": "A repository's dependency alerts were turned on or off.",
+      "properties": {
+        "type": {
+          "const": "repo:dependency_alerts_set",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
       "$ref": "#/$defs/RefCreated",
       "properties": {
         "type": {
@@ -6048,6 +6961,118 @@
       "properties": {
         "type": {
           "const": "check_run:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/DependencyAlertCreated",
+      "description": "The vendor reported a vulnerable dependency in a repository.",
+      "properties": {
+        "type": {
+          "const": "dependency_alert:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/DependencyAlertChanged",
+      "description": "A person dismissed an alert.",
+      "properties": {
+        "type": {
+          "const": "dependency_alert:dismissed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/DependencyAlertChanged",
+      "description": "A person reopened an alert they or another had dismissed.",
+      "properties": {
+        "type": {
+          "const": "dependency_alert:reopened",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/DependencyAlertChanged",
+      "description": "The dependency is no longer vulnerable.",
+      "properties": {
+        "type": {
+          "const": "dependency_alert:fixed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/DependencyAlertChanged",
+      "description": "A rule of the vendor's dismissed the alert.",
+      "properties": {
+        "type": {
+          "const": "dependency_alert:auto_dismissed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/DependencyAlertChanged",
+      "description": "A fixed alert's dependency is vulnerable again.",
+      "properties": {
+        "type": {
+          "const": "dependency_alert:reintroduced",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/DependencyAlertChanged",
+      "description": "An alert a rule had dismissed is open again.",
+      "properties": {
+        "type": {
+          "const": "dependency_alert:auto_reopened",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/DependencyAlertChanged",
+      "description": "What the vendor's updater did about the alert was recorded.",
+      "properties": {
+        "type": {
+          "const": "dependency_alert:update_set",
           "type": "string"
         }
       },

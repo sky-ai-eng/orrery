@@ -44,6 +44,17 @@ pub enum WorldError {
     NoSuchPull(i64),
     #[error("no check run with id {0}")]
     NoSuchCheckRun(i64),
+    #[error("no dependency alert numbered {0} in this repository")]
+    NoSuchDependencyAlert(i64),
+    #[error("no pull request numbered {number} in repository {repo_id}")]
+    NoSuchPullNumber { repo_id: i64, number: i64 },
+    #[error("dependency alerts are off for repository {0}")]
+    DependencyAlertsOff(i64),
+    #[error("dependency alert {number} is {state:?}, which this move does not start from")]
+    DependencyAlertState {
+        number: i64,
+        state: crate::AlertState,
+    },
     #[error("invalid label name {0:?}: 1-50 characters, not all whitespace")]
     InvalidLabel(String),
     #[error("pull has no label {0:?}")]

@@ -312,6 +312,52 @@ const MIGRATIONS: &[&str] = &[
         created_clock_unix   INTEGER NOT NULL,
         converted_clock_unix INTEGER
      ) STRICT;",
+    // 19: dependency alerts. A repository has them only while
+    // `dependency_alerts` is on, and a repository made before this version
+    // has them off. An alert is a vulnerable dependency the repository
+    // holds: the package and the manifest it is in, the advisory against
+    // it, and what has been done about it. It is numbered from 1 within its
+    // repository. A dismissal is who dismissed it, when, and why, and is
+    // held only while the alert is dismissed. `update_state` is what the
+    // vendor's updater did about the alert: nothing, an attempt it started,
+    // the pull request it opened, or the error it reported.
+    "ALTER TABLE repos ADD COLUMN dependency_alerts INTEGER NOT NULL DEFAULT 0
+         CHECK (dependency_alerts IN (0, 1));
+     CREATE TABLE dependency_alerts (
+        id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id                   INTEGER NOT NULL REFERENCES repos(id),
+        number                    INTEGER NOT NULL,
+        state                     TEXT NOT NULL
+            CHECK (state IN ('open', 'dismissed', 'fixed', 'auto_dismissed')),
+        ecosystem                 TEXT NOT NULL,
+        package                   TEXT NOT NULL,
+        manifest_path             TEXT NOT NULL,
+        scope                     TEXT CHECK (scope IN ('runtime', 'development')),
+        version_requirement       TEXT,
+        advisory_id               TEXT NOT NULL,
+        cve_id                    TEXT,
+        summary                   TEXT NOT NULL,
+        description               TEXT NOT NULL,
+        severity                  TEXT NOT NULL
+            CHECK (severity IN ('low', 'medium', 'high', 'critical')),
+        vulnerable_version_range  TEXT NOT NULL,
+        first_patched_version     TEXT,
+        created_clock_unix        INTEGER NOT NULL,
+        updated_clock_unix        INTEGER NOT NULL,
+        dismissed_clock_unix      INTEGER,
+        dismissed_by_id           INTEGER REFERENCES actors(id),
+        dismissed_reason          TEXT CHECK (dismissed_reason IN
+            ('fix_started', 'inaccurate', 'no_bandwidth', 'not_used', 'tolerable_risk')),
+        dismissed_comment         TEXT,
+        fixed_clock_unix          INTEGER,
+        auto_dismissed_clock_unix INTEGER,
+        update_state              TEXT NOT NULL
+            CHECK (update_state IN ('none', 'pending', 'pull_request', 'error')),
+        update_pull_id            INTEGER REFERENCES pulls(id),
+        update_error_type         TEXT,
+        update_error_title        TEXT,
+        UNIQUE (repo_id, number)
+     ) STRICT;",
 ];
 
 /// The version this binary reads and writes.

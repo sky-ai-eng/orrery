@@ -68,6 +68,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `review` | `id` | `pull`, `repo`, `owner` |
 | `comment` | `id` | `pull`, `repo`, `owner` |
 | `check_run` | `id`, `name`, `head_sha` | `repo`, `owner` |
+| `dependency_alert` | `id`, `number` | `repo`, `owner` |
 | `org_membership` | `member` | `owner` (the organization) |
 | `team` | `id`, `slug` | `owner` (the organization) |
 | `team_membership` | `member` | `team`, `owner` |
@@ -126,6 +127,12 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `comment:created` | commenting | `object` | `pull:updated` when `updated_unix` moves |
 | `check_run:created` | creating a check run | `object` | none |
 | `check_run:updated` | updating one | `changes` | none |
+| `repo:dependency_alerts_set` | turning a repository's dependency alerts on or off | `changes` | none |
+| `dependency_alert:created` | the vendor reporting a vulnerable dependency | `object` | none |
+| `dependency_alert:dismissed`, `dependency_alert:reopened` | a person dismissing an alert, or reopening one | `changes` | none |
+| `dependency_alert:fixed`, `dependency_alert:auto_dismissed` | the vendor finding the dependency no longer vulnerable, or dismissing the alert by rule | `changes` | none |
+| `dependency_alert:reintroduced`, `dependency_alert:auto_reopened` | the vendor opening again an alert that was fixed, or one a rule had dismissed | `changes` | none |
+| `dependency_alert:update_set` | recording what the vendor's updater did about an alert | `changes` | none |
 | `org_membership:created`, `org_membership:updated` | setting an organization membership | `object`, or `changes` | none |
 | `team:created` | creating a team | `object` | `team_membership:created` when the creator is a member of the organization |
 | `team:deleted` | deleting a team | `object`, as it was | `pull:review_request_removed` per pending request, then `team_membership:deleted` per member |

@@ -281,13 +281,15 @@ fn every_fixture_migrates_opens_and_diffs() {
             .into_iter()
             .map(|e| e.body.type_name().to_string())
             .collect();
-        // The re-key is one write: its own event, then one for each
-        // webhook it turned off and each delivery it dropped.
+        // The re-key is one write: its own event, then one for each key
+        // it derived again, each webhook it turned off, and each delivery
+        // it dropped.
         assert_eq!(since[0], "world:rekeyed", "fixture v{version}");
         assert!(
-            since[1..]
-                .iter()
-                .all(|kind| kind == "app:hook_set" || kind == "delivery:dropped"),
+            since[1..].iter().all(|kind| matches!(
+                kind.as_str(),
+                "app_key:rederived" | "app:hook_set" | "delivery:dropped"
+            )),
             "fixture v{version}: {since:?}"
         );
         world

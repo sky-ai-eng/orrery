@@ -7,7 +7,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::events::*;
 use crate::types::{
-    ActorEmail, ActorKind, CheckConclusion, CheckStatus, OrgRole, PullState, ReviewState, TeamRole,
+    ActorEmail, ActorKind, AlertUpdate, AlertUpdateState, CheckConclusion, CheckStatus, OrgRole,
+    PullState, ReviewState, TeamRole,
 };
 use crate::{Result, WorldError, queries};
 
@@ -220,7 +221,8 @@ pub(crate) fn repo_subject(conn: &Connection, repo_id: i64) -> Result<RepoSubjec
 pub(crate) fn repo_object(conn: &Connection, repo_id: i64) -> Result<RepoObject> {
     conn.query_row(
         "SELECT r.id, r.name, o.id, o.login, r.description, r.private, r.default_branch,
-                c.id, c.login, r.created_clock_unix, r.pushed_at_clock_unix
+                c.id, c.login, r.created_clock_unix, r.pushed_at_clock_unix,
+                r.dependency_alerts
          FROM repos r JOIN actors o ON o.id = r.owner_id JOIN actors c ON c.id = r.created_by
          WHERE r.id = ?1",
         params![repo_id],
@@ -235,11 +237,79 @@ pub(crate) fn repo_object(conn: &Connection, repo_id: i64) -> Result<RepoObject>
                 created_by: actor_ref_at(r, 7)?,
                 created_unix: r.get(9)?,
                 pushed_unix: r.get(10)?,
+                dependency_alerts: r.get(11)?,
             })
         },
     )
     .optional()?
     .ok_or(WorldError::NoSuchRepo(repo_id))
+}
+
+pub(crate) fn dependency_alert_subject(
+    conn: &Connection,
+    id: i64,
+) -> Result<DependencyAlertSubject> {
+    let alert = crate::alerts::alert_by_id(conn, id)?;
+    let (repo, owner) = repo_refs(conn, alert.repo_id)?;
+    Ok(DependencyAlertSubject {
+        kind: DependencyAlertType::Tag,
+        id,
+        number: alert.number,
+        repo,
+        owner,
+    })
+}
+
+pub(crate) fn dependency_alert_object(conn: &Connection, id: i64) -> Result<DependencyAlertObject> {
+    let alert = crate::alerts::alert_by_id(conn, id)?;
+    let (update_state, update_pull, update_error_type, update_error_title) = match alert.update {
+        AlertUpdate::None => (AlertUpdateState::None, None, None, None),
+        AlertUpdate::Pending => (AlertUpdateState::Pending, None, None, None),
+        AlertUpdate::PullRequest { pull_id, number } => (
+            AlertUpdateState::PullRequest,
+            Some(PullRef {
+                id: pull_id,
+                number,
+            }),
+            None,
+            None,
+        ),
+        AlertUpdate::Error { error_type, title } => {
+            (AlertUpdateState::Error, None, Some(error_type), Some(title))
+        }
+    };
+    Ok(DependencyAlertObject {
+        id: alert.id,
+        number: alert.number,
+        state: alert.state,
+        ecosystem: alert.ecosystem,
+        package: alert.package,
+        manifest_path: alert.manifest_path,
+        scope: alert.scope,
+        version_requirement: alert.version_requirement,
+        advisory_id: alert.advisory_id,
+        cve_id: alert.cve_id,
+        summary: alert.summary,
+        description: alert.description,
+        severity: alert.severity,
+        vulnerable_version_range: alert.vulnerable_version_range,
+        first_patched_version: alert.first_patched_version,
+        created_unix: alert.created_clock_unix,
+        updated_unix: alert.updated_clock_unix,
+        dismissed_unix: alert.dismissed.as_ref().map(|d| d.clock_unix),
+        dismissed_by: alert.dismissed.as_ref().map(|d| ActorRef {
+            id: d.by.id,
+            login: d.by.login.clone(),
+        }),
+        dismissed_reason: alert.dismissed.as_ref().map(|d| d.reason),
+        dismissed_comment: alert.dismissed.and_then(|d| d.comment),
+        fixed_unix: alert.fixed_clock_unix,
+        auto_dismissed_unix: alert.auto_dismissed_clock_unix,
+        update_state,
+        update_pull,
+        update_error_type,
+        update_error_title,
+    })
 }
 
 pub(crate) fn ref_subject(conn: &Connection, repo_id: i64, name: &str) -> Result<RefSubject> {

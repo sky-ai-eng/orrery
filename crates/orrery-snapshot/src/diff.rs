@@ -162,6 +162,27 @@ pub struct DeliveryAdded {
     pub state: String,
 }
 
+/// A dependency alert: its repository, its number there, the package it
+/// is about, and where it stands.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AlertAdded {
+    pub repo: String,
+    pub number: i64,
+    pub ecosystem: String,
+    pub package: String,
+    pub severity: String,
+    pub state: String,
+}
+
+/// An alert that stands somewhere else than it did.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AlertStateChange {
+    pub repo: String,
+    pub number: i64,
+    pub from: String,
+    pub to: String,
+}
+
 /// An actor's authorization of an OAuth app. The code itself is never
 /// reported.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -278,6 +299,8 @@ pub struct WorldDiff {
     pub installations_added: Vec<InstallationAdded>,
     pub installations_removed: Vec<InstallationAdded>,
     pub deliveries_added: Vec<DeliveryAdded>,
+    pub dependency_alerts_added: Vec<AlertAdded>,
+    pub dependency_alerts_changed: Vec<AlertStateChange>,
     pub repos_created: Vec<String>,
     pub repos_deleted: Vec<String>,
     pub default_branch_changes: Vec<DefaultBranchChange>,
@@ -458,6 +481,41 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
             state: d.state.as_str().to_string(),
         })
         .collect();
+
+    let repo_names: BTreeMap<i64, String> = to
+        .view
+        .list_repos()?
+        .into_iter()
+        .map(|r| (r.id, r.full_name()))
+        .collect();
+    let named = |repo_id: i64| repo_names.get(&repo_id).cloned().unwrap_or_default();
+    let from_alerts: BTreeMap<i64, _> = from
+        .view
+        .list_dependency_alerts()?
+        .into_iter()
+        .map(|a| (a.id, a.state))
+        .collect();
+    let mut dependency_alerts_added = Vec::new();
+    let mut dependency_alerts_changed = Vec::new();
+    for alert in to.view.list_dependency_alerts()? {
+        match from_alerts.get(&alert.id) {
+            None => dependency_alerts_added.push(AlertAdded {
+                repo: named(alert.repo_id),
+                number: alert.number,
+                ecosystem: alert.ecosystem,
+                package: alert.package,
+                severity: alert.severity.as_str().to_string(),
+                state: alert.state.as_str().to_string(),
+            }),
+            Some(was) if *was != alert.state => dependency_alerts_changed.push(AlertStateChange {
+                repo: named(alert.repo_id),
+                number: alert.number,
+                from: was.as_str().to_string(),
+                to: alert.state.as_str().to_string(),
+            }),
+            Some(_) => {}
+        }
+    }
 
     let from_repos: BTreeMap<i64, _> = from
         .view
@@ -907,6 +965,8 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         installations_added,
         installations_removed,
         deliveries_added,
+        dependency_alerts_added,
+        dependency_alerts_changed,
         repos_created,
         repos_deleted,
         default_branch_changes,
