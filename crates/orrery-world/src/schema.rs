@@ -23,7 +23,7 @@ pub const BASELINE_VERSION: i64 = 6;
 /// Forward migrations, oldest first, each one SQL batch, which is only a
 /// comment for a change to the events alone. `MIGRATIONS[i]` takes a
 /// database from version `BASELINE_VERSION + i` to the next.
-const MIGRATIONS: &[&str] = &[
+pub(crate) const MIGRATIONS: &[&str] = &[
     // 7: the real time each action-log entry was appended at, in Unix
     // milliseconds. Entries appended before this version never recorded one,
     // so they hold NULL.
@@ -367,7 +367,7 @@ const MIGRATIONS: &[&str] = &[
     // `conclusion` are what the suite's check runs come to, counting the
     // newest run of each name, and are stored so that a change to them is
     // an event of its own. Each check run made before this version joins a
-    // suite of its creator's on its commit.
+    // suite of its creator's on its commit, which records no push.
     "CREATE TABLE check_suites (
         id                 INTEGER PRIMARY KEY AUTOINCREMENT,
         repo_id            INTEGER NOT NULL REFERENCES repos(id),
@@ -405,7 +405,8 @@ const MIGRATIONS: &[&str] = &[
                       WHERE r.suite_id = check_suites.id AND r.status = 'queued') THEN 'queued'
          ELSE 'completed' END;
      UPDATE check_suites SET conclusion =
-         (SELECT r.conclusion FROM newest_check_runs r WHERE r.suite_id = check_suites.id
+         (SELECT r.conclusion FROM newest_check_runs r
+          WHERE r.suite_id = check_suites.id AND r.conclusion IS NOT NULL
           ORDER BY CASE r.conclusion
               WHEN 'action_required' THEN 0 WHEN 'timed_out' THEN 1 WHEN 'failure' THEN 2
               WHEN 'cancelled' THEN 3 WHEN 'success' THEN 4 WHEN 'neutral' THEN 5

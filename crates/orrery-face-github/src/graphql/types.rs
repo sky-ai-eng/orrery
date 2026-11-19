@@ -918,7 +918,10 @@ impl GqlCheckRun {
     }
 
     async fn check_suite(&self, ctx: &Context<'_>) -> Result<Option<GqlCheckSuite>, Error> {
-        let suite = face(ctx).world.check_suite_by_id(self.run.suite_id)?;
+        let suite = face(ctx)
+            .world
+            .check_suite_by_id(self.run.suite_id)
+            .map_err(internal)?;
         Ok(suite.map(|suite| GqlCheckSuite { suite }))
     }
 }
@@ -986,6 +989,8 @@ impl Commit {
             .world
             .list_check_runs_for_sha(self.repo.id, &self.sha)
             .map_err(internal)?;
+        // GitHub's rollup holds the newest run of each name, as its lists do.
+        let runs = world::newest_check_runs(runs);
         Ok((!runs.is_empty()).then_some(StatusCheckRollup { runs }))
     }
 }

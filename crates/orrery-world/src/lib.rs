@@ -62,6 +62,7 @@ pub use reader::{ViewMeta, WorldReader, WorldView};
 pub use schema::test_support;
 pub use schema::{BASELINE_VERSION, SCHEMA_VERSION};
 pub use signing::{ssh_public_key, ssh_public_key_from_blob};
+pub use suites::newest_check_runs;
 pub use types::*;
 
 pub type Result<T> = std::result::Result<T, WorldError>;
