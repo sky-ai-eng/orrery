@@ -106,7 +106,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `delivery:attempted` | the engine, after a delivery's one attempt | `changes`: the state, the receiver's status, headers, and body, or which step failed, and how long it took | none |
 | `delivery:dropped` | a restore, for each delivery its snapshot held pending; a consequence of forking a world | `changes` | one `delivery:dropped` for each other |
 | `repo:created` | creating a repository | `object` | none |
-| `repo:pushed` | a push, and a consequence of a merge | `changes` | for a push: a ref event per ref it moved, in ref-name order, then what [a push does to pull requests](#what-a-push-records), then a `commit:verified` per commit whose verdict it stores |
+| `repo:pushed` | a push, and a consequence of a merge | `changes` | for a push: a ref event per ref it moved, in ref-name order, then what [a push does to pull requests](#what-a-push-records), then a `check_suite:created` for each suite it makes, then a `commit:verified` per commit whose verdict it stores |
 | `ref:created` | a consequence of a push | `object`, `commits`, `commit_count` | |
 | `ref:updated` | a consequence of a push or a merge | `changes`, `forced`, `commits`, `commit_count` | |
 | `ref:deleted` | a consequence of a push | `object`, as it was | |
@@ -114,7 +114,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `pull:edited` | editing its title, body, or base | `changes` | none |
 | `pull:closed` | closing it, and a consequence of a push | `changes` | `timeline_item:created` |
 | `pull:reopened` | reopening it | `changes` | none |
-| `pull:merged` | merging it | `changes` | `timeline_item:created`; `repo:pushed` when `pushed_unix` moves; the base's `ref:updated`; what the base's move does to other pull requests |
+| `pull:merged` | merging it | `changes` | `timeline_item:created`; `repo:pushed` when `pushed_unix` moves; the base's `ref:updated`; what the base's move does to other pull requests; a `check_suite:created` for each suite the move makes on the merge commit |
 | `pull:ready_for_review` | marking it ready | `changes` | `timeline_item:created` |
 | `pull:converted_to_draft` | converting it to a draft | `changes` | none |
 | `pull:labeled`, `pull:unlabeled` | adding or removing labels | `changes` | `timeline_item:created` per label |
@@ -155,6 +155,8 @@ A push's ref events come first, then what the moves did to pull requests (`surfa
 - for a created branch, a `timeline_item:created` recording its restoration on each closed pull request whose head it is.
 
 A pull request whose `updated_unix` moves without another change gets a `pull:updated` before its item.
+
+Then the suites the push makes (`surface-github.md` §1.7): a `check_suite:created` for each app installed on the repository that may write checks, on each commit the push brought to a branch's tip where that app has none.
 
 Last come the verdicts the push stores: a `commit:verified` for each commit the ref events list, each once, in the order they list them, whose signature is `valid` and that has no stored verdict yet (`surface-github.md` §1.10).
 
