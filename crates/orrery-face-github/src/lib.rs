@@ -48,7 +48,7 @@ pub use render::repo_json;
 pub struct GithubFace {
     pub world: Arc<World>,
     pub git: Arc<GitFace>,
-    /// Where this instance's surfaces are, which every URL it returns names.
+    /// Where this instance's surfaces are: the roots of the URLs it renders.
     pub layout: Layout,
 }
 
