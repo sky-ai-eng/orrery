@@ -1467,6 +1467,7 @@ dependencies = [
  "hex",
  "hmac",
  "jiff",
+ "num-bigint",
  "orrery-world",
  "rusqlite",
  "schemars",

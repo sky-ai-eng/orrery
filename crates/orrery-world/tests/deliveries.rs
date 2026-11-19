@@ -31,6 +31,8 @@ fn hooked() -> (tempfile::TempDir, Arc<World>, i64) {
                 events: &[],
                 hook_url: Some("https://helper.test/hook"),
                 hook_active: true,
+                setup_url: None,
+                request_oauth_on_install: false,
             },
             SYSTEM,
         )

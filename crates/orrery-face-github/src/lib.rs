@@ -23,6 +23,7 @@ use axum::routing::{delete, get, patch, post, put};
 use orrery_face_git::GitFace;
 use orrery_world::{Actor, ActorKind, Attribution, Caller, Door, Repo, World, WorldError};
 
+pub mod app_flows;
 pub mod apps;
 mod checks;
 pub mod graphql;
@@ -64,7 +65,7 @@ pub fn router(face: GithubFace) -> Router {
         )
         .route(
             "/orgs/{org}/memberships/{username}",
-            put(orgs::set_org_membership),
+            get(orgs::get_org_membership).put(orgs::set_org_membership),
         )
         .route("/users/{username}", get(reads::get_user_by_login))
         .route(
@@ -79,6 +80,7 @@ pub fn router(face: GithubFace) -> Router {
         )
         .route("/user/ssh_signing_keys/{id}", delete(signing::delete_key))
         .route("/user/emails", get(reads::get_user_emails))
+        .route("/user/installations", get(apps::list_user_installations))
         .route("/user/teams", get(reads::list_user_teams))
         .route(
             "/user/repos",

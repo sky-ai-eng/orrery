@@ -697,6 +697,12 @@ pub struct App {
     pub events: Vec<String>,
     pub created_clock_unix: i64,
     pub hook: Hook,
+    /// Where a person is sent once they have installed the app, or `None`
+    /// for nowhere.
+    pub setup_url: Option<String>,
+    /// Whether a person who installs the app is sent through its
+    /// authorization, to its callback URL with a code.
+    pub request_oauth_on_install: bool,
 }
 
 /// An app's webhook: where its deliveries go, and whether it sends them.
@@ -734,6 +740,26 @@ pub struct NewApp<'a> {
     /// Where its deliveries go, or `None` for no webhook.
     pub hook_url: Option<&'a str>,
     pub hook_active: bool,
+    pub setup_url: Option<&'a str>,
+    pub request_oauth_on_install: bool,
+}
+
+/// An app registered from a manifest, and the code its registration issued.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestApp {
+    pub app: App,
+    pub code: String,
+}
+
+/// What trading a manifest's code answers: the app, and the credentials it
+/// is given then and by no read after. The private key is derived, and the
+/// world keeps its public half.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConvertedApp {
+    pub app: App,
+    pub client_secret: String,
+    pub hook_secret: Option<String>,
+    pub private_key_pem: String,
 }
 
 /// A public key an app's signatures are checked against.

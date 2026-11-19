@@ -34,14 +34,16 @@ mod orgs;
 mod pulls;
 mod queries;
 mod reader;
+mod rsa_key;
 mod schema;
 mod signing;
 mod types;
 
 pub use app_keys::rsa_public_key_from_pem;
 pub use apps::{
-    INSTALLATION_TOKEN_TTL_SECONDS, validate_app_callback_urls, validate_app_events,
-    validate_app_name, validate_app_permissions, validate_app_slug, validate_hook_url,
+    INSTALLATION_TOKEN_TTL_SECONDS, MANIFEST_CODE_TTL_SECONDS, validate_app_callback_urls,
+    validate_app_events, validate_app_name, validate_app_permissions, validate_app_slug,
+    validate_hook_url, validate_setup_url,
 };
 pub use checks::{CheckRunPatch, NewCheckRun};
 pub use credentials::{OAUTH_CLIENT_ID_PREFIX, WorldSecret};

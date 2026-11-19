@@ -53,6 +53,13 @@ listen = "127.0.0.1:4180"
 # Clone and fetch without a token, as GitHub allows for public repos. A world
 # whose faces are on the public internet sets this to false.
 # anonymous_git_reads = true
+# How the pages that stand in for GitHub's sign a person in: the OAuth
+# authorize page, and the pages a GitHub App is registered and installed on.
+# "login" takes the login they name, so whoever can reach a page can act as
+# any user and be issued a token for them. "token" also takes, as the
+# password, a token the control plane issued that user. A world whose faces
+# are on the public internet sets this to "token".
+# page_sign_in = "login"
 
 [outbound]
 # How a world sends its webhook deliveries, the one thing a world sends: one

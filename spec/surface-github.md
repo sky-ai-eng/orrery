@@ -70,6 +70,7 @@ A bot's token is refused on `GET /user`, `/user/emails`, `/user/teams`, `/user/r
 
 | Route | Behavior |
 | --- | --- |
+| `GET /orgs/{org}/memberships/{username}` | The membership, as the `PUT` answers it, or `404` for an organization or a user that does not exist, an account that is not an organization, and a user who is not a member, as on GitHub. |
 | `PUT /orgs/{org}/memberships/{username}` | Body optional; `role` is `member` (the default) or `admin`, else `422`. Answers `{url, state, role, organization_url, organization, user}`. Orrery presents as a GitHub Enterprise Server, which adds a member directly, so `state` is always `active`. Only a user can be a member; an unknown organization or user is `404`. |
 | `GET /orgs/{org}/teams` | Teams oldest first, paged; `[]` for an organization with none, `404` for a login that is not an organization. |
 | `POST /orgs/{org}/teams` | `{name, description?, privacy?}`. A missing, null, or blank `name` is `422 missing_field`; a non-string `name`, or one with no ASCII letter or digit, is `422 invalid`. The slug is the name lower-cased with each run of other characters turned into one hyphen. A name or slug already in the organization, ignoring case, is `422 already_exists`. A creator who is a member of the organization becomes the team's first maintainer. `maintainers`, `repo_names`, `parent_team_id`, and `privacy: secret` are not mocked. Answers `201` with the full team. |
@@ -190,7 +191,7 @@ Addresses compare ignoring case. Whether an SSH signature verifies is judged by 
 
 ### 1.11 GitHub Apps
 
-A GitHub App is registered, given a public key, and installed on the control plane (`usage.md`), since GitHub does each only in its web pages. Its bot is the `bot` actor whose login is its slug. An App is an OAuth app too: it has a client id, client secrets, and callback URLs, and the OAuth web flow takes its client id (§2).
+A GitHub App is registered, given a public key, and installed on the control plane (`usage.md`), or by a person on the pages GitHub does each on (§2.2). Its bot is the `bot` actor whose login is its slug. An App is an OAuth app too: it has a client id, client secrets, and callback URLs, and the OAuth web flow takes its client id (§2).
 
 **As the App.** These routes take a JWT the App signed, as `Authorization: Bearer <jwt>`, in place of a token.
 
@@ -205,7 +206,9 @@ A GitHub App is registered, given a public key, and installed on the control pla
 | `DELETE /app/installations/{installation_id}` | Removes the installation: `204`, then `404`. Its tokens are `401` "Bad credentials" from then on, and the App can be installed on the account again, as a new installation with a new id. |
 | `GET /app/hook/config`, `PATCH /app/hook/config`, `GET /app/hook/deliveries`, `POST /app/hook/deliveries/{delivery_id}/attempts` | The App's webhook (§1.12). |
 
-**The `Link` header.** `GET /app/installations` and `GET /installation/repositories` send GitHub's `Link` header when the list is more than the page asked for. It names, in this order, `prev`, `next`, `last`, and `first`, each when there is such a page and it is not the page asked for; a page past the end names the last page as both `prev` and `last`. Each is a URL on the base URL carrying `page`, and `per_page` when the request carried it.
+**With a person's token.** `GET /user/installations` answers `{total_count, installations}`: the installations of the token's App that its user reaches, newest first, each the object `GET /app/installations/{id}` answers, paged with `per_page` and `page` and the `Link` header below. A person reaches the installation on their own account and the ones on organizations they are a member of. GitHub answers it only to a token a person gave an App (§2): any other person's token is `403` "You must authenticate with an access token authorized to a GitHub App in order to list installations", and a bot's token is `403` "Resource not accessible by integration", as on the other `/user` routes (§1.1).
+
+**The `Link` header.** `GET /app/installations`, `GET /user/installations`, and `GET /installation/repositories` send GitHub's `Link` header when the list is more than the page asked for. It names, in this order, `prev`, `next`, `last`, and `first`, each when there is such a page and it is not the page asked for; a page past the end names the last page as both `prev` and `last`. Each is a URL on the base URL carrying `page`, and `per_page` when the request carried it.
 
 GitHub serves more to an App's JWT than Orrery does: every other path under `/app`, and the lookups of the installation on a repository, an organization, or a user (`GET /repos/{o}/{r}/installation`, `/orgs/{org}/installation`, `/users/{username}/installation`). Each answers the `501` of surface Orrery does not serve, to a valid JWT alone, so a caller whose JWT is good is never told it is bad.
 
@@ -280,17 +283,53 @@ Every payload but `installation`'s also carries `installation`, `{id, node_id}`.
 | `GET /app/hook/deliveries` | The deliveries whose attempt was made, newest first: each `{id, guid, delivered_at, redelivery, duration, status, status_code, event, action, installation_id, repository_id, url, throttled_at}`. `delivered_at` is the world's clock when the result was recorded, `duration` is in seconds, `url` is `""`, `throttled_at` is null, and `installation_id` is null for an `installation` event, as on GitHub. `status` and `status_code` are, as GitHub gives them: `OK` and the status for a `2xx` answer; the status and a space (`500 `, `502 `) for those two; `Invalid HTTP Response: {status}` and the status for any other; `failed to connect to host` and `502` for an attempt that reached no receiver; and `timed out` and `504` for one that ran out of time. `per_page` is 30 unless given, at most 100, and digits alone: anything else is `422` "Invalid request.\n\n{value} does not match /^\\d+$/." `status` keeps `success`, an answer with a status below 400, or `failure`, any other attempt, and any other value is `422` "Invalid request.\n\n{value} is not a member of [\"failure\", \"success\"]." A page that is not the last sends a `next` link, `<…?{the request's parameters}&cursor=v1_{id}>; rel="next"`, where the id is the next page's first delivery, and that cursor starts a page at that delivery. A page reached by a cursor also sends a `prev` link, after the `next`, whose cursor is `v1_p{id}l{per_page}` with the id of the page's own first delivery: such a cursor starts a page that many deliveries before that one, at most 100, and an empty page with no link when none is before it. A cursor of any other form is `422` "Error parsing cursor parameter", and any other parameter is `422` "Invalid request.\n\n\"{name}\" is not a permitted key." |
 | `POST /app/hook/deliveries/{delivery_id}/attempts` | `202` `{}`. The delivery is sent again as a new delivery with the same GUID, event, and body, and `redelivery` true, to the URL the webhook has now. An id that is not one of the App's deliveries is `404`, as is one whose attempt was never made, which the list does not hold either: a delivery still pending, or one a restore or a fork dropped. An id that is not an integer is `422` "The delivery_id parameter must be an integer." |
 
-## 2. OAuth web flow
+## 2. Web pages
 
-GitHub's OAuth web flow on the web host, without a token. An OAuth app is registered on the control plane (`POST /_orrery/oauth-apps`). A GitHub App is an OAuth app too (§1.11): the flow takes its client id, a `redirect_uri` may match any of its callback URLs, and the first of them is the default.
+The pages a person's browser is sent to, on the web host, without an `Authorization` header. A world has no browser sessions (rule 12), so each is Orrery's stand-in for GitHub's page, and its form signs the person in.
+
+**Signing in.** A form carries `login`, a user's login. A world set to ask for one (`page_sign_in = "token"`; `usage.md`, "Door two: the control plane") shows a `password` field too, which must be a token the control plane issued that user: any other value signs in nobody, a token an app was given for them included. A form that signs in nobody is answered with the page again, `200`, and "Incorrect username or password.", and changes nothing. A page shown again keeps the login and never the token. Below, "signed in" means this.
+
+### 2.1 OAuth web flow
+
+GitHub's OAuth web flow. An OAuth app is registered on the control plane (`POST /_orrery/oauth-apps`). A GitHub App is an OAuth app too (§1.11): the flow takes its client id, a `redirect_uri` may match any of its callback URLs, and the first of them is the default.
 
 | Route | Behavior |
 | --- | --- |
 | `GET /login/oauth/authorize` | `client_id, redirect_uri?, scope?, state?`. An unknown `client_id` is a `404` page. `redirect_uri` defaults to the app's callback; when given, its scheme, host, and port must equal the callback's and its path must be the callback's or below it, else a `302` to the callback with `error=redirect_uri_mismatch`, `error_description`, `error_uri`, and `state`. GitHub's sub-domain allowance and loopback-port exception are not modeled. Answers Orrery's stand-in for GitHub's sign-in and consent pages: a form asking for a login. |
-| `POST /login/oauth/authorize` | The same fields as a form, plus `login`, naming a user actor (rule 12: no passwords exist). Any other login re-renders the page with "Incorrect username or password." Success is a `302` to `redirect_uri` with `code` and `state`. |
+| `POST /login/oauth/authorize` | The same fields as a form, signed in. Success is a `302` to `redirect_uri` with `code` and `state`. |
 | `POST /login/oauth/access_token` | `client_id, client_secret, code, redirect_uri?` from the query, a form body, or a JSON body; the client pair may instead be HTTP Basic. Success is `access_token` (a new token for the actor who authorized), `token_type=bearer`, and `scope`, form-encoded unless `Accept: application/json`; `application/xml` is not mocked. Refusals are `200` with `error, error_description, error_uri`: `incorrect_client_credentials`, `bad_verification_code` (unknown, spent, or older than 10 minutes on the world clock), and `redirect_uri_mismatch` (a `redirect_uri` that differs from the one the code was issued for). A code is spent by its first successful exchange. |
 
 Scopes are recorded and echoed, not enforced: no route checks a token's scopes. The token reads the identity routes in §1.1.
+
+### 2.2 Registering and installing a GitHub App
+
+**From a manifest.** A caller sends a person's browser to GitHub with the App it wants as a manifest, and is handed back a code it trades for the App's credentials.
+
+| Route | Behavior |
+| --- | --- |
+| `POST /settings/apps/new?state=`, `POST /organizations/{org}/settings/apps/new?state=` | A form with one field, `manifest`, the App as JSON. Answers the page a person confirms on, which registers nothing: a form holding the manifest, the App's name, and the sign-in. Posting that form signed in registers the App, owned by that user or by `{org}`, and is a `302` to the manifest's `redirect_url` with `code` and, when the URL carried one, `state`. With no `redirect_url` it answers a page. An `{org}` that is not an organization is a `404` page. The page is shown again with `422` for a name that is blank ("Name can't be blank"), longer than 34 characters ("Name is too long (maximum is 34 characters)"), or taken ("Name is already in use"), for a manifest with no `url` ("Url can't be blank"), for a `redirect_url` that is not an `http` or `https` URL a redirect can carry, for `request_oauth_on_install` with no `callback_urls`, and for anything the control plane refuses of an App. A refused manifest registers nothing. A `manifest` that is not JSON is a `422` page. |
+| `POST /app-manifests/{code}/conversions` | No credential but the code, and no body. `201` with the App as `GET /app` answers it, without `installations_count`, plus `client_secret`, `webhook_secret`, and `pem`, the App's private key as PKCS#1 PEM (`BEGIN RSA PRIVATE KEY`), 2048 bits. A code is traded once, within an hour of the world's clock: a code that is unknown, traded, or older is `404` "Not Found". |
+
+The manifest's fields: `name`, `url`, `redirect_url`, `callback_urls`, `setup_url`, `request_oauth_on_install`, `default_permissions`, `default_events`, and `hook_attributes` (`url`, and `active`, true unless given). The App's slug is its name in lower case with every run of other characters a hyphen. `description`, `public`, and `setup_on_update` are accepted and kept nowhere. The App is registered when the person confirms, by them through the `web` door, and it is the App `POST /_orrery/apps` registers. It has a webhook secret whether or not its webhook is active, as on GitHub.
+
+The private key is derived from the world's secret when the code is traded, and the world keeps its public half as the App's first key: a world never holds a private key, and the same world gives the same key on replay. A fork derives a code it inherited again, and a code traded in the fork gives the fork's key. A fork under another secret also derives again the key a code traded in its source gave (`usage.md`, "Making worlds without serving them").
+
+**Installing.** A caller links a person to the App's install page.
+
+| Route | Behavior |
+| --- | --- |
+| `GET /apps/{slug}/installations/new?state=` | The install page: a form with the sign-in, the account to install on (the person's own unless named), all of the account's repositories or the ones named, and whether to install or only ask to. An unknown App is a `404` page. |
+| `GET /apps/{slug}/installations/new/permissions?target_id=&state=` | The same page with the account chosen: `target_id` is a user's or an organization's id, and any other is a `404` page. |
+| `POST` to either | Signed in, installs the App on the account, by the person through the `web` door, and sends them on (below). An account or a repository that does not exist shows it again with `422`. An account that already has the App is a `302` to its installation's page. |
+| `GET /settings/installations/{id}`, `GET /organizations/{org}/settings/installations/{id}` | A page naming the installation, at the path its `html_url` gives. Any other id is a `404` page. |
+
+Where a person is sent once they have installed the App, each a `302`:
+
+- An App with `request_oauth_on_install` sends them to its first callback URL with `code`, an authorization code for them as the OAuth flow issues one (§2.1), then `installation_id`, `setup_action=install`, and the `state` the install URL carried.
+- An App with a `setup_url` sends them there with `installation_id`, `setup_action=install`, and `state`.
+- Any other App sends them to the installation's page.
+
+`setup_action=request` on the form is what GitHub does for a person who may not install on the account: nothing is installed, and they are sent on the same way with `setup_action=request` and no `installation_id`. An App that asks for authorization still gets a `code`. With neither a callback nor a setup URL to go to, the answer is a page.
 
 ## 3. GraphQL
 
@@ -346,6 +385,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 **Not yet observed on GitHub:**
 
 - A team member's review leaves the team's pending request in place.
+- Everything a browser session is needed to see of §2.2. Observed on github.com: the manifest form's redirect carries `code` and `state` and nothing else; a conversion is `201`, a second is `404`, and so is an unknown code; the conversion's fields, its PKCS#1 key, and its webhook secret for an inactive webhook; `GET /user/installations` refused to a token no App was given; and the membership read. Not observed: the parameters an install redirects with (`installation_id`, `setup_action`, and `code`), which follow GitHub's documentation; what a request to install redirects with; what the manifest page answers a manifest it refuses, and its messages, including whether GitHub refuses a manifest with no `hook_attributes` or with a permission or an event it does not know, each of which a world accepts; an expired code; `GET /user/installations` with a token an App was given, including which installations GitHub counts as reached, and with an installation token.
 - The `pull_request` payload's `requested_team`, which follows GitHub's documentation. Every other payload a world sends was observed.
 - A team that is not in the organization that owns the repository is refused with the message GitHub gave for a team asked on a user's repository.
 - GitHub sent `synchronize` a second time, with the same `before` and `after`, when a pull request's base was changed just after a push to its head, and not when the base was changed back. A world sends it once, for the push.
@@ -378,6 +418,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - A `manual` world compares neither `iat` nor `exp` of an App's JWT to its clock, so it accepts one that has expired, and one that expires more than 10 minutes ahead (`usage.md`, "Time").
 - `repository(owner:, name:)` for a repository that does not exist, or that an installation token does not see, is `null` with no error. GitHub adds an error whose `type` is `NOT_FOUND`: "Could not resolve to a Repository with the name '{owner}/{name}'."
 - A bot's own token, the one its actor was created with, reaches every repository. Only an installation token is limited.
+- An App registered from a manifest that names no callback URL is given its `redirect_url`, or else its `url`, as one, since an App here holds at least one. A manifest that asks for authorization on install must name a callback URL of its own, because that is where the person is sent with a code. The manifest page's refusals for a `redirect_url` and a missing callback URL are Orrery's words. A request to install records nothing, where GitHub keeps it for an owner to approve. An account that already has the App is shown its installation, where GitHub offers to change it. An App takes a setup URL or authorization on install, not both, which is what GitHub's settings page allows.
 - An App holds at least one callback URL, where GitHub lets an App have none. Its `description` is null and its `external_url` is its `html_url`, since Orrery keeps neither.
 - `repository_ids` on a request for an installation token is not mocked, where GitHub narrows the token by it. `GET /app/installations` refuses `since` and `outdated` as not mocked (`422`), where GitHub filters the list by them.
 - A path under `/app` that Orrery does not serve is `501` to a valid JWT, where GitHub answers a path it does not serve `401` "Bad credentials".
@@ -424,6 +465,6 @@ Every route here answers `501` until a consumer needs it:
 - listing commits, a commit's `files` and `stats`, trees, and statuses;
 - GPG keys and SSH authentication keys (`/user/gpg_keys`, `/user/keys`), and a single signing key (`GET /user/ssh_signing_keys/{id}`);
 - Actions: workflow runs, jobs, and logs;
-- for GitHub Apps: one delivery with its request and response (`GET /app/hook/deliveries/{delivery_id}`), repository and organization webhooks (`/repos/{o}/{r}/hooks`, `/orgs/{org}/hooks`), the lookups of the installation on a repository, an organization, or a user, the manifest flow (`/app-manifests/{code}/conversions`), the install pages, `GET /user/installations`, changing an installation's repositories, `DELETE /installation/token`, and revoking or resetting a token or a grant (`/applications/{client_id}/…`);
+- for GitHub Apps: one delivery with its request and response (`GET /app/hook/deliveries/{delivery_id}`), repository and organization webhooks (`/repos/{o}/{r}/hooks`, `/orgs/{org}/hooks`), the lookups of the installation on a repository, an organization, or a user, updating an installation from its page and the pages of an App's own settings, the installation requests an App has received (`GET /app/installation-requests`), changing an installation's repositories, `DELETE /installation/token`, and revoking or resetting a token or a grant (`/applications/{client_id}/…`);
 - webhook delivery;
 - REST search, organization member listings, and `/rate_limit`.

@@ -294,6 +294,24 @@ const MIGRATIONS: &[&str] = &[
      ) STRICT;
      CREATE INDEX deliveries_by_app ON deliveries (app_id, id);
      CREATE INDEX deliveries_pending ON deliveries (id) WHERE state = 'pending';",
+    // 18: the browser flows that register and install an app. `setup_url` is
+    // where a person is sent once they have installed the app, null for
+    // nowhere, and `request_oauth_on_install` sends them through the app's
+    // authorization instead. A manifest code is what registering an app
+    // from a manifest hands the caller that sent the person: it is traded
+    // once for the app's credentials, and is derived, as an authorization
+    // code is. An app has at most one, the one its registration issued.
+    "ALTER TABLE apps ADD COLUMN setup_url TEXT;
+     ALTER TABLE apps ADD COLUMN request_oauth_on_install INTEGER NOT NULL DEFAULT 0
+         CHECK (request_oauth_on_install IN (0, 1));
+     CREATE TABLE app_manifest_codes (
+        id                   INTEGER PRIMARY KEY,
+        code                 TEXT NOT NULL UNIQUE,
+        app_id               INTEGER NOT NULL UNIQUE REFERENCES apps(id),
+        actor_id             INTEGER NOT NULL REFERENCES actors(id),
+        created_clock_unix   INTEGER NOT NULL,
+        converted_clock_unix INTEGER
+     ) STRICT;",
 ];
 
 /// The version this binary reads and writes.

@@ -70,6 +70,8 @@ fn seeded() -> (tempfile::TempDir, World, i64) {
                 events: &strings(&["push"]),
                 hook_url: None,
                 hook_active: false,
+                setup_url: None,
+                request_oauth_on_install: false,
             },
             SYSTEM,
         )
@@ -98,6 +100,8 @@ fn create_app_returns_the_app_a_read_answers() {
                 events: &strings(&["push", "pull_request"]),
                 hook_url: None,
                 hook_active: false,
+                setup_url: None,
+                request_oauth_on_install: false,
             },
             SYSTEM,
         )
@@ -161,6 +165,8 @@ fn an_app_takes_a_bot_that_has_none_and_no_other_login() {
                 events: &[],
                 hook_url: None,
                 hook_active: false,
+                setup_url: None,
+                request_oauth_on_install: false,
             },
             SYSTEM,
         )
@@ -202,6 +208,8 @@ fn an_app_value_is_refused_under_its_own_field() {
         events: &[],
         hook_url: None,
         hook_active: false,
+        setup_url: None,
+        request_oauth_on_install: false,
     };
     assert_eq!(
         refused(NewApp {
@@ -522,6 +530,8 @@ fn a_token_is_narrowed_to_repositories_and_permissions_the_installation_holds() 
                 events: &[],
                 hook_url: None,
                 hook_active: false,
+                setup_url: None,
+                request_oauth_on_install: false,
             },
             SYSTEM,
         )
@@ -556,4 +566,100 @@ fn a_real_worlds_token_expires_by_the_hosts_time() {
     assert!(w.caller_by_token(&issued.token).unwrap().is_some());
     w.set_host_time(host + INSTALLATION_TOKEN_TTL_SECONDS);
     assert_eq!(w.caller_by_token(&issued.token).unwrap(), None);
+}
+
+fn from_manifest<'a>(slug: &'a str, owner: &'a str) -> NewApp<'a> {
+    NewApp {
+        slug,
+        name: slug,
+        owner,
+        callback_urls: &[],
+        permissions: &EMPTY_PERMISSIONS,
+        events: &[],
+        hook_url: None,
+        hook_active: false,
+        setup_url: None,
+        request_oauth_on_install: false,
+    }
+}
+
+static EMPTY_PERMISSIONS: Permissions = Permissions::new();
+
+#[test]
+fn a_manifest_registers_an_app_and_its_code_is_traded_once_within_the_hour() {
+    let (_dir, w) = fresh();
+    let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+    let person = Attribution::new(alice.id, Door::Web);
+    let callbacks = strings(&["https://m.test/callback"]);
+    let new = |slug| NewApp {
+        callback_urls: &callbacks,
+        ..from_manifest(slug, "alice")
+    };
+
+    // What registering returns is what a read answers, and the app has no
+    // key until its code is traded.
+    let made = w.create_app_from_manifest(&new("first"), person).unwrap();
+    assert_eq!(w.app_by_slug("first").unwrap(), Some(made.app.clone()));
+    assert_eq!(made.code.len(), 40);
+    assert!(w.app_keys(made.app.id).unwrap().is_empty());
+
+    let given = w.convert_app_manifest(&made.code).unwrap();
+    assert_eq!(given.app, made.app);
+    assert!(given.client_secret.starts_with("orrfake_secret_"));
+    assert!(given.hook_secret.is_some());
+    assert!(
+        given
+            .private_key_pem
+            .starts_with("-----BEGIN RSA PRIVATE KEY-----\n")
+    );
+    assert_eq!(w.app_keys(made.app.id).unwrap().len(), 1);
+    assert!(matches!(
+        w.convert_app_manifest(&made.code),
+        Err(WorldError::NoSuchAppManifest(_))
+    ));
+    // The trade is the person's who registered the app, through the app.
+    let traded = w
+        .log_after(0, 100)
+        .unwrap()
+        .into_iter()
+        .find(|e| matches!(e.body, EventBody::AppManifestConverted(_)))
+        .unwrap();
+    assert_eq!((traded.actor.id, traded.door), (alice.id, Door::Rest));
+    assert_eq!(traded.app.map(|app| app.id), Some(made.app.id));
+
+    // A code lasts an hour of the world's clock, less a second.
+    let late = w.create_app_from_manifest(&new("late"), person).unwrap();
+    let on_time = w.create_app_from_manifest(&new("on-time"), person).unwrap();
+    w.advance_clock(3599, SYSTEM).unwrap();
+    w.convert_app_manifest(&on_time.code).unwrap();
+    w.advance_clock(1, SYSTEM).unwrap();
+    assert!(matches!(
+        w.convert_app_manifest(&late.code),
+        Err(WorldError::NoSuchAppManifest(_))
+    ));
+
+    // An app is sent to a setup URL or through its authorization, not both.
+    let both = NewApp {
+        setup_url: Some("https://m.test/setup"),
+        request_oauth_on_install: true,
+        ..new("both")
+    };
+    assert!(matches!(
+        w.create_app_from_manifest(&both, person),
+        Err(WorldError::InvalidApp {
+            field: "setup_url",
+            ..
+        })
+    ));
+    let nowhere = NewApp {
+        setup_url: Some("not a url"),
+        ..new("nowhere")
+    };
+    assert!(matches!(
+        w.create_app(&nowhere, SYSTEM),
+        Err(WorldError::InvalidApp {
+            field: "setup_url",
+            ..
+        })
+    ));
 }

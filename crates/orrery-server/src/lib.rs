@@ -65,6 +65,8 @@ pub struct AppState {
     stopping: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
+pub use orrery_face_github::oauth::SignIn;
+
 /// How a world process exposes its faces. The default is local `orrery serve`.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -72,6 +74,12 @@ pub struct Options {
     /// public repos. A world whose faces are on the public internet turns this
     /// off, since its host and repository names can be guessed.
     pub anonymous_git_reads: bool,
+    /// How the pages that stand in for GitHub's sign a person in: the
+    /// authorize page, and the pages an App is registered and installed on.
+    /// By login alone, whoever can reach a page can act as any user, and be
+    /// issued a token for them. A world whose faces are on the public
+    /// internet asks for a token too.
+    pub page_sign_in: SignIn,
     /// The SHA-256 of the config file this world was started from, as 64
     /// lowercase hex characters, reported by `GET /_orrery/healthz`. A
     /// supervisor that rewrites a world's config compares it with the digest
@@ -89,6 +97,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             anonymous_git_reads: true,
+            page_sign_in: SignIn::Login,
             config_sha256: None,
             outbound: None,
         }
@@ -204,7 +213,13 @@ pub fn routers(
 
     // The OAuth web flow lives on the web host and authenticates with client
     // credentials or a signed-in actor, never an API token.
-    let oauth = orrery_face_github::oauth::web_router(github.clone())
+    let oauth = orrery_face_github::oauth::web_router(github.clone(), options.page_sign_in)
+        .method_not_allowed_fallback(not_mocked);
+
+    // The pages a person registers and installs a GitHub App on are on the
+    // web host too, and the call that trades a manifest's code carries no
+    // credential but the code.
+    let app_flows = orrery_face_github::app_flows::web_router(github.clone(), options.page_sign_in)
         .method_not_allowed_fallback(not_mocked);
 
     // A GitHub App's own routes authenticate with a JWT the App signs, and
@@ -225,7 +240,11 @@ pub fn routers(
         .layer(middleware::from_fn_with_state(state.clone(), face_auth));
 
     Routers {
-        faces: Router::new().merge(oauth).merge(apps).merge(faces),
+        faces: Router::new()
+            .merge(oauth)
+            .merge(app_flows)
+            .merge(apps)
+            .merge(faces),
         // Every path under the prefix is the control plane's. One that no
         // control route names answers 404 in the control plane's error shape,
         // and on a listener the faces share, a face route whose first segment

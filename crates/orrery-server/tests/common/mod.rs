@@ -333,6 +333,15 @@ pub fn app_key() -> AppKey {
     ]);
     let public_pem = run(&["-e", "-m", "PKCS8", "-f", &format!("{path_str}.pub")]);
     let private_pem = std::fs::read_to_string(&path).expect("read the private key");
+    AppKey {
+        public_pem,
+        ..app_key_from_pem(&private_pem)
+    }
+}
+
+/// The key pair a PKCS#1 private key's PEM holds, to sign with as the app
+/// that was given it. Its `public_pem` is empty.
+pub fn app_key_from_pem(private_pem: &str) -> AppKey {
     let body: String = private_pem
         .lines()
         .filter(|line| !line.starts_with("-----"))
@@ -341,7 +350,7 @@ pub fn app_key() -> AppKey {
         .expect("the private key's PEM body is base64");
     AppKey {
         private: ring::signature::RsaKeyPair::from_der(&der).expect("a PKCS#1 RSA private key"),
-        public_pem,
+        public_pem: String::new(),
     }
 }
 

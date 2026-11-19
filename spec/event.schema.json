@@ -547,6 +547,46 @@
             "null"
           ]
         },
+        "request_oauth_on_install": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "boolean"
+            },
+            "to": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "setup_url": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "slug": {
           "description": "A field's value before and after a change.",
           "properties": {
@@ -582,6 +622,88 @@
         "subject",
         "object"
       ],
+      "type": "object"
+    },
+    "AppKeyChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/AppKeyChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/AppKeySubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "AppKeyChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "public_key": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "AppKeyCreated": {
@@ -648,6 +770,210 @@
       ],
       "type": "string"
     },
+    "AppManifestChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/AppManifestChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/AppManifestSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "AppManifestChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "actor": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "app": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/AppRef"
+            },
+            "to": {
+              "$ref": "#/$defs/AppRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "converted_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AppManifestCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/AppManifestObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/AppManifestSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "AppManifestObject": {
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "app": {
+          "$ref": "#/$defs/AppRef"
+        },
+        "converted_unix": {
+          "description": "When the code was traded for the app's credentials, or null\nwhile it has not been.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "app",
+        "actor",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "AppManifestSubject": {
+      "description": "An app's registration from a manifest: issued when a person registers\nthe app, converted when the code it issued is traded for the app's\ncredentials.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "The actor who registered the app."
+        },
+        "app": {
+          "$ref": "#/$defs/AppRef"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "type": {
+          "$ref": "#/$defs/AppManifestType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "app",
+        "actor"
+      ],
+      "type": "object"
+    },
+    "AppManifestType": {
+      "enum": [
+        "app_manifest"
+      ],
+      "type": "string"
+    },
     "AppObject": {
       "properties": {
         "bot": {
@@ -708,6 +1034,19 @@
             "$ref": "#/$defs/AccessLevel"
           },
           "type": "object"
+        },
+        "request_oauth_on_install": {
+          "default": false,
+          "description": "Whether a person who installs the app is sent through its\nauthorization.",
+          "type": "boolean"
+        },
+        "setup_url": {
+          "default": null,
+          "description": "Where a person is sent once they have installed the app, or\nnull for nowhere. Events appended before a world held the\nbrowser flows carry neither this nor the next.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "slug": {
           "type": "string"
@@ -3907,6 +4246,18 @@
     "Rekeyed": {
       "description": "What `world:rekeyed` derived again under the world's new secret.",
       "properties": {
+        "app_keys": {
+          "default": 0,
+          "description": "The keys a world derived for the apps registered from a manifest.\nA key a caller sent is not derived, and stays.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "app_manifest_codes": {
+          "default": 0,
+          "description": "The manifest codes not yet traded. Events appended before a world\nheld any carry none.",
+          "format": "int64",
+          "type": "integer"
+        },
         "hook_secrets": {
           "default": 0,
           "description": "The hook secrets. Events appended before a world held any carry\nnone.",
@@ -5240,6 +5591,48 @@
       "properties": {
         "type": {
           "const": "app_key:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/AppKeyChanged",
+      "description": "A key a world derived was derived again under the world's new\nsecret: a consequence of forking a world.",
+      "properties": {
+        "type": {
+          "const": "app_key:rederived",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/AppManifestCreated",
+      "description": "A person registered an app from a manifest, which issued a code.",
+      "properties": {
+        "type": {
+          "const": "app_manifest:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/AppManifestChanged",
+      "description": "The code was traded for the app's credentials, which made the app's\nfirst key.",
+      "properties": {
+        "type": {
+          "const": "app_manifest:converted",
           "type": "string"
         }
       },

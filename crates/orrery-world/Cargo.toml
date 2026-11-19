@@ -19,6 +19,7 @@ boon = { workspace = true, optional = true }
 hex.workspace = true
 hmac.workspace = true
 jiff.workspace = true
+num-bigint.workspace = true
 rusqlite.workspace = true
 schemars.workspace = true
 serde.workspace = true

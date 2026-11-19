@@ -6,15 +6,21 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::credentials;
 use crate::events::{self, Attribution, Door, EventBody};
+use crate::log::Write;
 use crate::{
-    Actor, ActorKind, App, AppKey, Installation, InstallationGrant, InstallationToken, NewApp,
-    Permissions, RegisteredApp, Repo, RepositorySelection, Result, World, WorldError, app_keys,
-    identity, objects, queries, uniqueness_violation, validate_login,
+    Actor, ActorKind, App, AppKey, ConvertedApp, Installation, InstallationGrant,
+    InstallationToken, ManifestApp, NewApp, Permissions, RegisteredApp, Repo, RepositorySelection,
+    Result, World, WorldError, app_keys, identity, objects, queries, uniqueness_violation,
+    validate_login,
 };
 
 /// How long an installation token lasts: GitHub's hour, on the world's
 /// clock.
 pub const INSTALLATION_TOKEN_TTL_SECONDS: i64 = 3600;
+
+/// How long a manifest's code can be traded for: GitHub's hour, on the
+/// world's clock.
+pub const MANIFEST_CODE_TTL_SECONDS: i64 = 3600;
 
 /// The most callback URLs an app holds, as on GitHub.
 const MAX_CALLBACK_URLS: usize = 10;
@@ -25,7 +31,8 @@ const APP_SELECT: &str = "SELECT a.id, o.name, o.client_id, o.callback_url, o.cr
             a.permissions, a.events,
             b.id, b.login, b.kind, b.created_clock_unix,
             w.id, w.login, w.kind, w.created_clock_unix,
-            a.hook_url, a.hook_active, a.hook_secret IS NOT NULL
+            a.hook_url, a.hook_active, a.hook_secret IS NOT NULL,
+            a.setup_url, a.request_oauth_on_install
      FROM apps a
      JOIN oauth_apps o ON o.id = a.id
      JOIN actors b ON b.id = a.bot_id
@@ -53,71 +60,126 @@ impl World {
     /// derived as an OAuth app's are.
     pub fn create_app(&self, new: &NewApp<'_>, by: Attribution) -> Result<RegisteredApp> {
         validate_app(new)?;
+        self.write(by, |w| register(w, new))
+    }
+
+    /// Register an app from a manifest a person confirmed, as
+    /// [`World::create_app`] registers one, and issue the code the caller
+    /// that sent them trades for the app's credentials
+    /// ([`World::convert_app_manifest`]). `by` is the person.
+    pub fn create_app_from_manifest(
+        &self,
+        new: &NewApp<'_>,
+        by: Attribution,
+    ) -> Result<ManifestApp> {
+        validate_app(new)?;
         self.write(by, |w| {
+            let app = register(w, new)?.app;
             let tx = w.tx;
-            let owner = account(tx, new.owner)?.ok_or_else(|| WorldError::InvalidApp {
-                field: "owner",
-                message: format!("no user or organization {:?}", new.owner),
-            })?;
-            let (bot, bot_created) = match actor_by_login(tx, new.slug)? {
-                None => (crate::insert_actor(tx, new.slug, ActorKind::Bot)?.0, true),
-                Some(held) if held.kind != ActorKind::Bot => {
-                    return Err(WorldError::AppSlugTaken(new.slug.to_string()));
-                }
-                Some(bot) => {
-                    let taken: bool = tx.query_row(
-                        "SELECT EXISTS (SELECT 1 FROM apps WHERE bot_id = ?1)",
-                        params![bot.id],
-                        |r| r.get(0),
-                    )?;
-                    if taken {
-                        return Err(WorldError::AppExists(new.slug.to_string()));
-                    }
-                    (bot, false)
-                }
-            };
-            let oauth = identity::insert_oauth_app(tx, new.name, &new.callback_urls[0])?;
-            let hook_secret =
-                credentials::hook_secret(&credentials::world_secret(tx)?, oauth.id, 1);
-            tx.execute(
-                "INSERT INTO apps (id, bot_id, owner_id, permissions, events,
-                                   hook_url, hook_active, hook_secret, hook_secrets)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
-                params![
-                    oauth.id,
-                    bot.id,
-                    owner.id,
-                    json_text(new.permissions),
-                    json_text(new.events),
-                    new.hook_url,
-                    new.hook_active,
-                    hook_secret
-                ],
+            let id: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM app_manifest_codes",
+                [],
+                |r| r.get(0),
             )?;
-            for (n, url) in new.callback_urls.iter().enumerate().skip(1) {
-                tx.execute(
-                    "INSERT INTO app_callback_urls (app_id, n, url) VALUES (?1, ?2, ?3)",
-                    params![oauth.id, n as i64, url],
-                )?;
-            }
-            w.operation(EventBody::AppCreated(events::AppCreated {
-                subject: objects::app_subject(tx, oauth.id)?,
-                object: objects::app_object(tx, oauth.id)?,
+            let code: String = tx.query_row(
+                "INSERT INTO app_manifest_codes (id, code, app_id, actor_id, created_clock_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 RETURNING code",
+                params![
+                    id,
+                    credentials::app_manifest_code(&credentials::world_secret(tx)?, id),
+                    app.id,
+                    w.by.actor_id,
+                    queries::clock(tx)?
+                ],
+                |r| r.get(0),
+            )?;
+            w.emit(EventBody::AppManifestCreated(events::AppManifestCreated {
+                subject: objects::app_manifest_subject(tx, id)?,
+                object: objects::app_manifest_object(tx, id)?,
             }));
-            if bot_created {
-                w.emit(EventBody::ActorCreated(events::ActorCreated {
-                    subject: objects::actor_subject(tx, bot.id)?,
-                    object: objects::actor_object(tx, bot.id)?,
-                }));
-            }
-            w.emit(EventBody::OAuthAppCreated(events::OAuthAppCreated {
-                subject: objects::oauth_app_subject(tx, oauth.id)?,
-                object: objects::oauth_app_object(tx, oauth.id)?,
+            Ok(ManifestApp { app, code })
+        })
+    }
+
+    /// Trade a manifest's code for its app's credentials: the client
+    /// secret, the hook's secret, and a private key, whose public half
+    /// becomes the app's first key. The key is derived when the code is
+    /// traded, under the secret the world has then, so the key a caller is
+    /// given is the one the world checks, whatever copied the world in
+    /// between. A code is traded once, within an hour of its issue on the
+    /// world's clock. The call carries no credential but the code, so the
+    /// write is the person's who registered the app, through the app.
+    pub fn convert_app_manifest(&self, code: &str) -> Result<ConvertedApp> {
+        let held = |tx: &Connection| -> Result<(i64, i64, i64)> {
+            tx.query_row(
+                "SELECT id, app_id, actor_id FROM app_manifest_codes
+                 WHERE code = ?1 AND converted_clock_unix IS NULL
+                   AND created_clock_unix + ?2 > ?3",
+                params![code, MANIFEST_CODE_TTL_SECONDS, queries::clock(tx)?],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| WorldError::NoSuchAppManifest(code.to_string()))
+        };
+        // A key takes long enough to derive that every other read and write
+        // would wait on it, so it is derived before the write, for the app
+        // and under the secret read here. The write uses it when both are
+        // still what it finds, and derives its own otherwise.
+        let (ahead_app, ahead_secret) = self.with_conn(|conn| {
+            let (_, app_id, _) = held(conn)?;
+            Ok((app_id, credentials::world_secret(conn)?))
+        })?;
+        let ahead = credentials::app_key_pair(&ahead_secret, ahead_app);
+        let by = |tx: &Connection| -> Result<(Attribution, (i64, i64))> {
+            let (id, app_id, actor_id) = held(tx)?;
+            let by = Attribution::new(actor_id, Door::Rest).with_app(Some(app_id));
+            Ok((by, (id, app_id)))
+        };
+        self.write_by(by, |w, (id, app_id)| {
+            let tx = w.tx;
+            let clock = queries::clock(tx)?;
+            let before = objects::app_manifest_object(tx, id)?;
+            tx.execute(
+                "UPDATE app_manifest_codes SET converted_clock_unix = ?1 WHERE id = ?2",
+                params![clock, id],
+            )?;
+            w.operation(EventBody::AppManifestConverted(
+                events::AppManifestChanged {
+                    subject: objects::app_manifest_subject(tx, id)?,
+                    changes: events::AppManifestChanges::between(
+                        &before,
+                        &objects::app_manifest_object(tx, id)?,
+                    ),
+                },
+            ));
+            let secret = credentials::world_secret(tx)?;
+            let pair = match app_id == ahead_app && secret == ahead_secret {
+                true => ahead,
+                false => credentials::app_key_pair(&secret, app_id),
+            };
+            let key = tx.query_row(
+                "INSERT INTO app_keys (app_id, public_key, created_clock_unix)
+                 VALUES (?1, ?2, ?3)
+                 RETURNING id, public_key, created_clock_unix",
+                params![app_id, base64_standard(&pair.public_der), clock],
+                row_to_app_key,
+            )?;
+            w.emit(EventBody::AppKeyCreated(events::AppKeyCreated {
+                subject: objects::app_key_subject(tx, key.id)?,
+                object: objects::app_key_object(tx, key.id)?,
             }));
-            Ok(RegisteredApp {
-                app: require_app(tx, "a.id = ?1", &oauth.id)?,
-                client_secret: oauth.client_secret,
+            let (client_secret, hook_secret) = tx.query_row(
+                "SELECT o.client_secret, a.hook_secret FROM apps a
+                 JOIN oauth_apps o ON o.id = a.id WHERE a.id = ?1",
+                params![app_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(ConvertedApp {
+                app: require_app(tx, "a.id = ?1", &app_id)?,
+                client_secret,
                 hook_secret,
+                private_key_pem: pair.private_pem(),
             })
         })
     }
@@ -614,6 +676,49 @@ impl World {
         Ok((installations, count_installations(&conn, app_id)?))
     }
 
+    /// The `limit` installations of an app that a person reaches, after
+    /// the first `offset` of them, newest first, and how many there are: the
+    /// ones on the person's own account and on the organizations they are a
+    /// member of.
+    pub fn installations_reached(
+        &self,
+        app_id: i64,
+        person_id: i64,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Installation>, i64)> {
+        const REACHED: &str = "i.app_id = ?1 AND (i.account_id = ?2 OR i.account_id IN
+                 (SELECT org_id FROM org_members WHERE member_id = ?2))";
+        let conn = self.lock();
+        let installations = installations_from(
+            &conn,
+            &format!("{INSTALLATION_SELECT} WHERE {REACHED} ORDER BY i.id DESC LIMIT ?4 OFFSET ?3"),
+            params![
+                app_id,
+                person_id,
+                i64::try_from(offset).unwrap_or(i64::MAX),
+                limit as i64
+            ],
+        )?;
+        let total = conn.query_row(
+            &format!("SELECT COUNT(*) FROM app_installations i WHERE {REACHED}"),
+            params![app_id, person_id],
+            |r| r.get(0),
+        )?;
+        Ok((installations, total))
+    }
+
+    /// An app's installation on an account, when it has one.
+    pub fn installation_on(&self, app_id: i64, account_id: i64) -> Result<Option<Installation>> {
+        let conn = self.lock();
+        Ok(installations_from(
+            &conn,
+            &format!("{INSTALLATION_SELECT} WHERE i.app_id = ?1 AND i.account_id = ?2"),
+            params![app_id, account_id],
+        )?
+        .pop())
+    }
+
     /// How many installations an app has.
     pub fn installation_count(&self, app_id: i64) -> Result<i64> {
         count_installations(&self.lock(), app_id)
@@ -753,6 +858,78 @@ fn actor_by_login(conn: &Connection, login: &str) -> Result<Option<Actor>> {
         .optional()?)
 }
 
+/// Store an app with its OAuth app and its bot, inside a write whose
+/// operation it becomes.
+fn register(w: &mut Write<'_>, new: &NewApp<'_>) -> Result<RegisteredApp> {
+    let tx = w.tx;
+    let owner = account(tx, new.owner)?.ok_or_else(|| WorldError::InvalidApp {
+        field: "owner",
+        message: format!("no user or organization {:?}", new.owner),
+    })?;
+    let (bot, bot_created) = match actor_by_login(tx, new.slug)? {
+        None => (crate::insert_actor(tx, new.slug, ActorKind::Bot)?.0, true),
+        Some(held) if held.kind != ActorKind::Bot => {
+            return Err(WorldError::AppSlugTaken(new.slug.to_string()));
+        }
+        Some(bot) => {
+            let taken: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM apps WHERE bot_id = ?1)",
+                params![bot.id],
+                |r| r.get(0),
+            )?;
+            if taken {
+                return Err(WorldError::AppExists(new.slug.to_string()));
+            }
+            (bot, false)
+        }
+    };
+    let oauth = identity::insert_oauth_app(tx, new.name, &new.callback_urls[0])?;
+    let hook_secret = credentials::hook_secret(&credentials::world_secret(tx)?, oauth.id, 1);
+    tx.execute(
+        "INSERT INTO apps (id, bot_id, owner_id, permissions, events,
+                           hook_url, hook_active, hook_secret, hook_secrets,
+                           setup_url, request_oauth_on_install)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10)",
+        params![
+            oauth.id,
+            bot.id,
+            owner.id,
+            json_text(new.permissions),
+            json_text(new.events),
+            new.hook_url,
+            new.hook_active,
+            hook_secret,
+            new.setup_url,
+            new.request_oauth_on_install
+        ],
+    )?;
+    for (n, url) in new.callback_urls.iter().enumerate().skip(1) {
+        tx.execute(
+            "INSERT INTO app_callback_urls (app_id, n, url) VALUES (?1, ?2, ?3)",
+            params![oauth.id, n as i64, url],
+        )?;
+    }
+    w.operation(EventBody::AppCreated(events::AppCreated {
+        subject: objects::app_subject(tx, oauth.id)?,
+        object: objects::app_object(tx, oauth.id)?,
+    }));
+    if bot_created {
+        w.emit(EventBody::ActorCreated(events::ActorCreated {
+            subject: objects::actor_subject(tx, bot.id)?,
+            object: objects::actor_object(tx, bot.id)?,
+        }));
+    }
+    w.emit(EventBody::OAuthAppCreated(events::OAuthAppCreated {
+        subject: objects::oauth_app_subject(tx, oauth.id)?,
+        object: objects::oauth_app_object(tx, oauth.id)?,
+    }));
+    Ok(RegisteredApp {
+        app: require_app(tx, "a.id = ?1", &oauth.id)?,
+        client_secret: oauth.client_secret,
+        hook_secret,
+    })
+}
+
 /// Who makes a write an app makes about one of its installations, with its
 /// own signature: its bot, through the app. Read with the installation and
 /// the bot's id.
@@ -875,6 +1052,8 @@ fn apps_from(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> Res
                     active: r.get(16)?,
                     has_secret: r.get(17)?,
                 },
+                setup_url: r.get(18)?,
+                request_oauth_on_install: r.get(19)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<App>>>()?;
@@ -990,11 +1169,23 @@ fn validate_app(new: &NewApp<'_>) -> Result<()> {
     validate_app_permissions(new.permissions)?;
     validate_app_events(new.events)?;
     match new.hook_url {
-        Some(url) => validate_hook_url(url),
-        None if new.hook_active => Err(invalid_app(
-            "webhook_active",
-            "a webhook with no URL cannot be active".to_string(),
+        Some(url) => validate_hook_url(url)?,
+        None if new.hook_active => {
+            return Err(invalid_app(
+                "webhook_active",
+                "a webhook with no URL cannot be active".to_string(),
+            ));
+        }
+        None => {}
+    }
+    match new.setup_url {
+        // GitHub offers no setup URL to an app that asks for authorization
+        // on install: the callback URL is where the person goes.
+        Some(_) if new.request_oauth_on_install => Err(invalid_app(
+            "setup_url",
+            "an app that requests authorization on install has no setup URL".to_string(),
         )),
+        Some(url) => validate_setup_url(url),
         None => Ok(()),
     }
 }
@@ -1025,12 +1216,27 @@ pub fn validate_hook_url(url: &str) -> Result<()> {
         .or_else(|| url.strip_prefix("http://"));
     let host = rest.map(|rest| rest.split(['/', '?', '#']).next().unwrap_or_default());
     match host {
-        Some(host) if !host.is_empty() && !url.contains(char::is_whitespace) => Ok(()),
+        Some(host)
+            if !host.is_empty() && !url.contains(|c: char| c.is_whitespace() || c.is_control()) =>
+        {
+            Ok(())
+        }
         _ => Err(invalid_app(
             "webhook_url",
             format!("{url:?} is not an http or https URL with a host"),
         )),
     }
+}
+
+/// A setup URL: where a person is sent once they have installed an app,
+/// held to a webhook URL's rule.
+pub fn validate_setup_url(url: &str) -> Result<()> {
+    validate_hook_url(url).map_err(|_| {
+        invalid_app(
+            "setup_url",
+            format!("{url:?} is not an http or https URL with a host"),
+        )
+    })
 }
 
 /// The URLs an app's authorizations redirect to: at least one, each held to

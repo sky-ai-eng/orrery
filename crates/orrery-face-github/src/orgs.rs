@@ -6,7 +6,7 @@
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{HeaderMap, Response, StatusCode};
-use orrery_world::{ActorKind, Caller, Door, OrgRole, Team, TeamRole, WorldError};
+use orrery_world::{ActorKind, Caller, Door, OrgMembership, OrgRole, Team, TeamRole, WorldError};
 
 use crate::render::{actor_json, org_json, team_full_json};
 use crate::{
@@ -86,30 +86,49 @@ pub(crate) async fn set_org_membership(
         Some(_) => return validation_invalid("Membership", "role"),
     };
     match face.world.set_org_membership(&org, &username, role, by) {
-        Ok(m) => {
-            let base = face.base_url.trim_end_matches('/');
-            let user = match face.world.actor_by_login(&m.member_login) {
-                Ok(Some(a)) => actor_json(&a),
-                Ok(None) => return internal("member actor missing"),
-                Err(e) => return internal(e),
-            };
-            json_response(
-                StatusCode::OK,
-                serde_json::json!({
-                    "url": format!("{base}/api/v3/orgs/{}/memberships/{}", m.org_login, m.member_login),
-                    "state": "active",
-                    "role": m.role.as_str(),
-                    "organization_url": format!("{base}/api/v3/orgs/{}", m.org_login),
-                    "organization": org_json(&face, &m.org_login),
-                    "user": user,
-                }),
-            )
-        }
+        Ok(m) => membership_response(&face, &m),
         Err(WorldError::NoSuchOrg(_) | WorldError::NoSuchActor(_)) => {
             github_error(StatusCode::NOT_FOUND, "Not Found")
         }
         Err(e) => internal(e),
     }
+}
+
+/// `GET /orgs/{org}/memberships/{username}`: the membership, or `404` for
+/// anyone who is not a member, whatever the reason.
+pub(crate) async fn get_org_membership(
+    State(face): State<GithubFace>,
+    UrlPath((org, username)): UrlPath<(String, String)>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if let Some(refused) = media::refuse_unrendered(&headers, "Membership") {
+        return refused;
+    }
+    match face.world.org_membership(&org, &username) {
+        Ok(Some(m)) => membership_response(&face, &m),
+        Ok(None) => github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => internal(e),
+    }
+}
+
+fn membership_response(face: &GithubFace, m: &OrgMembership) -> Response<Body> {
+    let base = face.base_url.trim_end_matches('/');
+    let user = match face.world.actor_by_login(&m.member_login) {
+        Ok(Some(a)) => actor_json(&a),
+        Ok(None) => return internal("member actor missing"),
+        Err(e) => return internal(e),
+    };
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "url": format!("{base}/api/v3/orgs/{}/memberships/{}", m.org_login, m.member_login),
+            "state": "active",
+            "role": m.role.as_str(),
+            "organization_url": format!("{base}/api/v3/orgs/{}", m.org_login),
+            "organization": org_json(face, &m.org_login),
+            "user": user,
+        }),
+    )
 }
 
 /// Fields GitHub's create-team accepts that Orrery does not model. Each would

@@ -1,8 +1,8 @@
 //! The control plane's routes for apps: registering one, giving it a key,
 //! and installing it on an account. GitHub offers each only in its web
-//! pages, so they are reality's to do, and the control plane's. What an app
-//! then does as itself, and with an installation token, is the GitHub
-//! face's.
+//! pages, never in an API, so they are reality's to do, and the control
+//! plane's. The GitHub face serves those pages for a person's browser, and
+//! what an app then does as itself, and with an installation token.
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use orrery_world::{
     App, AppKey, Installation, NewApp, Permissions, RepositorySelection, WorldError,
     validate_app_callback_urls, validate_app_events, validate_app_name, validate_app_permissions,
-    validate_app_slug, validate_hook_url,
+    validate_app_slug, validate_hook_url, validate_setup_url,
 };
 
 use crate::control::{Fault, Fields, SYSTEM, errors, internal};
@@ -49,6 +49,12 @@ struct AppBody {
     /// Whether the webhook makes deliveries. A fork starts with every
     /// webhook off.
     webhook_active: bool,
+    /// Where a person is sent once they have installed the app, or null
+    /// for nowhere.
+    setup_url: Option<String>,
+    /// Whether a person who installs the app is sent through its
+    /// authorization, to its first callback URL with a code.
+    request_oauth_on_install: bool,
     keys: Vec<KeyBody>,
 }
 
@@ -90,6 +96,8 @@ fn app_body(state: &AppState, app: App) -> Result<AppBody, WorldError> {
         events: app.events,
         webhook_url: app.hook.url,
         webhook_active: app.hook.active,
+        setup_url: app.setup_url,
+        request_oauth_on_install: app.request_oauth_on_install,
     })
 }
 
@@ -141,9 +149,12 @@ fn no_such_app(slug: String) -> Response<Body> {
 
 /// Register an app. `permissions` and `events` default to none, and so does
 /// its webhook: `webhook_url` is where its deliveries go, and
-/// `webhook_active`, false unless given, whether it makes any. The answer
-/// carries the first client secret and the webhook's secret, which no read
-/// returns again.
+/// `webhook_active`, false unless given, whether it makes any. `setup_url`
+/// is where a person is sent once they have installed the app, and
+/// `request_oauth_on_install`, false unless given, sends them through the
+/// app's authorization instead: an app takes one or the other, as on
+/// GitHub. The answer carries the first client secret and the webhook's
+/// secret, which no read returns again.
 async fn create_app(State(state): State<AppState>, body: Bytes) -> Response<Body> {
     let mut fields = Fields::parse(&body);
     let slug: Option<String> = fields.required("slug");
@@ -186,6 +197,20 @@ async fn create_app(State(state): State<AppState>, body: Bytes) -> Response<Body
             "webhook_active",
         ));
     }
+    let setup_url: Option<String> = fields.optional("setup_url");
+    if let Some(url) = &setup_url
+        && let Err(e) = validate_setup_url(url)
+    {
+        fields.fault(app_fault(e, "setup_url"));
+    }
+    let request_oauth_on_install: bool =
+        fields.optional("request_oauth_on_install").unwrap_or(false);
+    if request_oauth_on_install && setup_url.is_some() {
+        fields.fault(Fault::invalid(
+            "an app that requests authorization on install has no setup URL".to_string(),
+            "setup_url",
+        ));
+    }
     let read = slug.zip(name).zip(owner).zip(callback_urls);
     let (((slug, name), owner), callback_urls) = match fields.finish(read) {
         Ok(read) => read,
@@ -200,6 +225,8 @@ async fn create_app(State(state): State<AppState>, body: Bytes) -> Response<Body
         events: &events,
         hook_url: webhook_url.as_deref(),
         hook_active: webhook_active,
+        setup_url: setup_url.as_deref(),
+        request_oauth_on_install,
     };
     let registered = match state.world.create_app(&new, SYSTEM) {
         Ok(registered) => registered,

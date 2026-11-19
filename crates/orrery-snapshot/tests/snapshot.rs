@@ -405,6 +405,8 @@ fn seed(world: &World) -> Seeded {
                 events: &[],
                 hook_url: None,
                 hook_active: false,
+                setup_url: None,
+                request_oauth_on_install: false,
             },
             by(alice.id),
         )
@@ -590,6 +592,8 @@ fn a_fork_is_rekeyed_and_accepts_none_of_its_sources_credentials() {
             "oauth_codes": 1,
             "installation_tokens": 1,
             "hook_secrets": 1,
+            "app_manifest_codes": 0,
+            "app_keys": 0,
         })
     );
     let wire = serde_json::to_string(&log).unwrap();
@@ -886,6 +890,8 @@ fn diff_reports_apps_and_installations() {
                 events: &[],
                 hook_url: None,
                 hook_active: false,
+                setup_url: None,
+                request_oauth_on_install: false,
             },
             by(alice.id),
         )
@@ -1320,6 +1326,164 @@ impl orrery_world::Notifier for ForEachActor {
     }
 }
 
+/// Alice, and an app she registered from a manifest, whose code is still
+/// held.
+fn with_manifest(world: &World) -> orrery_world::ManifestApp {
+    let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
+    world
+        .create_app_from_manifest(
+            &NewApp {
+                slug: "helper",
+                name: "Helper",
+                owner: "alice",
+                callback_urls: &["https://helper.test/callback".to_string()],
+                permissions: &Permissions::new(),
+                events: &[],
+                hook_url: None,
+                hook_active: false,
+                setup_url: None,
+                request_oauth_on_install: false,
+            },
+            Attribution::new(alice.id, Door::Web),
+        )
+        .unwrap()
+}
+
+#[test]
+fn a_fork_derives_a_held_manifest_code_again_and_gives_the_key_it_checks() {
+    let inst = Instance::new();
+    let source = with_manifest(&inst.world);
+    inst.snapshot("seed");
+    // A twin: the same history under the fork's secret holds the code and
+    // the key the fork must derive.
+    let fork_secret = WorldSecret::from_bytes([0xc3; 32]);
+    let twin_dir = tempfile::tempdir().unwrap();
+    let twin_world = World::create(
+        &twin_dir.path().join("world"),
+        DEFAULT_T0_UNIX,
+        &fork_secret,
+    )
+    .unwrap();
+    let twin = with_manifest(&twin_world);
+    let dest = tempfile::tempdir().unwrap();
+    let root = orrery_snapshot::fork(&inst.snapshots(), "seed", dest.path(), &fork_secret).unwrap();
+    let fork = World::open(&root).unwrap();
+
+    // The source's code is dead in the fork, and the re-derived one trades.
+    assert_ne!(source.code, twin.code);
+    assert!(matches!(
+        fork.convert_app_manifest(&source.code),
+        Err(WorldError::NoSuchAppManifest(_))
+    ));
+    let rekeyed = fork
+        .log_after(0, 100)
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.body {
+            EventBody::WorldRekeyed(r) => Some(r.rekeyed),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(rekeyed.app_manifest_codes, 1);
+    let given = fork.convert_app_manifest(&twin.code).unwrap();
+
+    // The key is made when the code is traded, under the secret the world
+    // has then: the fork's is its twin's, and not the one the source gives
+    // for the same app.
+    let held = fork.app_keys(source.app.id).unwrap();
+    assert_eq!(held.len(), 1);
+    let twins = twin_world.convert_app_manifest(&twin.code).unwrap();
+    assert_eq!(given.private_key_pem, twins.private_key_pem);
+    assert_eq!(held, twin_world.app_keys(twin.app.id).unwrap());
+    let sources = inst.world.convert_app_manifest(&source.code).unwrap();
+    assert_ne!(given.private_key_pem, sources.private_key_pem);
+    assert_ne!(held, inst.world.app_keys(source.app.id).unwrap());
+    // A code is traded once.
+    assert!(matches!(
+        fork.convert_app_manifest(&twin.code),
+        Err(WorldError::NoSuchAppManifest(_))
+    ));
+}
+
+#[test]
+fn a_fork_derives_again_the_key_a_traded_code_gave_an_app() {
+    let inst = Instance::new();
+    let source = with_manifest(&inst.world);
+    let given = inst.world.convert_app_manifest(&source.code).unwrap();
+    // A key the app's caller sent is no secret's to derive.
+    const SENT: &str = "-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyQDurX+SGDbR9X9O5rwY
+XND5rbR9L5MHPsh5fy9PCvnjEtf9vd+gbv+MKb5isMFXGXS2Jwc/zZ4mitvK/TUB
+FZD5K4Q53vIVpt54aWggRB9a3KaePpA8hMrLDklc2JaVcUtOqR2U8okAqQhagx+V
+Hkjnfr2FKrRaIcA/vRvx/o+9yqSP/6TP3Kp5kMpxMBuCIPs3kF2WzxnvSrw+91Qp
+CljNv66agiv3iPnNWyeaOe5C/0YFg3PRLVJq03K/LT4cHaUGM/tSFJLGj9BwyxHT
+67koh9CtImSoshN5v/41kPYAuxUYzKXmUr9JGENNAIaUkrl7Gr3CzFnUIFfuCpd9
+uQIDAQAB
+-----END PUBLIC KEY-----
+";
+    let sent = inst
+        .world
+        .add_app_key(
+            "helper",
+            SENT,
+            Attribution::new(orrery_world::SYSTEM_ACTOR_ID, Door::Control),
+        )
+        .unwrap();
+    inst.snapshot("seed");
+    let held = inst.world.app_keys(source.app.id).unwrap();
+    assert_eq!(held.len(), 2);
+
+    let fork_of = |secret: &WorldSecret| {
+        let dest = tempfile::tempdir().unwrap();
+        let root = orrery_snapshot::fork(&inst.snapshots(), "seed", dest.path(), secret).unwrap();
+        (World::open(&root).unwrap(), dest)
+    };
+    let rekeyed = |fork: &World| {
+        fork.log_after(0, 100)
+            .unwrap()
+            .into_iter()
+            .find_map(|e| match e.body {
+                EventBody::WorldRekeyed(r) => Some(r.rekeyed),
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    // Whoever holds the source's secret can make the private half of the
+    // key it derived, so a fork under another secret derives its own: the
+    // one a twin gives, made of the same history under that secret.
+    let other = WorldSecret::from_bytes([0xc3; 32]);
+    let twin_dir = tempfile::tempdir().unwrap();
+    let twin_world =
+        World::create(&twin_dir.path().join("world"), DEFAULT_T0_UNIX, &other).unwrap();
+    let twin = with_manifest(&twin_world);
+    let twins = twin_world.convert_app_manifest(&twin.code).unwrap();
+    assert_ne!(twins.private_key_pem, given.private_key_pem);
+    let (fork, _dest) = fork_of(&other);
+    assert_eq!(rekeyed(&fork).app_keys, 1);
+    let forked = fork.app_keys(source.app.id).unwrap();
+    assert_eq!(forked.len(), 2);
+    let derived = forked.iter().find(|key| key.id != sent.id).unwrap();
+    assert!(
+        !held.contains(derived),
+        "the fork kept the source's derived key"
+    );
+    assert_eq!(
+        derived.public_key,
+        twin_world.app_keys(twin.app.id).unwrap()[0].public_key
+    );
+    // The key the caller sent stays.
+    assert!(forked.contains(&sent));
+    let logged = types(&fork, 0);
+    assert!(logged.contains(&"app_key:rederived"), "{logged:?}");
+
+    // Two worlds under one secret derive the same key, so that fork keeps
+    // it, and the app's caller goes on signing with the one it was given.
+    let (same, _dest) = fork_of(&SECRET);
+    assert_eq!(rekeyed(&same).app_keys, 0);
+    assert_eq!(same.app_keys(source.app.id).unwrap(), held);
+}
+
 /// A world whose one app has an active webhook, and that owes a delivery
 /// for every actor it creates from here on.
 fn hooked() -> (Instance, i64, String) {
@@ -1337,6 +1501,8 @@ fn hooked() -> (Instance, i64, String) {
                 events: &[],
                 hook_url: Some("https://helper.test/hook"),
                 hook_active: true,
+                setup_url: None,
+                request_oauth_on_install: false,
             },
             by(alice.id),
         )

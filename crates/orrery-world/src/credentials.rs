@@ -11,14 +11,14 @@ use std::path::Path;
 
 use hmac::{Hmac, Mac};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 use crate::events::{self, Attribution, Door, EventBody};
 use crate::{Result, SYSTEM_ACTOR_ID, World, objects, queries};
 
 /// The key behind every credential a world derives.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WorldSecret([u8; 32]);
 
 impl WorldSecret {
@@ -140,6 +140,19 @@ pub(crate) fn oauth_client_secret(secret: &WorldSecret, app_id: i64, n: i64) -> 
     )
 }
 
+/// The code registering an app from a manifest hands back, 40 characters as
+/// GitHub's is.
+pub(crate) fn app_manifest_code(secret: &WorldSecret, code_id: i64) -> String {
+    hex::encode(&secret.derive(&format!("app-manifest-code:{code_id}"))[..20])
+}
+
+/// The key pair an app registered from a manifest is given. A world keeps
+/// the public half and can make the pair again, so it never holds a private
+/// key.
+pub(crate) fn app_key_pair(secret: &WorldSecret, app_id: i64) -> crate::rsa_key::KeyPair {
+    crate::rsa_key::derive(&secret.derive(&format!("app-key:{app_id}")))
+}
+
 /// The `n`th secret issued for an app's webhook, counting from 1.
 pub(crate) fn hook_secret(secret: &WorldSecret, app_id: i64, n: i64) -> String {
     format!(
@@ -187,9 +200,11 @@ pub(crate) fn world_secret(conn: &Connection) -> Result<WorldSecret> {
 impl World {
     /// Open the world at `root` — a fresh copy of another world's state — as
     /// a new world: give it `secret` and re-derive every credential it
-    /// inherited, so it accepts none of its source's. An app's keys stay:
-    /// each is the public half of a pair its caller holds, which no secret
-    /// of a world's derives. This is the only way a
+    /// inherited, so it accepts none of its source's. A key a caller sent
+    /// an app stays: it is the public half of a pair the caller holds, which
+    /// no secret of a world's derives. A key the world derived for an app
+    /// registered from a manifest is derived again, since whoever holds the
+    /// source's secret can make its private half. This is the only way a
     /// world is re-keyed, and only at its creation, so every event after its
     /// `world:rekeyed` was made under the secret it holds now. The `orrery`
     /// command's fork is the one caller, so the write is the system actor's,
@@ -211,6 +226,7 @@ impl World {
         let by = Attribution::new(SYSTEM_ACTOR_ID, Door::Cli);
         self.write(by, |w| {
             let tx = w.tx;
+            let source = world_secret(tx)?;
             tx.execute("UPDATE world SET secret = ?1 WHERE id = 1", params![secret])?;
 
             let tokens = queries::list(
@@ -271,6 +287,61 @@ impl World {
                 )?;
             }
 
+            let manifest_codes: Vec<i64> = queries::list(
+                tx,
+                "SELECT id FROM app_manifest_codes WHERE converted_clock_unix IS NULL ORDER BY id",
+                |r| r.get(0),
+            )?;
+            for id in &manifest_codes {
+                tx.execute(
+                    "UPDATE app_manifest_codes SET code = ?1 WHERE id = ?2",
+                    params![app_manifest_code(secret, *id), id],
+                )?;
+            }
+
+            // The key each traded code gave its app, where the new secret
+            // derives another: two worlds under one secret derive the same.
+            let traded: Vec<i64> = queries::list(
+                tx,
+                "SELECT app_id FROM app_manifest_codes
+                 WHERE converted_clock_unix IS NOT NULL ORDER BY app_id",
+                |r| r.get(0),
+            )?;
+            let mut app_keys = 0;
+            for app_id in &traded {
+                let encode = |pair: crate::rsa_key::KeyPair| {
+                    base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        pair.public_der,
+                    )
+                };
+                let was = encode(app_key_pair(&source, *app_id));
+                let now = encode(app_key_pair(secret, *app_id));
+                let held: Option<i64> = tx
+                    .query_row(
+                        "SELECT id FROM app_keys WHERE app_id = ?1 AND public_key = ?2",
+                        params![app_id, was],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let Some(id) = held.filter(|_| was != now) else {
+                    continue;
+                };
+                let before = objects::app_key_object(tx, id)?;
+                tx.execute(
+                    "UPDATE app_keys SET public_key = ?1 WHERE id = ?2",
+                    params![now, id],
+                )?;
+                w.emit(EventBody::AppKeyRederived(events::AppKeyChanged {
+                    subject: objects::app_key_subject(tx, id)?,
+                    changes: events::AppKeyChanges::between(
+                        &before,
+                        &objects::app_key_object(tx, id)?,
+                    ),
+                }));
+                app_keys += 1;
+            }
+
             let installation_tokens: Vec<i64> = queries::list(
                 tx,
                 "SELECT id FROM app_installation_tokens ORDER BY id",
@@ -325,6 +396,8 @@ impl World {
                     oauth_codes: codes.len() as i64,
                     installation_tokens: installation_tokens.len() as i64,
                     hook_secrets,
+                    app_manifest_codes: manifest_codes.len() as i64,
+                    app_keys,
                 },
             }));
             crate::deliveries::drop_pending(w, None)?;

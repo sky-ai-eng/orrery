@@ -135,6 +135,22 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
             ("hook_active", Field("hook_active")),
             ("hook_secret", Credential),
             ("hook_secrets", Field("hook_secrets")),
+            ("setup_url", Field("setup_url")),
+            (
+                "request_oauth_on_install",
+                Field("request_oauth_on_install"),
+            ),
+        ],
+    ),
+    (
+        "app_manifest_codes",
+        &[
+            ("id", Identity),
+            ("code", Credential),
+            ("app_id", Field("app")),
+            ("actor_id", Field("actor")),
+            ("created_clock_unix", Field("created_unix")),
+            ("converted_clock_unix", Field("converted_unix")),
         ],
     ),
     (
@@ -587,6 +603,7 @@ fn subject_of(table: &str, row: &Row) -> (Subject, Option<String>) {
         ),
         "apps" => (s("app", int(row, "id")), None),
         "app_keys" => (s("app_key", int(row, "id")), None),
+        "app_manifest_codes" => (s("app_manifest", int(row, "id")), None),
         "app_installations" => (s("installation", int(row, "id")), None),
         "deliveries" => (s("delivery", int(row, "id")), None),
         "app_installation_tokens" => (s("installation_token", int(row, "id")), None),
