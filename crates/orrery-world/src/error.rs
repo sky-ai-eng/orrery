@@ -44,6 +44,8 @@ pub enum WorldError {
     NoSuchPull(i64),
     #[error("no check run with id {0}")]
     NoSuchCheckRun(i64),
+    #[error("no check suite with id {0}")]
+    NoSuchCheckSuite(i64),
     #[error("no dependency alert numbered {0} in this repository")]
     NoSuchDependencyAlert(i64),
     #[error("no pull request numbered {number} in repository {repo_id}")]

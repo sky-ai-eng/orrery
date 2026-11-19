@@ -841,10 +841,50 @@ pub struct GqlWorkflowRun {
     pub database_id: Option<i64>,
 }
 
-#[derive(SimpleObject)]
-#[graphql(name = "CheckSuite")]
 pub struct GqlCheckSuite {
-    pub workflow_run: Option<GqlWorkflowRun>,
+    pub suite: world::CheckSuite,
+}
+
+#[Object(name = "CheckSuite")]
+impl GqlCheckSuite {
+    async fn database_id(&self) -> Option<i64> {
+        Some(self.suite.id)
+    }
+
+    async fn status(&self) -> CheckStatusState {
+        check_status(self.suite.status)
+    }
+
+    async fn conclusion(&self) -> Option<CheckConclusionState> {
+        self.suite.conclusion.map(check_conclusion)
+    }
+
+    /// A world runs no workflows, so no suite is a workflow run's: the
+    /// answer GitHub gives for a check an app other than Actions made.
+    async fn workflow_run(&self) -> Option<GqlWorkflowRun> {
+        None
+    }
+}
+
+fn check_conclusion(conclusion: world::CheckConclusion) -> CheckConclusionState {
+    match conclusion {
+        world::CheckConclusion::Success => CheckConclusionState::Success,
+        world::CheckConclusion::Failure => CheckConclusionState::Failure,
+        world::CheckConclusion::Neutral => CheckConclusionState::Neutral,
+        world::CheckConclusion::Cancelled => CheckConclusionState::Cancelled,
+        world::CheckConclusion::Skipped => CheckConclusionState::Skipped,
+        world::CheckConclusion::Stale => CheckConclusionState::Stale,
+        world::CheckConclusion::TimedOut => CheckConclusionState::TimedOut,
+        world::CheckConclusion::ActionRequired => CheckConclusionState::ActionRequired,
+    }
+}
+
+fn check_status(status: world::CheckStatus) -> CheckStatusState {
+    match status {
+        world::CheckStatus::Queued => CheckStatusState::Queued,
+        world::CheckStatus::InProgress => CheckStatusState::InProgress,
+        world::CheckStatus::Completed => CheckStatusState::Completed,
+    }
 }
 
 pub struct GqlCheckRun {
@@ -862,24 +902,11 @@ impl GqlCheckRun {
     }
 
     async fn status(&self) -> CheckStatusState {
-        match self.run.status {
-            world::CheckStatus::Queued => CheckStatusState::Queued,
-            world::CheckStatus::InProgress => CheckStatusState::InProgress,
-            world::CheckStatus::Completed => CheckStatusState::Completed,
-        }
+        check_status(self.run.status)
     }
 
     async fn conclusion(&self) -> Option<CheckConclusionState> {
-        self.run.conclusion.map(|c| match c {
-            world::CheckConclusion::Success => CheckConclusionState::Success,
-            world::CheckConclusion::Failure => CheckConclusionState::Failure,
-            world::CheckConclusion::Neutral => CheckConclusionState::Neutral,
-            world::CheckConclusion::Cancelled => CheckConclusionState::Cancelled,
-            world::CheckConclusion::Skipped => CheckConclusionState::Skipped,
-            world::CheckConclusion::Stale => CheckConclusionState::Stale,
-            world::CheckConclusion::TimedOut => CheckConclusionState::TimedOut,
-            world::CheckConclusion::ActionRequired => CheckConclusionState::ActionRequired,
-        })
+        self.run.conclusion.map(check_conclusion)
     }
 
     async fn completed_at(&self) -> Option<String> {
@@ -890,10 +917,9 @@ impl GqlCheckRun {
         self.run.details_url.clone()
     }
 
-    /// The kernel has no check-suite / workflow model, so Actions linkage is
-    /// truthfully absent — the same shape third-party CI produces on GitHub.
-    async fn check_suite(&self) -> Option<GqlCheckSuite> {
-        None
+    async fn check_suite(&self, ctx: &Context<'_>) -> Result<Option<GqlCheckSuite>, Error> {
+        let suite = face(ctx).world.check_suite_by_id(self.run.suite_id)?;
+        Ok(suite.map(|suite| GqlCheckSuite { suite }))
     }
 }
 

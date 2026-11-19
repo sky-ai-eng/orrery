@@ -453,9 +453,32 @@ impl CheckConclusion {
     }
 }
 
+/// The check runs one creator made on one commit, and what they come to.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CheckSuite {
+    pub id: i64,
+    pub repo_id: i64,
+    pub head_sha: String,
+    /// The branch whose push made the suite, or none for a suite a check
+    /// run made.
+    pub head_branch: Option<String>,
+    /// What that branch pointed at before the push: all zeros for a branch
+    /// the push created.
+    pub before_sha: Option<String>,
+    pub creator_login: String,
+    /// Who made that push.
+    pub pusher_login: Option<String>,
+    pub status: CheckStatus,
+    pub conclusion: Option<CheckConclusion>,
+    pub created_clock_unix: i64,
+    /// When its status or conclusion last changed.
+    pub updated_clock_unix: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CheckRun {
     pub id: i64,
+    pub suite_id: i64,
     pub repo_id: i64,
     pub head_sha: String,
     pub name: String,

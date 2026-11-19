@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::events::{self, Attribution, EventBody};
 use crate::types::*;
-use crate::{Result, World, WorldError, objects, queries};
+use crate::{Result, World, WorldError, objects, queries, suites};
 
 pub struct NewCheckRun<'a> {
     pub repo_id: i64,
@@ -45,6 +45,7 @@ impl World {
         at: i64,
     ) -> Result<CheckRun> {
         self.write_at(at, by, |w| {
+            let suite = suites::suite_for(w, new.repo_id, new.head_sha, by.actor_id)?;
             let tx = w.tx;
             let clock = queries::clock(tx)?;
             let run = tx.query_row(
@@ -52,8 +53,8 @@ impl World {
                     "INSERT INTO check_runs (repo_id, head_sha, name, status, conclusion,
                                              details_url, external_id, output, creator_id,
                                              started_clock_unix, completed_clock_unix,
-                                             created_clock_unix)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                                             created_clock_unix, suite_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                      RETURNING {}",
                     queries::CHECK_RUN_COLUMNS
                 ),
@@ -69,7 +70,8 @@ impl World {
                     by.actor_id,
                     new.started_clock_unix,
                     new.completed_clock_unix,
-                    clock
+                    clock,
+                    suite
                 ],
                 queries::row_to_check_run,
             )?;
@@ -77,6 +79,7 @@ impl World {
                 subject: objects::check_run_subject(tx, run.id)?,
                 object: objects::check_run_object(tx, run.id)?,
             }));
+            suites::settle(w, suite)?;
             Ok(run)
         })
     }
@@ -131,6 +134,7 @@ impl World {
                     subject: objects::check_run_subject(tx, id)?,
                     changes,
                 }));
+                suites::settle(w, run.suite_id)?;
             }
             Ok(run)
         })
