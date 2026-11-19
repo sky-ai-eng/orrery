@@ -4,9 +4,9 @@ use axum::body::Body;
 use axum::extract::{Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use orrery_face_git::store;
-use orrery_world::{Actor, CheckRun, CheckSuite, PullState, Repo, WorldError};
+use orrery_world::{Actor, CheckRun, CheckSuite, PullState, Repo, WorldError, newest_check_runs};
 
-use crate::reads::{page_params, paginate};
+use crate::reads::{page_params, paginate, query_param as param};
 use crate::render::{check_run_json, repo_json, rfc3339};
 use crate::{GithubFace, github_error, internal, json_response, media, resolve_repo};
 
@@ -70,55 +70,45 @@ pub(crate) fn suite_brief(
     }))
 }
 
-/// A suite as REST answers it.
+/// A suite as a `check_suite` delivery carries it, which has the suite's
+/// repository beside it.
 pub(crate) fn suite_json(
+    face: &GithubFace,
+    repo: &Repo,
+    suite: &CheckSuite,
+) -> Result<serde_json::Value, WorldError> {
+    let base = face.base_url.trim_end_matches('/');
+    let latest = newest_check_runs(face.world.list_check_runs_for_suite(suite.id)?).len();
+    let mut json = suite_brief(face, repo, suite)?;
+    json["rerequestable"] = true.into();
+    json["runs_rerequestable"] = true.into();
+    json["latest_check_runs_count"] = latest.into();
+    json["check_runs_url"] = format!(
+        "{base}/api/v3/repos/{}/check-suites/{}/check-runs",
+        repo.full_name(),
+        suite.id
+    )
+    .into();
+    Ok(json)
+}
+
+/// A suite as REST answers it: with its repository.
+fn suite_with_repository(
     face: &GithubFace,
     repo: &Repo,
     owner: &Actor,
     suite: &CheckSuite,
 ) -> Result<serde_json::Value, WorldError> {
-    let base = face.base_url.trim_end_matches('/');
-    let latest = newest(face.world.list_check_runs_for_suite(suite.id)?).len();
-    let mut json = suite_brief(face, repo, suite)?;
-    let more = serde_json::json!({
-        "rerequestable": true,
-        "runs_rerequestable": true,
-        "latest_check_runs_count": latest,
-        "check_runs_url": format!(
-            "{base}/api/v3/repos/{}/check-suites/{}/check-runs",
-            repo.full_name(),
-            suite.id
-        ),
-        "repository": repo_json(face, repo, owner),
-    });
-    for (key, value) in more.as_object().into_iter().flatten() {
-        json[key] = value.clone();
-    }
+    let mut json = suite_json(face, repo, suite)?;
+    json["repository"] = repo_json(face, repo, owner);
     Ok(json)
 }
 
-/// The newest run of each name within its suite, which is what GitHub
-/// counts and lists unless asked for every run.
-pub(crate) fn newest(runs: Vec<CheckRun>) -> Vec<CheckRun> {
-    let keep: Vec<bool> = runs
-        .iter()
-        .map(|run| {
-            !runs.iter().any(|other| {
-                other.suite_id == run.suite_id && other.name == run.name && other.id > run.id
-            })
-        })
-        .collect();
-    runs.into_iter()
-        .zip(keep)
-        .filter_map(|(run, keep)| keep.then_some(run))
-        .collect()
-}
-
-/// A query's value for `name`, percent-decoded.
-fn param(query: &str, name: &str) -> Option<String> {
-    form_urlencoded::parse(query.as_bytes())
-        .find(|(key, _)| key == name)
-        .map(|(_, value)| value.into_owned())
+/// Whether `creator_login` is the bot of the App with this id, as the
+/// `app_id` filters ask.
+fn made_by(face: &GithubFace, creator_login: &str, app_id: &str) -> Result<bool, WorldError> {
+    let app = face.world.app_by_slug(creator_login)?;
+    Ok(app.is_some_and(|app| app.id.to_string() == app_id))
 }
 
 /// The check runs a list answers: GitHub's filters applied to `runs`, which
@@ -132,7 +122,7 @@ pub(crate) fn filtered(
 ) -> Result<Vec<CheckRun>, WorldError> {
     let mut runs = match param(query, "filter").as_deref() {
         Some("all") => runs,
-        _ => newest(runs),
+        _ => newest_check_runs(runs),
     };
     if let Some(name) = param(query, "check_name") {
         runs.retain(|run| run.name == name);
@@ -143,8 +133,7 @@ pub(crate) fn filtered(
     if let Some(app_id) = param(query, "app_id") {
         let mut kept = Vec::new();
         for run in runs {
-            let app = face.world.app_by_slug(&run.creator_login)?;
-            if app.is_some_and(|app| app.id.to_string() == app_id) {
+            if made_by(face, &run.creator_login, &app_id)? {
                 kept.push(run);
             }
         }
@@ -201,14 +190,14 @@ pub(crate) async fn get_suite(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    if let Some(refused) = media::refuse_unrendered(&headers, "CheckSuite") {
-        return refused;
-    }
     let suite = match suite_at(&face, &repo, &id) {
         Ok(suite) => suite,
         Err(resp) => return *resp,
     };
-    match suite_json(&face, &repo, &owner, &suite) {
+    if let Some(refused) = media::refuse_unrendered(&headers, "CheckSuite") {
+        return refused;
+    }
+    match suite_with_repository(&face, &repo, &owner, &suite) {
         Ok(json) => json_response(StatusCode::OK, json),
         Err(e) => internal(e),
     }
@@ -226,13 +215,13 @@ pub(crate) async fn list_suite_runs(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    if let Some(refused) = media::refuse_unrendered(&headers, "CheckRun") {
-        return refused;
-    }
     let suite = match suite_at(&face, &repo, &id) {
         Ok(suite) => suite,
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "CheckRun") {
+        return refused;
+    }
     let query = query.unwrap_or_default();
     let runs = face
         .world
@@ -263,22 +252,21 @@ pub(crate) async fn list_suites_for_ref(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    if let Some(refused) = media::refuse_unrendered(&headers, "CheckSuite") {
-        return refused;
-    }
     let sha = match commit_of(&face, &repo, &git_ref).await {
         Ok(Some(sha)) => sha,
         Ok(None) => return not_found(),
         Err(resp) => return *resp,
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "CheckSuite") {
+        return refused;
+    }
     let query = query.unwrap_or_default();
     let listed = || -> Result<Vec<CheckSuite>, WorldError> {
         let mut suites = face.world.list_check_suites_for_sha(repo.id, &sha)?;
         if let Some(app_id) = param(&query, "app_id") {
             let mut kept = Vec::new();
             for suite in suites {
-                let app = face.world.app_by_slug(&suite.creator_login)?;
-                if app.is_some_and(|app| app.id.to_string() == app_id) {
+                if made_by(&face, &suite.creator_login, &app_id)? {
                     kept.push(suite);
                 }
             }
@@ -303,7 +291,7 @@ pub(crate) async fn list_suites_for_ref(
     let total = suites.len();
     let items: Result<Vec<serde_json::Value>, _> = paginate(suites, per_page, page)
         .iter()
-        .map(|suite| suite_json(&face, &repo, &owner, suite))
+        .map(|suite| suite_with_repository(&face, &repo, &owner, suite))
         .collect();
     match items {
         Ok(items) => json_response(
@@ -323,9 +311,6 @@ pub(crate) async fn get_check_run(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    if let Some(refused) = media::refuse_unrendered(&headers, "CheckRun") {
-        return refused;
-    }
     let Ok(id) = id.parse::<i64>() else {
         return not_found();
     };
@@ -334,21 +319,25 @@ pub(crate) async fn get_check_run(
         Ok(_) => return not_found(),
         Err(e) => return internal(e),
     };
+    if let Some(refused) = media::refuse_unrendered(&headers, "CheckRun") {
+        return refused;
+    }
     match check_run_json(&face, &repo, &run) {
         Ok(json) => json_response(StatusCode::OK, json),
         Err(e) => internal(e),
     }
 }
 
-/// The commit a `{ref}` path segment names: a full sha as it is, or the tip
-/// of a branch, or none. The caller holds the gate.
+/// The commit a `{ref}` path segment names: a full sha exactly as given,
+/// which is how a check run on it was stored, or the tip of a branch, or
+/// none. The caller holds the gate.
 pub(crate) async fn commit_of(
     face: &GithubFace,
     repo: &Repo,
     git_ref: &str,
 ) -> Result<Option<String>, Box<Response<Body>>> {
     if git_ref.len() == 40 && git_ref.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Ok(Some(git_ref.to_ascii_lowercase()));
+        return Ok(Some(git_ref.to_string()));
     }
     let _refs = face.git.read_lock(repo.id).await;
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);

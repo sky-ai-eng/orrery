@@ -42,7 +42,7 @@ pub(crate) fn page_params(query: &str) -> (usize, usize) {
     (per_page, page)
 }
 
-fn query_param(query: &str, name: &str) -> Option<String> {
+pub(crate) fn query_param(query: &str, name: &str) -> Option<String> {
     parse_form(query.as_bytes()).remove(name)
 }
 

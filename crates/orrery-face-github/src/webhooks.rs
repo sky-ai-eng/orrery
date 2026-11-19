@@ -1014,10 +1014,7 @@ impl Rendering {
         let Some(owner) = world.actor_by_login(&repo.owner_login)? else {
             return Ok(Vec::new());
         };
-        let mut check_suite = crate::suites::suite_json(face, &repo, &owner, &suite)?;
-        if let Some(fields) = check_suite.as_object_mut() {
-            fields.remove("repository");
-        }
+        let check_suite = crate::suites::suite_json(face, &repo, &suite)?;
         Ok(vec![Outgoing {
             action: Some("completed".to_string()),
             payload: serde_json::json!({

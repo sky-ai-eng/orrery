@@ -263,13 +263,16 @@ async fn refresh_full_fragment_round_trip() {
         serde_json::json!({ "name": "ci/build", "head_sha": s.feature_sha,
                             "status": "completed", "conclusion": "success" }),
     );
-    face_ok(
-        "POST",
-        &checks_url,
-        &s.ci_token,
-        serde_json::json!({ "name": "ci/lint", "head_sha": s.feature_sha,
-                            "status": "in_progress" }),
-    );
+    // A second run of a name stands in for the first in the rollup.
+    for status in ["queued", "in_progress"] {
+        face_ok(
+            "POST",
+            &checks_url,
+            &s.ci_token,
+            serde_json::json!({ "name": "ci/lint", "head_sha": s.feature_sha,
+                                "status": status }),
+        );
+    }
     face_ok(
         "POST",
         &format!("{}/issues/1/comments", s.api),
@@ -347,7 +350,7 @@ async fn refresh_full_fragment_round_trip() {
     let contexts = &commit["statusCheckRollup"]["contexts"];
     assert_eq!(contexts["pageInfo"]["hasNextPage"], false);
     let runs = contexts["nodes"].as_array().unwrap();
-    assert_eq!(runs.len(), 2);
+    assert_eq!(runs.len(), 2, "the newest run of each name");
     assert_eq!(runs[0]["__typename"], "CheckRun");
     assert_eq!(runs[0]["databaseId"], 1);
     assert_eq!(runs[0]["name"], "ci/build");
