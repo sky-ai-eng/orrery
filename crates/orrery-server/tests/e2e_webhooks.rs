@@ -455,6 +455,18 @@ async fn a_receiver_gets_a_signed_delivery_for_each_event() {
     assert_eq!(pushed["head_commit"]["author"]["username"], "alice");
     assert_eq!(pushed["base_ref"], serde_json::Value::Null);
     assert!(pushed["repository"]["created_at"].is_i64());
+    // A push names its repository by the repository's page, as GitHub's
+    // does in a push alone.
+    assert_eq!(
+        pushed["repository"]["url"],
+        pushed["repository"]["html_url"]
+    );
+    assert!(
+        !pushed["repository"]["url"]
+            .as_str()
+            .unwrap()
+            .contains("/api/v3/")
+    );
 
     // pull_request: the pull request as a read answers it.
     let opened = payload(3);

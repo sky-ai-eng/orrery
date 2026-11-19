@@ -1176,6 +1176,7 @@ impl Rendering {
         repository["created_at"] = repo.created_clock_unix.into();
         repository["pushed_at"] = repo.pushed_at_clock_unix.into();
         repository["master_branch"] = repo.default_branch.clone().into();
+        repository["url"] = repository["html_url"].clone();
         repository["stargazers"] = 0.into();
         repository["owner"]["name"] = owner.login.clone().into();
         repository["owner"]["email"] = serde_json::Value::Null;
