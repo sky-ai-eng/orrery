@@ -30,6 +30,7 @@ use orrery_face_git::GitFace;
 use orrery_face_github::GithubFace;
 use orrery_world::World;
 
+mod alerts;
 mod apps;
 mod control;
 mod list;

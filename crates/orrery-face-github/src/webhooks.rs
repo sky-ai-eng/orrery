@@ -453,6 +453,13 @@ fn addressed(event: &EventBody) -> Option<(&'static str, i64)> {
         EventBody::CommentCreated(e) => ("issue_comment", e.subject.repo.id),
         EventBody::CheckRunCreated(e) => ("check_run", e.subject.repo.id),
         EventBody::CheckRunUpdated(e) => ("check_run", e.subject.repo.id),
+        EventBody::DependencyAlertCreated(e) => ("dependabot_alert", e.subject.repo.id),
+        EventBody::DependencyAlertDismissed(e)
+        | EventBody::DependencyAlertReopened(e)
+        | EventBody::DependencyAlertFixed(e)
+        | EventBody::DependencyAlertAutoDismissed(e)
+        | EventBody::DependencyAlertReintroduced(e)
+        | EventBody::DependencyAlertAutoReopened(e) => ("dependabot_alert", e.subject.repo.id),
         EventBody::RefCreated(e) => ("push", e.subject.repo.id),
         EventBody::RefUpdated(e) => ("push", e.subject.repo.id),
         EventBody::RefDeleted(e) => ("push", e.subject.repo.id),
@@ -884,6 +891,52 @@ impl Rendering {
                 }
                 _ => Ok(Vec::new()),
             },
+            EventBody::DependencyAlertCreated(e) => self.alert(
+                world,
+                about(e.subject.repo.id)?,
+                e.subject.number,
+                "created",
+                None,
+            ),
+            EventBody::DependencyAlertDismissed(e) => {
+                let person = Some(sender);
+                self.alert(
+                    world,
+                    about(e.subject.repo.id)?,
+                    e.subject.number,
+                    "dismissed",
+                    person,
+                )
+            }
+            EventBody::DependencyAlertReopened(e) => {
+                let person = Some(sender);
+                self.alert(
+                    world,
+                    about(e.subject.repo.id)?,
+                    e.subject.number,
+                    "reopened",
+                    person,
+                )
+            }
+            EventBody::DependencyAlertFixed(e) => self.alert(
+                world,
+                about(e.subject.repo.id)?,
+                e.subject.number,
+                "fixed",
+                None,
+            ),
+            EventBody::DependencyAlertAutoDismissed(e) => {
+                let about = about(e.subject.repo.id)?;
+                self.alert(world, about, e.subject.number, "auto_dismissed", None)
+            }
+            EventBody::DependencyAlertReintroduced(e) => {
+                let about = about(e.subject.repo.id)?;
+                self.alert(world, about, e.subject.number, "reintroduced", None)
+            }
+            EventBody::DependencyAlertAutoReopened(e) => {
+                let about = about(e.subject.repo.id)?;
+                self.alert(world, about, e.subject.number, "auto_reopened", None)
+            }
             EventBody::RefCreated(e) => {
                 let commits = Pushed {
                     before: None,
@@ -941,6 +994,43 @@ impl Rendering {
             payload: serde_json::json!({
                 "action": action,
                 "check_run": check_run,
+                "repository": repo_json(face, &repo, &owner),
+                "sender": sender,
+            }),
+        }])
+    }
+
+    /// GitHub's `dependabot_alert` for an alert as the write left it.
+    /// `person` is who dismissed or reopened it. What GitHub does to an
+    /// alert itself, it sends as its own organization, `github`.
+    fn alert(
+        &self,
+        world: &World,
+        about: Option<(Repo, Actor)>,
+        number: i64,
+        action: &str,
+        person: Option<serde_json::Value>,
+    ) -> Result<Vec<Outgoing>, WorldError> {
+        let face = &self.face;
+        let Some((repo, owner)) = about else {
+            return Ok(Vec::new());
+        };
+        let Some(alert) = world.dependency_alert(repo.id, number)? else {
+            return Ok(Vec::new());
+        };
+        let sender = person.unwrap_or_else(|| {
+            actor_json(&Actor {
+                id: 9919,
+                login: "github".to_string(),
+                kind: orrery_world::ActorKind::Org,
+                created_clock_unix: 0,
+            })
+        });
+        Ok(vec![Outgoing {
+            action: Some(action.to_string()),
+            payload: serde_json::json!({
+                "action": action,
+                "alert": crate::dependabot::alert_json(face, &repo, &alert),
                 "repository": repo_json(face, &repo, &owner),
                 "sender": sender,
             }),

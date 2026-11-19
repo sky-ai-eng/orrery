@@ -44,6 +44,14 @@ pub enum PullRequestState {
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
+pub enum RepositoryVulnerabilityAlertState {
+    Open,
+    Fixed,
+    Dismissed,
+    AutoDismissed,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
 pub enum MergeableState {
     Mergeable,
     Conflicting,
@@ -485,6 +493,124 @@ impl Repository {
             id: ID(format!("O_ref_{}_{}", self.repo.id, qualified_name)),
         }))
     }
+
+    /// The repository's Dependabot alerts in `states`, or in any state,
+    /// oldest first. A repository whose alerts are off has none to list, as
+    /// on GitHub.
+    async fn vulnerability_alerts(
+        &self,
+        ctx: &Context<'_>,
+        states: Option<Vec<RepositoryVulnerabilityAlertState>>,
+        first: Option<i32>,
+        after: Option<String>,
+    ) -> Result<RepositoryVulnerabilityAlertConnection, Error> {
+        use RepositoryVulnerabilityAlertState as State;
+        let query = world::AlertQuery {
+            states: states.map(|states| {
+                states
+                    .into_iter()
+                    .map(|state| match state {
+                        State::Open => world::AlertState::Open,
+                        State::Fixed => world::AlertState::Fixed,
+                        State::Dismissed => world::AlertState::Dismissed,
+                        State::AutoDismissed => world::AlertState::AutoDismissed,
+                    })
+                    .collect()
+            }),
+            ascending: true,
+            ..world::AlertQuery::default()
+        };
+        let mut alerts = match self.repo.dependency_alerts {
+            true => face(ctx)
+                .world
+                .dependency_alerts(self.repo.id, &query, usize::MAX)
+                .map_err(internal)?,
+            false => Vec::new(),
+        };
+        if let Some(a) = after {
+            let bound = cursor_id(&a).ok_or_else(|| {
+                Error::new(format!("`{a}` does not appear to be a valid cursor."))
+            })?;
+            alerts.retain(|alert| alert.id > bound);
+        }
+        let (alerts, mut page_info) = take_first("vulnerabilityAlerts", alerts, first)?;
+        page_info.start_cursor = alerts.first().map(|a| cursor(a.id));
+        page_info.end_cursor = alerts.last().map(|a| cursor(a.id));
+        Ok(RepositoryVulnerabilityAlertConnection {
+            page_info,
+            nodes: alerts
+                .into_iter()
+                .map(|alert| RepositoryVulnerabilityAlert {
+                    alert,
+                    repo: self.repo.clone(),
+                })
+                .collect(),
+        })
+    }
+}
+
+#[derive(SimpleObject)]
+pub struct RepositoryVulnerabilityAlertConnection {
+    pub page_info: PageInfo,
+    pub nodes: Vec<RepositoryVulnerabilityAlert>,
+}
+
+pub struct RepositoryVulnerabilityAlert {
+    alert: world::DependencyAlert,
+    repo: world::Repo,
+}
+
+#[Object]
+impl RepositoryVulnerabilityAlert {
+    async fn number(&self) -> i64 {
+        self.alert.number
+    }
+
+    /// What Dependabot did about the alert: null while it has not tried, and
+    /// otherwise the pull request it opened or the error it reported, each
+    /// null for an attempt that has only started.
+    async fn dependabot_update(
+        &self,
+        ctx: &Context<'_>,
+    ) -> Result<Option<DependabotUpdate>, Error> {
+        Ok(match &self.alert.update {
+            world::AlertUpdate::None => None,
+            world::AlertUpdate::Pending => Some(DependabotUpdate {
+                pull_request: None,
+                error: None,
+            }),
+            world::AlertUpdate::PullRequest { pull_id, .. } => {
+                let pull = face(ctx)
+                    .world
+                    .pull_by_id(*pull_id)
+                    .map_err(internal)?
+                    .map(|pull| PullRequest::new(pull, self.repo.clone()));
+                Some(DependabotUpdate {
+                    pull_request: pull,
+                    error: None,
+                })
+            }
+            world::AlertUpdate::Error { error_type, title } => Some(DependabotUpdate {
+                pull_request: None,
+                error: Some(DependabotUpdateError {
+                    error_type: error_type.clone(),
+                    title: title.clone(),
+                }),
+            }),
+        })
+    }
+}
+
+#[derive(SimpleObject)]
+pub struct DependabotUpdate {
+    pub pull_request: Option<PullRequest>,
+    pub error: Option<DependabotUpdateError>,
+}
+
+#[derive(SimpleObject)]
+pub struct DependabotUpdateError {
+    pub error_type: String,
+    pub title: String,
 }
 
 #[derive(SimpleObject)]

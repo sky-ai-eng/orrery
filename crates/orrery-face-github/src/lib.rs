@@ -26,6 +26,7 @@ use orrery_world::{Actor, ActorKind, Attribution, Caller, Door, Repo, World, Wor
 pub mod app_flows;
 pub mod apps;
 mod checks;
+mod dependabot;
 pub mod graphql;
 mod media;
 mod meta;
@@ -91,6 +92,24 @@ pub fn router(face: GithubFace) -> Router {
             get(apps::list_installation_repos),
         )
         .route("/repositories/{id}", get(reads::get_repo_by_id))
+        .route(
+            "/repositories/{id}/dependabot/alerts",
+            get(dependabot::list_alerts_by_id),
+        )
+        .route(
+            "/repos/{owner}/{repo}/dependabot/alerts",
+            get(dependabot::list_alerts),
+        )
+        .route(
+            "/repos/{owner}/{repo}/dependabot/alerts/{alert_number}",
+            get(dependabot::get_alert).patch(dependabot::update_alert),
+        )
+        .route(
+            "/repos/{owner}/{repo}/vulnerability-alerts",
+            get(dependabot::alerts_enabled)
+                .put(dependabot::enable_alerts)
+                .delete(dependabot::disable_alerts),
+        )
         .route("/repos/{owner}/{repo}", get(reads::get_repo))
         .route(
             "/repos/{owner}/{repo}/pulls",

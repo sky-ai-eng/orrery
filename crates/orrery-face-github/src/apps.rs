@@ -780,7 +780,7 @@ pub(crate) async fn limit_installation(
     };
     let param = |name: &str| params.iter().find(|(key, _)| *key == name).map(|(_, v)| v);
     let write = !matches!(*req.method(), Method::GET | Method::HEAD);
-    let by_id = matched.is_some_and(|m| m.as_str().ends_with("/repositories/{id}"));
+    let by_id = matched.is_some_and(|m| m.as_str().contains("/repositories/{id}"));
     let repo = match (param("owner"), param("repo"), param("id")) {
         (Some(owner), Some(name), _) => match resolve_repo(&face, owner, name) {
             Ok((repo, _)) => Some(repo),
