@@ -293,7 +293,9 @@ mod tests {
                 .unwrap();
             }
         }
-        conn.execute_batch(crate::schema::MIGRATIONS.last().unwrap())
+        // The migration to version 20, which is the one that made suites.
+        let to_20 = (20 - 1 - crate::schema::BASELINE_VERSION) as usize;
+        conn.execute_batch(crate::schema::MIGRATIONS[to_20])
             .unwrap();
 
         let stored: Vec<(i64, String, Option<String>)> = conn

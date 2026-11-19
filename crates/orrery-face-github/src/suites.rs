@@ -328,16 +328,16 @@ pub(crate) async fn get_check_run(
     }
 }
 
-/// The commit a `{ref}` path segment names: a full sha exactly as given,
-/// which is how a check run on it was stored, or the tip of a branch, or
-/// none. The caller holds the gate.
+/// The commit a `{ref}` path segment names: a full sha in either case, as
+/// GitHub takes one, or the tip of a branch, or none. The caller holds the
+/// gate.
 pub(crate) async fn commit_of(
     face: &GithubFace,
     repo: &Repo,
     git_ref: &str,
 ) -> Result<Option<String>, Box<Response<Body>>> {
     if git_ref.len() == 40 && git_ref.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Ok(Some(git_ref.to_string()));
+        return Ok(Some(git_ref.to_ascii_lowercase()));
     }
     let _refs = face.git.read_lock(repo.id).await;
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
