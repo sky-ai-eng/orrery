@@ -575,17 +575,73 @@ pub(crate) fn check_run_subject(conn: &Connection, id: i64) -> Result<CheckRunSu
     })
 }
 
+pub(crate) fn check_suite_subject(conn: &Connection, id: i64) -> Result<CheckSuiteSubject> {
+    let (repo_id, head_sha): (i64, String) = conn
+        .query_row(
+            "SELECT repo_id, head_sha FROM check_suites WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or(WorldError::NoSuchCheckSuite(id))?;
+    let (repo, owner) = repo_refs(conn, repo_id)?;
+    Ok(CheckSuiteSubject {
+        kind: CheckSuiteType::Tag,
+        id,
+        head_sha,
+        repo,
+        owner,
+    })
+}
+
+pub(crate) fn check_suite_object(conn: &Connection, id: i64) -> Result<CheckSuiteObject> {
+    let (object, pusher): (CheckSuiteObject, Option<i64>) = conn
+        .query_row(
+            "SELECT s.id, s.head_sha, s.head_branch, s.before_sha, a.id, a.login, s.pusher_id,
+                    s.status, s.conclusion, s.created_clock_unix, s.updated_clock_unix
+             FROM check_suites s JOIN actors a ON a.id = s.creator_id WHERE s.id = ?1",
+            params![id],
+            |r| {
+                Ok((
+                    CheckSuiteObject {
+                        id: r.get(0)?,
+                        head_sha: r.get(1)?,
+                        head_branch: r.get(2)?,
+                        before_sha: r.get(3)?,
+                        creator: actor_ref_at(r, 4)?,
+                        pusher: None,
+                        status: CheckStatus::from_db(&r.get::<_, String>(7)?),
+                        conclusion: r
+                            .get::<_, Option<String>>(8)?
+                            .as_deref()
+                            .map(CheckConclusion::from_db),
+                        created_unix: r.get(9)?,
+                        updated_unix: r.get(10)?,
+                    },
+                    r.get(6)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(WorldError::NoSuchCheckSuite(id))?;
+    Ok(CheckSuiteObject {
+        pusher: pusher.map(|id| actor_ref(conn, id)).transpose()?,
+        ..object
+    })
+}
+
 pub(crate) fn check_run_object(conn: &Connection, id: i64) -> Result<CheckRunObject> {
     conn.query_row(
         "SELECT c.id, c.head_sha, c.name, c.status, c.conclusion, c.details_url,
                 c.external_id, c.output, a.id, a.login, c.started_clock_unix,
-                c.completed_clock_unix, c.created_clock_unix
+                c.completed_clock_unix, c.created_clock_unix, c.suite_id
          FROM check_runs c JOIN actors a ON a.id = c.creator_id WHERE c.id = ?1",
         params![id],
         |r| {
             let output: Option<String> = r.get(7)?;
             Ok(CheckRunObject {
                 id: r.get(0)?,
+                suite_id: r.get(13)?,
                 head_sha: r.get(1)?,
                 name: r.get(2)?,
                 status: CheckStatus::from_db(&r.get::<_, String>(3)?),

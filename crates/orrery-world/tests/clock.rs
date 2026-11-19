@@ -176,9 +176,18 @@ fn a_write_dated_with_a_time_the_world_answered_advances_to_that_time() {
     assert_eq!(run.started_clock_unix, Some(T0 + 500));
     assert_eq!(run.created_clock_unix, T0 + 500);
     let added = since(&w, before);
-    assert_eq!(added.len(), 2);
     assert_advance(&added[0], T0 + 100, T0 + 500, Door::Control);
-    assert_eq!(added[1].body.type_name(), "check_run:created");
+    // The run is the write's operation, and the suite it made and what the
+    // suite came to are its consequences.
+    let rest: Vec<&str> = added[1..].iter().map(|e| e.body.type_name()).collect();
+    assert_eq!(
+        rest,
+        [
+            "check_run:created",
+            "check_suite:created",
+            "check_suite:updated"
+        ]
+    );
 }
 
 #[test]

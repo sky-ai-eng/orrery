@@ -117,7 +117,7 @@ async fn authorize_page(
     };
     html(
         StatusCode::OK,
-        &authorize_form(&app, &redirect_uri, &params, sign_in, None),
+        &authorize_form(&face, &app, &redirect_uri, &params, sign_in, None),
     )
 }
 
@@ -140,7 +140,14 @@ async fn authorize(
         Ok(None) => {
             return html(
                 StatusCode::OK,
-                &authorize_form(&app, &redirect_uri, &params, sign_in, Some(NOT_SIGNED_IN)),
+                &authorize_form(
+                    &face,
+                    &app,
+                    &redirect_uri,
+                    &params,
+                    sign_in,
+                    Some(NOT_SIGNED_IN),
+                ),
             );
         }
         Err(e) => return internal(e),
@@ -313,6 +320,7 @@ fn split_url(url: &str) -> Option<(&str, &str)> {
 }
 
 fn authorize_form(
+    face: &GithubFace,
     app: &OAuthApp,
     redirect_uri: &str,
     params: &BTreeMap<String, String>,
@@ -341,12 +349,13 @@ fn authorize_form(
         &format!("Authorize {}", app.name),
         &format!(
             r#"<h1>Authorize {name}</h1>{flash}
-<form method="post" action="/login/oauth/authorize">
+<form method="post" action="{web_path}/login/oauth/authorize">
 {fields}
 {sign_in}
 <button type="submit">Authorize</button>
 </form>"#,
             name = escape(&app.name),
+            web_path = escape(face.layout.web_path()),
             fields = fields.join("\n"),
             sign_in = sign_in_fields(sign_in, ""),
         ),

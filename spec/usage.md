@@ -105,7 +105,7 @@ curl -X POST $C/diff -d '{"from":"before","to":"after"}'   # → branch pushed, 
 | Repositories | `repos_created`, `repos_deleted`, `default_branch_changes`, `ref_changes` |
 | Pulls | `pulls_opened`, `pulls_closed`, `pulls_reopened`, `pulls_merged`, `pulls_synchronized`, `pulls_edited` (title, body, base), `pulls_ready_for_review` (with who marked it), `pulls_converted_to_draft`, `labels_added`, `labels_removed` |
 | Review | `review_requests_added`, `review_requests_removed` (each naming `{"user": login}` or `{"team": "org/slug"}`), `reviews_added`, `comments_added` |
-| Checks | `check_runs_added`, `check_runs_updated` |
+| Checks | `check_runs_added`, `check_runs_updated`, `check_suites_added`, `check_suites_updated` (each suite as the later side holds it: repository, commit, whose check runs it holds, and the status and conclusion they come to) |
 | Dependabot alerts | `dependency_alerts_added` (repository, number, package, severity, and state), `dependency_alerts_changed` (an alert whose state is another, with both), `dependency_alert_updates_changed` (an alert about which the updater did something else, as `none`, `pending`, `pull_request`, or `error`), `dependency_alerts_turned_on` and `dependency_alerts_turned_off` (the repositories) |
 | Organizations | `org_memberships_added`, `org_memberships_removed`, `org_roles_changed`, `teams_created`, `teams_deleted`, `team_memberships_added`, `team_memberships_removed`, `team_roles_changed` |
 | Log | `log` — the newest `seq` both sides' logs hold (`shared_seq`), and how many of `to`'s events follow it (`appended`), counted, since `seq` has gaps. Each side's own newest is its `last_seq`, beside its name and `clock_unix` in `from` and `to` |

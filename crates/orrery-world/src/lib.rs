@@ -38,6 +38,7 @@ mod reader;
 mod rsa_key;
 mod schema;
 mod signing;
+mod suites;
 mod types;
 
 pub use alerts::{AlertPosition, AlertQuery, NewDependencyAlert};
@@ -604,7 +605,7 @@ impl World {
                 self.record_branch_change(w, repo_id, branch, m.change)?;
             }
         }
-        Ok(())
+        suites::open_at_push(w, repo_id, moves)
     }
 
     // ---- snapshot support ----

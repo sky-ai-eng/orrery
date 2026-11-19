@@ -99,6 +99,17 @@ pub struct CommentAdded {
     pub body: String,
 }
 
+/// A check suite as the later side holds it: whose check runs it holds, and
+/// what they come to.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CheckSuiteChange {
+    pub repo: String,
+    pub head_sha: String,
+    pub creator: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CheckRunChange {
     pub repo: String,
@@ -334,6 +345,8 @@ pub struct WorldDiff {
     pub comments_added: Vec<CommentAdded>,
     pub check_runs_added: Vec<CheckRunChange>,
     pub check_runs_updated: Vec<CheckRunChange>,
+    pub check_suites_added: Vec<CheckSuiteChange>,
+    pub check_suites_updated: Vec<CheckSuiteChange>,
     pub org_memberships_added: Vec<OrgMembershipChange>,
     pub org_memberships_removed: Vec<OrgMembershipChange>,
     pub org_roles_changed: Vec<OrgRoleChange>,
@@ -799,6 +812,29 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         }
     }
 
+    let from_suites: BTreeMap<i64, _> = from
+        .view
+        .list_check_suites()?
+        .into_iter()
+        .map(|suite| (suite.id, suite))
+        .collect();
+    let mut check_suites_added = Vec::new();
+    let mut check_suites_updated = Vec::new();
+    for suite in to.view.list_check_suites()? {
+        let entry = CheckSuiteChange {
+            repo: repo_name(suite.repo_id),
+            head_sha: suite.head_sha.clone(),
+            creator: suite.creator_login.clone(),
+            status: suite.status.as_str().to_string(),
+            conclusion: suite.conclusion.map(|c| c.as_str().to_string()),
+        };
+        match from_suites.get(&suite.id) {
+            None => check_suites_added.push(entry),
+            Some(old) if *old != suite => check_suites_updated.push(entry),
+            Some(_) => {}
+        }
+    }
+
     let from_timeline: BTreeSet<i64> = from
         .view
         .list_timeline()?
@@ -1022,6 +1058,8 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         comments_added,
         check_runs_added,
         check_runs_updated,
+        check_suites_added,
+        check_suites_updated,
         org_memberships_added,
         org_memberships_removed,
         org_roles_changed,
