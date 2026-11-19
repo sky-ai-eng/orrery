@@ -354,7 +354,9 @@ async fn refresh_full_fragment_round_trip() {
     assert_eq!(runs[0]["status"], "COMPLETED");
     assert_eq!(runs[0]["conclusion"], "SUCCESS");
     assert_eq!(runs[0]["completedAt"], "2020-01-01T00:00:00Z");
-    assert!(runs[0]["checkSuite"].is_null());
+    // Each run is in a suite, and no suite is a workflow run's.
+    assert!(runs[0]["checkSuite"].is_object());
+    assert!(runs[0]["checkSuite"]["workflowRun"].is_null());
     assert_eq!(runs[1]["name"], "ci/lint");
     assert_eq!(runs[1]["status"], "IN_PROGRESS");
     assert!(runs[1]["conclusion"].is_null());

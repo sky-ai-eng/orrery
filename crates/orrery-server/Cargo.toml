@@ -22,6 +22,7 @@ orrery-snapshot.workspace = true
 orrery-world.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
+rustls-webpki.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true

@@ -493,7 +493,10 @@ async fn a_receiver_gets_a_signed_delivery_for_each_event() {
         let of = &check["check_run"]["pull_requests"][0];
         assert_eq!(of["number"], number);
         assert_eq!(of["base"]["repo"]["id"], repo_id);
-        assert_eq!(check["sender"]["login"], "helper[bot]");
+        // The sender is whoever pushed the commit the suite is on, not the
+        // App that wrote the check.
+        assert_eq!(check["sender"]["login"], "alice");
+        assert_eq!(check["check_run"]["check_suite"]["head_branch"], "feature");
     }
     assert_eq!(payload(8)["check_run"]["conclusion"], "success");
 
@@ -1208,6 +1211,236 @@ async fn a_check_run_created_complete_sends_both_actions() {
         assert_eq!(payload["check_run"]["status"], "completed");
         assert_eq!(payload["check_run"]["conclusion"], "success");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_suite_follows_its_check_runs_and_says_when_it_concludes() {
+    let s = setup_with(sending(), 204).await;
+    let api = &s.api;
+    // A second App hears of suites. It may only read checks, so no suite is
+    // its own.
+    control_post(
+        &s.base,
+        "/_orrery/apps",
+        serde_json::json!({
+            "slug": "watcher",
+            "name": "Watcher",
+            "owner": "acme",
+            "callback_urls": ["https://app.test/callback"],
+            "permissions": { "checks": "read" },
+            "events": ["check_suite"],
+            "webhook_url": s.receiver.url,
+            "webhook_active": true,
+        }),
+    );
+    control_post(
+        &s.base,
+        "/_orrery/apps/watcher/installations",
+        serde_json::json!({ "account": "acme" }),
+    );
+    let token = s.token(s.install());
+    let head_sha = s.push("feature");
+    let read = |path: &str| {
+        call(
+            "GET",
+            &format!("{api}/repos/acme/web/{path}"),
+            &bearer(&s.alice),
+            None,
+        )
+    };
+
+    // The push made a suite on the commit for the App that may write
+    // checks, before any check run.
+    let (status, _, listed) = read(&format!("commits/{head_sha}/check-suites"));
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["total_count"], 1);
+    let suite = listed["check_suites"][0].clone();
+    let suite_id = suite["id"].as_i64().unwrap();
+    assert_eq!(suite["app"]["slug"], "helper");
+    assert_eq!(suite["head_branch"], "feature");
+    assert_eq!(suite["head_sha"], head_sha.as_str());
+    assert_eq!(suite["before"], "0".repeat(40));
+    assert_eq!(suite["after"], head_sha.as_str());
+    assert_eq!(suite["status"], "queued");
+    assert!(suite["conclusion"].is_null());
+    assert_eq!(suite["latest_check_runs_count"], 0);
+    assert_eq!(read("commits/feature/check-suites").2["total_count"], 1);
+    assert_eq!(read("commits/nope/check-suites").0, 404);
+    let state = || {
+        let (status, _, suite) = read(&format!("check-suites/{suite_id}"));
+        assert_eq!(status, 200, "{suite}");
+        (
+            suite["status"].as_str().unwrap().to_string(),
+            suite["conclusion"].as_str().map(str::to_string),
+        )
+    };
+    let runs = format!("{api}/repos/acme/web/check-runs");
+    let make = |body: serde_json::Value| face_ok("POST", &runs, &token, body);
+    let set = |run: &serde_json::Value, body: serde_json::Value| {
+        face_ok("PATCH", &format!("{runs}/{}", run["id"]), &token, body)
+    };
+
+    // The App's check runs join it, and it follows them.
+    let build =
+        make(serde_json::json!({ "name": "build", "head_sha": head_sha, "status": "in_progress" }));
+    assert_eq!(build["check_suite"]["id"], suite_id);
+    assert_eq!(state(), ("in_progress".to_string(), None));
+    let lint = make(serde_json::json!({ "name": "lint", "head_sha": head_sha }));
+    set(&build, serde_json::json!({ "conclusion": "success" }));
+    assert_eq!(state(), ("queued".to_string(), None));
+    set(&lint, serde_json::json!({ "conclusion": "failure" }));
+    assert_eq!(
+        state(),
+        ("completed".to_string(), Some("failure".to_string()))
+    );
+    set(&lint, serde_json::json!({ "conclusion": "success" }));
+    assert_eq!(
+        state(),
+        ("completed".to_string(), Some("success".to_string()))
+    );
+    // A newer run of a name takes the older one's place.
+    let again = make(serde_json::json!({ "name": "lint", "head_sha": head_sha }));
+    assert_eq!(state(), ("queued".to_string(), None));
+    set(&again, serde_json::json!({ "conclusion": "success" }));
+    assert_eq!(
+        state(),
+        ("completed".to_string(), Some("success".to_string()))
+    );
+
+    // The lists: the newest of each name unless every run is asked for.
+    let names = |path: &str| -> Vec<(String, i64)> {
+        let (status, _, listed) = read(path);
+        assert_eq!(status, 200, "{path}: {listed}");
+        let runs = listed["check_runs"].as_array().unwrap();
+        assert_eq!(listed["total_count"], runs.len(), "{path}");
+        runs.iter()
+            .map(|r| {
+                (
+                    r["name"].as_str().unwrap().to_string(),
+                    r["id"].as_i64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let id = |run: &serde_json::Value| run["id"].as_i64().unwrap();
+    let (b, l1, l2) = (
+        ("build".to_string(), id(&build)),
+        ("lint".to_string(), id(&lint)),
+        ("lint".to_string(), id(&again)),
+    );
+    let on = format!("commits/{head_sha}/check-runs");
+    assert_eq!(names(&on), [l2.clone(), b.clone()]);
+    assert_eq!(
+        names(&format!("{on}?filter=all")),
+        [l2.clone(), l1.clone(), b.clone()]
+    );
+    assert_eq!(
+        names(&format!("{on}?filter=bogus")),
+        [l2.clone(), b.clone()]
+    );
+    assert_eq!(
+        names(&format!("{on}?check_name=lint")),
+        std::slice::from_ref(&l2)
+    );
+    assert_eq!(
+        names(&format!("{on}?status=completed")),
+        [l2.clone(), b.clone()]
+    );
+    assert_eq!(names(&format!("{on}?status=queued")), []);
+    assert_eq!(
+        names(&format!("{on}?app_id={}", s.app_id)),
+        [l2.clone(), b.clone()]
+    );
+    assert_eq!(names(&format!("{on}?app_id=0")), []);
+    assert_eq!(read("commits/nope/check-runs").0, 422);
+    let of = format!("check-suites/{suite_id}/check-runs");
+    assert_eq!(names(&of), [b.clone(), l2.clone()]);
+    assert_eq!(
+        names(&format!("{of}?filter=all")),
+        [l2.clone(), l1.clone(), b.clone()]
+    );
+    // GitHub answers a suite once for each of its runs of the name.
+    let (_, _, twice) = read(&format!("commits/{head_sha}/check-suites?check_name=lint"));
+    assert_eq!(twice["total_count"], 2);
+    assert_eq!(twice["check_suites"][1]["id"], suite_id);
+    let (_, _, counted) = read(&format!("check-suites/{suite_id}"));
+    assert_eq!(counted["latest_check_runs_count"], 2);
+    let (status, _, one) = read(&format!("check-runs/{}", l1.1));
+    assert_eq!((status, &one["check_suite"]["id"]), (200, &suite_id.into()));
+    assert_eq!(read("check-runs/999").0, 404);
+    assert_eq!(read("check-suites/999").0, 404);
+    assert_eq!(read("check-suites/abc").0, 404);
+
+    // A check run on a commit no push brought to a tip makes a suite that
+    // records no push.
+    let unpushed = "1".repeat(40);
+    let alone =
+        make(serde_json::json!({ "name": "build", "head_sha": unpushed, "conclusion": "success" }));
+    let (_, _, made) = read(&format!("check-suites/{}", alone["check_suite"]["id"]));
+    assert_ne!(made["id"], suite_id);
+    for field in ["head_branch", "before", "after"] {
+        assert!(made[field].is_null(), "{field}");
+    }
+    assert_eq!(made["conclusion"], "success");
+
+    // The App that subscribes is told each time a suite concludes, and of
+    // nothing else a suite does.
+    let got = s.receiver.wait(17).await;
+    let of_suites: Vec<serde_json::Value> = got
+        .iter()
+        .filter(|r| r.header("x-github-event") == "check_suite")
+        .map(Received::json)
+        .collect();
+    let told: Vec<(&str, &str, &str)> = of_suites
+        .iter()
+        .map(|p| {
+            (
+                p["action"].as_str().unwrap(),
+                p["check_suite"]["conclusion"].as_str().unwrap(),
+                p["sender"]["login"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        told,
+        [
+            ("completed", "failure", "alice"),
+            ("completed", "success", "alice"),
+            ("completed", "success", "alice"),
+            ("completed", "success", "ghost"),
+        ]
+    );
+    let first = &of_suites[0];
+    let mut keys: Vec<&str> = first
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "action",
+            "check_suite",
+            "installation",
+            "repository",
+            "sender"
+        ]
+    );
+    assert_eq!(first["check_suite"]["id"], suite_id);
+    assert_eq!(first["check_suite"]["head_branch"], "feature");
+    assert!(first["check_suite"].get("repository").is_none());
+    // GitHub's `ghost` carries GitHub's ids, not a world's.
+    assert_eq!(of_suites[3]["sender"]["id"], 10137);
+    assert_eq!(of_suites[3]["sender"]["node_id"], "MDQ6VXNlcjEwMTM3");
+    // A complete run whose conclusion changes is sent as completed again.
+    let completions = got
+        .iter()
+        .filter(|r| r.kind() == ("check_run".to_string(), Some("completed".to_string())))
+        .filter(|r| r.json()["check_run"]["id"] == l1.1)
+        .count();
+    assert_eq!(completions, 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]

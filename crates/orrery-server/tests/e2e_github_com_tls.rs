@@ -14,19 +14,6 @@ use std::process::{Command, Output};
 use common::{GithubTls, Instance, boot_github_com_tls, face_answer, git_command, mint_actor};
 use serde_json::{Value, json};
 
-/// The environment variables through which a caller's own proxy settings
-/// would reach a client; each command here starts without them.
-const PROXY_VARS: [&str; 8] = [
-    "HTTPS_PROXY",
-    "https_proxy",
-    "HTTP_PROXY",
-    "http_proxy",
-    "ALL_PROXY",
-    "all_proxy",
-    "NO_PROXY",
-    "no_proxy",
-];
-
 /// Real git, trusting the test authority alone, with `config` beside it.
 fn git_tls(
     inst: &Instance,
@@ -36,9 +23,6 @@ fn git_tls(
     args: &[&str],
 ) -> Output {
     let mut command = git_command(cwd, inst.world.clock().unwrap());
-    for var in PROXY_VARS {
-        command.env_remove(var);
-    }
     command
         .arg("-c")
         .arg(format!("http.sslCAInfo={}", tls.ca_pem.display()));
@@ -228,6 +212,9 @@ fn ask_proxy(tls: &GithubTls, request: &str) -> (String, Value) {
     stream.read_to_string(&mut answer).unwrap();
     let (head, body) = answer.split_once("\r\n\r\n").unwrap();
     let status_line = head.lines().next().unwrap().to_string();
+    if status_line.contains(" 405 ") {
+        assert!(head.lines().any(|l| l == "allow: CONNECT"), "{head}");
+    }
     (status_line, serde_json::from_str(body).unwrap())
 }
 
@@ -247,6 +234,20 @@ async fn the_proxy_refuses_what_is_not_a_tunnel_to_github() {
             "{body}"
         );
     }
+    // A GitHub host the world's certificate does not name would fail TLS in
+    // the tunnel, so the proxy refuses it and says why.
+    let (status, body) = ask_proxy(
+        &tls,
+        "CONNECT objects.githubusercontent.com:443 HTTP/1.1\r\nHost: objects.githubusercontent.com:443\r\n\r\n",
+    );
+    assert_eq!(status, "HTTP/1.1 403 Forbidden", "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not name objects.githubusercontent.com"),
+        "{body}"
+    );
     let (status, body) = ask_proxy(
         &tls,
         "GET http://api.github.com/user HTTP/1.1\r\nHost: api.github.com\r\n\r\n",

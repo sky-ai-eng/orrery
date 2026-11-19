@@ -68,6 +68,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `review` | `id` | `pull`, `repo`, `owner` |
 | `comment` | `id` | `pull`, `repo`, `owner` |
 | `check_run` | `id`, `name`, `head_sha` | `repo`, `owner` |
+| `check_suite` | `id`, `head_sha` | `repo`, `owner` |
 | `dependency_alert` | `id`, `number` | `repo`, `owner` |
 | `org_membership` | `member` | `owner` (the organization) |
 | `team` | `id`, `slug` | `owner` (the organization) |
@@ -125,8 +126,10 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `timeline_item:created` | a consequence only | `object` | |
 | `review:submitted` | submitting a review | `object` | `pull:review_request_removed` when the author was asked for one, or else `pull:updated` when `updated_unix` moves |
 | `comment:created` | commenting | `object` | `pull:updated` when `updated_unix` moves |
-| `check_run:created` | creating a check run | `object` | none |
-| `check_run:updated` | updating one | `changes` | none |
+| `check_run:created` | creating a check run | `object` | `check_suite:created` when its creator had no suite on the commit, then `check_suite:updated` when the suite comes to something else |
+| `check_run:updated` | updating one | `changes` | `check_suite:updated` when the suite comes to something else |
+| `check_suite:created` | a consequence only: of a push or a merge that brings a commit to a branch's tip, for each app that may write checks there, and of a check run on a commit its creator has no suite for | `object` | |
+| `check_suite:updated` | a consequence only: of a check run's write that brings its suite to another status or conclusion | `changes` | |
 | `repo:dependency_alerts_set` | turning a repository's dependency alerts on or off | `changes` | none |
 | `dependency_alert:created` | the vendor reporting a vulnerable dependency | `object` | none |
 | `dependency_alert:dismissed`, `dependency_alert:reopened` | a person dismissing an alert, or reopening one | `changes` | none |

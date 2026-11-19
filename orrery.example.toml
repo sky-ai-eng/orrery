@@ -43,9 +43,17 @@ t0 = "2026-01-01T00:00:00Z"
 #   {"base_url":"http://127.0.0.1:43211","listen":"127.0.0.1:43211","control":"127.0.0.1:43211"}
 # Nothing else goes to stdout; logs go to stderr.
 listen = "127.0.0.1:4180"
-# External base URL rendered into clone/html URLs; defaults to http://<listen>.
-# Required when listen is a socket.
+# The world's own URL, which the ready line reports; under the
+# "enterprise-server" layout every URL the world returns starts with it.
+# Defaults to http://<listen>. Required when listen is a socket.
 # base_url = "http://127.0.0.1:4180"
+# Where the GitHub face's surfaces are (spec/grammar.md, "Where the face is").
+# "enterprise-server": REST under <base_url>/api/v3, GraphQL at
+# <base_url>/api/graphql, and web pages and git at <base_url>, whatever host a
+# request names. "github.com": a request is served by the host it names, REST
+# at the root of api.github.com and git and web pages on github.com, and every
+# URL names those hosts; the world's own host keeps the enterprise paths.
+# layout = "enterprise-server"
 # Serve the control plane (/_orrery/*) only here, in listen's syntax; listen
 # then answers /_orrery/* as unmocked surface. Omit to keep it on listen. As
 # fd:<name>, it must name a different passed socket from listen's.
@@ -60,6 +68,21 @@ listen = "127.0.0.1:4180"
 # password, a token the control plane issued that user. A world whose faces
 # are on the public internet sets this to "token".
 # page_sign_in = "login"
+# A certificate chain and its private key, PEM, that name GitHub's hosts (or,
+# under the "enterprise-server" layout, base_url's host), from an authority
+# the operator makes and the system under test trusts. tls_listen and
+# proxy_listen serve the faces with it, and never the control plane
+# (spec/usage.md, "Reaching github.com's hosts"). Set together.
+# tls_cert = "/etc/orrery/github-hosts.pem"
+# tls_key = "/etc/orrery/github-hosts-key.pem"
+# Serve the faces over TLS here, in listen's syntax, for a client that
+# resolves GitHub's hosts to the world (compose network aliases). Under the
+# "enterprise-server" layout it needs base_url.
+# tls_listen = "0.0.0.0:443"
+# An HTTPS proxy for GitHub's hosts here, for a client that reaches them
+# through HTTPS_PROXY. It needs layout = "github.com", tunnels only to GitHub
+# hosts the certificate names, and opens no connection of its own.
+# proxy_listen = "127.0.0.1:4182"
 
 [outbound]
 # How a world sends its webhook deliveries, the one thing a world sends: one

@@ -203,6 +203,7 @@ subject_type! {
     ReviewType = "review",
     CommentType = "comment",
     CheckRunType = "check_run",
+    CheckSuiteType = "check_suite",
     DependencyAlertType = "dependency_alert",
     OrgMembershipType = "org_membership",
     TeamType = "team",
@@ -386,6 +387,17 @@ pub struct CheckRunSubject {
     pub kind: CheckRunType,
     pub id: i64,
     pub name: String,
+    pub head_sha: String,
+    pub repo: RepoRef,
+    pub owner: ActorRef,
+}
+
+/// The check runs one creator made on one commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CheckSuiteSubject {
+    #[serde(rename = "type")]
+    pub kind: CheckSuiteType,
+    pub id: i64,
     pub head_sha: String,
     pub repo: RepoRef,
     pub owner: ActorRef,
@@ -844,8 +856,34 @@ pub struct CommentObject {
 }
 
 object! {
+    CheckSuiteObject, CheckSuiteChanges {
+        id: i64,
+        head_sha: String,
+        /// The branch whose push made the suite, or null for a suite a
+        /// check run made.
+        head_branch: Option<String>,
+        /// What that branch pointed at before the push.
+        before_sha: Option<String>,
+        /// Whose check runs it holds.
+        creator: ActorRef,
+        /// Who made that push.
+        pusher: Option<ActorRef>,
+        /// What its check runs come to, counting the newest of each name.
+        status: CheckStatus,
+        conclusion: Option<CheckConclusion>,
+        created_unix: i64,
+        /// When its status or conclusion last changed.
+        updated_unix: i64,
+    }
+}
+
+object! {
     CheckRunObject, CheckRunChanges {
         id: i64,
+        /// The suite it is in. Events appended before a world held suites
+        /// carry none.
+        #[serde(default)]
+        suite_id: Option<i64>,
         head_sha: String,
         name: String,
         status: CheckStatus,
@@ -1028,6 +1066,8 @@ bodies! {
     DependencyAlertCreated { subject: DependencyAlertSubject, object: DependencyAlertObject }
     DependencyAlertChanged { subject: DependencyAlertSubject, changes: DependencyAlertChanges }
     CheckRunChanged { subject: CheckRunSubject, changes: CheckRunChanges }
+    CheckSuiteCreated { subject: CheckSuiteSubject, object: CheckSuiteObject }
+    CheckSuiteChanged { subject: CheckSuiteSubject, changes: CheckSuiteChanges }
     OrgMembershipCreated { subject: OrgMembershipSubject, object: OrgMembershipObject }
     OrgMembershipChanged { subject: OrgMembershipSubject, changes: OrgMembershipChanges }
     TeamCreated { subject: TeamSubject, object: TeamObject }
@@ -1169,6 +1209,11 @@ event_types! {
     CommentCreated(CommentCreated) = "comment:created",
 
     CheckRunCreated(CheckRunCreated) = "check_run:created",
+    /// A push brought a commit to a branch's tip, or a check run was made
+    /// on a commit its creator had no suite for.
+    CheckSuiteCreated(CheckSuiteCreated) = "check_suite:created",
+    /// A suite's check runs came to something else.
+    CheckSuiteUpdated(CheckSuiteChanged) = "check_suite:updated",
     /// The vendor reported a vulnerable dependency in a repository.
     DependencyAlertCreated(DependencyAlertCreated) = "dependency_alert:created",
     /// A person dismissed an alert.

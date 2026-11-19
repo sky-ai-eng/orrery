@@ -16,7 +16,7 @@ use base64::Engine as _;
 use orrery_face_git::{GitFace, store};
 use orrery_world::events::{self, Door, EventBody};
 use orrery_world::{
-    Actor, App, Attribution, CheckRun, CheckStatus, Delivery, DeliveryFailure, DeliveryFilter,
+    Actor, App, Attribution, CheckStatus, Delivery, DeliveryFailure, DeliveryFilter,
     DeliveryOutcome, Installation, NewDelivery, Notifier, Pull, PullState, Repo,
     RepositorySelection, SYSTEM_ACTOR_ID, World, WorldError, WorldView,
 };
@@ -455,6 +455,7 @@ fn addressed(event: &EventBody) -> Option<(&'static str, i64)> {
         EventBody::CommentCreated(e) => ("issue_comment", e.subject.repo.id),
         EventBody::CheckRunCreated(e) => ("check_run", e.subject.repo.id),
         EventBody::CheckRunUpdated(e) => ("check_run", e.subject.repo.id),
+        EventBody::CheckSuiteUpdated(e) => ("check_suite", e.subject.repo.id),
         EventBody::DependencyAlertCreated(e) => ("dependabot_alert", e.subject.repo.id),
         EventBody::DependencyAlertDismissed(e)
         | EventBody::DependencyAlertReopened(e)
@@ -879,20 +880,34 @@ impl Rendering {
             // GitHub sends both for a run that is created already complete.
             EventBody::CheckRunCreated(e) => {
                 let (id, repo_id) = (e.subject.id, e.subject.repo.id);
-                let mut out = self.check_run(world, id, repo_id, "created", sender.clone())?;
+                let mut out = self.check_run(world, id, repo_id, "created")?;
                 if e.object.status == CheckStatus::Completed {
-                    out.extend(self.check_run(world, id, repo_id, "completed", sender)?);
+                    out.extend(self.check_run(world, id, repo_id, "completed")?);
                 }
                 Ok(out)
             }
-            // GitHub sends `completed` when a run completes, and nothing
-            // for any other update.
-            EventBody::CheckRunUpdated(e) => match &e.changes.status {
-                Some(status) if status.to == CheckStatus::Completed => {
-                    self.check_run(world, e.subject.id, e.subject.repo.id, "completed", sender)
+            // GitHub sends `completed` when a run completes, and again when
+            // a complete run's conclusion changes. It sends nothing for any
+            // other update.
+            EventBody::CheckRunUpdated(e) => {
+                let completes =
+                    matches!(&e.changes.status, Some(s) if s.to == CheckStatus::Completed);
+                let concludes = e.changes.status.is_none()
+                    && e.changes.conclusion.is_some()
+                    && world
+                        .check_run_by_id(e.subject.id)?
+                        .is_some_and(|run| run.status == CheckStatus::Completed);
+                if completes || concludes {
+                    self.check_run(world, e.subject.id, e.subject.repo.id, "completed")
+                } else {
+                    Ok(Vec::new())
                 }
-                _ => Ok(Vec::new()),
-            },
+            }
+            // GitHub sends `completed` each time a suite comes to a
+            // conclusion, a different one from the last included.
+            EventBody::CheckSuiteUpdated(e) => {
+                self.check_suite(world, e.subject.id, e.subject.repo.id)
+            }
             EventBody::DependencyAlertCreated(e) => {
                 let about = about(e.subject.repo.id)?;
                 self.alert(world, about, e.subject.number, "created", None)
@@ -956,27 +971,92 @@ impl Rendering {
         id: i64,
         repo_id: i64,
         action: &str,
-        sender: serde_json::Value,
     ) -> Result<Vec<Outgoing>, WorldError> {
         let face = &self.face;
         let (Some(repo), Some(run)) = (world.repo_by_id(repo_id)?, world.check_run_by_id(id)?)
         else {
             return Ok(Vec::new());
         };
-        let Some(owner) = world.actor_by_login(&repo.owner_login)? else {
+        let (Some(owner), Some(suite)) = (
+            world.actor_by_login(&repo.owner_login)?,
+            world.check_suite_by_id(run.suite_id)?,
+        ) else {
             return Ok(Vec::new());
         };
         let mut check_run = check_run_json(face, &repo, &run)?;
-        check_run["pull_requests"] = self.pulls_of(world, &repo, &run)?;
+        check_run["pull_requests"] = crate::suites::pulls_at(face, &repo, &run.head_sha)?;
+        check_run["check_suite"] = crate::suites::suite_brief(face, &repo, &suite)?;
         Ok(vec![Outgoing {
             action: Some(action.to_string()),
             payload: serde_json::json!({
                 "action": action,
                 "check_run": check_run,
                 "repository": repo_json(face, &repo, &owner),
-                "sender": sender,
+                "sender": self.suite_sender(world, &suite)?,
             }),
         }])
+    }
+
+    /// GitHub's `check_suite` for a suite that has come to a conclusion, and
+    /// nothing for one that has not.
+    fn check_suite(
+        &self,
+        world: &World,
+        id: i64,
+        repo_id: i64,
+    ) -> Result<Vec<Outgoing>, WorldError> {
+        let face = &self.face;
+        let (Some(repo), Some(suite)) = (world.repo_by_id(repo_id)?, world.check_suite_by_id(id)?)
+        else {
+            return Ok(Vec::new());
+        };
+        if suite.status != CheckStatus::Completed {
+            return Ok(Vec::new());
+        }
+        let Some(owner) = world.actor_by_login(&repo.owner_login)? else {
+            return Ok(Vec::new());
+        };
+        let mut check_suite = crate::suites::suite_json(face, &repo, &owner, &suite)?;
+        if let Some(fields) = check_suite.as_object_mut() {
+            fields.remove("repository");
+        }
+        Ok(vec![Outgoing {
+            action: Some("completed".to_string()),
+            payload: serde_json::json!({
+                "action": "completed",
+                "check_suite": check_suite,
+                "repository": repo_json(face, &repo, &owner),
+                "sender": self.suite_sender(world, &suite)?,
+            }),
+        }])
+    }
+
+    /// Who GitHub names as the sender of what happens to a suite and its
+    /// check runs: whoever made the push the suite came from, whichever app
+    /// wrote the check. For a suite no push made, it is GitHub's `ghost`,
+    /// which is no actor of the world and carries GitHub's ids.
+    fn suite_sender(
+        &self,
+        world: &World,
+        suite: &orrery_world::CheckSuite,
+    ) -> Result<serde_json::Value, WorldError> {
+        let pusher = match &suite.pusher_login {
+            Some(login) => world.actor_by_login(login)?,
+            None => None,
+        };
+        Ok(match pusher {
+            Some(pusher) => actor_json(&pusher),
+            None => {
+                let mut ghost = actor_json(&Actor {
+                    id: 10137,
+                    login: "ghost".to_string(),
+                    kind: orrery_world::ActorKind::User,
+                    created_clock_unix: 0,
+                });
+                ghost["node_id"] = "MDQ6VXNlcjEwMTM3".into();
+                ghost
+            }
+        })
     }
 
     /// GitHub's `dependabot_alert` for an alert as the write left it.
@@ -1018,39 +1098,6 @@ impl Rendering {
                 "sender": sender,
             }),
         }])
-    }
-
-    /// The open pull requests whose head is the commit a check run is on,
-    /// as GitHub lists them in a check run.
-    fn pulls_of(
-        &self,
-        world: &World,
-        repo: &Repo,
-        run: &CheckRun,
-    ) -> Result<serde_json::Value, WorldError> {
-        let api = self.face.layout.api();
-        let url = format!("{api}/repos/{}", repo.full_name());
-        let of = |pull: &Pull, name: &str, sha: &str| {
-            serde_json::json!({
-                "ref": name,
-                "sha": sha,
-                "repo": { "id": pull.repo_id, "url": url, "name": repo.name },
-            })
-        };
-        Ok(world
-            .list_pulls_for_repo(repo.id, Some(PullState::Open))?
-            .iter()
-            .filter(|pull| pull.head_sha == run.head_sha)
-            .map(|pull| {
-                serde_json::json!({
-                    "url": format!("{url}/pulls/{}", pull.number),
-                    "id": pull.id,
-                    "number": pull.number,
-                    "head": of(pull, &pull.head_ref, &pull.head_sha),
-                    "base": of(pull, &pull.base_ref, &pull.base_sha),
-                })
-            })
-            .collect())
     }
 
     /// GitHub's `push` for a branch or a tag that was created, moved, or

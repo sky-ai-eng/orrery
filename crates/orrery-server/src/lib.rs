@@ -30,8 +30,8 @@ use axum::{Router, middleware};
 use base64::Engine as _;
 use orrery_face_git::GitFace;
 use orrery_face_github::GithubFace;
-use orrery_face_github::layout::Landing;
 pub use orrery_face_github::layout::Layout;
+use orrery_face_github::layout::{GRAPHQL_PATH, Landing, REST_PATH, under};
 use orrery_world::World;
 
 mod alerts;
@@ -220,10 +220,10 @@ pub fn routers(
         stopping,
     };
 
-    // GraphQL mounts at the GHES address — `/api/graphql`, a sibling of
-    // `/api/v3`, never nested under it. Consumers derive it exactly there.
+    // GraphQL mounts at the GHES address, a sibling of the REST root, never
+    // nested under it. Consumers derive it exactly there.
     let graphql = Router::new()
-        .route("/api/graphql", axum::routing::post(graphql_handler))
+        .route(GRAPHQL_PATH, axum::routing::post(graphql_handler))
         .with_state(state.clone());
 
     // The OAuth web flow lives on the web host and authenticates with client
@@ -247,7 +247,7 @@ pub fn routers(
     let faces = Router::new()
         .merge(orrery_face_git::router(git))
         .nest(
-            "/api/v3",
+            REST_PATH,
             orrery_face_github::router(github).fallback(not_mocked),
         )
         .merge(graphql)
@@ -293,44 +293,56 @@ fn by_host(app: Router, layout: Layout) -> Router {
 
 async fn land(State(layout): State<Arc<Layout>>, mut req: Request, next: Next) -> Response<Body> {
     let host = request_host(&req);
-    let path_and_query = req
-        .uri()
-        .path_and_query()
-        .map_or("/", PathAndQuery::as_str)
-        .to_string();
-    match layout.landing(host.as_deref(), &path_and_query) {
-        Landing::Own | Landing::Web => next.run(req).await,
+    let landing = {
+        let path_and_query = req.uri().path_and_query().map_or("/", PathAndQuery::as_str);
+        layout.landing(host.as_deref(), path_and_query)
+    };
+    match landing {
+        Landing::Own => next.run(req).await,
+        // The control plane is the world's own host's, never github.com's.
+        Landing::Web if under(req.uri().path(), CONTROL_PREFIX) => not_served(&req, host),
+        Landing::Web => next.run(req).await,
         Landing::Api(served) => {
             let mut parts = req.uri().clone().into_parts();
             match served.parse::<PathAndQuery>() {
                 Ok(served) => parts.path_and_query = Some(served),
-                Err(_) => return not_served(&req, host.as_deref()),
+                Err(_) => return not_served(&req, host),
             }
             match Uri::from_parts(parts) {
                 Ok(uri) => *req.uri_mut() = uri,
-                Err(_) => return not_served(&req, host.as_deref()),
+                Err(_) => return not_served(&req, host),
             }
             next.run(req).await
         }
-        Landing::NotServed => not_served(&req, host.as_deref()),
+        Landing::NotServed => not_served(&req, host),
     }
 }
 
-fn not_served(req: &Request, host: Option<&str>) -> Response<Body> {
-    orrery_face_github::not_mocked_on(req.method().as_str(), host.unwrap_or(""), req.uri().path())
+fn not_served(req: &Request, host: Option<String>) -> Response<Body> {
+    orrery_face_github::not_mocked_on(
+        req.method().as_str(),
+        host.as_deref().unwrap_or(""),
+        req.uri().path(),
+    )
 }
 
-/// The host a request names: its URI's authority when it carries one, as an
-/// HTTP/2 request and an absolute-form request do, and its `Host` header
-/// otherwise.
+/// The name of the host a request names, in lower case, without a port, the
+/// trailing dot of a fully qualified name, or any user information: from its
+/// URI's authority when it carries one, as an HTTP/2 request and an
+/// absolute-form request do, and from its `Host` header otherwise.
 fn request_host(req: &Request) -> Option<String> {
-    if let Some(authority) = req.uri().authority() {
-        return Some(authority.as_str().to_string());
-    }
-    req.headers()
-        .get(axum::http::header::HOST)
-        .and_then(|host| host.to_str().ok())
-        .map(str::to_string)
+    let authority = match req.uri().authority() {
+        Some(authority) => authority.clone(),
+        None => req
+            .headers()
+            .get(axum::http::header::HOST)?
+            .to_str()
+            .ok()?
+            .parse::<axum::http::uri::Authority>()
+            .ok()?,
+    };
+    let host = authority.host();
+    Some(host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase())
 }
 
 /// Serve until `stop` resolves ([`Stop::requested`]), then stop accepting

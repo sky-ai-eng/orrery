@@ -276,25 +276,31 @@ struct ServerConfig {
 impl ServerConfig {
     /// The rules that span fields, which serde checks none of.
     fn check(&self) -> anyhow::Result<()> {
-        let fds: Vec<(&str, &str)> = [
+        let listeners = [
             ("listen", &self.listen),
             ("control_listen", &self.control_listen),
             ("tls_listen", &self.tls_listen),
             ("proxy_listen", &self.proxy_listen),
-        ]
-        .into_iter()
-        .filter_map(|(key, listen)| match listen {
-            Some(Listen::Fd(name)) => Some((key, name.as_str())),
+        ];
+        let named = |pick: fn(&Listen) -> Option<String>| -> Vec<(&str, String)> {
+            listeners
+                .iter()
+                .filter_map(|(key, listen)| Some((*key, pick(listen.as_ref()?)?)))
+                .collect()
+        };
+        // A passed name and a socket path are checked here, before a world
+        // is opened. Two passed names can still be one socket, which only
+        // binding shows.
+        let fds = named(|l| match l {
+            Listen::Fd(name) => Some(format!("fd:{name}")),
             _ => None,
-        })
-        .collect();
-        for (i, (key, name)) in fds.iter().enumerate() {
-            if let Some((other, _)) = fds[i + 1..].iter().find(|(_, n)| n == name) {
-                anyhow::bail!(
-                    "server.{key} and server.{other} both name fd:{name}: each needs a socket of its own"
-                );
-            }
-        }
+        });
+        distinct(&fds, "both name")?;
+        let paths = named(|l| match l {
+            Listen::Unix(path) => Some(format!("unix:{}", path.display())),
+            _ => None,
+        });
+        distinct(&paths, "are both")?;
         anyhow::ensure!(
             self.tls_cert.is_some() == self.tls_key.is_some(),
             "server.tls_cert and server.tls_key are set together, or neither is"
@@ -312,8 +318,56 @@ impl ServerConfig {
             self.proxy_listen.is_none() || matches!(self.layout, LayoutChoice::GitHubCom),
             "server.proxy_listen needs server.layout = \"github.com\": the proxy reaches only GitHub's hosts, which only that layout serves"
         );
+        // Under GitHub Enterprise Server's layout every URL starts with
+        // base_url, so the one derived from the plain listener would send
+        // a client that came over TLS back to plain HTTP.
+        anyhow::ensure!(
+            self.tls_listen.is_none()
+                || matches!(self.layout, LayoutChoice::GitHubCom)
+                || self.base_url.is_some(),
+            "server.tls_listen under the \"enterprise-server\" layout needs server.base_url, the URL clients reach the world at"
+        );
         Ok(())
     }
+
+    /// The rules a certificate must meet to be served, which only reading
+    /// it shows: it names each host a client will ask the world for.
+    fn check_certificate(
+        &self,
+        certificate: &orrery_server::tls::Certificate,
+    ) -> anyhow::Result<()> {
+        let hosts: Vec<String> = match self.layout {
+            LayoutChoice::GitHubCom => vec!["api.github.com".to_string(), "github.com".to_string()],
+            LayoutChoice::EnterpriseServer => self
+                .base_url
+                .as_deref()
+                .and_then(|url| url.parse::<axum::http::Uri>().ok())
+                .filter(|uri| uri.scheme_str() == Some("https"))
+                .and_then(|uri| uri.host().map(str::to_string))
+                .into_iter()
+                .collect(),
+        };
+        for host in hosts {
+            anyhow::ensure!(
+                certificate.names(&host),
+                "server.tls_cert does not name {host}, so a client asking for it would refuse the world"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Fail naming the first two keys that share a value, as "server.a and
+/// server.b {relation} value".
+fn distinct(named: &[(&str, String)], relation: &str) -> anyhow::Result<()> {
+    for (i, (key, value)) in named.iter().enumerate() {
+        if let Some((other, _)) = named[i + 1..].iter().find(|(_, v)| v == value) {
+            anyhow::bail!(
+                "server.{key} and server.{other} {relation} {value}: each needs a socket of its own"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// How the one thing a world sends, a webhook delivery, is sent
@@ -470,40 +524,38 @@ async fn run(
     }
 }
 
-/// How a TLS listener's connections start.
-#[derive(Clone, Copy)]
-enum Tls {
-    Direct,
-    Proxy,
+/// A listener served over TLS: the listener, the faces it serves, and the
+/// certificate it serves them with.
+struct TlsServed {
+    listener: Listener,
+    app: axum::Router,
+    certificate: orrery_server::tls::Certificate,
 }
 
-/// Serve `app` on `listener` over TLS, from the first byte or through the
-/// HTTPS proxy. With no listener there is nothing to serve, and it returns.
+/// Serve `served` over TLS as `mode` says, or return at once with nothing to
+/// serve.
 async fn run_tls(
-    listener: Option<Listener>,
-    tls: Tls,
-    app: Option<axum::Router>,
-    certificate: Option<&orrery_server::tls::Certificate>,
+    served: Option<TlsServed>,
+    mode: orrery_server::tls::Mode,
     stop: &orrery_server::Stop,
 ) -> std::io::Result<()> {
     use orrery_server::tls::TlsListener;
 
-    let (Some(listener), Some(app), Some(cert)) = (listener, app, certificate) else {
+    let Some(TlsServed {
+        listener,
+        app,
+        certificate,
+    }) = served
+    else {
         return Ok(());
     };
     let requested = stop.requested();
-    match (listener, tls) {
-        (Listener::Tcp(l, _), Tls::Direct) => {
-            orrery_server::run(TlsListener::direct(l, cert), app, requested).await
+    match listener {
+        Listener::Tcp(l, _) => {
+            orrery_server::run(TlsListener::new(l, &certificate, mode), app, requested).await
         }
-        (Listener::Tcp(l, _), Tls::Proxy) => {
-            orrery_server::run(TlsListener::proxy(l, cert), app, requested).await
-        }
-        (Listener::Unix(l, _), Tls::Direct) => {
-            orrery_server::run(TlsListener::direct(l, cert), app, requested).await
-        }
-        (Listener::Unix(l, _), Tls::Proxy) => {
-            orrery_server::run(TlsListener::proxy(l, cert), app, requested).await
+        Listener::Unix(l, _) => {
+            orrery_server::run(TlsListener::new(l, &certificate, mode), app, requested).await
         }
     }
 }
@@ -808,6 +860,12 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         ),
         _ => None,
     };
+    if let Some(certificate) = &certificate {
+        config
+            .server
+            .check_certificate(certificate)
+            .with_context(|| format!("checking config {}", config_path.display()))?;
+    }
 
     let clock = new_clock(
         config.instance.clock,
@@ -839,7 +897,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
     let proxy_listener = bind_optional(config.server.proxy_listen.as_ref()).await?;
     // Two passed descriptors can be one socket, and two listeners would then
     // accept from one queue.
-    let sockets: Vec<(&str, &PathBuf)> = [
+    let sockets: Vec<(&str, String)> = [
         ("listen", Some(&listener)),
         ("control_listen", control.as_ref()),
         ("tls_listen", tls_listener.as_ref()),
@@ -847,18 +905,11 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
     ]
     .into_iter()
     .filter_map(|(key, bound)| match bound {
-        Some(Listener::Unix(_, path)) => Some((key, path)),
+        Some(bound @ Listener::Unix(..)) => Some((key, bound.to_string())),
         _ => None,
     })
     .collect();
-    for (i, (key, path)) in sockets.iter().enumerate() {
-        if let Some((other, _)) = sockets[i + 1..].iter().find(|(_, p)| p == path) {
-            anyhow::bail!(
-                "server.{key} and server.{other} are both unix:{}: each needs a socket of its own",
-                path.display()
-            );
-        }
-    }
+    distinct(&sockets, "are both")?;
     // A push is recorded only by the process serving it, so a process that
     // died mid-push can have left refs its log does not describe. This runs
     // once every listener is bound, because a second `serve` of an instance
@@ -872,6 +923,8 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         world = %world_root.display(),
         listen = %listener,
         control = %control.as_ref().map_or_else(|| format!("{listener}/_orrery"), ToString::to_string),
+        tls_listen = %tls_listener.as_ref().map_or_else(|| "none".to_string(), ToString::to_string),
+        proxy_listen = %proxy_listener.as_ref().map_or_else(|| "none".to_string(), ToString::to_string),
         %base_url,
         layout = config.server.layout.name(),
         egress = %outbound.egress(),
@@ -905,8 +958,20 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         .and_then(|()| stdout.flush())
         .context("writing the ready line to stdout")?;
     // The TLS listeners serve the faces alone, never the control plane.
-    let tls_faces = tls_listener.as_ref().map(|_| routers.faces());
-    let proxy_faces = proxy_listener.as_ref().map(|_| routers.faces());
+    // `check` has refused a TLS listener with no certificate.
+    let tls_served = |listener: Option<Listener>| -> anyhow::Result<Option<TlsServed>> {
+        match (listener, &certificate) {
+            (None, _) => Ok(None),
+            (Some(listener), Some(certificate)) => Ok(Some(TlsServed {
+                listener,
+                app: routers.faces(),
+                certificate: certificate.clone(),
+            })),
+            (Some(listener), None) => anyhow::bail!("{listener} serves TLS with no certificate"),
+        }
+    };
+    let tls_served_direct = tls_served(tls_listener)?;
+    let tls_served_proxy = tls_served(proxy_listener)?;
     let serving = async {
         let plain = async {
             match control {
@@ -921,11 +986,10 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
                 }
             }
         };
-        let cert = certificate.as_ref();
         tokio::try_join!(
             plain,
-            run_tls(tls_listener, Tls::Direct, tls_faces, cert, &stop),
-            run_tls(proxy_listener, Tls::Proxy, proxy_faces, cert, &stop),
+            run_tls(tls_served_direct, orrery_server::tls::Mode::Direct, &stop),
+            run_tls(tls_served_proxy, orrery_server::tls::Mode::Proxy, &stop),
         )
         .map(|_| ())
     };

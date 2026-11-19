@@ -194,6 +194,36 @@ async fn what_github_com_does_not_serve_is_not_mocked() {
             None => assert!(answer["orrery"].get("host").is_none(), "{host} {path}"),
         }
     }
+
+    // A refusal the host decides comes before any token is read, and names
+    // the host by its name alone, in lower case.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    for (host, path, named) in [
+        (
+            "codeload.github.com",
+            "/alice/webapp/tar.gz/main",
+            "codeload.github.com",
+        ),
+        (
+            "CodeLoad.GitHub.com.:443",
+            "/alice/webapp/tar.gz/main",
+            "codeload.github.com",
+        ),
+        ("github.com", "/_orrery/healthz", "github.com"),
+        ("github.com.", "/api/v3/user", "github.com"),
+    ] {
+        let mut resp = agent
+            .get(&format!("{}{path}", inst.base))
+            .header("host", host)
+            .call()
+            .unwrap();
+        let answer: Value = resp.body_mut().read_json().unwrap();
+        assert_eq!(resp.status().as_u16(), 501, "{host} {path}: {answer}");
+        assert_eq!(answer["orrery"]["host"], named, "{host} {path}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

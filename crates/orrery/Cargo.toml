@@ -38,6 +38,8 @@ orrery-world = { workspace = true, features = ["test-support"] }
 rcgen.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+# A TLS client for the TLS listeners and the proxy.
+ureq.workspace = true
 
 [lints]
 workspace = true

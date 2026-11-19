@@ -66,11 +66,12 @@ pub async fn boot_at(dir: tempfile::TempDir, world_root: &Path) -> Instance {
 /// names `api.github.com` or `github.com`, and a request finds its surface by
 /// the host it names. `base` is still the listener's own origin.
 pub async fn boot_github_com() -> Instance {
+    boot_github_com_with(orrery_server::Options::default()).await
+}
+
+pub async fn boot_github_com_with(options: orrery_server::Options) -> Instance {
     let (dir, world) = create(&WorldSecret::LOCAL);
-    serve_as(dir, world, orrery_server::Options::default(), |_| {
-        orrery_server::Layout::github_com()
-    })
-    .await
+    serve_as(dir, world, options, |_| orrery_server::Layout::github_com()).await
 }
 
 /// Boot a local world with the control plane on a listener of its own, as
@@ -175,11 +176,33 @@ pub fn git_output(cwd: &Path, clock_unix: i64, args: &[&str]) -> Output {
         .expect("spawn git")
 }
 
+/// The environment variables through which a caller's own proxy and TLS
+/// settings would reach a client a test runs. Each is removed, so a test's
+/// client reaches only the world, trusting only what the test gives it.
+pub const CLIENT_NETWORK_VARS: [&str; 13] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "GIT_SSL_CAINFO",
+    "GIT_SSL_CAPATH",
+    "GIT_SSL_NO_VERIFY",
+    "GIT_SSL_CERT",
+    "GIT_SSL_KEY",
+];
+
 /// The hermetic git command [`git`] runs, for a test that adds to its
-/// environment.
+/// arguments or environment.
 pub fn git_command(cwd: &Path, clock_unix: i64) -> Command {
     let date = format!("{clock_unix} +0000");
     let mut command = Command::new("git");
+    for var in CLIENT_NETWORK_VARS {
+        command.env_remove(var);
+    }
     command
         .current_dir(cwd)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -479,12 +502,16 @@ pub async fn boot_github_com_tls() -> (Instance, GithubTls) {
         orrery_server::Options::default(),
     );
     let direct_server = orrery_server::run(
-        orrery_server::tls::TlsListener::direct(direct, &certificate),
+        orrery_server::tls::TlsListener::new(
+            direct,
+            &certificate,
+            orrery_server::tls::Mode::Direct,
+        ),
         routers.faces(),
         std::future::pending(),
     );
     let proxy_server = orrery_server::run(
-        orrery_server::tls::TlsListener::proxy(proxy, &certificate),
+        orrery_server::tls::TlsListener::new(proxy, &certificate, orrery_server::tls::Mode::Proxy),
         routers.faces(),
         std::future::pending(),
     );

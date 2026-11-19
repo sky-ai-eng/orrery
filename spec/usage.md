@@ -105,7 +105,7 @@ curl -X POST $C/diff -d '{"from":"before","to":"after"}'   # → branch pushed, 
 | Repositories | `repos_created`, `repos_deleted`, `default_branch_changes`, `ref_changes` |
 | Pulls | `pulls_opened`, `pulls_closed`, `pulls_reopened`, `pulls_merged`, `pulls_synchronized`, `pulls_edited` (title, body, base), `pulls_ready_for_review` (with who marked it), `pulls_converted_to_draft`, `labels_added`, `labels_removed` |
 | Review | `review_requests_added`, `review_requests_removed` (each naming `{"user": login}` or `{"team": "org/slug"}`), `reviews_added`, `comments_added` |
-| Checks | `check_runs_added`, `check_runs_updated` |
+| Checks | `check_runs_added`, `check_runs_updated`, `check_suites_added`, `check_suites_updated` (each suite as the later side holds it: repository, commit, whose check runs it holds, and the status and conclusion they come to) |
 | Dependabot alerts | `dependency_alerts_added` (repository, number, package, severity, and state), `dependency_alerts_changed` (an alert whose state is another, with both), `dependency_alert_updates_changed` (an alert about which the updater did something else, as `none`, `pending`, `pull_request`, or `error`), `dependency_alerts_turned_on` and `dependency_alerts_turned_off` (the repositories) |
 | Organizations | `org_memberships_added`, `org_memberships_removed`, `org_roles_changed`, `teams_created`, `teams_deleted`, `team_memberships_added`, `team_memberships_removed`, `team_roles_changed` |
 | Log | `log` — the newest `seq` both sides' logs hold (`shared_seq`), and how many of `to`'s events follow it (`appended`), counted, since `seq` has gaps. Each side's own newest is its `last_seq`, beside its name and `clock_unix` in `from` and `to` |
@@ -204,13 +204,15 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
   -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=github.com" \
   -keyout github-hosts-key.pem -out github-hosts.csr
-openssl x509 -req -in github-hosts.csr -CA ca.pem -CAkey ca-key.pem -days 30 -out github-hosts.pem \
-  -extfile <(printf 'subjectAltName=DNS:github.com,DNS:api.github.com,DNS:codeload.github.com,DNS:uploads.github.com,DNS:raw.githubusercontent.com\nextendedKeyUsage=serverAuth\n')
+printf 'subjectAltName=DNS:github.com,DNS:api.github.com,DNS:codeload.github.com,DNS:uploads.github.com,DNS:raw.githubusercontent.com\nextendedKeyUsage=serverAuth\n' \
+  > github-hosts.ext
+openssl x509 -req -in github-hosts.csr -CA ca.pem -CAkey ca-key.pem -days 30 \
+  -extfile github-hosts.ext -out github-hosts.pem
 ```
 
 A client trusts `ca.pem` beside its usual roots, not in place of them, or every other HTTPS call it makes fails. A container adds it to its image's trust store (`update-ca-certificates`), and Node takes it in `NODE_EXTRA_CA_CERTS`. `SSL_CERT_FILE`, which Go, OpenSSL, and curl read, replaces their roots, so it names a bundle of the system's roots and `ca.pem` together; git's `http.sslCAInfo` and `GIT_SSL_CAINFO` replace its roots the same way. Anyone holding the authority's key can stand in for GitHub wherever the authority is trusted, so it is trusted only where the system under test runs.
 
-**The proxy.** `server.proxy_listen` is an HTTPS proxy for GitHub's hosts. A client sends it `CONNECT` to a host in `github.com` or `githubusercontent.com` on port 443, the world answers `200`, and the client speaks TLS to the world inside the tunnel as it would to GitHub. A client finds it through `HTTPS_PROXY`, which Go, git, curl, and Python's `requests` read; some runtimes, Node among them, read it only when told to. The proxy opens no connection of its own (rule 6). A `CONNECT` to any other host or port is `403`, with a message naming the target and `NO_PROXY`, and any other request is `405`; both close the connection. So a client that also reaches other hosts lists them in `NO_PROXY`. The proxy needs `server.layout = "github.com"`, the one layout that serves GitHub's hosts.
+**The proxy.** `server.proxy_listen` is an HTTPS proxy for GitHub's hosts. A client sends it `CONNECT` to a host in `github.com` or `githubusercontent.com` on port 443 that the certificate names, the world answers `200`, and the client speaks TLS to the world inside the tunnel as it would to GitHub. A client finds it through `HTTPS_PROXY`, which Go, git, curl, and Python's `requests` read; some runtimes, Node among them, read it only when told to. The proxy opens no connection of its own (rule 6). A `CONNECT` to any other host or port is `403`, with a message naming the target and `NO_PROXY`; one to a GitHub host the certificate does not name is `403` saying so, since the client would refuse the tunnel's TLS; and any other request is `405` with `Allow: CONNECT`. Each closes the connection, and the world logs it. So a client that also reaches other hosts lists them in `NO_PROXY`. The proxy needs `server.layout = "github.com"`, the one layout that serves GitHub's hosts.
 
 **The TLS listener.** `server.tls_listen` serves the faces over TLS from the first byte, for a client that resolves GitHub's hosts to the world. In compose, the world's service takes them as network aliases and listens on port 443:
 
@@ -222,9 +224,9 @@ services:
         aliases: [github.com, api.github.com, codeload.github.com]
 ```
 
-It serves under either layout, so a world under GitHub Enterprise Server's layout can be reached over HTTPS at its own name too.
+It serves under either layout, so a world under GitHub Enterprise Server's layout can be reached over HTTPS at its own name too. That layout starts every URL with `base_url`, so it then needs `base_url` set, to the HTTPS URL clients reach the world at.
 
-Neither TLS listener serves the control plane. `serve` refuses, before it opens a world, `tls_cert` without `tls_key` or the reverse, a certificate no TLS listener serves, a TLS listener with no certificate, a certificate it can't read or serve, and the proxy under GitHub Enterprise Server's layout.
+Neither TLS listener serves the control plane. `serve` refuses, before it opens a world: `tls_cert` without `tls_key` or the reverse; a certificate no TLS listener serves, or a TLS listener with no certificate; a certificate it can't read or serve, or one that does not name the hosts a client will ask for (`api.github.com` and `github.com` under github.com's layout, and an `https` `base_url`'s host under GitHub Enterprise Server's); `tls_listen` under GitHub Enterprise Server's layout with no `base_url`; the proxy under GitHub Enterprise Server's layout; and two listeners on one socket.
 
 **What this does not reach:**
 

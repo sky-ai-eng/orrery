@@ -23,6 +23,7 @@ use orrery_world::{
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
 use serde::Deserialize as _;
 
+use crate::layout::rest;
 use crate::reads::{page_params, paginate};
 use crate::render::{actor_json, owner_type, repo_json, rfc3339};
 use crate::{GithubFace, github_error, internal, json_response, media, resolve_repo};
@@ -58,42 +59,42 @@ const JWT_EXP_TOO_FAR: &str = "'Expiration time' claim ('exp') is too far in the
 /// never told they are bad.
 pub fn app_router(face: GithubFace) -> Router {
     let as_app = Router::new()
-        .route("/api/v3/app", get(get_app))
-        .route("/api/v3/app/installations", get(list_installations))
+        .route(&rest("/app"), get(get_app))
+        .route(&rest("/app/installations"), get(list_installations))
         .route(
-            "/api/v3/app/installations/{id}",
+            &rest("/app/installations/{id}"),
             get(get_installation).delete(delete_installation),
         )
         .route(
-            "/api/v3/app/installations/{id}/access_tokens",
+            &rest("/app/installations/{id}/access_tokens"),
             post(create_token),
         )
         .route(
-            "/api/v3/app/installations/{id}/suspended",
+            &rest("/app/installations/{id}/suspended"),
             put(suspend_installation).delete(unsuspend_installation),
         )
         .route(
-            "/api/v3/app/hook/config",
+            &rest("/app/hook/config"),
             get(crate::webhooks::get_config).patch(crate::webhooks::patch_config),
         )
         .route(
-            "/api/v3/app/hook/deliveries",
+            &rest("/app/hook/deliveries"),
             get(crate::webhooks::list_deliveries),
         )
         .route(
-            "/api/v3/app/hook/deliveries/{id}/attempts",
+            &rest("/app/hook/deliveries/{id}/attempts"),
             post(crate::webhooks::redeliver),
         )
-        .route("/api/v3/app/", any(not_mocked))
-        .route("/api/v3/app/{*rest}", any(not_mocked))
-        .route("/api/v3/repos/{owner}/{repo}/installation", any(not_mocked))
-        .route("/api/v3/orgs/{org}/installation", any(not_mocked))
-        .route("/api/v3/users/{username}/installation", any(not_mocked))
+        .route(&rest("/app/"), any(not_mocked))
+        .route(&rest("/app/{*rest}"), any(not_mocked))
+        .route(&rest("/repos/{owner}/{repo}/installation"), any(not_mocked))
+        .route(&rest("/orgs/{org}/installation"), any(not_mocked))
+        .route(&rest("/users/{username}/installation"), any(not_mocked))
         .method_not_allowed_fallback(not_mocked)
         .layer(middleware::from_fn_with_state(face.clone(), authenticate));
     let as_client = Router::new()
-        .route("/api/v3/applications/{client_id}/token", post(check_token))
-        .route("/api/v3/applications/{client_id}/{*rest}", any(not_mocked))
+        .route(&rest("/applications/{client_id}/token"), post(check_token))
+        .route(&rest("/applications/{client_id}/{*rest}"), any(not_mocked))
         .method_not_allowed_fallback(not_mocked)
         .layer(middleware::from_fn_with_state(
             face.clone(),

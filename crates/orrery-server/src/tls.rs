@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use axum::serve::Listener;
 use rustls_pki_types::pem::PemObject as _;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
@@ -23,6 +23,8 @@ use tokio_rustls::server::TlsStream;
 #[derive(Clone)]
 pub struct Certificate {
     acceptor: TlsAcceptor,
+    /// The served certificate, first in its chain.
+    leaf: Arc<CertificateDer<'static>>,
 }
 
 /// A certificate and key that can't be served.
@@ -55,11 +57,11 @@ impl Certificate {
             .map_err(read(cert))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(read(cert))?;
-        if chain.is_empty() {
+        let Some(leaf) = chain.first().cloned() else {
             return Err(CertificateError::NoCertificate {
                 path: cert.to_path_buf(),
             });
-        }
+        };
         let private = PrivateKeyDer::from_pem_file(key).map_err(read(key))?;
         let unusable = |source| CertificateError::Unusable {
             cert: cert.to_path_buf(),
@@ -78,7 +80,20 @@ impl Certificate {
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(Certificate {
             acceptor: TlsAcceptor::from(Arc::new(config)),
+            leaf: Arc::new(leaf),
         })
+    }
+
+    /// Whether the served certificate names `host`, a DNS name or an IP
+    /// address, so a client asking for it accepts the certificate's name.
+    pub fn names(&self, host: &str) -> bool {
+        let Ok(cert) = webpki::EndEntityCert::try_from(self.leaf.as_ref()) else {
+            return false;
+        };
+        let Ok(name) = ServerName::try_from(host) else {
+            return false;
+        };
+        cert.verify_is_valid_for_subject_name(&name).is_ok()
     }
 }
 
@@ -90,9 +105,16 @@ const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
 /// The most a `CONNECT` request's head may hold.
 const MAX_CONNECT_HEAD: usize = 16 * 1024;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
+/// How a [`TlsListener`]'s connections start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// TLS from the first byte, as a client that resolves GitHub's hosts to
+    /// the world sends.
     Direct,
+    /// An HTTPS proxy for GitHub's hosts: a connection opens with `CONNECT`
+    /// to one of them on port 443 that the certificate names, then speaks
+    /// TLS inside the tunnel. A `CONNECT` anywhere else, or any other
+    /// request, is refused, and Orrery opens no connection of its own.
     Proxy,
 }
 
@@ -109,49 +131,41 @@ where
     L: Listener,
     L::Addr: Clone + Sync,
 {
-    /// Connections that speak TLS from their first byte, as a client that
-    /// resolves GitHub's hosts to the world sends.
-    pub fn direct(inner: L, certificate: &Certificate) -> TlsListener<L> {
-        TlsListener::start(inner, certificate, Mode::Direct)
-    }
-
-    /// An HTTPS proxy for GitHub's hosts: a connection opens with `CONNECT`
-    /// to one of them on port 443, then speaks TLS inside the tunnel. A
-    /// `CONNECT` to any other host, or any other request, is refused, and
-    /// Orrery opens no connection of its own.
-    pub fn proxy(inner: L, certificate: &Certificate) -> TlsListener<L> {
-        TlsListener::start(inner, certificate, Mode::Proxy)
-    }
-
-    fn start(mut inner: L, certificate: &Certificate, mode: Mode) -> TlsListener<L> {
+    pub fn new(mut inner: L, certificate: &Certificate, mode: Mode) -> TlsListener<L> {
         let local_addr = inner.local_addr().ok();
         let (tx, accepted) = mpsc::channel(64);
-        let acceptor = certificate.acceptor.clone();
-        // Ends when `axum::serve` drops this listener, as it does once it
-        // stops accepting, and drops `inner` with it.
+        let certificate = certificate.clone();
+        // The task accepts until this listener, which holds the receiving
+        // end, is dropped, then drops `inner`, which closes its socket.
         tokio::spawn(async move {
             loop {
                 let (io, addr) = tokio::select! {
                     () = tx.closed() => return,
                     accepted = inner.accept() => accepted,
                 };
-                let (acceptor, tx) = (acceptor.clone(), tx.clone());
+                let (certificate, tx) = (certificate.clone(), tx.clone());
                 tokio::spawn(async move {
                     let started = tokio::time::timeout(HANDSHAKE_LIMIT, async {
                         let mut io = io;
                         if mode == Mode::Proxy {
-                            open_tunnel(&mut io).await?;
+                            open_tunnel(&mut io, &certificate).await?;
                         }
-                        acceptor.accept(io).await
+                        certificate.acceptor.accept(io).await
                     });
                     match started.await {
                         Ok(Ok(tls)) => {
                             let _ = tx.send((tls, addr)).await;
                         }
-                        Ok(Err(e)) => {
-                            tracing::debug!(error = %e, "a TLS connection ended before its first request")
-                        }
-                        Err(_) => tracing::debug!("a TLS connection did not start in time"),
+                        // A refusal has said why already.
+                        Ok(Err(e)) if e.get_ref().is_some_and(|e| e.is::<Refused>()) => {}
+                        Ok(Err(e)) => tracing::warn!(
+                            error = %e,
+                            "a TLS connection failed before its first request: a client that does not trust the world's certificate, or that does not speak TLS, ends here"
+                        ),
+                        Err(_) => tracing::warn!(
+                            limit_secs = HANDSHAKE_LIMIT.as_secs(),
+                            "a TLS connection did not start in time"
+                        ),
                     }
                 });
             }
@@ -186,10 +200,16 @@ where
     }
 }
 
+/// A proxy request [`refuse`] answered.
+#[derive(Debug, thiserror::Error)]
+#[error("the proxy refused the request")]
+struct Refused;
+
 /// Read the request that opens a tunnel and answer it: `200` for a `CONNECT`
-/// to one of GitHub's hosts on port 443, after which the client speaks TLS,
-/// and a refusal for anything else, after which the connection closes.
-async fn open_tunnel<Io>(io: &mut Io) -> io::Result<()>
+/// to one of GitHub's hosts on port 443 that `certificate` names, after
+/// which the client speaks TLS, and a refusal for anything else, after which
+/// the connection closes.
+async fn open_tunnel<Io>(io: &mut Io, certificate: &Certificate) -> io::Result<()>
 where
     Io: AsyncRead + AsyncWrite + Unpin,
 {
@@ -211,63 +231,71 @@ where
             }
             Ok(httparse::Status::Partial) if head.len() < MAX_CONNECT_HEAD => {}
             Ok(httparse::Status::Partial) => {
-                return refuse(
-                    io,
+                return Refusal::new(
                     431,
                     "Request Header Fields Too Large",
                     "orrery: the proxy request's head is too large".to_string(),
-                    None,
                 )
+                .send(io)
                 .await;
             }
             Err(e) => {
-                return refuse(
-                    io,
+                return Refusal::new(
                     400,
                     "Bad Request",
                     format!("orrery: the proxy request is not HTTP: {e}"),
-                    None,
                 )
+                .send(io)
                 .await;
             }
         }
     };
     if method != "CONNECT" {
-        return refuse(
-            io,
+        return Refusal::new(
             405,
             "Method Not Allowed",
             format!(
                 "orrery: the proxy takes CONNECT to GitHub's hosts only, not {method} {target}"
             ),
-            None,
         )
+        .allow("CONNECT")
+        .send(io)
         .await;
     }
-    let github = target.rsplit_once(':').is_some_and(|(host, port)| {
-        port == "443" && orrery_face_github::layout::is_github_host(host)
-    });
-    if !github {
-        tracing::warn!(%target, "the proxy refused a CONNECT to a host other than GitHub's; a client that reaches other hosts lists them in NO_PROXY");
-        return refuse(
-            io,
+    let host = match target.rsplit_once(':') {
+        Some((host, "443")) if orrery_face_github::layout::is_github_host(host) => {
+            host.strip_suffix('.').unwrap_or(host)
+        }
+        _ => {
+            return Refusal::new(
+                403,
+                "Forbidden",
+                format!("orrery: the proxy reaches only GitHub's hosts, on port 443, not {target}. A client that reaches other hosts lists them in NO_PROXY."),
+            )
+            .target(&target)
+            .send(io)
+            .await;
+        }
+    };
+    if !certificate.names(host) {
+        return Refusal::new(
             403,
             "Forbidden",
-            format!("orrery: the proxy reaches only GitHub's hosts, on port 443, not {target}. A client that reaches other hosts lists them in NO_PROXY."),
-            Some(&target),
+            format!("orrery: the world's certificate does not name {host}, so a client would refuse the tunnel's TLS. A certificate that names it serves it."),
         )
+        .target(&target)
+        .send(io)
         .await;
     }
     // A client waits for the answer before it starts TLS, so nothing may
     // follow the head yet.
     if len != head.len() {
-        return refuse(
-            io,
+        return Refusal::new(
             400,
             "Bad Request",
             "orrery: the proxy request was followed by data before the tunnel opened".to_string(),
-            None,
         )
+        .send(io)
         .await;
     }
     io.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
@@ -275,28 +303,61 @@ where
     io.flush().await
 }
 
-/// Answer a proxy request with `status` and an Orrery error body, and fail,
-/// so the connection closes.
-async fn refuse<Io>(
-    io: &mut Io,
+/// A proxy request's refusal: its status, an Orrery error body, and the
+/// target it names, if any.
+struct Refusal<'a> {
     status: u16,
-    reason: &str,
+    reason: &'a str,
     message: String,
-    target: Option<&str>,
-) -> io::Result<()>
-where
-    Io: AsyncWrite + Unpin,
-{
-    let mut orrery = serde_json::json!({ "proxy_refused": true });
-    if let Some(target) = target {
-        orrery["target"] = serde_json::json!(target);
+    target: Option<&'a str>,
+    allow: Option<&'a str>,
+}
+
+impl<'a> Refusal<'a> {
+    fn new(status: u16, reason: &'a str, message: String) -> Refusal<'a> {
+        Refusal {
+            status,
+            reason,
+            message,
+            target: None,
+            allow: None,
+        }
     }
-    let body = serde_json::json!({ "message": message, "orrery": orrery }).to_string();
-    let answer = format!(
-        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    io.write_all(answer.as_bytes()).await?;
-    io.flush().await?;
-    Err(io::Error::other(message))
+
+    fn target(mut self, target: &'a str) -> Refusal<'a> {
+        self.target = Some(target);
+        self
+    }
+
+    fn allow(mut self, methods: &'a str) -> Refusal<'a> {
+        self.allow = Some(methods);
+        self
+    }
+
+    /// Send the refusal, log it, and fail with [`Refused`], so the
+    /// connection closes.
+    async fn send<Io>(self, io: &mut Io) -> io::Result<()>
+    where
+        Io: AsyncWrite + Unpin,
+    {
+        tracing::warn!(status = self.status, message = %self.message, "the proxy refused a request");
+        let mut orrery = serde_json::json!({ "proxy_refused": true });
+        if let Some(target) = self.target {
+            orrery["target"] = serde_json::json!(target);
+        }
+        let body = serde_json::json!({ "message": self.message, "orrery": orrery }).to_string();
+        let allow = self
+            .allow
+            .map(|methods| format!("allow: {methods}\r\n"))
+            .unwrap_or_default();
+        let answer = format!(
+            "HTTP/1.1 {} {}\r\n{allow}content-type: application/json; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            self.status,
+            self.reason,
+            body.len()
+        );
+        io.write_all(answer.as_bytes()).await?;
+        io.flush().await?;
+        Err(io::Error::other(Refused))
+    }
 }
