@@ -40,6 +40,8 @@ fn split_listeners_serve_over_unix_sockets() {
             base_url: "http://world.test".to_string(),
             listen: format!("unix:{}", faces.display()),
             control: format!("unix:{}", control.display()),
+            tls_listen: None,
+            proxy_listen: None,
         }
     );
     let (faces, control) = (&ready.listen, &ready.control);
@@ -102,6 +104,8 @@ fn split_listeners_serve_over_passed_sockets() {
             base_url: "http://world.test".to_string(),
             listen: format!("unix:{}", sockets[0].1.display()),
             control: format!("unix:{}", sockets[1].1.display()),
+            tls_listen: None,
+            proxy_listen: None,
         }
     );
 
@@ -899,4 +903,102 @@ fn an_unknown_layout_is_refused() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("unknown variant `github`"), "{stderr}");
+}
+
+/// A certificate for GitHub's hosts from an authority made for this test,
+/// written to `dir` as `cert.pem` and `key.pem`; the `[server]` lines that
+/// name them.
+fn github_certificate(dir: &Path) -> String {
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca =
+        rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap()).unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let leaf =
+        rcgen::CertificateParams::new(vec!["github.com".to_string(), "api.github.com".to_string()])
+            .unwrap()
+            .signed_by(&key, &ca)
+            .unwrap();
+    let cert = dir.join("cert.pem");
+    std::fs::write(&cert, leaf.pem()).unwrap();
+    let key_path = dir.join("key.pem");
+    std::fs::write(&key_path, key.serialize_pem()).unwrap();
+    format!("tls_cert = {cert:?}\ntls_key = {key_path:?}\n")
+}
+
+#[test]
+fn the_ready_line_reports_the_tls_listener_and_the_proxy() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = format!(
+        "listen = \"127.0.0.1:0\"\nlayout = \"github.com\"\n{}tls_listen = \"127.0.0.1:0\"\nproxy_listen = \"127.0.0.1:0\"\n",
+        github_certificate(dir.path())
+    );
+    let config = write_config(dir.path(), "", &server);
+    let (_served, ready) = serve(&config, &[]);
+    let tls_listen = ready.tls_listen.clone().unwrap();
+    let proxy = ready.proxy_listen.clone().unwrap();
+    for bound in [&tls_listen, &proxy] {
+        assert!(
+            bound.starts_with("127.0.0.1:") && !bound.ends_with(":0"),
+            "{ready:?}"
+        );
+    }
+    // The proxy answers from the first byte; a tunnel to another host is
+    // refused.
+    let mut stream = std::net::TcpStream::connect(&proxy).unwrap();
+    stream
+        .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+        .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 403 Forbidden\r\n"), "{answer}");
+}
+
+#[test]
+fn tls_settings_that_cannot_be_served_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let cert = github_certificate(dir.path());
+    let missing = format!(
+        "tls_cert = {:?}\ntls_key = {:?}\ntls_listen = \"127.0.0.1:0\"\n",
+        dir.path().join("missing.pem"),
+        dir.path().join("key.pem")
+    );
+    let cases = [
+        (
+            "tls_listen = \"127.0.0.1:0\"\n".to_string(),
+            "need server.tls_cert and server.tls_key",
+        ),
+        (
+            format!(
+                "tls_cert = {:?}\ntls_listen = \"127.0.0.1:0\"\n",
+                dir.path().join("cert.pem")
+            ),
+            "server.tls_cert and server.tls_key are set together",
+        ),
+        (
+            cert.clone(),
+            "neither server.tls_listen nor server.proxy_listen serves it",
+        ),
+        (
+            format!("{cert}proxy_listen = \"127.0.0.1:0\"\n"),
+            "server.proxy_listen needs server.layout = \"github.com\"",
+        ),
+        (missing, "missing.pem"),
+    ];
+    for (server, expected) in cases {
+        let case = tempfile::tempdir().unwrap();
+        let config = write_config(
+            case.path(),
+            "",
+            &format!("listen = \"127.0.0.1:0\"\n{server}"),
+        );
+        let out = refused(orrery_serve(&config, &[]));
+        assert!(!out.status.success(), "{server}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(expected), "{server}: {stderr}");
+        assert!(
+            !case.path().join("instance").exists(),
+            "{server}: no world was created"
+        );
+    }
 }

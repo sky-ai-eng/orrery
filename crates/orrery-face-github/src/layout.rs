@@ -118,7 +118,7 @@ impl Layout {
                 Landing::Web
             };
         }
-        if is_github_domain(host) {
+        if is_github_host(host) {
             return Landing::NotServed;
         }
         Landing::Own
@@ -131,9 +131,11 @@ fn under(path: &str, prefix: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
-/// GitHub's own domains, whose hosts the face either serves or answers as
-/// not served, so a request for one never lands on the world's own host.
-fn is_github_domain(host: &str) -> bool {
+/// Whether `host` (a name, without a port) is in one of GitHub's own
+/// domains, whose hosts the face under github.com's layout either serves or
+/// answers as not served, so a request for one never lands on the world's
+/// own host.
+pub fn is_github_host(host: &str) -> bool {
     ["github.com", "githubusercontent.com"]
         .iter()
         .any(|domain| {

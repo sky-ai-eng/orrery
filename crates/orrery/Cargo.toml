@@ -34,6 +34,8 @@ ureq.workspace = true
 
 [dev-dependencies]
 orrery-world = { workspace = true, features = ["test-support"] }
+# Makes the certificate the TLS listeners are served with.
+rcgen.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 

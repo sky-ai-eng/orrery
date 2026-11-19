@@ -25,6 +25,10 @@ pub struct Ready {
     pub base_url: String,
     pub listen: String,
     pub control: String,
+    #[serde(default)]
+    pub tls_listen: Option<String>,
+    #[serde(default)]
+    pub proxy_listen: Option<String>,
 }
 
 pub struct Served {

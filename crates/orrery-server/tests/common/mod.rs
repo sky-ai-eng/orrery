@@ -169,8 +169,18 @@ pub fn git(cwd: &Path, clock_unix: i64, args: &[&str]) -> String {
 
 /// [`git`] for a run whose failure is the point.
 pub fn git_output(cwd: &Path, clock_unix: i64, args: &[&str]) -> Output {
+    git_command(cwd, clock_unix)
+        .args(args)
+        .output()
+        .expect("spawn git")
+}
+
+/// The hermetic git command [`git`] runs, for a test that adds to its
+/// environment.
+pub fn git_command(cwd: &Path, clock_unix: i64) -> Command {
     let date = format!("{clock_unix} +0000");
-    Command::new("git")
+    let mut command = Command::new("git");
+    command
         .current_dir(cwd)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -180,10 +190,8 @@ pub fn git_output(cwd: &Path, clock_unix: i64, args: &[&str]) -> Output {
         .env("GIT_COMMITTER_NAME", "alice")
         .env("GIT_COMMITTER_EMAIL", "alice@orrery.invalid")
         .env("GIT_AUTHOR_DATE", &date)
-        .env("GIT_COMMITTER_DATE", &date)
-        .args(args)
-        .output()
-        .expect("spawn git")
+        .env("GIT_COMMITTER_DATE", &date);
+    command
 }
 
 pub fn control_post(base: &str, path: &str, body: serde_json::Value) -> serde_json::Value {
@@ -411,4 +419,94 @@ impl AppKey {
             serde_json::json!({ "iss": iss, "iat": now - 60, "exp": now + 540 }),
         )
     }
+}
+
+/// What a client needs to reach a world served as github.com's hosts over
+/// TLS: the authority to trust, and the listeners.
+pub struct GithubTls {
+    /// The test authority's certificate, PEM, which a client trusts.
+    pub ca_pem: std::path::PathBuf,
+    /// `127.0.0.1:<port>` of the listener that speaks TLS from the first
+    /// byte.
+    pub direct: String,
+    /// `127.0.0.1:<port>` of the HTTPS proxy.
+    pub proxy: String,
+    _dir: tempfile::TempDir,
+}
+
+/// Boot a local world under github.com's layout with, beside its plain
+/// listener, a TLS listener and the HTTPS proxy, each serving a certificate
+/// for GitHub's hosts from a test authority made for this world alone.
+pub async fn boot_github_com_tls() -> (Instance, GithubTls) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "orrery test authority");
+    params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+    ];
+    let ca =
+        rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap()).unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let leaf = rcgen::CertificateParams::new(vec![
+        "github.com".to_string(),
+        "api.github.com".to_string(),
+        "codeload.github.com".to_string(),
+    ])
+    .unwrap()
+    .signed_by(&key, &ca)
+    .unwrap();
+    let ca_pem = dir.path().join("ca.pem");
+    std::fs::write(&ca_pem, ca.as_ref().pem()).unwrap();
+    let cert_pem = dir.path().join("cert.pem");
+    std::fs::write(&cert_pem, leaf.pem()).unwrap();
+    let key_pem = dir.path().join("key.pem");
+    std::fs::write(&key_pem, key.serialize_pem()).unwrap();
+    let certificate =
+        orrery_server::tls::Certificate::from_pem_files(&cert_pem, &key_pem).expect("certificate");
+
+    let (instance_dir, world) = create(&WorldSecret::LOCAL);
+    let (plain, base) = bind().await;
+    let (direct, direct_base) = bind().await;
+    let (proxy, proxy_base) = bind().await;
+    let routers = orrery_server::routers(
+        world.clone(),
+        orrery_server::Layout::github_com(),
+        instance_dir.path().join("snapshots"),
+        orrery_server::Options::default(),
+    );
+    let direct_server = orrery_server::run(
+        orrery_server::tls::TlsListener::direct(direct, &certificate),
+        routers.faces(),
+        std::future::pending(),
+    );
+    let proxy_server = orrery_server::run(
+        orrery_server::tls::TlsListener::proxy(proxy, &certificate),
+        routers.faces(),
+        std::future::pending(),
+    );
+    let tasks = vec![
+        spawn_server(plain, routers.combined()),
+        tokio::spawn(async move { direct_server.await.expect("server run") }),
+        tokio::spawn(async move { proxy_server.await.expect("server run") }),
+    ];
+    let strip = |origin: String| origin.strip_prefix("http://").unwrap().to_string();
+    (
+        Instance {
+            dir: instance_dir,
+            world,
+            control: base.clone(),
+            base,
+            tasks,
+        },
+        GithubTls {
+            ca_pem,
+            direct: strip(direct_base),
+            proxy: strip(proxy_base),
+            _dir: dir,
+        },
+    )
 }

@@ -63,6 +63,8 @@ tokio = { version = "1", features = [
     "sync",
     "signal",
 ] }
+# The async TLS a world serves GitHub's hosts over; ring alone, as rustls is.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
