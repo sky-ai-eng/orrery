@@ -48,7 +48,6 @@ pub const BUILD_COMMIT: &str = env!("ORRERY_BUILD_COMMIT");
 #[derive(Clone)]
 pub struct AppState {
     pub world: Arc<World>,
-    pub base_url: String,
     /// The git face's handle, here for its world write gate: snapshot
     /// create/restore hold it exclusively against in-flight git traffic.
     pub git: Arc<GitFace>,
@@ -177,7 +176,7 @@ pub fn routers(
     let github = GithubFace {
         world: world.clone(),
         git: git.clone(),
-        base_url: base_url.clone(),
+        layout: orrery_face_github::Layout::enterprise_server(&base_url),
     };
     // The GitHub face makes the deliveries of every write this world takes
     // from here on, and of its newest write, if a process stopped between
@@ -196,7 +195,6 @@ pub fn routers(
     };
     let state = AppState {
         world: world.clone(),
-        base_url,
         git: git.clone(),
         snapshots_dir,
         schema: orrery_face_github::graphql::schema(github.clone()),

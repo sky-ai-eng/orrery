@@ -417,7 +417,8 @@ pub(crate) async fn get_contents(
     if let Some(refused) = media::refuse_unrendered_except(&headers, "Content", &["object"]) {
         return refused;
     }
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
+    let web = face.layout.web();
     let full_name = repo.full_name();
     let name = path.rsplit('/').next().unwrap_or(&path);
     // GitHub wraps this base64 in newlines; consumers strip them, so the
@@ -432,8 +433,8 @@ pub(crate) async fn get_contents(
             "sha": blob_sha,
             "size": bytes.len(),
             "content": base64::engine::general_purpose::STANDARD.encode(&bytes),
-            "url": format!("{base}/api/v3/repos/{full_name}/contents/{path}"),
-            "html_url": format!("{base}/{full_name}/blob/{rev}/{path}"),
+            "url": format!("{api}/repos/{full_name}/contents/{path}"),
+            "html_url": format!("{web}/{full_name}/blob/{rev}/{path}"),
             "download_url": serde_json::Value::Null,
         }),
     )
@@ -580,11 +581,7 @@ pub(crate) async fn get_branch_ref(
     if let Some(refused) = media::refuse_unrendered(&headers, "Ref") {
         return refused;
     }
-    let api = format!(
-        "{}/api/v3/repos/{}",
-        face.base_url.trim_end_matches('/'),
-        repo.full_name()
-    );
+    let api = format!("{}/repos/{}", face.layout.api(), repo.full_name());
     let body = serde_json::json!({
         "ref": format!("refs/heads/{branch}"),
         "url": format!("{api}/git/refs/heads/{branch}"),

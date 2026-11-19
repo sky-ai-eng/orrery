@@ -1482,10 +1482,9 @@ impl PullRequest {
     }
 
     async fn url(&self, ctx: &Context<'_>) -> String {
-        let base = face(ctx).base_url.trim_end_matches('/');
         format!(
             "{}/{}/pull/{}",
-            base,
+            face(ctx).layout.web(),
             self.repo.full_name(),
             self.pull.number
         )

@@ -343,8 +343,8 @@ async fn list_installations(
         .map(|i| installation_json(&face, i))
         .collect();
     let resp = json_response(StatusCode::OK, serde_json::Value::Array(items));
-    let base = face.base_url.trim_end_matches('/');
-    let url = format!("{base}/api/v3/app/installations");
+    let api = face.layout.api();
+    let url = format!("{api}/app/installations");
     with_link(resp, &url, &query, total as usize)
 }
 
@@ -396,8 +396,8 @@ pub(crate) async fn list_user_installations(
         StatusCode::OK,
         serde_json::json!({ "total_count": total, "installations": items }),
     );
-    let base = face.base_url.trim_end_matches('/');
-    let url = format!("{base}/api/v3/user/installations");
+    let api = face.layout.api();
+    let url = format!("{api}/user/installations");
     with_link(resp, &url, &query, total as usize)
 }
 
@@ -724,8 +724,8 @@ pub(crate) async fn list_installation_repos(
             "repositories": listed,
         }),
     );
-    let base = face.base_url.trim_end_matches('/');
-    let url = format!("{base}/api/v3/installation/repositories");
+    let api = face.layout.api();
+    let url = format!("{api}/installation/repositories");
     with_link(resp, &url, &query, total)
 }
 
@@ -826,8 +826,8 @@ fn permissions_json(permissions: &Permissions) -> serde_json::Value {
 
 /// GitHub's App object.
 pub(crate) fn app_json(face: &GithubFace, app: &App) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
-    let html_url = format!("{base}/apps/{}", app.slug);
+    let web = face.layout.web();
+    let html_url = format!("{web}/apps/{}", app.slug);
     serde_json::json!({
         "id": app.id,
         "slug": app.slug,
@@ -857,24 +857,25 @@ pub(crate) fn installation_json(
     face: &GithubFace,
     installation: &Installation,
 ) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
+    let web = face.layout.web();
     let account = &installation.account;
     let html_url = match account.kind {
         orrery_world::ActorKind::Org => format!(
-            "{base}/organizations/{}/settings/installations/{}",
+            "{web}/organizations/{}/settings/installations/{}",
             account.login, installation.id
         ),
-        _ => format!("{base}/settings/installations/{}", installation.id),
+        _ => format!("{web}/settings/installations/{}", installation.id),
     };
     serde_json::json!({
         "id": installation.id,
         "account": actor_json(account),
         "repository_selection": installation.repository_selection.as_str(),
         "access_tokens_url": format!(
-            "{base}/api/v3/app/installations/{}/access_tokens",
+            "{api}/app/installations/{}/access_tokens",
             installation.id
         ),
-        "repositories_url": format!("{base}/api/v3/installation/repositories"),
+        "repositories_url": format!("{api}/installation/repositories"),
         "html_url": html_url,
         "app_id": installation.app_id,
         "app_slug": installation.app_slug,
