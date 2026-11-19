@@ -19,7 +19,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{HeaderMap, Response, StatusCode, header};
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{delete, get, post, put};
 use orrery_face_git::GitFace;
 use orrery_world::{Actor, ActorKind, Attribution, Caller, Door, Repo, World, WorldError};
 
@@ -38,6 +38,7 @@ mod pulls;
 mod reads;
 mod render;
 mod signing;
+mod suites;
 pub mod webhooks;
 
 pub use layout::Layout;
@@ -179,7 +180,19 @@ pub fn router(face: GithubFace) -> Router {
         )
         .route(
             "/repos/{owner}/{repo}/check-runs/{id}",
-            patch(checks::patch_check_run),
+            get(suites::get_check_run).patch(checks::patch_check_run),
+        )
+        .route(
+            "/repos/{owner}/{repo}/check-suites/{id}",
+            get(suites::get_suite),
+        )
+        .route(
+            "/repos/{owner}/{repo}/check-suites/{id}/check-runs",
+            get(suites::list_suite_runs),
+        )
+        .route(
+            "/repos/{owner}/{repo}/commits/{sha}/check-suites",
+            get(suites::list_suites_for_ref),
         )
         .layer(axum::middleware::from_fn_with_state(
             face.clone(),

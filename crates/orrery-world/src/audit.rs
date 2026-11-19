@@ -375,10 +375,27 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
         ],
     ),
     (
+        "check_suites",
+        &[
+            ("id", Identity),
+            ("repo_id", Identity),
+            ("head_sha", Field("head_sha")),
+            ("head_branch", Field("head_branch")),
+            ("before_sha", Field("before_sha")),
+            ("creator_id", Field("creator")),
+            ("pusher_id", Field("pusher")),
+            ("status", Field("status")),
+            ("conclusion", Field("conclusion")),
+            ("created_clock_unix", Field("created_unix")),
+            ("updated_clock_unix", Field("updated_unix")),
+        ],
+    ),
+    (
         "check_runs",
         &[
             ("id", Identity),
             ("repo_id", Identity),
+            ("suite_id", Field("suite_id")),
             ("head_sha", Field("head_sha")),
             ("name", Field("name")),
             ("status", Field("status")),
@@ -616,6 +633,7 @@ fn subject_of(table: &str, row: &Row) -> (Subject, Option<String>) {
         "reviews" => (s("review", int(row, "id")), None),
         "issue_comments" => (s("comment", int(row, "id")), None),
         "check_runs" => (s("check_run", int(row, "id")), None),
+        "check_suites" => (s("check_suite", int(row, "id")), None),
         "dependency_alerts" => (s("dependency_alert", int(row, "id")), None),
         "ssh_signing_keys" => (s("ssh_signing_key", int(row, "id")), None),
         "commit_verifications" => (

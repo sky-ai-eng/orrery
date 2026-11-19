@@ -20,8 +20,8 @@ use sha2::{Digest, Sha256};
 
 use crate::pulls::pull_by_path_number;
 use crate::render::{
-    MergeRead, MergeRefs, check_run_json, comment_json, full_pull_json, merge_read, org_full_json,
-    pull_json, repo_json, review_json, team_full_json, team_json, test_merge, user_full_json,
+    MergeRead, MergeRefs, comment_json, full_pull_json, merge_read, org_full_json, pull_json,
+    repo_json, review_json, team_full_json, team_json, test_merge, user_full_json,
 };
 use crate::{
     GithubFace, github_error, internal, json_response, media, orrery_unsupported_field, parse_form,
@@ -339,41 +339,29 @@ pub(crate) async fn list_check_runs_for_ref(
         Err(resp) => return *resp,
     };
     // GitHub accepts a sha or a ref name here; a poller sends the PR head sha.
-    let sha = if is_full_sha(&git_ref) {
-        git_ref.clone()
-    } else {
-        let _refs = face.git.read_lock(repo.id).await;
-        let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-        match store::rev_parse(&bare, &format!("refs/heads/{git_ref}")) {
-            Ok(Some(sha)) => sha,
-            Ok(None) => {
-                return github_error(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    &format!("No commit found for ref {git_ref}"),
-                );
-            }
-            Err(e) => return internal(e),
+    let sha = match crate::suites::commit_of(&face, &repo, &git_ref).await {
+        Ok(Some(sha)) => sha,
+        Ok(None) => {
+            return github_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("No commit found for SHA: {git_ref}"),
+            );
         }
+        Err(resp) => return *resp,
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "CheckRun") {
         return refused;
     }
-    let (per_page, page) = page_params(&query.unwrap_or_default());
-    match face.world.list_check_runs_for_sha(repo.id, &sha) {
-        Ok(runs) => {
-            let total = runs.len();
-            let items: Result<Vec<serde_json::Value>, _> = paginate(runs, per_page, page)
-                .iter()
-                .map(|r| check_run_json(&face, &repo, r))
-                .collect();
-            let items = match items {
-                Ok(items) => items,
-                Err(e) => return internal(e),
-            };
-            json_response(
-                StatusCode::OK,
-                serde_json::json!({ "total_count": total, "check_runs": items }),
-            )
+    let query = query.unwrap_or_default();
+    let runs = face
+        .world
+        .list_check_runs_for_sha(repo.id, &sha)
+        .and_then(|runs| crate::suites::filtered(&face, runs, &query));
+    match runs {
+        // GitHub lists a commit's check runs newest first.
+        Ok(mut runs) => {
+            runs.reverse();
+            crate::suites::runs_page(&face, &repo, runs, &query)
         }
         Err(e) => internal(e),
     }
@@ -970,8 +958,4 @@ pub(crate) async fn list_user_repos(
         .map(|r| repo_json(&face, r, &actor))
         .collect();
     json_response(StatusCode::OK, serde_json::Value::Array(items))
-}
-
-fn is_full_sha(s: &str) -> bool {
-    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
