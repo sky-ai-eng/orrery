@@ -44,6 +44,14 @@ pub enum PullRequestState {
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
+pub enum RepositoryVulnerabilityAlertState {
+    Open,
+    Fixed,
+    Dismissed,
+    AutoDismissed,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
 pub enum MergeableState {
     Mergeable,
     Conflicting,
@@ -485,6 +493,139 @@ impl Repository {
             id: ID(format!("O_ref_{}_{}", self.repo.id, qualified_name)),
         }))
     }
+
+    /// The repository's Dependabot alerts in `states`, or in any state,
+    /// oldest first. A repository whose alerts are off has none to list, as
+    /// on GitHub, and neither has one an installation token does not reach.
+    async fn vulnerability_alerts(
+        &self,
+        ctx: &Context<'_>,
+        states: Option<Vec<RepositoryVulnerabilityAlertState>>,
+        first: Option<i32>,
+        after: Option<String>,
+    ) -> Result<RepositoryVulnerabilityAlertConnection, Error> {
+        use RepositoryVulnerabilityAlertState as State;
+        page_size("vulnerabilityAlerts", first, None)?;
+        let cap = first.unwrap_or_default() as usize;
+        let world = &face(ctx).world;
+        let mut query = world::AlertQuery {
+            states: states.map(|states| {
+                states
+                    .into_iter()
+                    .map(|state| match state {
+                        State::Open => world::AlertState::Open,
+                        State::Fixed => world::AlertState::Fixed,
+                        State::Dismissed => world::AlertState::Dismissed,
+                        State::AutoDismissed => world::AlertState::AutoDismissed,
+                    })
+                    .collect()
+            }),
+            ascending: true,
+            ..world::AlertQuery::default()
+        };
+        // A cursor names the alert a page ended at, by its number.
+        if let Some(a) = after {
+            let ended_at = match cursor_id(&a) {
+                Some(number) => world
+                    .dependency_alert(self.repo.id, number)
+                    .map_err(internal)?,
+                None => None,
+            };
+            let ended_at = ended_at.ok_or_else(|| {
+                Error::new(format!("`{a}` does not appear to be a valid cursor."))
+            })?;
+            query.after = Some(query.position(&ended_at));
+        }
+        let readable = self.repo.dependency_alerts && caller(ctx).reaches(&self.repo);
+        // One past the page says whether another follows.
+        let mut alerts = match readable {
+            true => world
+                .dependency_alerts(self.repo.id, &query, cap.saturating_add(1))
+                .map_err(internal)?,
+            false => Vec::new(),
+        };
+        let has_next_page = alerts.len() > cap;
+        alerts.truncate(cap);
+        Ok(RepositoryVulnerabilityAlertConnection {
+            page_info: PageInfo {
+                has_next_page,
+                start_cursor: alerts.first().map(|a| cursor(a.number)),
+                end_cursor: alerts.last().map(|a| cursor(a.number)),
+                ..PageInfo::default()
+            },
+            nodes: alerts
+                .into_iter()
+                .map(|alert| RepositoryVulnerabilityAlert {
+                    alert,
+                    repo: self.repo.clone(),
+                })
+                .collect(),
+        })
+    }
+}
+
+#[derive(SimpleObject)]
+pub struct RepositoryVulnerabilityAlertConnection {
+    pub page_info: PageInfo,
+    pub nodes: Vec<RepositoryVulnerabilityAlert>,
+}
+
+pub struct RepositoryVulnerabilityAlert {
+    alert: world::DependencyAlert,
+    repo: world::Repo,
+}
+
+#[Object]
+impl RepositoryVulnerabilityAlert {
+    async fn number(&self) -> i64 {
+        self.alert.number
+    }
+
+    /// What Dependabot did about the alert: null while it has not tried, and
+    /// otherwise the pull request it opened or the error it reported, each
+    /// null for an attempt that has only started.
+    async fn dependabot_update(
+        &self,
+        ctx: &Context<'_>,
+    ) -> Result<Option<DependabotUpdate>, Error> {
+        Ok(match &self.alert.update {
+            world::AlertUpdate::None => None,
+            world::AlertUpdate::Pending => Some(DependabotUpdate {
+                pull_request: None,
+                error: None,
+            }),
+            world::AlertUpdate::PullRequest { pull_id, .. } => {
+                let pull = face(ctx)
+                    .world
+                    .pull_by_id(*pull_id)
+                    .map_err(internal)?
+                    .map(|pull| PullRequest::new(pull, self.repo.clone()));
+                Some(DependabotUpdate {
+                    pull_request: pull,
+                    error: None,
+                })
+            }
+            world::AlertUpdate::Error { error_type, title } => Some(DependabotUpdate {
+                pull_request: None,
+                error: Some(DependabotUpdateError {
+                    error_type: error_type.clone(),
+                    title: title.clone(),
+                }),
+            }),
+        })
+    }
+}
+
+#[derive(SimpleObject)]
+pub struct DependabotUpdate {
+    pub pull_request: Option<PullRequest>,
+    pub error: Option<DependabotUpdateError>,
+}
+
+#[derive(SimpleObject)]
+pub struct DependabotUpdateError {
+    pub error_type: String,
+    pub title: String,
 }
 
 #[derive(SimpleObject)]

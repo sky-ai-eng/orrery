@@ -347,6 +347,57 @@ fn populate(w: &World) -> orrery_world::Result<()> {
             w.convert_app_manifest(&made.code)?;
         }
     }
+    // Dependency alerts on a repository that has them on: one open with the
+    // pull request the updater opened for it, one a person dismissed, and
+    // one fixed.
+    w.set_dependency_alerts(repo.id, true, by(alice.id))?;
+    for (package, severity) in [
+        ("lodash", orrery_world::AlertSeverity::High),
+        ("minimist", orrery_world::AlertSeverity::Medium),
+        ("node-fetch", orrery_world::AlertSeverity::Critical),
+    ] {
+        w.create_dependency_alert(
+            repo.id,
+            &orrery_world::NewDependencyAlert {
+                ecosystem: "npm",
+                package,
+                manifest_path: "package-lock.json",
+                scope: Some(orrery_world::AlertScope::Runtime),
+                version_requirement: Some("1.0.0"),
+                advisory_id: "GHSA-0000-0000-0000",
+                cve_id: Some("CVE-2021-0000"),
+                summary: "A vulnerable dependency",
+                description: "What is wrong with it.",
+                severity,
+                vulnerable_version_range: "< 2.0.0",
+                first_patched_version: Some("2.0.0"),
+            },
+            by(system.id),
+        )?;
+    }
+    w.set_dependency_alert_update(
+        repo.id,
+        1,
+        &orrery_world::NewAlertUpdate::PullRequest {
+            number: closed.number,
+        },
+        by(system.id),
+    )?;
+    w.move_dependency_alert(
+        repo.id,
+        2,
+        &orrery_world::AlertTransition::Dismiss {
+            reason: orrery_world::DismissReason::TolerableRisk,
+            comment: Some("accepted"),
+        },
+        by(alice.id),
+    )?;
+    w.move_dependency_alert(
+        repo.id,
+        3,
+        &orrery_world::AlertTransition::Fix,
+        by(system.id),
+    )?;
     // A delivery for the installation, as a face would make one, so that
     // `deliveries` holds one that was answered and one still pending.
     w.set_notifier(std::sync::Arc::new(OnInstallation));

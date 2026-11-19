@@ -1029,6 +1029,108 @@ fn diff_reports_ready_for_review_and_conversion_to_draft() {
 }
 
 #[test]
+fn diff_reports_dependency_alerts_and_which_repositories_have_them() {
+    use orrery_world::{
+        AlertSeverity, AlertTransition, NewAlertUpdate, NewDependencyAlert, SYSTEM_ACTOR_ID,
+    };
+    let inst = Instance::new();
+    let w = &inst.world;
+    let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+    let me = by(alice.id);
+    let system = Attribution::new(SYSTEM_ACTOR_ID, Door::Control);
+    let alert = |package: &'static str| NewDependencyAlert {
+        ecosystem: "npm",
+        package,
+        manifest_path: "package-lock.json",
+        scope: None,
+        version_requirement: None,
+        advisory_id: "GHSA-0000-0000-0000",
+        cve_id: None,
+        summary: "A vulnerable dependency",
+        description: "",
+        severity: AlertSeverity::High,
+        vulnerable_version_range: "< 2",
+        first_patched_version: None,
+    };
+    let web = w
+        .create_repo(alice.id, "web", None, false, "main", me)
+        .unwrap();
+    let api = w
+        .create_repo(alice.id, "api", None, false, "main", me)
+        .unwrap();
+    w.set_dependency_alerts(web.id, true, me).unwrap();
+    for package in ["a", "b", "c"] {
+        w.create_dependency_alert(web.id, &alert(package), system)
+            .unwrap();
+    }
+    inst.snapshot("before");
+
+    // Nothing has happened.
+    let none = inst.diff("before", None);
+    assert!(none.dependency_alerts_added.is_empty());
+    assert!(none.dependency_alerts_changed.is_empty());
+    assert!(none.dependency_alert_updates_changed.is_empty());
+    assert!(none.dependency_alerts_turned_on.is_empty());
+    assert!(none.dependency_alerts_turned_off.is_empty());
+
+    w.move_dependency_alert(web.id, 1, &AlertTransition::Fix, system)
+        .unwrap();
+    w.set_dependency_alert_update(web.id, 2, &NewAlertUpdate::Pending, system)
+        .unwrap();
+    w.create_dependency_alert(web.id, &alert("d"), system)
+        .unwrap();
+    w.set_dependency_alerts(api.id, true, me).unwrap();
+    w.create_dependency_alert(api.id, &alert("e"), system)
+        .unwrap();
+    // One turned off keeps its alerts, which is why it is reported.
+    w.set_dependency_alerts(web.id, false, me).unwrap();
+
+    let d = inst.diff("before", None);
+    let added: Vec<(&str, i64, &str, &str)> = d
+        .dependency_alerts_added
+        .iter()
+        .map(|a| {
+            (
+                a.repo.as_str(),
+                a.number,
+                a.package.as_str(),
+                a.state.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        added,
+        [("alice/web", 4, "d", "open"), ("alice/api", 1, "e", "open")]
+    );
+    let moves = |changes: &[orrery_snapshot::diff::AlertStateChange]| -> Vec<(String, i64, String, String)> {
+        changes
+            .iter()
+            .map(|c| (c.repo.clone(), c.number, c.from.clone(), c.to.clone()))
+            .collect()
+    };
+    assert_eq!(
+        moves(&d.dependency_alerts_changed),
+        [(
+            "alice/web".to_string(),
+            1,
+            "open".to_string(),
+            "fixed".to_string()
+        )]
+    );
+    assert_eq!(
+        moves(&d.dependency_alert_updates_changed),
+        [(
+            "alice/web".to_string(),
+            2,
+            "none".to_string(),
+            "pending".to_string()
+        )]
+    );
+    assert_eq!(d.dependency_alerts_turned_on, ["alice/api"]);
+    assert_eq!(d.dependency_alerts_turned_off, ["alice/web"]);
+}
+
+#[test]
 fn diff_reports_org_memberships_and_roles() {
     let inst = Instance::new();
     let (admin, _) = inst.world.create_actor("admin", ActorKind::User).unwrap();

@@ -41,6 +41,7 @@ pub trait WorldView {
     fn list_apps(&self) -> Result<Vec<App>>;
     fn list_installations(&self) -> Result<Vec<Installation>>;
     fn list_deliveries(&self) -> Result<Vec<Delivery>>;
+    fn list_dependency_alerts(&self) -> Result<Vec<DependencyAlert>>;
     fn list_timeline(&self) -> Result<Vec<TimelineItem>>;
     fn list_org_members(&self) -> Result<Vec<OrgMembership>>;
     fn list_teams(&self) -> Result<Vec<Team>>;
@@ -116,6 +117,10 @@ impl WorldView for World {
 
     fn list_deliveries(&self) -> Result<Vec<Delivery>> {
         self.with_conn(deliveries::list_deliveries)
+    }
+
+    fn list_dependency_alerts(&self) -> Result<Vec<DependencyAlert>> {
+        self.with_conn(crate::alerts::list_alerts)
     }
 
     fn list_timeline(&self) -> Result<Vec<TimelineItem>> {
@@ -251,6 +256,10 @@ impl WorldView for WorldReader {
 
     fn list_deliveries(&self) -> Result<Vec<Delivery>> {
         deliveries::list_deliveries(&self.conn)
+    }
+
+    fn list_dependency_alerts(&self) -> Result<Vec<DependencyAlert>> {
+        crate::alerts::list_alerts(&self.conn)
     }
 
     fn list_timeline(&self) -> Result<Vec<TimelineItem>> {

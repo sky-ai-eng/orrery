@@ -16,7 +16,8 @@ pub(crate) const ACTOR_COLUMNS: &str = "id, login, kind, created_clock_unix";
 
 pub(crate) const REPO_COLUMNS: &str = "id,
     (SELECT login FROM actors WHERE actors.id = repos.owner_id),
-    name, description, private, default_branch, created_clock_unix, pushed_at_clock_unix";
+    name, description, private, default_branch, created_clock_unix, pushed_at_clock_unix,
+    dependency_alerts";
 
 pub(crate) const PULL_COLUMNS: &str = "id, repo_id, number, title, body,
     (SELECT login FROM actors WHERE actors.id = pulls.author_id),
@@ -78,6 +79,7 @@ pub(crate) fn row_to_repo(r: &Row<'_>) -> rusqlite::Result<Repo> {
         default_branch: r.get(5)?,
         created_clock_unix: r.get(6)?,
         pushed_at_clock_unix: r.get(7)?,
+        dependency_alerts: r.get(8)?,
     })
 }
 

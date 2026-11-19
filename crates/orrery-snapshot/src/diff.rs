@@ -162,6 +162,29 @@ pub struct DeliveryAdded {
     pub state: String,
 }
 
+/// A dependency alert: its repository, its number there, the package it
+/// is about, and where it stands.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AlertAdded {
+    pub repo: String,
+    pub number: i64,
+    pub ecosystem: String,
+    pub package: String,
+    pub severity: String,
+    pub state: String,
+}
+
+/// An alert that stands somewhere else than it did, or about which the
+/// updater did something else: `from` and `to` are states of the alert, or
+/// of the update (`none`, `pending`, `pull_request`, `error`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AlertStateChange {
+    pub repo: String,
+    pub number: i64,
+    pub from: String,
+    pub to: String,
+}
+
 /// An actor's authorization of an OAuth app. The code itself is never
 /// reported.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -278,6 +301,11 @@ pub struct WorldDiff {
     pub installations_added: Vec<InstallationAdded>,
     pub installations_removed: Vec<InstallationAdded>,
     pub deliveries_added: Vec<DeliveryAdded>,
+    pub dependency_alerts_added: Vec<AlertAdded>,
+    pub dependency_alerts_changed: Vec<AlertStateChange>,
+    pub dependency_alert_updates_changed: Vec<AlertStateChange>,
+    pub dependency_alerts_turned_on: Vec<String>,
+    pub dependency_alerts_turned_off: Vec<String>,
     pub repos_created: Vec<String>,
     pub repos_deleted: Vec<String>,
     pub default_branch_changes: Vec<DefaultBranchChange>,
@@ -471,6 +499,68 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         .into_iter()
         .map(|r| (r.id, r))
         .collect();
+    // Alerts: which repositories have them, the ones that are new, and
+    // where each stands and what the updater did about it.
+    let switched = |on: bool| -> Vec<String> {
+        to_repos
+            .values()
+            .filter(|r| r.dependency_alerts == on)
+            .filter(|r| {
+                from_repos
+                    .get(&r.id)
+                    .is_some_and(|was| was.dependency_alerts != on)
+            })
+            .map(|r| r.full_name())
+            .collect()
+    };
+    let dependency_alerts_turned_on = switched(true);
+    let dependency_alerts_turned_off = switched(false);
+    let named = |repo_id: i64| {
+        to_repos
+            .get(&repo_id)
+            .map(|r| r.full_name())
+            .unwrap_or_default()
+    };
+    let update = |alert: &orrery_world::DependencyAlert| match alert.update {
+        orrery_world::AlertUpdate::None => "none",
+        orrery_world::AlertUpdate::Pending => "pending",
+        orrery_world::AlertUpdate::PullRequest { .. } => "pull_request",
+        orrery_world::AlertUpdate::Error { .. } => "error",
+    };
+    let from_alerts: BTreeMap<i64, _> = from
+        .view
+        .list_dependency_alerts()?
+        .into_iter()
+        .map(|a| (a.id, a))
+        .collect();
+    let mut dependency_alerts_added = Vec::new();
+    let mut dependency_alerts_changed = Vec::new();
+    let mut dependency_alert_updates_changed = Vec::new();
+    for alert in to.view.list_dependency_alerts()? {
+        let Some(was) = from_alerts.get(&alert.id) else {
+            dependency_alerts_added.push(AlertAdded {
+                repo: named(alert.repo_id),
+                number: alert.number,
+                ecosystem: alert.ecosystem,
+                package: alert.package,
+                severity: alert.severity.as_str().to_string(),
+                state: alert.state.as_str().to_string(),
+            });
+            continue;
+        };
+        let moved = |from: &str, to: &str| AlertStateChange {
+            repo: named(alert.repo_id),
+            number: alert.number,
+            from: from.to_string(),
+            to: to.to_string(),
+        };
+        if was.state != alert.state {
+            dependency_alerts_changed.push(moved(was.state.as_str(), alert.state.as_str()));
+        }
+        if was.update != alert.update {
+            dependency_alert_updates_changed.push(moved(update(was), update(&alert)));
+        }
+    }
     let repos_created = to_repos
         .values()
         .filter(|r| !from_repos.contains_key(&r.id))
@@ -907,6 +997,11 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         installations_added,
         installations_removed,
         deliveries_added,
+        dependency_alerts_added,
+        dependency_alerts_changed,
+        dependency_alert_updates_changed,
+        dependency_alerts_turned_on,
+        dependency_alerts_turned_off,
         repos_created,
         repos_deleted,
         default_branch_changes,

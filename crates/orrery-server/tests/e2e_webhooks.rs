@@ -633,6 +633,173 @@ async fn a_review_request_is_delivered_once_for_each_new_reviewer() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_app_is_told_of_each_move_of_a_dependabot_alert() {
+    let s = setup_with(sending(), 204).await;
+    let api = &s.api;
+    // An App that subscribes to the event.
+    control_post(
+        &s.base,
+        "/_orrery/apps",
+        serde_json::json!({
+            "slug": "watcher",
+            "name": "Watcher",
+            "owner": "acme",
+            "callback_urls": ["https://app.test/callback"],
+            "events": ["dependabot_alert"],
+            "webhook_url": s.receiver.url,
+            "webhook_active": true,
+        }),
+    );
+    control_post(
+        &s.base,
+        "/_orrery/apps/watcher/installations",
+        serde_json::json!({ "account": "acme" }),
+    );
+    s.push("feature");
+    let pull = face_ok(
+        "POST",
+        &format!("{api}/repos/acme/web/pulls"),
+        &s.alice,
+        serde_json::json!({ "title": "Bump lodash", "head": "feature", "base": "main" }),
+    );
+    let (status, _, _) = call(
+        "PUT",
+        &format!("{api}/repos/acme/web/vulnerability-alerts"),
+        &bearer(&s.alice),
+        None,
+    );
+    assert_eq!(status, 204);
+    let alerts = "/_orrery/repos/acme/web/dependabot-alerts";
+    control_post(
+        &s.base,
+        alerts,
+        serde_json::json!({
+            "ecosystem": "npm", "package": "lodash", "manifest_path": "package-lock.json",
+            "ghsa_id": "GHSA-35jh-r3h4-6jhm", "summary": "Command Injection in lodash",
+            "severity": "high", "vulnerable_version_range": "< 4.17.21",
+        }),
+    );
+    let one = format!("{api}/repos/acme/web/dependabot/alerts/1");
+    for body in [
+        serde_json::json!({ "state": "dismissed", "dismissed_reason": "not_used" }),
+        serde_json::json!({ "state": "open" }),
+    ] {
+        let (status, _, moved) = call("PATCH", &one, &bearer(&s.alice), Some(body));
+        assert_eq!(status, 200, "{moved}");
+    }
+    // What the updater did is not a move, and sends nothing.
+    let update = format!("{}{alerts}/1/update/pull-request", s.base);
+    let mut said = agent()
+        .put(&update)
+        .send_json(serde_json::json!({ "number": pull["number"] }))
+        .unwrap();
+    assert_eq!(said.status(), 200);
+    let said: serde_json::Value = said.body_mut().read_json().unwrap();
+    assert_eq!(said["update"]["pull_request"], pull["number"]);
+    let moved = |state: &str| {
+        let mut resp = agent()
+            .patch(&format!("{}{alerts}/1", s.base))
+            .send_json(serde_json::json!({ "state": state }))
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{state}");
+        let _: serde_json::Value = resp.body_mut().read_json().unwrap();
+    };
+    moved("fixed");
+    moved("open");
+    moved("auto_dismissed");
+    moved("open");
+
+    // The App is told of its own installation, then of the alert's moves.
+    // The other App, which is not installed, is told nothing.
+    let got = s.receiver.wait(8).await;
+    let of_alert: Vec<&Received> = got
+        .iter()
+        .filter(|r| r.header("x-github-event") == "dependabot_alert")
+        .collect();
+    let actions: Vec<String> = of_alert
+        .iter()
+        .map(|r| r.json()["action"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            "created",
+            "dismissed",
+            "reopened",
+            "fixed",
+            "reintroduced",
+            "auto_dismissed",
+            "auto_reopened"
+        ]
+    );
+    let (_, _, listed) = call("GET", &one, &bearer(&s.alice), None);
+    for received in &of_alert {
+        let payload = received.json();
+        let mut keys: Vec<&str> = payload
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["action", "alert", "installation", "repository", "sender"]
+        );
+        assert_eq!(payload["repository"]["full_name"], "acme/web");
+        // The alert is GitHub's alert object, as REST answers it.
+        let mut alert: Vec<&String> = payload["alert"].as_object().unwrap().keys().collect();
+        let mut rest: Vec<&String> = listed.as_object().unwrap().keys().collect();
+        alert.sort();
+        rest.sort();
+        assert_eq!(alert, rest);
+    }
+    let payload = |n: usize| of_alert[n].json();
+    // A person's move is theirs, and GitHub's own is its organization's.
+    assert_eq!(payload(0)["sender"]["login"], "github");
+    assert_eq!(payload(0)["sender"]["type"], "Organization");
+    // GitHub's organization is no actor of the world, under GitHub's ids.
+    assert_eq!(payload(0)["sender"]["id"], 9919);
+    assert_eq!(
+        payload(0)["sender"]["node_id"],
+        "MDEyOk9yZ2FuaXphdGlvbjk5MTk="
+    );
+    assert_eq!(payload(0)["alert"]["state"], "open");
+    assert_eq!(payload(1)["sender"]["login"], "alice");
+    assert_eq!(payload(1)["alert"]["state"], "dismissed");
+    assert_eq!(payload(1)["alert"]["dismissed_reason"], "not_used");
+    assert_eq!(payload(2)["sender"]["login"], "alice");
+    assert_eq!(payload(3)["sender"]["login"], "github");
+    assert_eq!(payload(3)["alert"]["state"], "fixed");
+    assert_eq!(payload(5)["alert"]["state"], "auto_dismissed");
+    assert_eq!(payload(6)["alert"]["state"], "open");
+
+    // GraphQL names the pull request the updater opened.
+    let (status, _, answer) = call(
+        "POST",
+        &format!("{}/api/graphql", s.base),
+        &bearer(&s.alice),
+        Some(serde_json::json!({
+            "query": "{ repository(owner: \"acme\", name: \"web\") { vulnerabilityAlerts(states: [OPEN], first: 10) { nodes { number dependabotUpdate { pullRequest { number url } error { errorType title } } } } } }",
+        })),
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer["data"]["repository"]["vulnerabilityAlerts"]["nodes"],
+        serde_json::json!([{
+            "number": 1,
+            "dependabotUpdate": {
+                "pullRequest": {
+                    "number": pull["number"],
+                    "url": format!("{}/acme/web/pull/{}", s.base, pull["number"]),
+                },
+                "error": null,
+            },
+        }])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_app_reads_its_deliveries_and_asks_for_one_again() {
     let s = setup_with(sending(), 500).await;
     let api = &s.api;

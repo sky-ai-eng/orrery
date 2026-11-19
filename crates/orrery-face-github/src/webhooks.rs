@@ -453,6 +453,13 @@ fn addressed(event: &EventBody) -> Option<(&'static str, i64)> {
         EventBody::CommentCreated(e) => ("issue_comment", e.subject.repo.id),
         EventBody::CheckRunCreated(e) => ("check_run", e.subject.repo.id),
         EventBody::CheckRunUpdated(e) => ("check_run", e.subject.repo.id),
+        EventBody::DependencyAlertCreated(e) => ("dependabot_alert", e.subject.repo.id),
+        EventBody::DependencyAlertDismissed(e)
+        | EventBody::DependencyAlertReopened(e)
+        | EventBody::DependencyAlertFixed(e)
+        | EventBody::DependencyAlertAutoDismissed(e)
+        | EventBody::DependencyAlertReintroduced(e)
+        | EventBody::DependencyAlertAutoReopened(e) => ("dependabot_alert", e.subject.repo.id),
         EventBody::RefCreated(e) => ("push", e.subject.repo.id),
         EventBody::RefUpdated(e) => ("push", e.subject.repo.id),
         EventBody::RefDeleted(e) => ("push", e.subject.repo.id),
@@ -884,6 +891,29 @@ impl Rendering {
                 }
                 _ => Ok(Vec::new()),
             },
+            EventBody::DependencyAlertCreated(e) => {
+                let about = about(e.subject.repo.id)?;
+                self.alert(world, about, e.subject.number, "created", None)
+            }
+            // A person dismisses and reopens an alert. GitHub makes every
+            // other move itself.
+            EventBody::DependencyAlertDismissed(e)
+            | EventBody::DependencyAlertReopened(e)
+            | EventBody::DependencyAlertFixed(e)
+            | EventBody::DependencyAlertAutoDismissed(e)
+            | EventBody::DependencyAlertReintroduced(e)
+            | EventBody::DependencyAlertAutoReopened(e) => {
+                let (action, person) = match event {
+                    EventBody::DependencyAlertDismissed(_) => ("dismissed", Some(sender)),
+                    EventBody::DependencyAlertReopened(_) => ("reopened", Some(sender)),
+                    EventBody::DependencyAlertFixed(_) => ("fixed", None),
+                    EventBody::DependencyAlertAutoDismissed(_) => ("auto_dismissed", None),
+                    EventBody::DependencyAlertReintroduced(_) => ("reintroduced", None),
+                    _ => ("auto_reopened", None),
+                };
+                let about = about(e.subject.repo.id)?;
+                self.alert(world, about, e.subject.number, action, person)
+            }
             EventBody::RefCreated(e) => {
                 let commits = Pushed {
                     before: None,
@@ -941,6 +971,47 @@ impl Rendering {
             payload: serde_json::json!({
                 "action": action,
                 "check_run": check_run,
+                "repository": repo_json(face, &repo, &owner),
+                "sender": sender,
+            }),
+        }])
+    }
+
+    /// GitHub's `dependabot_alert` for an alert as the write left it.
+    /// `person` is who dismissed or reopened it. What GitHub does to an
+    /// alert itself, it sends as its own organization, `github`.
+    fn alert(
+        &self,
+        world: &World,
+        about: Option<(Repo, Actor)>,
+        number: i64,
+        action: &str,
+        person: Option<serde_json::Value>,
+    ) -> Result<Vec<Outgoing>, WorldError> {
+        let face = &self.face;
+        let Some((repo, owner)) = about else {
+            return Ok(Vec::new());
+        };
+        let Some(alert) = world.dependency_alert(repo.id, number)? else {
+            return Ok(Vec::new());
+        };
+        // GitHub's organization is no actor of the world, so its node id is
+        // GitHub's own, never one a world's actor could hold.
+        let sender = person.unwrap_or_else(|| {
+            let mut github = actor_json(&Actor {
+                id: 9919,
+                login: "github".to_string(),
+                kind: orrery_world::ActorKind::Org,
+                created_clock_unix: 0,
+            });
+            github["node_id"] = "MDEyOk9yZ2FuaXphdGlvbjk5MTk=".into();
+            github
+        });
+        Ok(vec![Outgoing {
+            action: Some(action.to_string()),
+            payload: serde_json::json!({
+                "action": action,
+                "alert": crate::dependabot::alert_json(face, &repo, &alert),
                 "repository": repo_json(face, &repo, &owner),
                 "sender": sender,
             }),

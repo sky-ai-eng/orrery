@@ -17,6 +17,7 @@ use std::sync::{Mutex, RwLock};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+mod alerts;
 mod app_keys;
 mod apps;
 #[cfg(any(test, feature = "test-support"))]
@@ -39,6 +40,7 @@ mod schema;
 mod signing;
 mod types;
 
+pub use alerts::{AlertPosition, AlertQuery, NewDependencyAlert};
 pub use app_keys::rsa_public_key_from_pem;
 pub use apps::{
     INSTALLATION_TOKEN_TTL_SECONDS, MANIFEST_CODE_TTL_SECONDS, validate_app_callback_urls,

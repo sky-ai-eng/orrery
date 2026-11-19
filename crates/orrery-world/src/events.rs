@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::types::{
-    ActorEmail, ActorKind, CheckConclusion, CheckStatus, ClockMode, DeliveryFailure, DeliveryState,
+    ActorEmail, ActorKind, AlertScope, AlertSeverity, AlertState, AlertUpdateState,
+    CheckConclusion, CheckStatus, ClockMode, DeliveryFailure, DeliveryState, DismissReason,
     OrgRole, Permissions, PullState, RepositorySelection, ReviewState, TeamRole,
 };
 
@@ -202,6 +203,7 @@ subject_type! {
     ReviewType = "review",
     CommentType = "comment",
     CheckRunType = "check_run",
+    DependencyAlertType = "dependency_alert",
     OrgMembershipType = "org_membership",
     TeamType = "team",
     TeamMembershipType = "team_membership",
@@ -385,6 +387,17 @@ pub struct CheckRunSubject {
     pub id: i64,
     pub name: String,
     pub head_sha: String,
+    pub repo: RepoRef,
+    pub owner: ActorRef,
+}
+
+/// A vulnerable dependency a repository holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DependencyAlertSubject {
+    #[serde(rename = "type")]
+    pub kind: DependencyAlertType,
+    pub id: i64,
+    pub number: i64,
     pub repo: RepoRef,
     pub owner: ActorRef,
 }
@@ -678,6 +691,49 @@ object! {
         created_unix: i64,
         /// When a push or a merge last moved a ref, or null before the first.
         pushed_unix: Option<i64>,
+        /// Whether the repository has dependency alerts. Events appended
+        /// before a world held any carry none, and mean off.
+        #[serde(default)]
+        dependency_alerts: bool,
+    }
+}
+
+object! {
+    DependencyAlertObject, DependencyAlertChanges {
+        id: i64,
+        /// Counted from 1 within the repository.
+        number: i64,
+        state: AlertState,
+        ecosystem: String,
+        package: String,
+        manifest_path: String,
+        scope: Option<AlertScope>,
+        version_requirement: Option<String>,
+        /// The advisory's id, such as a GHSA id.
+        advisory_id: String,
+        cve_id: Option<String>,
+        summary: String,
+        description: String,
+        severity: AlertSeverity,
+        vulnerable_version_range: String,
+        first_patched_version: Option<String>,
+        created_unix: i64,
+        updated_unix: i64,
+        /// When the alert was dismissed, who by, and why: each null unless
+        /// the alert is dismissed.
+        dismissed_unix: Option<i64>,
+        dismissed_by: Option<ActorRef>,
+        dismissed_reason: Option<DismissReason>,
+        dismissed_comment: Option<String>,
+        fixed_unix: Option<i64>,
+        auto_dismissed_unix: Option<i64>,
+        /// What the vendor's updater did about the alert.
+        update_state: AlertUpdateState,
+        /// The pull request it opened, when it opened one.
+        update_pull: Option<PullRef>,
+        /// The error it reported, when it reported one.
+        update_error_type: Option<String>,
+        update_error_title: Option<String>,
     }
 }
 
@@ -969,6 +1025,8 @@ bodies! {
     ReviewSubmitted { subject: ReviewSubject, object: ReviewObject }
     CommentCreated { subject: CommentSubject, object: CommentObject }
     CheckRunCreated { subject: CheckRunSubject, object: CheckRunObject }
+    DependencyAlertCreated { subject: DependencyAlertSubject, object: DependencyAlertObject }
+    DependencyAlertChanged { subject: DependencyAlertSubject, changes: DependencyAlertChanges }
     CheckRunChanged { subject: CheckRunSubject, changes: CheckRunChanges }
     OrgMembershipCreated { subject: OrgMembershipSubject, object: OrgMembershipObject }
     OrgMembershipChanged { subject: OrgMembershipSubject, changes: OrgMembershipChanges }
@@ -1076,6 +1134,8 @@ event_types! {
     /// A push, or a merge, moved refs in the repository. On a push it is the
     /// operation, and a ref event for each ref it moved follows.
     RepoPushed(RepoChanged) = "repo:pushed",
+    /// A repository's dependency alerts were turned on or off.
+    RepoDependencyAlertsSet(RepoChanged) = "repo:dependency_alerts_set",
 
     RefCreated(RefCreated) = "ref:created",
     RefUpdated(RefUpdated) = "ref:updated",
@@ -1109,6 +1169,22 @@ event_types! {
     CommentCreated(CommentCreated) = "comment:created",
 
     CheckRunCreated(CheckRunCreated) = "check_run:created",
+    /// The vendor reported a vulnerable dependency in a repository.
+    DependencyAlertCreated(DependencyAlertCreated) = "dependency_alert:created",
+    /// A person dismissed an alert.
+    DependencyAlertDismissed(DependencyAlertChanged) = "dependency_alert:dismissed",
+    /// A person reopened an alert they or another had dismissed.
+    DependencyAlertReopened(DependencyAlertChanged) = "dependency_alert:reopened",
+    /// The dependency is no longer vulnerable.
+    DependencyAlertFixed(DependencyAlertChanged) = "dependency_alert:fixed",
+    /// A rule of the vendor's dismissed the alert.
+    DependencyAlertAutoDismissed(DependencyAlertChanged) = "dependency_alert:auto_dismissed",
+    /// A fixed alert's dependency is vulnerable again.
+    DependencyAlertReintroduced(DependencyAlertChanged) = "dependency_alert:reintroduced",
+    /// An alert a rule had dismissed is open again.
+    DependencyAlertAutoReopened(DependencyAlertChanged) = "dependency_alert:auto_reopened",
+    /// What the vendor's updater did about the alert was recorded.
+    DependencyAlertUpdateSet(DependencyAlertChanged) = "dependency_alert:update_set",
     CheckRunUpdated(CheckRunChanged) = "check_run:updated",
 
     OrgMembershipCreated(OrgMembershipCreated) = "org_membership:created",
