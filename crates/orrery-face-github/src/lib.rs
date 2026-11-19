@@ -751,6 +751,15 @@ mod ref_read_tests {
                 )),
             ),
             (
+                "GET check-suites for a branch",
+                unbudgeted(suites::list_suites_for_ref(
+                    face(),
+                    path3("main"),
+                    RawQuery(None),
+                    HeaderMap::new(),
+                )),
+            ),
+            (
                 "GET pull",
                 unbudgeted(reads::get_pull(
                     face(),
