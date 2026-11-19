@@ -8,7 +8,7 @@ use crate::types::*;
 use crate::{RefChange, RefMove, Result, World, log, objects, queries};
 
 /// The id a ref that does not exist has, as a suite records it.
-const NO_COMMIT: &str = "0000000000000000000000000000000000000000";
+pub(crate) const NO_COMMIT: &str = "0000000000000000000000000000000000000000";
 
 /// The newest run of each name within its suite: the runs a suite counts,
 /// and the ones a list answers unless asked for every run. The order of
@@ -79,19 +79,20 @@ pub(crate) fn suite_for(
     }
 }
 
-/// The branch, what it pointed at, and who pushed, for a suite a push made.
-struct Pushed<'a> {
-    branch: &'a str,
-    before: &'a str,
-    pusher_id: i64,
+/// The branch, what it pointed at, and who it was, for a suite that a push
+/// or the start of a workflow run made.
+pub(crate) struct Started<'a> {
+    pub(crate) branch: &'a str,
+    pub(crate) before: &'a str,
+    pub(crate) by: i64,
 }
 
-fn create(
+pub(crate) fn create(
     w: &mut log::Write<'_>,
     repo_id: i64,
     head_sha: &str,
     creator_id: i64,
-    pushed: Option<Pushed<'_>>,
+    started: Option<Started<'_>>,
 ) -> Result<i64> {
     let clock = queries::clock(w.tx)?;
     let id: i64 = w.tx.query_row(
@@ -102,10 +103,10 @@ fn create(
         params![
             repo_id,
             head_sha,
-            pushed.as_ref().map(|p| p.branch),
-            pushed.as_ref().map(|p| p.before),
+            started.as_ref().map(|s| s.branch),
+            started.as_ref().map(|s| s.before),
             creator_id,
-            pushed.as_ref().map(|p| p.pusher_id),
+            started.as_ref().map(|s| s.by),
             clock
         ],
         |r| r.get(0),
@@ -194,10 +195,10 @@ pub(crate) fn open_at_push(
                 RefChange::Created => NO_COMMIT,
                 _ => m.old,
             };
-            let pushed = Pushed {
+            let pushed = Started {
                 branch,
                 before,
-                pusher_id,
+                by: pusher_id,
             };
             create(w, repo_id, m.new, bot_id, Some(pushed))?;
         }
@@ -331,6 +332,7 @@ mod tests {
                         started_clock_unix: None,
                         completed_clock_unix: None,
                         created_clock_unix: 100,
+                        job: None,
                     })
                 })
                 .unwrap()

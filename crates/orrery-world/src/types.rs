@@ -493,6 +493,124 @@ pub struct CheckRun {
     pub started_clock_unix: Option<i64>,
     pub completed_clock_unix: Option<i64>,
     pub created_clock_unix: i64,
+    /// What a check run that is a job of a workflow run holds beside.
+    pub job: Option<Job>,
+}
+
+/// A check run's place in a workflow run, and how far its runner has
+/// brought it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Job {
+    pub run_id: i64,
+    /// The attempt of the run it is a job of.
+    pub attempt: i64,
+    /// The steps the runner has listed, in order: none until it starts the
+    /// job.
+    pub steps: Vec<Step>,
+}
+
+/// One step of a job, as its runner has brought it.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct Step {
+    pub name: String,
+    pub status: StepStatus,
+    pub conclusion: Option<StepConclusion>,
+    pub started_unix: Option<i64>,
+    pub completed_unix: Option<i64>,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    /// Listed, and not reached.
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum StepConclusion {
+    Success,
+    Failure,
+    /// Not run, because a step before it failed.
+    Skipped,
+}
+
+/// One job of a workflow: what the workflow says of it, before any run.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct JobSpec {
+    /// Unique within its workflow.
+    pub name: String,
+    /// The jobs that finish before this one is listed.
+    pub needs: Vec<String>,
+    /// Whether it runs when a job it needs did not succeed. One that does
+    /// not is listed as skipped.
+    pub always: bool,
+    /// What it asks of the machine that runs it.
+    pub labels: Vec<String>,
+    /// The steps its runner works through, in order.
+    pub steps: Vec<StepSpec>,
+    /// The steps its runner adds, already complete, as the job finishes.
+    pub closing_steps: Vec<String>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct StepSpec {
+    pub name: String,
+    /// Whether it runs after a step before it failed. One that does not is
+    /// skipped.
+    pub always: bool,
+}
+
+/// What stands for a workflow file: where it is, its name, and its jobs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Workflow {
+    pub id: i64,
+    pub repo_id: i64,
+    pub path: String,
+    pub name: String,
+    pub jobs: Vec<JobSpec>,
+    pub created_clock_unix: i64,
+}
+
+/// One run of a workflow on a commit.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkflowRun {
+    pub id: i64,
+    pub repo_id: i64,
+    pub workflow_id: i64,
+    /// The suite its jobs are check runs of, which no other run shares.
+    pub suite_id: i64,
+    /// Its place among the runs of its workflow, from 1.
+    pub run_number: i64,
+    /// What started it, as the caller named it.
+    pub event: String,
+    pub head_branch: Option<String>,
+    pub head_sha: String,
+    pub title: String,
+    /// Who started it.
+    pub actor_login: String,
+    pub attempt: i64,
+    /// Its suite's, which its jobs bring about.
+    pub status: CheckStatus,
+    /// Its suite's.
+    pub conclusion: Option<CheckConclusion>,
+    pub created_clock_unix: i64,
+    /// When its current attempt began.
+    pub started_clock_unix: i64,
+    /// When its suite's status or conclusion last changed.
+    pub updated_clock_unix: i64,
 }
 
 /// One of an actor's email addresses. Every actor but the system actor holds

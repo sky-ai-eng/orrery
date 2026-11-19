@@ -40,6 +40,7 @@ mod schema;
 mod signing;
 mod suites;
 mod types;
+mod workflows;
 
 pub use alerts::{AlertPosition, AlertQuery, NewDependencyAlert};
 pub use app_keys::rsa_public_key_from_pem;
@@ -64,6 +65,7 @@ pub use schema::{BASELINE_VERSION, SCHEMA_VERSION};
 pub use signing::{ssh_public_key, ssh_public_key_from_blob};
 pub use suites::newest_check_runs;
 pub use types::*;
+pub use workflows::{NewWorkflow, NewWorkflowRun, check_jobs};
 
 pub type Result<T> = std::result::Result<T, WorldError>;
 

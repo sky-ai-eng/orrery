@@ -14,9 +14,9 @@ use std::path::Path;
 
 use orrery_world::{
     AccessLevel, ActorEmail, ActorKind, Attribution, CheckConclusion, CheckRunPatch, CheckStatus,
-    CommitFacts, CommitSignature, DEFAULT_T0_UNIX, Door, NewApp, NewCheckRun, NewPull, OrgRole,
-    Permissions, RefChange, RefMove, ReviewState, SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, TeamRole,
-    World, WorldSecret,
+    CommitFacts, CommitSignature, DEFAULT_T0_UNIX, Door, JobSpec, NewApp, NewCheckRun, NewPull,
+    NewWorkflow, NewWorkflowRun, OrgRole, Permissions, RefChange, RefMove, ReviewState,
+    SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, StepConclusion, StepSpec, TeamRole, World, WorldSecret,
 };
 
 /// A write by `actor_id` as the REST face makes it.
@@ -213,6 +213,62 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         },
         w.clock()?,
     )?;
+    let jobs = [
+        JobSpec {
+            name: "test".to_string(),
+            needs: Vec::new(),
+            always: false,
+            labels: vec!["ubuntu-latest".to_string()],
+            steps: vec![
+                StepSpec {
+                    name: "Set up job".to_string(),
+                    always: false,
+                },
+                StepSpec {
+                    name: "Run tests".to_string(),
+                    always: false,
+                },
+            ],
+            closing_steps: vec!["Complete job".to_string()],
+        },
+        JobSpec {
+            name: "deploy".to_string(),
+            needs: vec!["test".to_string()],
+            always: false,
+            labels: vec!["ubuntu-latest".to_string()],
+            steps: vec![StepSpec {
+                name: "Set up job".to_string(),
+                always: false,
+            }],
+            closing_steps: Vec::new(),
+        },
+    ];
+    let workflow = w.create_workflow(
+        NewWorkflow {
+            repo_id: repo.id,
+            path: ".github/workflows/ci.yml",
+            name: "ci",
+            jobs: &jobs,
+        },
+        by(system.id),
+    )?;
+    let run = w.start_workflow_run(
+        NewWorkflowRun {
+            workflow_id: workflow.id,
+            event: "push",
+            head_sha: HEAD_SHA,
+            head_branch: Some("feature"),
+            title: "Add the feature",
+            actor_id: alice.id,
+            runner: "runner",
+        },
+        by(system.id),
+    )?;
+    let test = w.list_workflow_jobs(run.id)?[0].id;
+    w.start_workflow_job(test, by(system.id))?;
+    w.complete_workflow_step(test, StepConclusion::Success, by(system.id))?;
+    w.complete_workflow_job(test, false, by(system.id))?;
+
     let merge = RefMove {
         name: "refs/heads/main",
         old: BASE_SHA,

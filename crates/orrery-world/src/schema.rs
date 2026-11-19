@@ -414,6 +414,44 @@ pub(crate) const MIGRATIONS: &[&str] = &[
           LIMIT 1)
          WHERE status = 'completed';
      DROP TABLE newest_check_runs;",
+    // 21: workflows, their runs, and the jobs of a run. A workflow is a
+    // path, a name, and its jobs: for each, the jobs it needs, whether it
+    // runs when one of those did not succeed, and its steps. A run has a
+    // suite of its own, and its status and conclusion are that suite's, so
+    // it stores neither. A job of a run is a check run of that suite, which
+    // holds the run, the attempt of the run it is in, and its steps as the
+    // runner has brought them.
+    "CREATE TABLE workflows (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id            INTEGER NOT NULL REFERENCES repos(id),
+        path               TEXT NOT NULL,
+        name               TEXT NOT NULL,
+        jobs               TEXT NOT NULL,
+        created_clock_unix INTEGER NOT NULL,
+        UNIQUE (repo_id, path)
+     ) STRICT;
+     CREATE TABLE workflow_runs (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id            INTEGER NOT NULL REFERENCES repos(id),
+        workflow_id        INTEGER NOT NULL REFERENCES workflows(id),
+        suite_id           INTEGER NOT NULL UNIQUE REFERENCES check_suites(id),
+        run_number         INTEGER NOT NULL,
+        event              TEXT NOT NULL,
+        head_branch        TEXT,
+        head_sha           TEXT NOT NULL,
+        title              TEXT NOT NULL,
+        actor_id           INTEGER NOT NULL REFERENCES actors(id),
+        attempt            INTEGER NOT NULL,
+        created_clock_unix INTEGER NOT NULL,
+        started_clock_unix INTEGER NOT NULL,
+        UNIQUE (workflow_id, run_number)
+     ) STRICT;
+     CREATE INDEX workflow_runs_by_repo ON workflow_runs (repo_id, id);
+     ALTER TABLE check_runs ADD COLUMN workflow_run_id INTEGER REFERENCES workflow_runs(id);
+     ALTER TABLE check_runs ADD COLUMN run_attempt INTEGER;
+     ALTER TABLE check_runs ADD COLUMN steps TEXT;
+     CREATE INDEX check_runs_by_workflow_run ON check_runs (workflow_run_id)
+        WHERE workflow_run_id IS NOT NULL;",
 ];
 
 /// The version this binary reads and writes.

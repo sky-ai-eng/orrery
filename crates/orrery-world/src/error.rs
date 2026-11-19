@@ -46,6 +46,22 @@ pub enum WorldError {
     NoSuchCheckRun(i64),
     #[error("no check suite with id {0}")]
     NoSuchCheckSuite(i64),
+    #[error("no workflow with id {0}")]
+    NoSuchWorkflow(i64),
+    #[error("no workflow run with id {0}")]
+    NoSuchWorkflowRun(i64),
+    #[error("no job of a workflow run with id {0}")]
+    NoSuchWorkflowJob(i64),
+    #[error("the repository already has a workflow at {0:?}")]
+    WorkflowExists(String),
+    #[error("invalid workflow {field}: {message}")]
+    InvalidWorkflow { field: String, message: String },
+    #[error("job {0} is not queued")]
+    JobNotQueued(i64),
+    #[error("job {0} is not in progress")]
+    JobNotInProgress(i64),
+    #[error("{0:?} is the login of an actor that is not a bot")]
+    RunnerNotABot(String),
     #[error("no dependency alert numbered {0} in this repository")]
     NoSuchDependencyAlert(i64),
     #[error("no pull request numbered {number} in repository {repo_id}")]
