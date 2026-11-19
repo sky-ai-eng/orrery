@@ -1464,7 +1464,7 @@ async fn a_world_is_released_when_its_server_is_gone() {
     );
     let routers = orrery_server::routers(
         world.clone(),
-        "http://127.0.0.1:1".to_string(),
+        orrery_server::Layout::enterprise_server("http://127.0.0.1:1"),
         dir.path().join("snapshots"),
         orrery_server::Options::default(),
     );

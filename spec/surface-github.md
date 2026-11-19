@@ -159,6 +159,8 @@ Only a bot creates or updates check runs; any other actor gets a `403` naming th
 
 Clients read `installed_version` to decide which requests to send, so Orrery reports the release whose requests it serves. 3.17 is the first release without classic projects, which Orrery does not have, and the last before advanced issue search, whose syntax (parentheses and `OR`) the search in §3.2 does not parse. gh 2.89, for one, asks for a pull request's classic project cards below 3.17, and sends advanced search syntax from 3.18.
 
+Under github.com's layout, `GET /meta` is the not-mocked `501`, through any host (`grammar.md`, "Where the face is"): github.com's `/meta` names no release, and lists network addresses and keys Orrery does not have.
+
 ### 1.10 Commit signing
 
 An account signs commits with an SSH key it registers as a signing key, and a commit read answers GitHub's verdict on its signature.
@@ -499,6 +501,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - Orrery parses no PGP signature, so a malformed one reads `unknown_key` where GitHub answers `malformed_signature`.
 - A verdict a read reaches as `valid` has a null `verified_at`. GitHub stores the verdict then.
 - `GET /meta` needs a token, as every REST route does, where github.com answers it without one (`grammar.md`).
+- No response carries `X-RateLimit-*` headers, where github.com sends them on every response (`grammar.md`, "Rate limits").
 - A diff's `index` lines abbreviate object ids to 7 hex digits. GitHub's length grows with the repository, as git's default does (7 digits were observed on a small repository and 9 on a larger one), but git picks that length from how the repository's objects are packed, which a replayed world need not share.
 - A hunk header's trailing context is the one git picks, by default the nearest line above the hunk that starts with a letter, `_`, or `$`. GitHub picks it by the file's language, so in an HTML file it names the nearest heading.
 - `Accept` media types match ignoring case, and every `Accept` header counts. GitHub answers JSON to `application/vnd.github.v3.DIFF`, and reads only the first `Accept` header.

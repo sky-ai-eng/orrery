@@ -449,11 +449,34 @@ pub fn not_mocked(method: &str, path: &str) -> Response<Body> {
                 "not_mocked": true,
                 "method": method,
                 "path": path,
-                "hint": "If a consumer needs this endpoint, add it to the surface inventory (spec/surface-github.md) and implement it.",
+                "hint": NOT_MOCKED_HINT,
             },
         }),
     )
 }
+
+/// The not-mocked `501` for a request whose host decides that the face does
+/// not serve it, under github.com's layout: a GitHub host the face does not
+/// serve, or a path GitHub does not serve on that host. It names the host
+/// beside the method and the path.
+pub fn not_mocked_on(method: &str, host: &str, path: &str) -> Response<Body> {
+    tracing::warn!(%method, %host, %path, "NOT MOCKED: unimplemented surface was called");
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        serde_json::json!({
+            "message": format!("orrery: {method} {host}{path} is not mocked"),
+            "orrery": {
+                "not_mocked": true,
+                "method": method,
+                "host": host,
+                "path": path,
+                "hint": NOT_MOCKED_HINT,
+            },
+        }),
+    )
+}
+
+const NOT_MOCKED_HINT: &str = "If a consumer needs this endpoint, add it to the surface inventory (spec/surface-github.md) and implement it.";
 
 /// An empty `204 No Content`.
 pub(crate) fn no_content() -> Response<Body> {

@@ -62,6 +62,17 @@ pub async fn boot_at(dir: tempfile::TempDir, world_root: &Path) -> Instance {
     serve(dir, world, orrery_server::Options::default()).await
 }
 
+/// Boot a local world served under github.com's layout: every URL it returns
+/// names `api.github.com` or `github.com`, and a request finds its surface by
+/// the host it names. `base` is still the listener's own origin.
+pub async fn boot_github_com() -> Instance {
+    let (dir, world) = create(&WorldSecret::LOCAL);
+    serve_as(dir, world, orrery_server::Options::default(), |_| {
+        orrery_server::Layout::github_com()
+    })
+    .await
+}
+
 /// Boot a local world with the control plane on a listener of its own, as
 /// `orrery serve` does when `server.control_listen` is set.
 pub async fn boot_split() -> Instance {
@@ -70,7 +81,7 @@ pub async fn boot_split() -> Instance {
     let (control, control_base) = bind().await;
     let (faces_app, control_app) = orrery_server::routers(
         world.clone(),
-        base.clone(),
+        orrery_server::Layout::enterprise_server(&base),
         dir.path().join("snapshots"),
         orrery_server::Options::default(),
     )
@@ -92,10 +103,25 @@ async fn serve(
     world: Arc<World>,
     options: orrery_server::Options,
 ) -> Instance {
+    serve_as(
+        dir,
+        world,
+        options,
+        orrery_server::Layout::enterprise_server,
+    )
+    .await
+}
+
+async fn serve_as(
+    dir: tempfile::TempDir,
+    world: Arc<World>,
+    options: orrery_server::Options,
+    layout: impl FnOnce(&str) -> orrery_server::Layout,
+) -> Instance {
     let (listener, base) = bind().await;
     let app = orrery_server::routers(
         world.clone(),
-        base.clone(),
+        layout(&base),
         dir.path().join("snapshots"),
         options,
     )
