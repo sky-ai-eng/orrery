@@ -867,3 +867,43 @@ fn an_unusable_outbound_setting_stops_serve_before_the_world_is_made() {
         assert!(!dir.path().join("instance/world").exists(), "{case}");
     }
 }
+
+/// Every URL a world returns starts with its `base_url`, so one a client
+/// can't follow, or that a path can't be appended to, is refused before a
+/// world is made.
+#[test]
+fn an_unusable_base_url_is_refused() {
+    for (base_url, why) in [
+        ("127.0.0.1:4180", "is not an http or https URL"),
+        ("ftp://world.example", "is not an http or https URL"),
+        ("/world", "is not an http or https URL"),
+        ("not a url", "is not a URL"),
+        ("https://world.example/?mode=x", "has a query"),
+        ("https://world.example/#top", "has a fragment"),
+        ("https://user:secret@world.example", "has user information"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_config(
+            dir.path(),
+            "",
+            &format!("listen = \"127.0.0.1:0\"\nbase_url = {base_url:?}\n"),
+        );
+        let out = refused(orrery_serve(&config, &[]));
+        assert!(!out.status.success(), "{base_url}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(why), "{base_url}: {stderr}");
+        assert!(
+            !dir.path().join("instance").exists(),
+            "{base_url}: no world was created"
+        );
+    }
+    // A path is kept: a world served below one by a proxy in front of it.
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "",
+        "listen = \"127.0.0.1:0\"\nbase_url = \"https://world.example/prefix\"\n",
+    );
+    let (_served, ready) = serve(&config, &[]);
+    assert_eq!(ready.base_url, "https://world.example/prefix");
+}
