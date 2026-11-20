@@ -28,6 +28,10 @@ pub fn check(id: i64) -> String {
     format!("O_check_{id}")
 }
 
+pub fn status(id: i64) -> String {
+    format!("O_status_{id}")
+}
+
 pub fn check_suite(id: i64) -> String {
     format!("O_check_suite_{id}")
 }

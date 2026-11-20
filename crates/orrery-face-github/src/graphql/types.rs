@@ -87,6 +87,28 @@ pub enum CheckStatusState {
     Pending,
 }
 
+/// What a commit status says, and what a commit's statuses and check runs
+/// come to. GitHub's `EXPECTED`, for a required check that has not
+/// reported, has no counterpart here.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub enum StatusState {
+    Error,
+    Failure,
+    Pending,
+    Success,
+}
+
+impl From<world::StatusState> for StatusState {
+    fn from(state: world::StatusState) -> StatusState {
+        match state {
+            world::StatusState::Error => StatusState::Error,
+            world::StatusState::Failure => StatusState::Failure,
+            world::StatusState::Pending => StatusState::Pending,
+            world::StatusState::Success => StatusState::Success,
+        }
+    }
+}
+
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
 pub enum CheckConclusionState {
     ActionRequired,
@@ -1084,34 +1106,152 @@ impl GqlCheckRun {
     }
 }
 
+/// One commit status: the newest of its context on its commit.
+#[derive(Clone)]
+pub struct GqlStatusContext {
+    pub status: world::CommitStatus,
+}
+
+#[Object(name = "StatusContext")]
+impl GqlStatusContext {
+    async fn id(&self) -> ID {
+        ID(crate::nodeid::status(self.status.id))
+    }
+
+    async fn context(&self) -> &str {
+        &self.status.context
+    }
+
+    async fn state(&self) -> StatusState {
+        self.status.state.into()
+    }
+
+    async fn description(&self) -> Option<&str> {
+        self.status.description.as_deref()
+    }
+
+    async fn target_url(&self) -> Option<&str> {
+        self.status.target_url.as_deref()
+    }
+
+    async fn created_at(&self) -> String {
+        rfc3339(self.status.created_clock_unix)
+    }
+
+    async fn creator(&self, ctx: &Context<'_>) -> Option<GqlActor> {
+        Some(author(face(ctx), &self.status.creator_login))
+    }
+}
+
+/// A commit's statuses: the newest of each context.
+pub struct GqlStatus {
+    sha: String,
+    newest: Vec<world::CommitStatus>,
+}
+
+#[Object(name = "Status")]
+impl GqlStatus {
+    async fn id(&self) -> ID {
+        ID(format!("O_commit_status_{}", self.sha))
+    }
+
+    async fn state(&self) -> StatusState {
+        world::combined_state(&self.newest).into()
+    }
+
+    /// GitHub lists the contexts that errored first, then those that
+    /// failed, those pending, and those that succeeded, each by name.
+    async fn contexts(&self) -> Vec<GqlStatusContext> {
+        contexts_in_order(&self.newest)
+    }
+}
+
+fn contexts_in_order(newest: &[world::CommitStatus]) -> Vec<GqlStatusContext> {
+    let mut contexts: Vec<GqlStatusContext> = newest
+        .iter()
+        .map(|status| GqlStatusContext {
+            status: status.clone(),
+        })
+        .collect();
+    contexts.sort_by(|a, b| {
+        let key =
+            |c: &GqlStatusContext| (StatusState::from(c.status.state), c.status.context.clone());
+        key(a).cmp(&key(b))
+    });
+    contexts
+}
+
 #[derive(Union)]
 pub enum StatusCheckRollupContext {
     CheckRun(GqlCheckRun),
+    StatusContext(GqlStatusContext),
 }
 
 #[derive(SimpleObject)]
 pub struct StatusCheckRollupContextConnection {
     pub page_info: PageInfo,
     pub nodes: Vec<StatusCheckRollupContext>,
+    /// How many contexts the commit has, whatever page was asked for.
+    pub total_count: i64,
+    pub check_run_count: i64,
+    pub status_context_count: i64,
 }
 
 pub struct StatusCheckRollup {
+    /// The newest check run of each name.
     pub runs: Vec<world::CheckRun>,
+    /// The newest status of each context.
+    pub statuses: Vec<world::CommitStatus>,
 }
 
 #[Object]
 impl StatusCheckRollup {
+    /// What the commit's check runs and statuses come to together: a
+    /// failure when any failed, pending when any has yet to finish, and
+    /// otherwise a success.
+    async fn state(&self) -> StatusState {
+        use world::CheckConclusion as C;
+        let failed = |run: &world::CheckRun| {
+            matches!(
+                run.conclusion,
+                Some(C::Failure | C::Cancelled | C::TimedOut | C::ActionRequired)
+            )
+        };
+        let unfinished = |run: &world::CheckRun| run.status != world::CheckStatus::Completed;
+        let statuses = match self.statuses.is_empty() {
+            true => StatusState::Success,
+            false => world::combined_state(&self.statuses).into(),
+        };
+        if statuses == StatusState::Failure || self.runs.iter().any(failed) {
+            StatusState::Failure
+        } else if statuses == StatusState::Pending || self.runs.iter().any(unfinished) {
+            StatusState::Pending
+        } else {
+            StatusState::Success
+        }
+    }
+
+    /// The check runs, then the statuses.
     async fn contexts(
         &self,
         first: Option<i32>,
     ) -> Result<StatusCheckRollupContextConnection, Error> {
-        let nodes: Vec<StatusCheckRollupContext> = self
+        let runs = self
             .runs
             .iter()
-            .map(|r| StatusCheckRollupContext::CheckRun(GqlCheckRun { run: r.clone() }))
-            .collect();
+            .map(|r| StatusCheckRollupContext::CheckRun(GqlCheckRun { run: r.clone() }));
+        let statuses = contexts_in_order(&self.statuses)
+            .into_iter()
+            .map(StatusCheckRollupContext::StatusContext);
+        let nodes: Vec<StatusCheckRollupContext> = runs.chain(statuses).collect();
         let (nodes, page_info) = take_first("contexts", nodes, first)?;
-        Ok(StatusCheckRollupContextConnection { page_info, nodes })
+        Ok(StatusCheckRollupContextConnection {
+            page_info,
+            nodes,
+            total_count: (self.runs.len() + self.statuses.len()) as i64,
+            check_run_count: self.runs.len() as i64,
+            status_context_count: self.statuses.len() as i64,
+        })
     }
 }
 
@@ -1136,8 +1276,9 @@ impl Commit {
         Ok(rfc3339(unix))
     }
 
-    /// `null` when the commit has no check runs at all — GitHub's shape, and
-    /// the one consumers read as "no CI here" rather than "CI unknown".
+    /// `null` when the commit has no check runs and no statuses — GitHub's
+    /// shape, and the one consumers read as "no CI here" rather than "CI
+    /// unknown".
     async fn status_check_rollup(
         &self,
         ctx: &Context<'_>,
@@ -1149,7 +1290,32 @@ impl Commit {
             .map_err(internal)?;
         // GitHub's rollup holds the newest run of each name, as its lists do.
         let runs = world::newest_check_runs(runs);
-        Ok((!runs.is_empty()).then_some(StatusCheckRollup { runs }))
+        let statuses = self.newest_statuses(ctx)?;
+        Ok((!runs.is_empty() || !statuses.is_empty())
+            .then_some(StatusCheckRollup { runs, statuses }))
+    }
+
+    /// The commit's statuses, or `null` for a commit with none.
+    async fn status(&self, ctx: &Context<'_>) -> Result<Option<GqlStatus>, Error> {
+        let newest = self.newest_statuses(ctx)?;
+        Ok((!newest.is_empty()).then(|| GqlStatus {
+            sha: self.sha.clone(),
+            newest,
+        }))
+    }
+}
+
+impl Commit {
+    /// The newest status of each context on the commit.
+    fn newest_statuses(&self, ctx: &Context<'_>) -> Result<Vec<world::CommitStatus>, Error> {
+        let statuses = face(ctx)
+            .world
+            .list_commit_statuses(self.repo.id, &self.sha)
+            .map_err(internal)?;
+        Ok(world::newest_of_each_context(&statuses)
+            .into_iter()
+            .cloned()
+            .collect())
     }
 }
 

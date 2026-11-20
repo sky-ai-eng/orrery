@@ -1938,4 +1938,45 @@ fn diff_reports_workflows_and_what_their_runs_come_to() {
     );
     assert_eq!(d.workflow_runs_deleted[0].attempt, 2);
     assert!(d.workflow_runs_updated.is_empty());
+    assert!(d.commit_statuses_added.is_empty());
+
+    // A status a commit is given is reported, each one, since a context's
+    // next status is another.
+    for state in [
+        orrery_world::StatusState::Pending,
+        orrery_world::StatusState::Success,
+    ] {
+        w.create_commit_status(
+            by(alice.id),
+            orrery_world::NewCommitStatus {
+                repo_id: repo.id,
+                sha: ONE,
+                context: "deploy",
+                state,
+                description: None,
+                target_url: None,
+            },
+        )
+        .unwrap();
+    }
+    let d = inst.diff("rerun", None);
+    let given: Vec<(&str, &str, &str, &str)> = d
+        .commit_statuses_added
+        .iter()
+        .map(|s| {
+            (
+                s.sha.as_str(),
+                s.context.as_str(),
+                s.state.as_str(),
+                s.creator.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        given,
+        [
+            (ONE, "deploy", "pending", "alice"),
+            (ONE, "deploy", "success", "alice")
+        ]
+    );
 }

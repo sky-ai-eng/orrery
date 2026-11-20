@@ -375,11 +375,25 @@ fn listed(
     total: usize,
     items: Vec<serde_json::Value>,
 ) -> Response<Body> {
-    let (per_page, page) = page_of(query);
-    let mut resp = json_response(
+    let resp = json_response(
         StatusCode::OK,
         serde_json::json!({ "total_count": total, key: items }),
     );
+    with_page_links(resp, face, repo, path, query, total)
+}
+
+/// `resp` with GitHub's `Link` header for the page `query` asks of a list
+/// of `total`: the list's path under `/repositories/{id}`, the query as it
+/// was asked, and `page` last.
+pub(crate) fn with_page_links(
+    mut resp: Response<Body>,
+    face: &GithubFace,
+    repo: &Repo,
+    path: &str,
+    query: &str,
+    total: usize,
+) -> Response<Body> {
+    let (per_page, page) = page_of(query);
     let last = total.div_ceil(per_page).max(1);
     let kept: Vec<&str> = query
         .split('&')
@@ -415,13 +429,16 @@ fn listed(
     resp
 }
 
-fn page<T>(items: Vec<T>, query: &str) -> Vec<T> {
+pub(crate) fn page<T>(items: Vec<T>, query: &str) -> Vec<T> {
     let (per_page, page) = page_of(query);
     crate::reads::paginate(items, per_page, page)
 }
 
 /// The repository with the id a `/repositories/{id}` path names.
-fn repo_by_id(face: &GithubFace, id: &str) -> Result<(Repo, Actor), Box<Response<Body>>> {
+pub(crate) fn repo_by_id(
+    face: &GithubFace,
+    id: &str,
+) -> Result<(Repo, Actor), Box<Response<Body>>> {
     let repo = match id.parse::<i64>().map(|id| face.world.repo_by_id(id)) {
         Ok(Ok(Some(repo))) => repo,
         Ok(Ok(None)) | Err(_) => return Err(Box::new(not_found())),

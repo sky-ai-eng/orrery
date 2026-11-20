@@ -40,6 +40,7 @@ mod pulls;
 mod reads;
 mod render;
 mod signing;
+mod statuses;
 mod suites;
 pub mod webhooks;
 
@@ -297,6 +298,26 @@ pub fn router(face: GithubFace) -> Router {
         .route(
             "/repos/{owner}/{repo}/commits/{sha}/check-suites",
             get(suites::list_suites_for_ref),
+        )
+        .route(
+            "/repos/{owner}/{repo}/statuses/{sha}",
+            get(statuses::list_for_ref).post(statuses::create),
+        )
+        .route(
+            "/repos/{owner}/{repo}/commits/{sha}/statuses",
+            get(statuses::list_for_ref),
+        )
+        .route(
+            "/repos/{owner}/{repo}/commits/{sha}/status",
+            get(statuses::combined_for_ref),
+        )
+        .route(
+            "/repositories/{id}/statuses/{sha}",
+            get(statuses::list_by_id),
+        )
+        .route(
+            "/repositories/{id}/status/{sha}",
+            get(statuses::combined_by_id),
         )
         .layer(axum::middleware::from_fn_with_state(
             face.clone(),

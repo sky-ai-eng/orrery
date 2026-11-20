@@ -1781,6 +1781,23 @@ async fn an_installation_token_does_what_its_permissions_allow() {
     ] {
         assert_eq!(refused(&none, "GET", &path, None), "checks=read", "{path}");
     }
+    // Statuses ask for a permission of their own, which this App has not.
+    for path in [
+        format!("commits/{}/status", s.main_sha),
+        format!("commits/{}/statuses", s.main_sha),
+        format!("statuses/{}", s.main_sha),
+    ] {
+        assert_eq!(refused(&all, "GET", &path, None), "statuses=read", "{path}");
+    }
+    assert_eq!(
+        refused(
+            &all,
+            "POST",
+            &format!("statuses/{}", s.main_sha),
+            Some(json!({ "state": "success" }))
+        ),
+        "statuses=write"
+    );
     // The one route that looks first: a check run that does not exist.
     assert_eq!(
         ask(&none, "GET", "check-runs/999", None),
@@ -1916,4 +1933,380 @@ async fn an_installation_token_does_what_its_permissions_allow() {
         ask(&none, "GET", "actions/artifacts", None),
         (501, String::new())
     );
+}
+
+/// Commit statuses as GitHub was observed to serve them: each write, the
+/// two reads, and the state GraphQL makes of them with the check runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_commit_is_given_statuses_and_comes_to_what_they_say() {
+    let s = seed().await;
+    let base = s.inst.base.clone();
+    let sha = s.feature_sha.clone();
+    let post = |to: &str, body: Value| {
+        send(
+            "POST",
+            &format!("{}/statuses/{to}", s.api),
+            Some(&s.token),
+            Some(body),
+        )
+    };
+    let give = |context: &str, state: &str| {
+        let answer = post(&sha, json!({ "state": state, "context": context }));
+        assert_eq!(answer.status, 201, "{}", answer.text());
+        serde_json::from_slice::<Value>(&answer.body).unwrap()
+    };
+    let combined = || s.get(&format!("commits/{sha}/status"));
+    let shown = |combined: &Value| -> (String, Vec<(String, String)>) {
+        let statuses = combined["statuses"].as_array().unwrap();
+        (
+            combined["state"].as_str().unwrap().to_string(),
+            statuses
+                .iter()
+                .map(|status| {
+                    (
+                        status["context"].as_str().unwrap().to_string(),
+                        status["state"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect(),
+        )
+    };
+    let of = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(context, state)| (context.to_string(), state.to_string()))
+            .collect()
+    };
+
+    // A commit with no statuses is pending, with none.
+    let none = combined();
+    assert_eq!(shown(&none), ("pending".to_string(), Vec::new()));
+    assert_eq!(none["total_count"], 0);
+    assert_eq!(none["sha"], sha.as_str());
+    assert_eq!(none["repository"]["full_name"], "alice/web");
+    assert_eq!(
+        none["commit_url"],
+        format!("{}/commits/{sha}", s.api).as_str()
+    );
+    assert_eq!(
+        none["url"],
+        format!("{}/commits/{sha}/status", s.api).as_str()
+    );
+    assert_eq!(s.get(&format!("commits/{sha}/statuses")), json!([]));
+
+    // A status, with what GitHub answers for it.
+    let answer = post(
+        &sha,
+        json!({
+            "state": "pending", "context": "ext/deploy", "description": "Deploying",
+            "target_url": "https://deploy.example/1", "bogus": 1,
+        }),
+    );
+    assert_eq!(answer.status, 201, "{}", answer.text());
+    let made: Value = serde_json::from_slice(&answer.body).unwrap();
+    assert_eq!(made["url"], format!("{}/statuses/{sha}", s.api).as_str());
+    assert_eq!(
+        (
+            &made["state"],
+            &made["context"],
+            &made["description"],
+            &made["target_url"]
+        ),
+        (
+            &json!("pending"),
+            &json!("ext/deploy"),
+            &json!("Deploying"),
+            &json!("https://deploy.example/1")
+        )
+    );
+    assert_eq!(made["creator"]["login"], "alice");
+    assert_eq!(made["created_at"], made["updated_at"]);
+    assert!(made["id"].is_i64() && made["node_id"].is_string());
+    // No context is `default`, and so is a null one. An empty description
+    // is kept as it is.
+    let unnamed = post(
+        &sha,
+        json!({ "state": "success", "context": null, "description": "" }),
+    );
+    let unnamed: Value = serde_json::from_slice(&unnamed.body).unwrap();
+    assert_eq!(
+        (
+            &unnamed["context"],
+            &unnamed["description"],
+            &unnamed["target_url"]
+        ),
+        (&json!("default"), &json!(""), &Value::Null)
+    );
+
+    // What GitHub refuses, in its words: a field of the wrong type by name,
+    // then a commit it cannot find, then every other fault in one string.
+    for (field, body) in [
+        ("context", json!({ "state": 5, "context": 7 })),
+        ("state", json!({ "state": 5 })),
+        (
+            "description",
+            json!({ "state": "success", "description": 5 }),
+        ),
+        ("target_url", json!({ "state": "success", "target_url": 5 })),
+    ] {
+        assert_eq!(
+            post(&sha, body).message(),
+            (
+                422,
+                format!("Invalid value for '{field}'. Must be a string.")
+            )
+        );
+    }
+    for missing in ["0".repeat(40), "abc".to_string(), "nope".to_string()] {
+        assert_eq!(
+            post(&missing, json!({ "state": "bogus" })).message(),
+            (422, format!("No commit found for SHA: {missing}"))
+        );
+    }
+    let failed = |answer: Answer| {
+        let body: Value = serde_json::from_slice(&answer.body).unwrap();
+        (
+            answer.status,
+            body["message"].as_str().unwrap().to_string(),
+            body["errors"].as_str().unwrap().to_string(),
+        )
+    };
+    let validation = |faults: &str| {
+        (
+            422,
+            "Validation Failed".to_string(),
+            format!("Validation failed: {faults}"),
+        )
+    };
+    assert_eq!(
+        failed(post(&sha, json!({}))),
+        validation("State is not included in the list")
+    );
+    assert_eq!(
+        failed(post(&sha, json!({ "state": "SUCCESS" }))),
+        validation("State is not included in the list")
+    );
+    assert_eq!(
+        failed(post(
+            &sha,
+            json!({
+                "state": "bogus", "context": "", "description": "x".repeat(141),
+                "target_url": "ftp://x",
+            })
+        )),
+        validation(
+            "Context can't be blank, State is not included in the list, Description is too \
+             long (maximum is 140 characters), Target url must use http(s) scheme"
+        )
+    );
+    assert_eq!(
+        post(
+            &sha,
+            json!({ "state": "success", "context": "long", "description": "x".repeat(140) })
+        )
+        .status,
+        201
+    );
+    // A commit named by a branch or in upper case is found, and is not a
+    // valid sha.
+    for named in ["feature".to_string(), sha.to_uppercase()] {
+        assert_eq!(
+            failed(post(&named, json!({ "state": "success" }))),
+            validation("Sha must be a valid hex object ID"),
+            "{named}"
+        );
+    }
+
+    // The combined status keeps the newest of each context, in the order of
+    // those newest, and comes to a failure when any failed or errored, to
+    // pending when any is, and otherwise to a success.
+    let other = s.main_sha.clone();
+    let on_main = |context: &str, state: &str| {
+        let answer = send(
+            "POST",
+            &format!("{}/statuses/{other}", s.api),
+            Some(&s.token),
+            Some(json!({ "state": state, "context": context })),
+        );
+        assert_eq!(answer.status, 201);
+    };
+    let main_combined = || shown(&s.get(&format!("commits/{other}/status")));
+    on_main("one", "success");
+    assert_eq!(
+        main_combined(),
+        ("success".to_string(), of(&[("one", "success")]))
+    );
+    on_main("two", "pending");
+    assert_eq!(main_combined().0, "pending");
+    on_main("three", "failure");
+    on_main("four", "error");
+    assert_eq!(
+        main_combined(),
+        (
+            "failure".to_string(),
+            of(&[
+                ("one", "success"),
+                ("two", "pending"),
+                ("three", "failure"),
+                ("four", "error")
+            ])
+        )
+    );
+    on_main("three", "success");
+    assert_eq!(
+        main_combined(),
+        (
+            "failure".to_string(),
+            of(&[
+                ("one", "success"),
+                ("two", "pending"),
+                ("four", "error"),
+                ("three", "success")
+            ])
+        )
+    );
+    on_main("four", "success");
+    assert_eq!(main_combined().0, "pending");
+    on_main("two", "success");
+    assert_eq!(
+        main_combined(),
+        (
+            "success".to_string(),
+            of(&[
+                ("one", "success"),
+                ("three", "success"),
+                ("four", "success"),
+                ("two", "success")
+            ])
+        )
+    );
+
+    // The list has every status, newest first, with who gave each. Both
+    // reads page, with links at the repository's id, and take a branch.
+    let all = s.get(&format!("commits/{other}/statuses"));
+    let listed: Vec<&str> = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|status| status["context"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        listed,
+        ["two", "four", "three", "four", "three", "two", "one"]
+    );
+    assert_eq!(all[0]["creator"]["login"], "alice");
+    assert!(s.get(&format!("commits/{other}/status"))["statuses"][0]["creator"].is_null());
+    assert_eq!(s.get(&format!("statuses/{other}")), all);
+    assert_eq!(s.get("commits/main/statuses"), all);
+    assert_eq!(s.get("commits/main/status")["total_count"], 4);
+    let paged = fetch(
+        "GET",
+        &format!("{}/commits/{other}/status?per_page=3", s.api),
+        Some(&s.token),
+    );
+    let page: Value = serde_json::from_slice(&paged.body).unwrap();
+    assert_eq!(
+        (
+            page["total_count"].as_i64(),
+            page["statuses"].as_array().unwrap().len()
+        ),
+        (Some(4), 3)
+    );
+    assert_eq!(page["state"], "success");
+    // A ref that names nothing is not found, each read in its own words,
+    // and a sha no commit has is a commit with no statuses.
+    let unknown = |path: &str| fetch("GET", &format!("{}/{path}", s.api), Some(&s.token)).message();
+    assert_eq!(
+        unknown("commits/nope/status"),
+        (404, "Ref not found".to_string())
+    );
+    assert_eq!(
+        unknown("commits/nope/statuses"),
+        (404, "Not Found".to_string())
+    );
+    let nowhere = "0".repeat(40);
+    assert_eq!(
+        shown(&s.get(&format!("commits/{nowhere}/status"))),
+        ("pending".to_string(), Vec::new())
+    );
+    assert_eq!(s.get(&format!("commits/{nowhere}/statuses")), json!([]));
+
+    // GraphQL: a commit's statuses, and the rollup's state over them and
+    // the check runs. The head of the pull request has three contexts.
+    give("ext/deploy", "error");
+    let query = r#"
+        query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest {
+            commits(last: 1) { nodes { commit {
+                status { state contexts { context state description targetUrl creator { login } } }
+                statusCheckRollup { state contexts(first: 50) {
+                    totalCount checkRunCount statusContextCount
+                    nodes { __typename ... on StatusContext { context state } ... on CheckRun { name } }
+                } }
+            } } }
+        } } }"#;
+    let ask = || -> Value {
+        let answer: Value = ureq::post(format!("{base}/api/graphql"))
+            .header("authorization", &format!("token {}", s.token))
+            .send_json(json!({ "query": query, "variables": { "ids": ["O_pull_1"] } }))
+            .unwrap()
+            .body_mut()
+            .read_json()
+            .unwrap();
+        assert!(answer.get("errors").is_none(), "{answer}");
+        answer["data"]["nodes"][0]["commits"]["nodes"][0]["commit"].clone()
+    };
+    let commit = ask();
+    assert_eq!(commit["status"]["state"], "FAILURE");
+    // The contexts that errored come first, and the rest by name.
+    assert_eq!(
+        commit["status"]["contexts"],
+        json!([
+            { "context": "ext/deploy", "state": "ERROR", "description": null, "targetUrl": null,
+              "creator": { "login": "alice" } },
+            { "context": "default", "state": "SUCCESS", "description": "", "targetUrl": null,
+              "creator": { "login": "alice" } },
+            { "context": "long", "state": "SUCCESS", "description": "x".repeat(140),
+              "targetUrl": null, "creator": { "login": "alice" } },
+        ])
+    );
+    let rollup = &commit["statusCheckRollup"];
+    assert_eq!(rollup["state"], "FAILURE");
+    assert_eq!(
+        (
+            &rollup["contexts"]["totalCount"],
+            &rollup["contexts"]["checkRunCount"],
+            &rollup["contexts"]["statusContextCount"]
+        ),
+        (&json!(3), &json!(0), &json!(3))
+    );
+    assert_eq!(
+        rollup["contexts"]["nodes"][0]["__typename"],
+        "StatusContext"
+    );
+    // With every status a success, a check run decides: queued is pending,
+    // and a failure is a failure.
+    give("ext/deploy", "success");
+    assert_eq!(ask()["statusCheckRollup"]["state"], "SUCCESS");
+    let ci = mint_actor(&base, "ci", "bot");
+    let run = face_ok(
+        "POST",
+        &format!("{}/check-runs", s.api),
+        &ci,
+        json!({ "name": "build", "head_sha": sha }),
+    );
+    let commit = ask();
+    assert_eq!(commit["statusCheckRollup"]["state"], "PENDING");
+    assert_eq!(commit["status"]["state"], "SUCCESS");
+    assert_eq!(
+        commit["statusCheckRollup"]["contexts"]["nodes"][0]["name"],
+        "build"
+    );
+    assert_eq!(commit["statusCheckRollup"]["contexts"]["totalCount"], 4);
+    send(
+        "PATCH",
+        &format!("{}/check-runs/{}", s.api, run["id"]),
+        Some(&ci),
+        Some(json!({ "status": "completed", "conclusion": "failure" })),
+    );
+    assert_eq!(ask()["statusCheckRollup"]["state"], "FAILURE");
 }
