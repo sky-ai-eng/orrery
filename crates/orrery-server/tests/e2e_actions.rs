@@ -18,6 +18,11 @@ struct Seeded {
 /// alice/web with `main` and a one-commit `feature` branch, and an open
 /// pull request for it.
 async fn seed() -> Seeded {
+    seed_as(false).await
+}
+
+/// The same, in a repository that is private when `private` is set.
+async fn seed_as(private: bool) -> Seeded {
     let inst = boot().await;
     let base = inst.base.clone();
     let token = mint_actor(&base, "alice", "user");
@@ -25,7 +30,7 @@ async fn seed() -> Seeded {
         "POST",
         &format!("{base}/api/v3/user/repos"),
         &token,
-        json!({ "name": "web" }),
+        json!({ "name": "web", "private": private }),
     );
     let clone_url = repo["clone_url"].as_str().unwrap().to_string();
     let authed_url = clone_url.replace("http://", &format!("http://x-access-token:{token}@"));
@@ -1204,8 +1209,12 @@ impl Answer {
         String::from_utf8(self.body.clone()).unwrap()
     }
 
+    fn json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap()
+    }
+
     fn message(&self) -> (u16, String) {
-        let body: Value = serde_json::from_slice(&self.body).unwrap();
+        let body = self.json();
         (self.status, body["message"].as_str().unwrap().to_string())
     }
 }
@@ -1591,6 +1600,47 @@ async fn a_runs_logs_are_read_through_links_and_deleted_with_the_run() {
         3
     );
 
+    // A re-run after the logs were deleted has logs again, in what it runs.
+    // The jobs it carries over have the logs of the jobs that ran, which
+    // are gone: the job's route is `404`, and a step's link answers
+    // nothing. The attempts before it still have no archive.
+    let rerun = fetch(
+        "POST",
+        &format!("{}/actions/jobs/{}/rerun", s.api, job_id(&state(), "build")),
+        Some(&s.token),
+    );
+    assert_eq!(rerun.status, 201);
+    let twice = job_id(&state(), "lint");
+    assert_ne!(twice, carried);
+    assert_eq!(api(&format!("actions/jobs/{twice}/logs")).status, 404);
+    let gone = api(&format!("actions/jobs/{twice}/steps/1/logs"));
+    let nothing = follow(&gone);
+    assert_eq!(
+        (gone.status, nothing.status, nothing.error_code.as_deref()),
+        (302, 404, Some("BlobNotFound"))
+    );
+    finish(&state(), "build", "success");
+    let build = job_id(&state(), "build");
+    assert_eq!(
+        follow(&api(&format!("actions/jobs/{build}/logs"))).status,
+        200
+    );
+    let third = unzip(&follow(&api(&format!("{run_path}/logs"))).body);
+    assert_eq!(
+        third
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| !name.contains('/'))
+            .collect::<Vec<_>>(),
+        ["0_build.txt"]
+    );
+    for attempt in [1, 2] {
+        assert_eq!(
+            api(&format!("{run_path}/attempts/{attempt}/logs")).status,
+            404
+        );
+    }
+
     // Deleting the run: it, its jobs, their check runs, and its suite are
     // gone, and the commit lists no check run of its.
     let deleted = delete(&run_path);
@@ -1615,6 +1665,18 @@ async fn a_runs_logs_are_read_through_links_and_deleted_with_the_run() {
     assert_eq!(s.get("actions/runs")["total_count"], 0);
     assert_eq!(delete(&run_path).status, 404);
     assert_eq!(delete(&format!("{run_path}/logs")).status, 404);
+
+    // The workflow's next run does not take the deleted run's number, and
+    // its jobs do not take the deleted jobs' ids.
+    assert_eq!(run["run_number"], 1);
+    let next = s.runner(
+        &format!("/workflows/{}/runs", workflow["id"]),
+        Some(json!({
+            "event": "push", "head_sha": s.feature_sha, "head_branch": "feature", "actor": "alice",
+        })),
+    );
+    assert_eq!(next["run_number"], 2);
+    assert!(job_id(&next, "lint") > build);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1670,7 +1732,9 @@ async fn a_runner_writes_only_whole_lines_to_a_job_in_progress() {
 /// by the permissions the token holds.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_installation_token_does_what_its_permissions_allow() {
-    let s = seed().await;
+    // The permissions are asked of a private repository: anyone reads a
+    // public one.
+    let s = seed_as(true).await;
     let base = s.inst.base.clone();
     // A finished run with one job, to read and to try to write.
     let (_, workflow) = s.control(
@@ -1719,21 +1783,24 @@ async fn an_installation_token_does_what_its_permissions_allow() {
         "/_orrery/apps/ci-app/installations",
         json!({ "account": "alice" }),
     );
-    let issue = |permissions: Option<Value>| {
+    let issued = |body: Value| {
         let jwt = key.jwt(app["id"].clone(), s.inst.world.clock().unwrap());
         let mut resp = ureq::post(format!(
             "{base}/api/v3/app/installations/{}/access_tokens",
             installation["id"]
         ))
         .header("authorization", format!("Bearer {jwt}"))
-        .send_json(match permissions {
-            Some(permissions) => json!({ "permissions": permissions }),
-            None => json!({}),
-        })
+        .send_json(body)
         .unwrap();
         let issued: Value = resp.body_mut().read_json().unwrap();
         issued["token"].as_str().unwrap().to_string()
     };
+    let issue = |permissions: Option<Value>| match permissions {
+        Some(permissions) => issued(json!({ "permissions": permissions })),
+        None => issued(json!({})),
+    };
+    // A token of every permission, narrowed to the repositories named.
+    let issue_for = |repositories: Option<Value>| issued(json!({ "repositories": repositories }));
     let all = issue(None);
     let read = issue(Some(json!({ "actions": "read", "checks": "read" })));
     let none = issue(Some(json!({ "metadata": "read" })));
@@ -1798,10 +1865,104 @@ async fn an_installation_token_does_what_its_permissions_allow() {
         ),
         "statuses=write"
     );
-    // The one route that looks first: a check run that does not exist.
+    // The one route that looks first: a check run that does not exist, or
+    // that is another repository's.
+    face_ok(
+        "POST",
+        &format!("{base}/api/v3/user/repos"),
+        &s.token,
+        json!({ "name": "open" }),
+    );
+    let open = format!("{base}/api/v3/repos/alice/open");
+    let elsewhere = format!("{open}/check-runs/{job}");
+    for token in [&none, &read] {
+        assert_eq!(
+            ask(token, "GET", "check-runs/999", None),
+            (404, "checks=read".to_string())
+        );
+        let answer = send("GET", &elsewhere, Some(token), None);
+        assert_eq!(
+            (answer.status, answer.accepted.as_deref()),
+            (404, Some("checks=read"))
+        );
+    }
+    // `HEAD` is a read, refused as one.
     assert_eq!(
-        ask(&none, "GET", "check-runs/999", None),
-        (404, "checks=read".to_string())
+        ask(&none, "HEAD", "actions/runs", None),
+        (403, "actions=read".to_string())
+    );
+    assert_eq!(
+        ask(&read, "HEAD", "actions/runs", None),
+        (200, "actions=read".to_string())
+    );
+    // The routes that name the repository by its id ask the same.
+    let repo_id = send("GET", &s.api, Some(&s.token), None).json()["id"]
+        .as_i64()
+        .unwrap();
+    let by_id = format!("{base}/api/v3/repositories/{repo_id}/actions/runs");
+    for (token, status) in [(&none, 403), (&read, 200)] {
+        let answer = send("GET", &by_id, Some(token), None);
+        assert_eq!(
+            (answer.status, answer.accepted.as_deref()),
+            (status, Some("actions=read"))
+        );
+    }
+
+    // A repository is looked for before the permission: one that does not
+    // exist is `404` whatever the token holds, by name and by id.
+    for url in [
+        format!("{base}/api/v3/repos/alice/nope/actions/runs"),
+        format!("{base}/api/v3/repositories/999999/actions/runs"),
+    ] {
+        for token in [&none, &read] {
+            let answer = send("GET", &url, Some(token), None);
+            assert_eq!(
+                (answer.message(), answer.accepted.as_deref()),
+                ((404, "Not Found".to_string()), Some("actions=read")),
+                "{url}"
+            );
+        }
+    }
+    // So is a private repository the token does not reach, which a token
+    // narrowed to another repository shows.
+    let elsewhere_only = issue_for(Some(json!(["open"])));
+    let unreached = send(
+        "GET",
+        &format!("{}/actions/runs", s.api),
+        Some(&elsewhere_only),
+        None,
+    );
+    assert_eq!(
+        (unreached.message(), unreached.accepted.as_deref()),
+        ((404, "Not Found".to_string()), Some("actions=read"))
+    );
+
+    // Anyone reads a public repository, so a token without the permission
+    // does, and is still told what the route asks. A write there needs the
+    // permission.
+    for (path, accepted) in [
+        ("actions/runs", "actions=read"),
+        ("actions/workflows", "actions=read"),
+    ] {
+        let answer = send("GET", &format!("{open}/{path}"), Some(&none), None);
+        assert_eq!(
+            (answer.status, answer.accepted.as_deref()),
+            (200, Some(accepted)),
+            "{path}"
+        );
+    }
+    let write = send(
+        "POST",
+        &format!("{open}/actions/runs/999/cancel"),
+        Some(&none),
+        None,
+    );
+    assert_eq!(
+        (write.message(), write.accepted.as_deref()),
+        (
+            (403, "Resource not accessible by integration".to_string()),
+            Some("actions=write")
+        )
     );
 
     // With the permission to read, each read answers as it does anyone.
@@ -1809,8 +1970,11 @@ async fn an_installation_token_does_what_its_permissions_allow() {
         ("actions/runs".to_string(), 200, "actions=read"),
         (run_path.clone(), 200, "actions=read"),
         ("actions/runs/999".to_string(), 404, "actions=read"),
-        (format!("actions/jobs/{job}/logs"), 302, "actions=read"),
-        (format!("{run_path}/logs"), 302, "actions=read"),
+        // A redirect to a log names no permission.
+        (format!("actions/jobs/{job}/logs"), 302, ""),
+        (format!("{run_path}/logs"), 302, ""),
+        (format!("{run_path}/attempts/1/logs"), 302, ""),
+        (format!("{run_path}/attempts/1/jobs"), 200, "actions=read"),
         (format!("check-runs/{job}"), 200, "checks=read"),
         ("check-suites/999".to_string(), 404, "checks=read"),
         (

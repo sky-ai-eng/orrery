@@ -4,9 +4,9 @@
 //! run of one is started here for the events GitHub starts one on by
 //! itself. And a runner's work on a job is reported here: taking it,
 //! writing to its log, finishing a step, and finishing the job. Which jobs
-//! a run lists, and
-//! when, follows from those (`spec/surface-github.md`, "Actions"). The
-//! reads of workflows, runs, and jobs are the GitHub face's.
+//! a run lists, and when, follows from those (`spec/surface-github.md`,
+//! "Actions"). The reads of workflows, runs, and jobs are the GitHub
+//! face's.
 
 use axum::Router;
 use axum::body::{Body, Bytes};

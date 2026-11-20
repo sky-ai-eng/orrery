@@ -72,9 +72,15 @@ fn api(face: &GithubFace, repo: &Repo) -> String {
     format!("{}/repos/{}", face.layout.api(), repo.full_name())
 }
 
-/// The name of the runner GitHub hosts for a job, numbered after the job.
+/// The id of the runner GitHub hosts for a job, which is numbered after
+/// the job.
+fn runner_id(job: &CheckRun) -> i64 {
+    1_000_000_000 + job.id
+}
+
+/// The name of the runner GitHub hosts for a job.
 pub(crate) fn runner_name(job: &CheckRun) -> String {
-    format!("GitHub Actions {}", 1_000_000_000 + job.id)
+    format!("GitHub Actions {}", runner_id(job))
 }
 
 /// The page a job's check run and the job itself link to.
@@ -320,7 +326,7 @@ pub(crate) fn job_json(
         .unwrap_or_default();
     // A runner took the job if it lists a step: a queued job and a skipped
     // one list none.
-    let runner = (!steps.is_empty()).then_some(1_000_000_000 + job.id);
+    let runner = (!steps.is_empty()).then(|| runner_id(job));
     serde_json::json!({
         "id": job.id,
         "run_id": run.id,
@@ -818,25 +824,12 @@ pub(crate) async fn get_job(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    let read = || -> Result<Option<(CheckRun, WorkflowRun, Option<Workflow>)>, WorldError> {
-        let Ok(id) = id.parse::<i64>() else {
-            return Ok(None);
-        };
-        let Some(job) = face.world.check_run_by_id(id)? else {
-            return Ok(None);
-        };
-        let Some(held) = job.job.as_ref().filter(|_| job.repo_id == repo.id) else {
-            return Ok(None);
-        };
-        let Some(run) = face.world.workflow_run_by_id(held.run_id)? else {
-            return Ok(None);
-        };
-        let workflow = face.world.workflow_by_id(run.workflow_id)?;
-        Ok(Some((job, run, workflow)))
+    let (job, run) = match job_at(&face, &repo, &id) {
+        Ok(found) => found,
+        Err(resp) => return *resp,
     };
-    let (job, run, workflow) = match read() {
-        Ok(Some(found)) => found,
-        Ok(None) => return not_found(),
+    let workflow = match face.world.workflow_by_id(run.workflow_id) {
+        Ok(workflow) => workflow,
         Err(e) => return internal(e),
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowJob") {
@@ -1075,20 +1068,9 @@ pub(crate) async fn rerun_job(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    let found = || -> Result<Option<(i64, i64)>, WorldError> {
-        let Ok(id) = id.parse::<i64>() else {
-            return Ok(None);
-        };
-        Ok(face
-            .world
-            .check_run_by_id(id)?
-            .filter(|job| job.repo_id == repo.id)
-            .and_then(|job| Some((job.job?.run_id, job.id))))
-    };
-    let (run_id, job_id) = match found() {
-        Ok(Some(found)) => found,
-        Ok(None) => return not_found(),
-        Err(e) => return internal(e),
+    let (job, run) = match job_at(&face, &repo, &id) {
+        Ok(found) => found,
+        Err(resp) => return *resp,
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowJob") {
         return refused;
@@ -1098,7 +1080,7 @@ pub(crate) async fn rerun_job(
     }
     let written = face
         .world
-        .rerun_workflow_run(run_id, Rerun::Job(job_id), caller.actor.id, by);
+        .rerun_workflow_run(run.id, Rerun::Job(job.id), caller.actor.id, by);
     rerun_answer(
         written,
         "The workflow run containing this job is already running",

@@ -555,8 +555,8 @@ pub struct Job {
     /// The steps the runner has listed, in order: none until it starts the
     /// job.
     pub steps: Vec<Step>,
-    /// For a job a re-run carried over, the job of the attempt before that
-    /// it is a copy of.
+    /// For a job a re-run carried over, the job that ran, in whichever
+    /// attempt it did.
     pub carried_from: Option<i64>,
 }
 
@@ -914,6 +914,16 @@ pub enum AccessLevel {
     Admin,
 }
 
+impl AccessLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AccessLevel::Read => "read",
+            AccessLevel::Write => "write",
+            AccessLevel::Admin => "admin",
+        }
+    }
+}
+
 /// What an app, an installation, or an installation token may do, by
 /// permission name. The world records them and checks no call against
 /// them: a face does, where its vendor does.
@@ -1081,8 +1091,8 @@ pub struct InstallationToken {
     pub expires_clock_unix: i64,
 }
 
-/// What an installation token may reach: the repositories its installation
-/// covers, or the ones it was narrowed to.
+/// What an installation token may reach and do: the repositories its
+/// installation covers, or the ones it was narrowed to, and its permissions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallationGrant {
     pub installation_id: i64,
@@ -1105,9 +1115,7 @@ impl InstallationGrant {
             .get(name)
             .is_some_and(|held| *held >= level)
     }
-}
 
-impl InstallationGrant {
     pub fn covers(&self, repo: &Repo) -> bool {
         match &self.repos {
             Some(ids) => ids.contains(&repo.id),

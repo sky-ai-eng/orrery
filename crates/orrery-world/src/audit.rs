@@ -438,6 +438,14 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
         ],
     ),
     (
+        "deleted_workflow_runs",
+        &[
+            ("run_id", Identity),
+            ("workflow_id", Identity),
+            ("run_number", Identity),
+        ],
+    ),
+    (
         "workflows",
         &[
             ("id", Identity),
@@ -707,6 +715,12 @@ fn subject_of(table: &str, row: &Row) -> (Subject, Option<String>) {
         "check_suites" => (s("check_suite", int(row, "id")), None),
         "commit_statuses" => (s("commit_status", int(row, "id")), None),
         "workflows" => (s("workflow", int(row, "id")), None),
+        // A deleted run's number stays taken. The event that deletes the
+        // run carries it.
+        "deleted_workflow_runs" => (
+            s("workflow_run", int(row, "run_id")),
+            Some("run_number".into()),
+        ),
         "workflow_runs" => (s("workflow_run", int(row, "id")), None),
         // A line belongs to its job's log, which the events that write or
         // delete it name.

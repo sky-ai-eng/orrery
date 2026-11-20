@@ -948,9 +948,10 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
             Some(_) => {}
         }
     }
+    let kept: BTreeSet<i64> = to_runs.iter().map(|run| run.id).collect();
     let workflow_runs_deleted = from_runs
         .values()
-        .filter(|old| !to_runs.iter().any(|run| run.id == old.id))
+        .filter(|old| !kept.contains(&old.id))
         .map(run_entry)
         .collect();
 
