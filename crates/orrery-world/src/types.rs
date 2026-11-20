@@ -507,8 +507,8 @@ pub struct Job {
     /// The steps the runner has listed, in order: none until it starts the
     /// job.
     pub steps: Vec<Step>,
-    /// For a job a re-run carried over, the job of the attempt before that
-    /// it is a copy of.
+    /// For a job a re-run carried over, the job that ran, in whichever
+    /// attempt it did.
     pub carried_from: Option<i64>,
 }
 

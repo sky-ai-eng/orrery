@@ -155,7 +155,9 @@ impl World {
             let clock = queries::clock(tx)?;
             // The run reads its status through its suite, which is queued
             // now and still is once the first jobs are, so the row the
-            // insert returns is the run as the write leaves it.
+            // insert returns is the run as the write leaves it. Its number
+            // is the next its workflow has not given out, counting the runs
+            // that were deleted.
             let run = tx.query_row(
                 &format!(
                     "INSERT INTO workflow_runs (repo_id, workflow_id, suite_id, run_number,
@@ -163,8 +165,12 @@ impl World {
                                                 attempt, created_clock_unix, started_clock_unix,
                                                 triggering_actor_id)
                      VALUES (?1, ?2, ?3,
-                             (SELECT COALESCE(MAX(run_number), 0) + 1 FROM workflow_runs
-                              WHERE workflow_id = ?2),
+                             (SELECT MAX(issued) + 1 FROM (
+                                  SELECT COALESCE(MAX(run_number), 0) AS issued
+                                  FROM workflow_runs WHERE workflow_id = ?2
+                                  UNION ALL
+                                  SELECT COALESCE(MAX(run_number), 0)
+                                  FROM deleted_workflow_runs WHERE workflow_id = ?2)),
                              ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, ?8)
                      RETURNING {}",
                     queries::WORKFLOW_RUN_COLUMNS
@@ -472,7 +478,7 @@ impl World {
                                              workflow_run_id, run_attempt, steps, carried_from)
                      SELECT repo_id, head_sha, name, status, conclusion, creator_id,
                             started_clock_unix, completed_clock_unix, ?2, suite_id,
-                            workflow_run_id, run_attempt + 1, steps, id
+                            workflow_run_id, run_attempt + 1, steps, COALESCE(carried_from, id)
                      FROM check_runs WHERE id = ?1
                      RETURNING id",
                     params![job.id, clock],
@@ -520,10 +526,16 @@ impl World {
         })
     }
 
-    /// The lines of a job's log, oldest first. A job a re-run carried over
-    /// has the log of the job that ran.
-    pub fn job_log(&self, job_id: i64) -> Result<Vec<LogLine>> {
+    /// The lines of a job's log, oldest first, or `None` for a log that was
+    /// deleted. A job a re-run carried over has the log of the job that
+    /// ran, which is deleted when that job's attempt's logs are.
+    pub fn job_log(&self, job_id: i64) -> Result<Option<Vec<LogLine>>> {
         self.with_conn(|conn| queries::job_log(conn, job_id))
+    }
+
+    /// Whether a job's log was deleted with its run's logs.
+    pub fn job_log_deleted(&self, job_id: i64) -> Result<bool> {
+        self.with_conn(|conn| Ok(queries::log_owner(conn, job_id)?.deleted))
     }
 
     /// Delete the logs of a run that has finished, those of every attempt.
@@ -581,6 +593,11 @@ impl World {
                 subject: objects::check_suite_subject(tx, run.suite_id)?,
                 object: objects::check_suite_object(tx, run.suite_id)?,
             };
+            tx.execute(
+                "INSERT INTO deleted_workflow_runs (run_id, workflow_id, run_number)
+                 VALUES (?1, ?2, ?3)",
+                params![run_id, run.workflow_id, run.run_number],
+            )?;
             // Newest first: a job carried over names an older one.
             for job in queries::list_workflow_jobs(tx, run_id)?.iter().rev() {
                 w.emit(EventBody::CheckRunDeleted(events::CheckRunDeleted {

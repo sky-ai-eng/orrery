@@ -1644,7 +1644,7 @@
       "properties": {
         "carried_from": {
           "default": null,
-          "description": "For a job a re-run carried over, the job it is a copy of, whose\nlog is its own.",
+          "description": "For a job a re-run carried over, the job that ran, whose log is\nits own. A job carried over again names the same job.",
           "format": "int64",
           "type": [
             "integer",

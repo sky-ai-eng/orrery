@@ -788,39 +788,58 @@ pub(crate) fn list_workflow_jobs_of_attempt(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// The job whose log a job's is: itself, or for a job a re-run carried
-/// over, the job that ran.
-pub(crate) fn log_owner(conn: &Connection, job_id: i64) -> Result<i64> {
-    let mut owner = job_id;
-    loop {
-        let from: Option<i64> = conn
-            .query_row(
-                "SELECT carried_from FROM check_runs WHERE id = ?1",
-                params![owner],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        match from {
-            Some(from) => owner = from,
-            None => return Ok(owner),
-        }
-    }
+/// The job whose log a job's is, and whether that log was deleted.
+pub(crate) struct LogOwner {
+    pub job_id: i64,
+    pub deleted: bool,
 }
 
-/// The lines of a job's log, oldest first.
-pub(crate) fn job_log(conn: &Connection, job_id: i64) -> Result<Vec<LogLine>> {
+/// The job whose log a job's is: itself, or for a job a re-run carried
+/// over, the job that ran. Its log is deleted when its run's logs were
+/// deleted through the attempt it ran in, whichever attempt lists the job
+/// asked about.
+pub(crate) fn log_owner(conn: &Connection, job_id: i64) -> Result<LogOwner> {
+    let found = conn
+        .query_row(
+            "SELECT o.id, r.logs_deleted_attempt IS NOT NULL
+                          AND o.run_attempt <= r.logs_deleted_attempt
+             FROM check_runs j
+             JOIN check_runs o ON o.id = COALESCE(j.carried_from, j.id)
+             LEFT JOIN workflow_runs r ON r.id = o.workflow_run_id
+             WHERE j.id = ?1",
+            params![job_id],
+            |r| {
+                Ok(LogOwner {
+                    job_id: r.get(0)?,
+                    deleted: r.get::<_, Option<bool>>(1)?.unwrap_or(false),
+                })
+            },
+        )
+        .optional()?;
+    Ok(found.unwrap_or(LogOwner {
+        job_id,
+        deleted: false,
+    }))
+}
+
+/// The lines of a job's log, oldest first, or `None` for a log that was
+/// deleted.
+pub(crate) fn job_log(conn: &Connection, job_id: i64) -> Result<Option<Vec<LogLine>>> {
+    let owner = log_owner(conn, job_id)?;
+    if owner.deleted {
+        return Ok(None);
+    }
     let mut stmt = conn.prepare(
         "SELECT step, clock_unix, text FROM workflow_job_log_lines WHERE job_id = ?1 ORDER BY id",
     )?;
-    let rows = stmt.query_map(params![log_owner(conn, job_id)?], |r| {
+    let rows = stmt.query_map(params![owner.job_id], |r| {
         Ok(LogLine {
             step: r.get(0)?,
             clock_unix: r.get(1)?,
             text: r.get(2)?,
         })
     })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    Ok(Some(rows.collect::<rusqlite::Result<Vec<_>>>()?))
 }
 
 /// An attempt of a run that a re-run has replaced.
