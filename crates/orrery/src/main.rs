@@ -327,6 +327,9 @@ impl ServerConfig {
                 || self.base_url.is_some(),
             "server.tls_listen under the \"enterprise-server\" layout needs server.base_url, the URL clients reach the world at"
         );
+        if let Some(base_url) = &self.base_url {
+            check_base_url(base_url)?;
+        }
         Ok(())
     }
 
@@ -355,6 +358,38 @@ impl ServerConfig {
         }
         Ok(())
     }
+}
+
+/// A client reaches the world at `base_url`, and under GitHub Enterprise
+/// Server's layout every URL the world returns starts with it, so it must be
+/// one a client can follow and a path can be appended to: http or https,
+/// with a host, and with no user information, query, or fragment.
+fn check_base_url(base_url: &str) -> anyhow::Result<()> {
+    let fault = |why: &str| {
+        anyhow::anyhow!(
+            "server.base_url {base_url:?} {why}: it is the URL a client reaches the world at, so it is an http or https URL with a host, like https://world.example"
+        )
+    };
+    if base_url.contains('#') {
+        return Err(fault("has a fragment"));
+    }
+    let uri = base_url
+        .parse::<axum::http::Uri>()
+        .map_err(|_| fault("is not a URL"))?;
+    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        return Err(fault("is not an http or https URL"));
+    }
+    let authority = uri.authority().ok_or_else(|| fault("has no host"))?;
+    if authority.host().is_empty() {
+        return Err(fault("has no host"));
+    }
+    if authority.as_str().contains('@') {
+        return Err(fault("has user information"));
+    }
+    if uri.query().is_some() {
+        return Err(fault("has a query"));
+    }
+    Ok(())
 }
 
 /// Fail naming the first two keys that share a value, as "server.a and
