@@ -38,6 +38,7 @@ mod reader;
 mod rsa_key;
 mod schema;
 mod signing;
+mod statuses;
 mod suites;
 mod types;
 mod workflows;
@@ -63,6 +64,9 @@ pub use reader::{ViewMeta, WorldReader, WorldView};
 pub use schema::test_support;
 pub use schema::{BASELINE_VERSION, SCHEMA_VERSION};
 pub use signing::{ssh_public_key, ssh_public_key_from_blob};
+pub use statuses::{
+    MAX_STATUSES_PER_CONTEXT, NewCommitStatus, combined_state, newest_of_each_context,
+};
 pub use suites::newest_check_runs;
 pub use types::*;
 pub use workflows::{NewWorkflow, NewWorkflowRun, check_jobs};

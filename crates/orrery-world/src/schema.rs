@@ -488,6 +488,23 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         text        TEXT NOT NULL
      ) STRICT;
      CREATE INDEX workflow_job_log_lines_by_job ON workflow_job_log_lines (job_id, id);",
+    // 24: commit statuses. A status is what a caller says of a commit under
+    // a context of its own naming. Each is kept: a second status of a
+    // context is a new row, and what a commit comes to reads the newest of
+    // each context.
+    "CREATE TABLE commit_statuses (
+        id                 INTEGER PRIMARY KEY,
+        repo_id            INTEGER NOT NULL REFERENCES repos(id),
+        sha                TEXT NOT NULL,
+        context            TEXT NOT NULL,
+        state              TEXT NOT NULL
+                           CHECK (state IN ('error', 'failure', 'pending', 'success')),
+        description        TEXT,
+        target_url         TEXT,
+        creator_id         INTEGER NOT NULL REFERENCES actors(id),
+        created_clock_unix INTEGER NOT NULL
+     ) STRICT;
+     CREATE INDEX commit_statuses_by_commit ON commit_statuses (repo_id, sha, id);",
 ];
 
 /// The version this binary reads and writes.

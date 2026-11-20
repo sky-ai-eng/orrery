@@ -61,6 +61,46 @@ pub(crate) const CHECK_RUN_COLUMNS: &str = "id, repo_id, head_sha, name, status,
     started_clock_unix, completed_clock_unix, created_clock_unix, suite_id,
     workflow_run_id, run_attempt, steps, carried_from";
 
+pub(crate) const COMMIT_STATUS_COLUMNS: &str = "id, repo_id, sha, context, state, description,
+    target_url, (SELECT login FROM actors WHERE actors.id = commit_statuses.creator_id),
+    created_clock_unix";
+
+pub(crate) fn row_to_commit_status(r: &Row<'_>) -> rusqlite::Result<CommitStatus> {
+    Ok(CommitStatus {
+        id: r.get(0)?,
+        repo_id: r.get(1)?,
+        sha: r.get(2)?,
+        context: r.get(3)?,
+        state: crate::objects::status_state(&r.get::<_, String>(4)?),
+        description: r.get(5)?,
+        target_url: r.get(6)?,
+        creator_login: r.get(7)?,
+        created_clock_unix: r.get(8)?,
+    })
+}
+
+/// Every status of one commit, newest first.
+pub(crate) fn list_commit_statuses_for_sha(
+    conn: &Connection,
+    repo_id: i64,
+    sha: &str,
+) -> Result<Vec<CommitStatus>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COMMIT_STATUS_COLUMNS} FROM commit_statuses
+         WHERE repo_id = ?1 AND sha = ?2 ORDER BY id DESC"
+    ))?;
+    let rows = stmt.query_map(params![repo_id, sha], row_to_commit_status)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn list_commit_statuses(conn: &Connection) -> Result<Vec<CommitStatus>> {
+    list(
+        conn,
+        &format!("SELECT {COMMIT_STATUS_COLUMNS} FROM commit_statuses ORDER BY id"),
+        row_to_commit_status,
+    )
+}
+
 pub(crate) const WORKFLOW_COLUMNS: &str =
     "id, repo_id, path, name, jobs, created_clock_unix, dispatch_inputs";
 

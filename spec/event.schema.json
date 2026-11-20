@@ -2280,6 +2280,104 @@
       ],
       "type": "string"
     },
+    "CommitStatusCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/CommitStatusObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/CommitStatusSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "CommitStatusObject": {
+      "properties": {
+        "context": {
+          "type": "string"
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "creator": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sha": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/StatusState"
+        },
+        "target_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "sha",
+        "context",
+        "state",
+        "creator",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "CommitStatusSubject": {
+      "properties": {
+        "context": {
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "sha": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/CommitStatusType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "context",
+        "sha",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "CommitStatusType": {
+      "enum": [
+        "commit_status"
+      ],
+      "type": "string"
+    },
     "CommitSubject": {
       "description": "A commit in a repository. A commit has no id: it is its sha in its\nrepository.",
       "properties": {
@@ -6387,6 +6485,16 @@
       ],
       "type": "string"
     },
+    "StatusState": {
+      "description": "What a commit status says of its commit.",
+      "enum": [
+        "error",
+        "failure",
+        "pending",
+        "success"
+      ],
+      "type": "string"
+    },
     "Step": {
       "description": "One step of a job, as its runner has brought it.",
       "properties": {
@@ -8333,6 +8441,20 @@
       "properties": {
         "type": {
           "const": "comment:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CommitStatusCreated",
+      "description": "A status was given to a commit. One of a context the commit has a\nstatus of already is a new status, not a change to that one.",
+      "properties": {
+        "type": {
+          "const": "commit_status:created",
           "type": "string"
         }
       },

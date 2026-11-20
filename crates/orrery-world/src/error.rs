@@ -64,6 +64,8 @@ pub enum WorldError {
     WorkflowRunCompleted(i64),
     #[error("workflow run {0} has no job that failed or was cancelled")]
     NothingToRerun(i64),
+    #[error("commit {sha} has as many statuses of the context {context:?} as it can hold")]
+    TooManyStatuses { sha: String, context: String },
     #[error("job {0} is of an attempt its workflow run has replaced")]
     JobOfEarlierAttempt(i64),
     #[error("job {0} is not queued")]
