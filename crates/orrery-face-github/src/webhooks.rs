@@ -422,6 +422,9 @@ pub fn notifier(face: &GithubFace) -> Arc<dyn Notifier> {
     })
 }
 
+/// The most branches GitHub names in a `status` payload.
+const MAX_STATUS_BRANCHES: usize = 10;
+
 /// The face a write's payloads are rendered with.
 struct Rendering {
     face: GithubFace,
@@ -456,6 +459,7 @@ fn addressed(event: &EventBody) -> Option<(&'static str, i64)> {
         EventBody::CheckRunCreated(e) => ("check_run", e.subject.repo.id),
         EventBody::CheckRunUpdated(e) => ("check_run", e.subject.repo.id),
         EventBody::CheckSuiteUpdated(e) => ("check_suite", e.subject.repo.id),
+        EventBody::CommitStatusCreated(e) => ("status", e.subject.repo.id),
         EventBody::WorkflowRunCreated(e) => ("workflow_run", e.subject.repo.id),
         EventBody::DependencyAlertCreated(e) => ("dependabot_alert", e.subject.repo.id),
         EventBody::DependencyAlertDismissed(e)
@@ -998,6 +1002,7 @@ impl Rendering {
                 let about = about(e.subject.repo.id)?;
                 self.alert(world, about, e.subject.number, action, person)
             }
+            EventBody::CommitStatusCreated(e) => self.status(world, e, sender),
             EventBody::RefCreated(e) => {
                 let commits = Pushed {
                     before: None,
@@ -1091,6 +1096,75 @@ impl Rendering {
                 "check_suite": check_suite,
                 "repository": repo_json(face, &repo, &owner),
                 "sender": self.suite_sender(world, &suite)?,
+            }),
+        }])
+    }
+
+    /// GitHub's `status` for a status a commit was given, which has no
+    /// action. Its times are written with an offset, where every other
+    /// payload's end in `Z`.
+    fn status(
+        &self,
+        world: &World,
+        event: &events::CommitStatusCreated,
+        sender: serde_json::Value,
+    ) -> Result<Vec<Outgoing>, WorldError> {
+        let face = &self.face;
+        let Some(repo) = world.repo_by_id(event.subject.repo.id)? else {
+            return Ok(Vec::new());
+        };
+        let Some(owner) = world.actor_by_login(&repo.owner_login)? else {
+            return Ok(Vec::new());
+        };
+        let status = &event.object;
+        let commit = match crate::signing::delivery_commit(face, world, &repo, &status.sha) {
+            Ok(Some(commit)) => commit,
+            Ok(None) => return Ok(Vec::new()),
+            Err(e) => {
+                tracing::error!(error = %e, "reading a status's commit failed");
+                return Ok(Vec::new());
+            }
+        };
+        let bare = store::bare_dir(&world.repos_dir(), &repo.owner_login, &repo.name);
+        let mut holding = match store::branches_holding(&bare, &status.sha) {
+            Ok(holding) => holding,
+            Err(e) => {
+                tracing::error!(error = %e, "reading the branches that hold a status's commit failed");
+                Vec::new()
+            }
+        };
+        // The default branch comes first, and the others stay in name order.
+        holding.sort_by_key(|(name, _)| *name != repo.default_branch);
+        let api = format!("{}/repos/{}", face.layout.api(), repo.full_name());
+        let branches: Vec<serde_json::Value> = holding
+            .iter()
+            .take(MAX_STATUS_BRANCHES)
+            .map(|(name, tip)| {
+                serde_json::json!({
+                    "name": name,
+                    "commit": { "sha": tip, "url": format!("{api}/commits/{tip}") },
+                    "protected": false,
+                })
+            })
+            .collect();
+        let created = rfc3339(status.created_unix).replace('Z', "+00:00");
+        Ok(vec![Outgoing {
+            action: None,
+            payload: serde_json::json!({
+                "id": status.id,
+                "sha": status.sha,
+                "name": repo.full_name(),
+                "target_url": status.target_url,
+                "avatar_url": serde_json::Value::Null,
+                "context": status.context,
+                "description": status.description,
+                "state": status.state.as_str(),
+                "commit": commit,
+                "branches": branches,
+                "created_at": created,
+                "updated_at": created,
+                "repository": repo_json(face, &repo, &owner),
+                "sender": sender,
             }),
         }])
     }

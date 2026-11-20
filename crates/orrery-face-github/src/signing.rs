@@ -238,6 +238,32 @@ fn verdict_now(
     }
 }
 
+/// The commit `sha` names as a delivery carries it: the object the commit
+/// route answers, read from `world`, which is the world as the write that
+/// sends the delivery left it. `None` for a sha that names no commit.
+pub(crate) fn delivery_commit(
+    face: &GithubFace,
+    world: &orrery_world::World,
+    repo: &Repo,
+    sha: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let bare = store::bare_dir(&world.repos_dir(), &repo.owner_login, &repo.name);
+    let Some(commit) = signature::read_commit(&bare, sha).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let facts = signature::commit_facts(&bare, &commit).map_err(|e| e.to_string())?;
+    let verification = world
+        .commit_verification(repo.id, &facts)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(commit_json(
+        face,
+        repo,
+        &commit,
+        verification.verdict,
+        verification.stored_clock_unix,
+    )))
+}
+
 fn commit_json(
     face: &GithubFace,
     repo: &Repo,

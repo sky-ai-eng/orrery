@@ -2045,3 +2045,135 @@ async fn a_workflow_run_sends_what_github_sends_at_each_stage() {
     );
     assert_eq!(completed["sender"]["login"], "alice");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_status_is_delivered_with_its_commit_and_the_branches_that_hold_it() {
+    let s = setup_with(sending(), 204).await;
+    let api = &s.api;
+    let watcher = control_post(
+        &s.base,
+        "/_orrery/apps",
+        serde_json::json!({
+            "slug": "watcher",
+            "name": "Watcher",
+            "owner": "acme",
+            "callback_urls": ["https://app.test/callback"],
+            "permissions": { "statuses": "write" },
+            "events": ["status"],
+            "webhook_url": s.receiver.url,
+            "webhook_active": true,
+        }),
+    );
+    let key = app_key();
+    control_post(
+        &s.base,
+        "/_orrery/apps/watcher/keys",
+        serde_json::json!({ "public_key": key.public_pem }),
+    );
+    let installation = control_post(
+        &s.base,
+        "/_orrery/apps/watcher/installations",
+        serde_json::json!({ "account": "acme" }),
+    )["id"]
+        .as_i64()
+        .unwrap();
+    // `alpha` holds a commit of its own on top of the one `main` names.
+    let head_sha = s.push("alpha");
+    let read = |path: &str| {
+        let (status, _, body) = call(
+            "GET",
+            &format!("{api}/repos/acme/web/{path}"),
+            &bearer(&s.alice),
+            None,
+        );
+        assert_eq!(status, 200, "{path}: {body}");
+        body
+    };
+    let main = read("commits/main");
+    let main_sha = main["sha"].as_str().unwrap();
+
+    let by_alice = face_ok(
+        "POST",
+        &format!("{api}/repos/acme/web/statuses/{main_sha}"),
+        &s.alice,
+        serde_json::json!({
+            "state": "pending", "context": "ci/build", "description": "building",
+            "target_url": "https://ci.test/1",
+        }),
+    );
+    let jwt = bearer(&key.jwt(
+        serde_json::json!(watcher["id"].as_i64().unwrap()),
+        s.inst.world.clock().unwrap(),
+    ));
+    let (status, _, issued) = call(
+        "POST",
+        &format!("{api}/app/installations/{installation}/access_tokens"),
+        &jwt,
+        None,
+    );
+    assert_eq!(status, 201, "{issued}");
+    let by_app = face_ok(
+        "POST",
+        &format!("{api}/repos/acme/web/statuses/{head_sha}"),
+        issued["token"].as_str().unwrap(),
+        serde_json::json!({ "state": "success" }),
+    );
+
+    // The App's installation is delivered first, and then each status.
+    let got = s.receiver.wait(3).await;
+    let statuses: Vec<&Received> = got.iter().filter(|r| r.kind().0 == "status").collect();
+    assert_eq!(statuses.len(), 2);
+    let branch = |name: &str, sha: &str| {
+        serde_json::json!({
+            "name": name,
+            "commit": { "sha": sha, "url": format!("{api}/repos/acme/web/commits/{sha}") },
+            "protected": false,
+        })
+    };
+
+    // A status has no action. Its commit is the one the commit route
+    // answers, and its branches are those that hold the commit, the
+    // default branch first.
+    let first = statuses[0].json();
+    assert_eq!(statuses[0].kind(), ("status".to_string(), None));
+    assert_eq!(statuses[0].header("x-github-event"), "status");
+    assert!(first.get("action").is_none(), "{first}");
+    assert_eq!(first["id"], by_alice["id"]);
+    assert_eq!(first["sha"], main_sha);
+    assert_eq!(first["name"], "acme/web");
+    assert_eq!(first["state"], "pending");
+    assert_eq!(first["context"], "ci/build");
+    assert_eq!(first["description"], "building");
+    assert_eq!(first["target_url"], "https://ci.test/1");
+    assert_eq!(first["avatar_url"], serde_json::Value::Null);
+    assert_eq!(first["commit"], main);
+    assert_eq!(
+        first["branches"],
+        serde_json::json!([branch("main", main_sha), branch("alpha", &head_sha)])
+    );
+    // Its times are written with an offset, where the status's own end
+    // in `Z`.
+    let created = by_alice["created_at"].as_str().unwrap();
+    assert!(created.ends_with('Z'), "{created}");
+    assert_eq!(first["created_at"], created.replace('Z', "+00:00"));
+    assert_eq!(first["updated_at"], first["created_at"]);
+    assert_eq!(first["sender"]["login"], "alice");
+    assert_eq!(first["repository"]["full_name"], "acme/web");
+    assert_eq!(first["organization"]["login"], "acme");
+    assert_eq!(first["installation"]["id"], installation);
+
+    // An App's status is sent from its bot, and a commit one branch holds
+    // names that branch alone.
+    let second = statuses[1].json();
+    assert_eq!(second["id"], by_app["id"]);
+    assert_eq!(second["context"], "default");
+    assert_eq!(second["description"], serde_json::Value::Null);
+    assert_eq!(second["target_url"], serde_json::Value::Null);
+    assert_eq!(second["commit"], read(&format!("commits/{head_sha}")));
+    assert_eq!(
+        second["branches"],
+        serde_json::json!([branch("alpha", &head_sha)])
+    );
+    assert_eq!(second["sender"]["login"], "watcher[bot]");
+    assert_eq!(second["sender"]["type"], "Bot");
+}

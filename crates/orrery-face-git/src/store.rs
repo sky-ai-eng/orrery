@@ -140,6 +140,28 @@ pub fn list_refs(bare: &Path) -> Result<BTreeMap<String, String>, GitFaceError> 
     Ok(refs)
 }
 
+/// The branches whose history holds the commit `sha`, each with its tip, in
+/// name order.
+pub fn branches_holding(bare: &Path, sha: &str) -> Result<Vec<(String, String)>, GitFaceError> {
+    let out = run(hermetic_git(bare).args([
+        "for-each-ref",
+        "--contains",
+        sha,
+        "--format=%(refname)%00%(objectname)",
+        "refs/heads/",
+    ]))?;
+    Ok(out
+        .lines()
+        .filter_map(|line| line.split_once('\0'))
+        .filter_map(|(name, tip)| {
+            Some((
+                name.strip_prefix("refs/heads/")?.to_string(),
+                tip.to_string(),
+            ))
+        })
+        .collect())
+}
+
 pub fn set_head_symref(bare: &Path, branch: &str) -> Result<(), GitFaceError> {
     run(hermetic_git(bare).args(["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")]))?;
     Ok(())
