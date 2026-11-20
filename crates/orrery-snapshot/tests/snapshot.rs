@@ -1921,4 +1921,21 @@ fn diff_reports_workflows_and_what_their_runs_come_to() {
         )]
     );
     assert_eq!(d.workflow_runs_updated[0].attempt, 2);
+    assert!(d.workflow_runs_deleted.is_empty());
+
+    // A run deleted is reported as the earlier side held it.
+    inst.snapshot("rerun");
+    w.delete_workflow_run(first.id, by(alice.id)).unwrap();
+    let d = inst.diff("rerun", None);
+    assert_eq!(
+        view(&d.workflow_runs_deleted),
+        [(
+            "ci.yml".to_string(),
+            1,
+            "completed".to_string(),
+            Some("failure".to_string())
+        )]
+    );
+    assert_eq!(d.workflow_runs_deleted[0].attempt, 2);
+    assert!(d.workflow_runs_updated.is_empty());
 }

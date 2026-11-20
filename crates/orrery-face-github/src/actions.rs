@@ -63,13 +63,24 @@ pub(crate) fn actions_app_json(face: &GithubFace) -> serde_json::Value {
     })
 }
 
-fn not_found() -> Response<Body> {
+pub(crate) fn not_found() -> Response<Body> {
     github_error(StatusCode::NOT_FOUND, "Not Found")
 }
 
 /// Where REST serves the repository.
 fn api(face: &GithubFace, repo: &Repo) -> String {
     format!("{}/repos/{}", face.layout.api(), repo.full_name())
+}
+
+/// The id of the runner GitHub hosts for a job, which is numbered after
+/// the job.
+fn runner_id(job: &CheckRun) -> i64 {
+    1_000_000_000 + job.id
+}
+
+/// The name of the runner GitHub hosts for a job.
+pub(crate) fn runner_name(job: &CheckRun) -> String {
+    format!("GitHub Actions {}", runner_id(job))
 }
 
 /// The page a job's check run and the job itself link to.
@@ -315,7 +326,7 @@ pub(crate) fn job_json(
         .unwrap_or_default();
     // A runner took the job if it lists a step: a queued job and a skipped
     // one list none.
-    let runner = (!steps.is_empty()).then_some(1_000_000_000 + job.id);
+    let runner = (!steps.is_empty()).then(|| runner_id(job));
     serde_json::json!({
         "id": job.id,
         "run_id": run.id,
@@ -338,7 +349,7 @@ pub(crate) fn job_json(
         "check_run_url": format!("{api}/check-runs/{}", job.id),
         "labels": labels,
         "runner_id": runner,
-        "runner_name": runner.map(|id| format!("GitHub Actions {id}")),
+        "runner_name": runner.map(|_| runner_name(job)),
         "runner_group_id": runner.map(|_| 0),
         "runner_group_name": runner.map(|_| "GitHub Actions"),
     })
@@ -444,7 +455,11 @@ fn workflow_at(
 }
 
 /// The repository's run with this id.
-fn run_at(face: &GithubFace, repo: &Repo, id: &str) -> Result<WorkflowRun, Box<Response<Body>>> {
+pub(crate) fn run_at(
+    face: &GithubFace,
+    repo: &Repo,
+    id: &str,
+) -> Result<WorkflowRun, Box<Response<Body>>> {
     let Ok(id) = id.parse::<i64>() else {
         return Err(Box::new(not_found()));
     };
@@ -792,25 +807,12 @@ pub(crate) async fn get_job(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    let read = || -> Result<Option<(CheckRun, WorkflowRun, Option<Workflow>)>, WorldError> {
-        let Ok(id) = id.parse::<i64>() else {
-            return Ok(None);
-        };
-        let Some(job) = face.world.check_run_by_id(id)? else {
-            return Ok(None);
-        };
-        let Some(held) = job.job.as_ref().filter(|_| job.repo_id == repo.id) else {
-            return Ok(None);
-        };
-        let Some(run) = face.world.workflow_run_by_id(held.run_id)? else {
-            return Ok(None);
-        };
-        let workflow = face.world.workflow_by_id(run.workflow_id)?;
-        Ok(Some((job, run, workflow)))
+    let (job, run) = match job_at(&face, &repo, &id) {
+        Ok(found) => found,
+        Err(resp) => return *resp,
     };
-    let (job, run, workflow) = match read() {
-        Ok(Some(found)) => found,
-        Ok(None) => return not_found(),
+    let workflow = match face.world.workflow_by_id(run.workflow_id) {
+        Ok(workflow) => workflow,
         Err(e) => return internal(e),
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowJob") {
@@ -822,9 +824,36 @@ pub(crate) async fn get_job(
     )
 }
 
+/// The repository's job of this id with its run, or GitHub's 404: a check
+/// run that is no job is none.
+pub(crate) fn job_at(
+    face: &GithubFace,
+    repo: &Repo,
+    id: &str,
+) -> Result<(CheckRun, WorkflowRun), Box<Response<Body>>> {
+    let read = || -> Result<Option<(CheckRun, WorkflowRun)>, WorldError> {
+        let Ok(id) = id.parse::<i64>() else {
+            return Ok(None);
+        };
+        let Some(job) = face.world.check_run_by_id(id)? else {
+            return Ok(None);
+        };
+        let Some(held) = job.job.as_ref().filter(|_| job.repo_id == repo.id) else {
+            return Ok(None);
+        };
+        let run = face.world.workflow_run_by_id(held.run_id)?;
+        Ok(run.map(|run| (job, run)))
+    };
+    match read() {
+        Ok(Some(found)) => Ok(found),
+        Ok(None) => Err(Box::new(not_found())),
+        Err(e) => Err(Box::new(internal(e))),
+    }
+}
+
 /// The repository's run as its attempt `n` left it, or GitHub's 404 for an
 /// attempt it has not had.
-fn attempt_at(
+pub(crate) fn attempt_at(
     face: &GithubFace,
     repo: &Repo,
     id: &str,
@@ -1022,20 +1051,9 @@ pub(crate) async fn rerun_job(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    let found = || -> Result<Option<(i64, i64)>, WorldError> {
-        let Ok(id) = id.parse::<i64>() else {
-            return Ok(None);
-        };
-        Ok(face
-            .world
-            .check_run_by_id(id)?
-            .filter(|job| job.repo_id == repo.id)
-            .and_then(|job| Some((job.job?.run_id, job.id))))
-    };
-    let (run_id, job_id) = match found() {
-        Ok(Some(found)) => found,
-        Ok(None) => return not_found(),
-        Err(e) => return internal(e),
+    let (job, run) = match job_at(&face, &repo, &id) {
+        Ok(found) => found,
+        Err(resp) => return *resp,
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowJob") {
         return refused;
@@ -1045,7 +1063,7 @@ pub(crate) async fn rerun_job(
     }
     let written = face
         .world
-        .rerun_workflow_run(run_id, Rerun::Job(job_id), caller.actor.id, by);
+        .rerun_workflow_run(run.id, Rerun::Job(job.id), caller.actor.id, by);
     rerun_answer(
         written,
         "The workflow run containing this job is already running",

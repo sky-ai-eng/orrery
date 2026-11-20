@@ -130,12 +130,18 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `comment:created` | commenting | `object` | `pull:updated` when `updated_unix` moves |
 | `check_run:created` | creating a check run | `object` | `check_suite:created` when its creator had no suite on the commit, then `check_suite:updated` when the suite comes to something else |
 | `check_run:carried` | a consequence only: a re-run listing, in its new attempt, a job it does not run again, as the job finished in the attempt before and under a new id | `object` | |
+| `check_run:logged` | a runner writing lines to the log of a job, in the step in progress | the `step`'s number and the `lines` | none |
+| `check_run:log_deleted` | a consequence only: of deleting a run's logs, for each job that had lines of its own | how many `lines` it held | |
+| `check_run:deleted` | a consequence only: of deleting a workflow run, for each job of every attempt | `object`, the check run as it was; its log goes with it | |
 | `check_run:updated` | updating one, or a runner's work on a job: taking it, finishing a step, or finishing it | `changes` | for a job that finished, a `check_run:created` for each job its finish listed; then `check_suite:updated` when the suite comes to something else |
 | `check_suite:created` | a consequence only: of a push or a merge that brings a commit to a branch's tip, for each app that may write checks there, of a check run on a commit its creator has no suite for, and of the start of a workflow run, which has a suite to itself | `object` | |
+| `check_suite:deleted` | a consequence only: of deleting the workflow run whose suite it is | `object`, the suite as it was | |
 | `check_suite:updated` | a consequence only: of a check run's write that brings its suite to another status or conclusion | `changes` | |
 | `workflow:created` | registering a workflow | `object` | none |
 | `workflow_run:rerun` | running a finished run again | `changes` | `check_suite:updated`, the suite back to `queued`; a `check_run:created` for each job the attempt queues; a `check_run:carried` for each job it does not run again; a `check_run:created` for each job it lists already skipped; `check_suite:updated` again when no job was queued, so the attempt has ended |
 | `workflow_run:cancelled` | asking a run to cancel, or cancelling it by force | `changes` | a `check_run:updated` for each job it stops, which a job that runs regardless is not unless the cancel is by force; a `check_run:created` for each job the stop lists; `check_suite:updated` when the suite comes to something else |
+| `workflow_run:logs_deleted` | deleting the logs of a finished run | `changes`: the attempt through which they were deleted, and when | a `check_run:log_deleted` for each job that had lines |
+| `workflow_run:deleted` | deleting a finished run | `object`, the run as it was | a `check_run:deleted` for each of its jobs, newest first; `check_suite:deleted` for its suite |
 | `workflow_run:created` | starting a run of a workflow | `object` | `actor:created` for the runner's bot when the world had none; `check_suite:created` for the run's own suite; a `check_run:created` for each job that needs nothing |
 | `repo:dependency_alerts_set` | turning a repository's dependency alerts on or off | `changes` | none |
 | `dependency_alert:created` | the vendor reporting a vulnerable dependency | `object` | none |

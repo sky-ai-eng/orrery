@@ -181,6 +181,12 @@ pub(crate) fn delivery_guid(secret: &WorldSecret, delivery_id: i64) -> String {
     )
 }
 
+/// What signs a link to `what`, a log, that answers until `expires_unix` to
+/// whoever holds it.
+pub(crate) fn log_link_signature(secret: &WorldSecret, what: &str, expires_unix: i64) -> String {
+    hex::encode(&secret.derive(&format!("log-link:{expires_unix}:{what}"))[..16])
+}
+
 /// Every client id starts with this, so a value without it names no app.
 pub const OAUTH_CLIENT_ID_PREFIX: &str = "orrfake_client_";
 

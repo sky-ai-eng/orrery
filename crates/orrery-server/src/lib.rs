@@ -243,6 +243,11 @@ pub fn routers(
     // API token.
     let apps = orrery_face_github::apps::app_router(github.clone());
 
+    // A link to a log carries its own authority, as the links GitHub hands
+    // out do, so the store they name takes no token.
+    let log_store = orrery_face_github::logs::store_router(github.clone())
+        .method_not_allowed_fallback(not_mocked);
+
     // The method fallback is set before the auth layer so that it is behind
     // face auth, as the unmatched-path fallback under `/api/v3` is.
     let faces = Router::new()
@@ -260,6 +265,7 @@ pub fn routers(
             .merge(oauth)
             .merge(app_flows)
             .merge(apps)
+            .merge(log_store)
             .merge(faces),
         // Every path under the prefix is the control plane's. One that no
         // control route names answers 404 in the control plane's error shape,

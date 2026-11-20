@@ -635,7 +635,7 @@ pub(crate) fn check_run_object(conn: &Connection, id: i64) -> Result<CheckRunObj
         "SELECT c.id, c.head_sha, c.name, c.status, c.conclusion, c.details_url,
                 c.external_id, c.output, a.id, a.login, c.started_clock_unix,
                 c.completed_clock_unix, c.created_clock_unix, c.suite_id,
-                c.workflow_run_id, c.run_attempt, c.steps
+                c.workflow_run_id, c.run_attempt, c.steps, c.carried_from
          FROM check_runs c JOIN actors a ON a.id = c.creator_id WHERE c.id = ?1",
         params![id],
         |r| {
@@ -662,6 +662,7 @@ pub(crate) fn check_run_object(conn: &Connection, id: i64) -> Result<CheckRunObj
                 steps: r
                     .get::<_, Option<String>>(16)?
                     .and_then(|s| serde_json::from_str(&s).ok()),
+                carried_from: r.get(17)?,
             })
         },
     )
@@ -727,7 +728,8 @@ pub(crate) fn workflow_run_object(conn: &Connection, id: i64) -> Result<Workflow
         .query_row(
             "SELECT r.id, r.suite_id, r.run_number, r.event, r.head_branch, r.head_sha, r.title,
                     a.id, a.login, r.attempt, r.created_clock_unix, r.started_clock_unix,
-                    r.triggering_actor_id, r.cancel
+                    r.triggering_actor_id, r.cancel, r.logs_deleted_attempt,
+                    r.logs_deleted_clock_unix
              FROM workflow_runs r JOIN actors a ON a.id = r.actor_id WHERE r.id = ?1",
             params![id],
             |r| {
@@ -748,6 +750,8 @@ pub(crate) fn workflow_run_object(conn: &Connection, id: i64) -> Result<Workflow
                         cancel: r
                             .get::<_, Option<String>>(13)?
                             .map(|s| RunCancel::from_db(&s)),
+                        logs_deleted_attempt: r.get(14)?,
+                        logs_deleted_unix: r.get(15)?,
                     },
                     r.get(12)?,
                 ))
