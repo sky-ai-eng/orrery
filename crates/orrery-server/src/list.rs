@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 use crate::control::{Fault, Fields};
 use crate::json;
 
-const LIST_PAGE_MAX: usize = 500;
-const LIST_PAGE_DEFAULT: usize = 100;
+const LIST_PAGE_MAX: usize = 200;
+const LIST_PAGE_DEFAULT: usize = 50;
 
 /// What a list body's `page_size` and `page_token` ask for.
 pub(crate) struct Window<K> {

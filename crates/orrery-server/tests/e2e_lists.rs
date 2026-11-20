@@ -120,7 +120,7 @@ async fn every_keyed_list_walks_by_token_in_key_order() {
     let base = &inst.base;
     populate(base);
     for (path, key) in KEYED_LISTS {
-        let whole = list(base, path, json!({ "page_size": 500 }));
+        let whole = list(base, path, json!({ "page_size": 200 }));
         assert!(whole.get("next_page_token").is_none(), "{whole}");
         let items = whole["items"].as_array().unwrap().clone();
         assert_eq!(items.len(), 5, "{path}");
@@ -223,6 +223,26 @@ async fn oauth_apps_list_in_client_id_order_without_secrets() {
     assert!(exact.get("next_page_token").is_none(), "{exact}");
 }
 
+/// A body that names no `page_size` reads a page of 50, and the walk goes on
+/// from its token.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_holds_50_items_unless_the_body_names_another_size() {
+    let inst = boot().await;
+    let base = &inst.base;
+    for _ in 0..60 {
+        let (status, answer) = post(base, "/clock/advance", json!({ "seconds": 1 }));
+        assert_eq!(status, 200, "{answer}");
+    }
+    let first = list(base, "/log/list", json!({}));
+    let total = first["total_count"].as_u64().unwrap();
+    assert!(total > 50, "{total}");
+    assert_eq!(first["items"].as_array().unwrap().len(), 50);
+    let token = first["next_page_token"].as_str().unwrap();
+    let rest = list(base, "/log/list", json!({ "page_token": token }));
+    assert_eq!(rest["items"].as_array().unwrap().len() as u64, total - 50);
+    assert!(rest.get("next_page_token").is_none(), "{rest}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_page_size_of_zero_counts_every_keyed_list() {
     let inst = boot().await;
@@ -301,7 +321,7 @@ async fn bad_list_bodies_name_every_fault() {
         "/log/list",
     ] {
         assert_eq!(
-            refused(path, json!({ "page_size": 501 })),
+            refused(path, json!({ "page_size": 201 })),
             [fault("OUT_OF_RANGE", Some("page_size"))]
         );
         assert_eq!(
@@ -319,7 +339,7 @@ async fn bad_list_bodies_name_every_fault() {
             [fault("INVALID_ARGUMENT", Some("sort_dir"))]
         );
         assert_eq!(
-            refused(path, json!({ "sort_key": "id", "page_size": 501 })),
+            refused(path, json!({ "sort_key": "id", "page_size": 201 })),
             [
                 fault("INVALID_ARGUMENT", Some("sort_key")),
                 fault("OUT_OF_RANGE", Some("page_size")),
@@ -338,7 +358,7 @@ async fn bad_list_bodies_name_every_fault() {
             ]
         );
         assert_eq!(
-            refused(path, json!({ "page_size": 501, "bogus": 1 })),
+            refused(path, json!({ "page_size": 201, "bogus": 1 })),
             [
                 fault("OUT_OF_RANGE", Some("page_size")),
                 fault("INVALID_ARGUMENT", Some("bogus")),
@@ -356,7 +376,7 @@ async fn bad_list_bodies_name_every_fault() {
     }
     // The bounds are inclusive.
     list(base, "/actors/list", json!({ "page_size": 1 }));
-    list(base, "/actors/list", json!({ "page_size": 500 }));
+    list(base, "/actors/list", json!({ "page_size": 200 }));
 
     // A log position is never negative, so a negative cursor is refused
     // rather than read as the start of the log.
@@ -365,7 +385,7 @@ async fn bad_list_bodies_name_every_fault() {
         [fault("OUT_OF_RANGE", Some("after_seq"))]
     );
     assert_eq!(
-        refused("/log/list", json!({ "after_seq": -1, "page_size": 501 })),
+        refused("/log/list", json!({ "after_seq": -1, "page_size": 201 })),
         [
             fault("OUT_OF_RANGE", Some("after_seq")),
             fault("OUT_OF_RANGE", Some("page_size")),
@@ -471,7 +491,7 @@ async fn reading_writes_nothing() {
     mint_actor(base, "alice", "user");
     let client_id = register_app(base, "Sign-in");
 
-    let log = || list(base, "/log/list", json!({ "page_size": 500 }));
+    let log = || list(base, "/log/list", json!({ "page_size": 200 }));
     let before = log();
     list(base, "/actors/list", json!({}));
     list(base, "/oauth-apps/list", json!({}));
@@ -489,7 +509,7 @@ fn newest_first() -> Value {
 
 /// The whole log, oldest first, in one read.
 fn whole_log(base: &str) -> Vec<Value> {
-    let all = list(base, "/log/list", json!({ "page_size": 500 }));
+    let all = list(base, "/log/list", json!({ "page_size": 200 }));
     assert!(all.get("next_page_token").is_none(), "{all}");
     all["items"].as_array().unwrap().clone()
 }

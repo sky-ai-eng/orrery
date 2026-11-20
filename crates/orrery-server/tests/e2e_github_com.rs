@@ -263,7 +263,7 @@ async fn a_webhook_body_names_github_coms_hosts() {
 
     // The default options make deliveries and send none; each is in the log
     // with its body as it would be sent.
-    let log = control_post(&inst.base, "/_orrery/log/list", json!({ "page_size": 500 }));
+    let log = control_post(&inst.base, "/_orrery/log/list", json!({ "page_size": 200 }));
     let deliveries: Vec<(&Value, String)> = log["items"]
         .as_array()
         .unwrap()

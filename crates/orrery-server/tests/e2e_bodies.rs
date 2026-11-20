@@ -208,7 +208,7 @@ fn with(body: &Value, field: &str, value: Value) -> Vec<u8> {
 }
 
 fn log(base: &str) -> Value {
-    call(base, "POST", "/log/list", br#"{"page_size": 500}"#).1
+    call(base, "POST", "/log/list", br#"{"page_size": 200}"#).1
 }
 
 #[tokio::test(flavor = "multi_thread")]

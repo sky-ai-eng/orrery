@@ -525,7 +525,7 @@ async fn a_receiver_gets_a_signed_delivery_for_each_event() {
     let log = control_post(
         &s.base,
         "/_orrery/log/list",
-        serde_json::json!({ "page_size": 500 }),
+        serde_json::json!({ "page_size": 200 }),
     );
     let attempted: Vec<&serde_json::Value> = log["items"]
         .as_array()
@@ -1200,7 +1200,7 @@ async fn a_world_that_does_not_send_makes_its_deliveries_and_keeps_them() {
     let log = control_post(
         &s.base,
         "/_orrery/log/list",
-        serde_json::json!({ "page_size": 500 }),
+        serde_json::json!({ "page_size": 200 }),
     );
     let of = |kind: &str| {
         log["items"]
@@ -1571,7 +1571,7 @@ async fn an_app_points_its_own_webhook() {
     let log = control_post(
         &s.base,
         "/_orrery/log/list",
-        serde_json::json!({ "page_size": 500 }),
+        serde_json::json!({ "page_size": 200 }),
     );
     let set = log["items"]
         .as_array()

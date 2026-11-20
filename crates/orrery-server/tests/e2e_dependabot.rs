@@ -718,7 +718,7 @@ async fn a_person_dismisses_and_reopens_an_alert_and_github_fixes_one() {
     let log = control_post(
         base,
         "/_orrery/log/list",
-        serde_json::json!({ "page_size": 500 }),
+        serde_json::json!({ "page_size": 200 }),
     );
     let moves: Vec<(String, String)> = log["items"]
         .as_array()
