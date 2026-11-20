@@ -281,6 +281,21 @@ fn populate(w: &World) -> orrery_world::Result<()> {
         .expect("the job runs again");
     w.start_workflow_job(again, by(system.id))?;
     w.cancel_workflow_run(rerun.id, false, by(bob.id))?;
+    // A run that was deleted, whose number the workflow keeps.
+    let gone = w.start_workflow_run(
+        NewWorkflowRun {
+            workflow_id: workflow.id,
+            event: "push",
+            head_sha: HEAD_SHA,
+            head_branch: Some("feature"),
+            title: "Add the feature",
+            actor_id: alice.id,
+            runner: "runner",
+        },
+        by(system.id),
+    )?;
+    w.cancel_workflow_run(gone.id, true, by(bob.id))?;
+    w.delete_workflow_run(gone.id, by(bob.id))?;
     w.create_commit_status(
         by(bob.id),
         NewCommitStatus {
