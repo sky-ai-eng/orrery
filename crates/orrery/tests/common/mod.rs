@@ -195,7 +195,13 @@ pub fn serve(config: &Path, envs: &[(&str, &str)]) -> (Served, Ready) {
 }
 
 /// Run `cmd`, which starts `orrery serve`, and read its ready line.
-pub fn start(mut cmd: Command) -> (Served, Ready) {
+pub fn start(cmd: Command) -> (Served, Ready) {
+    start_reading(cmd)
+}
+
+/// Run `cmd`, which starts an `orrery` process that prints a ready line,
+/// and read that line as `R`.
+pub fn start_reading<R: serde::de::DeserializeOwned>(mut cmd: Command) -> (Served, R) {
     let mut child = cmd.spawn().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut stderr = child.stderr.take().unwrap();
@@ -220,10 +226,10 @@ pub fn start(mut cmd: Command) -> (Served, Ready) {
     };
     let line = first_line_rx
         .recv_timeout(Duration::from_secs(10))
-        .expect("orrery serve printed no ready line");
+        .expect("orrery printed no ready line");
     if line.is_empty() {
         let (_, stderr) = served.stop();
-        panic!("orrery serve exited before its ready line: {stderr}");
+        panic!("orrery exited before its ready line: {stderr}");
     }
     let ready = serde_json::from_str(&line)
         .unwrap_or_else(|e| panic!("{line:?} is not the ready line: {e}"));
@@ -400,4 +406,56 @@ pub fn wait_until(within: Duration, what: &str, mut done: impl FnMut() -> bool) 
         std::thread::sleep(tick);
     }
     panic!("{what} did not happen within {within:?}");
+}
+
+/// A certificate for `names` from an authority made for this test, written
+/// to `dir` as `cert.pem` and `key.pem`, with the authority's own as
+/// `ca.pem`; the paths of the certificate and its key.
+pub fn certificate_files(dir: &Path, names: &[&str]) -> (PathBuf, PathBuf) {
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca =
+        rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap()).unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let leaf =
+        rcgen::CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+            .unwrap()
+            .signed_by(&key, &ca)
+            .unwrap();
+    std::fs::write(dir.join("ca.pem"), ca.as_ref().pem()).unwrap();
+    let cert = dir.join("cert.pem");
+    std::fs::write(&cert, leaf.pem()).unwrap();
+    let key_path = dir.join("key.pem");
+    std::fs::write(&key_path, key.serialize_pem()).unwrap();
+    (cert, key_path)
+}
+
+/// [`certificate_files`], as the `[server]` lines that name the certificate
+/// and its key.
+pub fn certificate_for(dir: &Path, names: &[&str]) -> String {
+    let (cert, key) = certificate_files(dir, names);
+    format!("tls_cert = {cert:?}\ntls_key = {key:?}\n")
+}
+
+/// A certificate for GitHub's two hosts, and for the loopback address a
+/// test reaches the TLS listener at.
+pub fn github_certificate(dir: &Path) -> String {
+    certificate_for(dir, &["github.com", "api.github.com", "127.0.0.1"])
+}
+
+/// A TLS client trusting only the authority in `dir`, through `proxy` when
+/// it is given.
+pub fn tls_client(dir: &Path, proxy: Option<&str>) -> ureq::Agent {
+    let pem = std::fs::read(dir.join("ca.pem")).unwrap();
+    let ca = ureq::tls::Certificate::from_pem(&pem).unwrap();
+    ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::new_with_certs(&[ca]))
+                .build(),
+        )
+        .proxy(proxy.map(|p| ureq::Proxy::new(&format!("http://{p}")).unwrap()))
+        .http_status_as_error(false)
+        .build()
+        .into()
 }

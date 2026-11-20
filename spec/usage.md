@@ -234,6 +234,29 @@ Neither TLS listener serves the control plane. `serve` refuses, before it opens 
 - A client that pins GitHub's certificate, or carries its roots compiled in with no way to add one (Rust's `webpki-roots`), refuses the world's certificate.
 - git over SSH (`git@github.com:…`) is not served.
 
+## Reaching a world served elsewhere
+
+A world on another machine, such as a hosted one on a public domain of its own, can't be reached as github.com's hosts by the client itself: public DNS sends `github.com` to GitHub, and no public authority signs a certificate for it. `orrery relay` runs beside the client instead. It serves GitHub's hosts with the operator's certificate, as the world's own proxy and TLS listener do ("Reaching github.com's hosts"), and forwards each request to the world:
+
+```sh
+orrery relay --world https://world.example --tls-cert github-hosts.pem --tls-key github-hosts-key.pem \
+  --proxy-listen 127.0.0.1:8443
+```
+
+- `--world` is the world's own host, as its `server.base_url` names it: an `http` or `https` URL with a host and no user information, query, or fragment, and a path kept for a world served below one. The world is served under `server.layout = "github.com"`, so every URL it returns names GitHub's hosts, and the client follows each back through the relay. The relay changes no body.
+- `api.github.com` is forwarded to the world's REST paths, `/X` to `<world>/api/v3/X`, and `/graphql` to `<world>/api/graphql`. `github.com` is forwarded to the same path on the world, for git, the OAuth web flow, and the GitHub App pages. Each forwarded request names the world's own host in `Host`, so a router in front of the world that finds it by that name reaches it. The headers that describe one connection, such as `Connection` and `Transfer-Encoding`, are each connection's own. Requests and answers stream through as they arrive, so a push or a fetch of any size passes, and nothing after the connection opens is timed.
+- What the world would answer without serving is answered by the relay itself: a path under `/_orrery` or REST or GraphQL on `github.com`, and any other GitHub host, are the world's `501` (`grammar.md`, "Where the face is"). A request on the TLS listener for a host that is not GitHub's is `421`, naming the world's own URL, which a client reaches directly. A world the relay can't reach, or whose certificate it does not trust, is `502`, naming the world and why.
+- `--proxy-listen` is an HTTPS proxy for GitHub's hosts, and `--tls-listen` serves TLS from the first byte, each as the world's own (`server.proxy_listen` and `server.tls_listen`); at least one is given. Each takes `host:port`, `unix:/absolute/path`, or `fd:<name>`. `--tls-cert` and `--tls-key` are the certificate and its key, which name `api.github.com` and `github.com`.
+- An `https` world's certificate is checked against the public roots the binary ships, the ones a webhook delivery trusts, and the authorities in the PEM file `--extra-ca-certs` names, for a world whose authority is private.
+
+The relay is a client of a world, not a world: it holds nothing, and it connects to the world it was given and to nothing else, so rule 6 holds of a world reached through it. It is not a control-plane alias either, as `create` and `fork` are not: it calls the face, as any client of the world does, rather than standing for one call. Once its listeners are bound it prints one line of JSON to stdout, as `serve` does:
+
+```json
+{"world":"https://world.example","proxy_listen":"127.0.0.1:8443"}
+```
+
+`proxy_listen` and `tls_listen` are the bound addresses of the listeners it was given. SIGTERM or SIGINT stops it: it stops accepting connections, gives the requests it is forwarding 5 seconds to finish, and exits with status 0. It refuses, before it binds anything, a `--world` that is not such a URL, a certificate it can't read or serve, or one that does not name both hosts, an `--extra-ca-certs` file it can't trust, and two listeners on one socket.
+
 ## What a world sends
 
 A world sends one thing: a webhook delivery, a POST from the world to a receiver's URL (rule 6). The GitHub face makes one for each event an App's webhook is owed (`surface-github.md` §1.12).

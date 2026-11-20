@@ -132,6 +132,44 @@ pub enum TrustError {
     },
 }
 
+/// A TLS client's configuration that trusts the public root certificates
+/// built into the binary, and, when `extra_ca_certs` names a PEM file, every
+/// certificate in it as an authority too. It offers no ALPN protocol.
+pub fn trust(extra_ca_certs: Option<&Path>) -> Result<rustls::ClientConfig, TrustError> {
+    let mut roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    if let Some(path) = extra_ca_certs {
+        let read = |source| TrustError::Read {
+            path: path.to_path_buf(),
+            source,
+        };
+        let mut added = 0;
+        for cert in CertificateDer::pem_file_iter(path).map_err(read)? {
+            added += 1;
+            roots
+                .add(cert.map_err(read)?)
+                .map_err(|source| TrustError::Unusable {
+                    path: path.to_path_buf(),
+                    index: added,
+                    source,
+                })?;
+        }
+        if added == 0 {
+            return Err(TrustError::Empty {
+                path: path.to_path_buf(),
+            });
+        }
+    }
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring offers cipher suites for every default protocol version")
+    .with_root_certificates(roots)
+    .with_no_client_auth())
+}
+
 /// What an attempt sends: a POST of `body` to `url`, with `headers`. It also
 /// carries `Host` and `Content-Length`, from the URL and the body, and no
 /// other header the caller did not give.
@@ -200,41 +238,9 @@ impl Client {
     /// certificates built into the binary, and, when `extra_ca_certs` names a
     /// PEM file, every certificate in it as an authority too.
     pub fn new(egress: Egress, extra_ca_certs: Option<&Path>) -> Result<Client, TrustError> {
-        let mut roots = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
-        if let Some(path) = extra_ca_certs {
-            let read = |source| TrustError::Read {
-                path: path.to_path_buf(),
-                source,
-            };
-            let mut added = 0;
-            for cert in CertificateDer::pem_file_iter(path).map_err(read)? {
-                added += 1;
-                roots
-                    .add(cert.map_err(read)?)
-                    .map_err(|source| TrustError::Unusable {
-                        path: path.to_path_buf(),
-                        index: added,
-                        source,
-                    })?;
-            }
-            if added == 0 {
-                return Err(TrustError::Empty {
-                    path: path.to_path_buf(),
-                });
-            }
-        }
-        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("ring offers cipher suites for every default protocol version")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
         Ok(Client {
             egress,
-            tls: Arc::new(tls),
+            tls: Arc::new(trust(extra_ca_certs)?),
         })
     }
 

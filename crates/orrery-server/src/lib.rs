@@ -30,8 +30,8 @@ use axum::{Router, middleware};
 use base64::Engine as _;
 use orrery_face_git::GitFace;
 use orrery_face_github::GithubFace;
-pub use orrery_face_github::layout::Layout;
 use orrery_face_github::layout::{GRAPHQL_PATH, Landing, REST_PATH, under};
+pub use orrery_face_github::layout::{Layout, RootUrlError, root_url};
 use orrery_world::World;
 
 mod alerts;
@@ -44,7 +44,7 @@ mod snapshots;
 pub mod tls;
 
 /// Where the control plane is mounted, on its own listener or the faces'.
-const CONTROL_PREFIX: &str = "/_orrery";
+pub const CONTROL_PREFIX: &str = "/_orrery";
 
 /// The full SHA of the commit this binary was built from, or `unknown` when
 /// the build named none and was not run in a git checkout. See `build.rs`.
@@ -330,7 +330,7 @@ fn not_served(req: &Request, host: Option<String>) -> Response<Body> {
 /// trailing dot of a fully qualified name, or any user information: from its
 /// URI's authority when it carries one, as an HTTP/2 request and an
 /// absolute-form request do, and from its `Host` header otherwise.
-fn request_host(req: &Request) -> Option<String> {
+pub fn request_host(req: &Request) -> Option<String> {
     let authority = match req.uri().authority() {
         Some(authority) => authority.clone(),
         None => req
