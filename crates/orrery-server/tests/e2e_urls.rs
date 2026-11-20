@@ -3,9 +3,8 @@
 //! least once: REST answers, `Link` headers, GraphQL, and stored webhook
 //! bodies. Then every URL in them is checked by the key it is under: an
 //! `html_url`, `clone_url`, `diff_url`, `patch_url`, or `external_url` is a
-//! page, at the web root, as are `_links.html` and a push's commits; any
-//! other URL starts at the
-//! REST root, and GraphQL's `url` is a page, at the web root.
+//! page, at the web root, as are `_links.html`, GraphQL's `url`, and a push's
+//! repository and commits; any other URL starts at the REST root.
 
 mod common;
 
@@ -456,6 +455,9 @@ fn chosen(url: &str) -> bool {
 /// rendered each kind this test means to reach.
 fn check(rendered: &Rendered, roots: &Roots) {
     let at = |root: &str, url: &str| url == root || url.starts_with(&format!("{root}/"));
+    // Under GitHub Enterprise Server's layout the REST root is below the web
+    // root, so a page is at the web root and not at the REST root.
+    let page = |url: &str| at(&roots.web, url) && !at(&roots.api, url);
     let mut keys = BTreeSet::new();
     for (what, body) in &rendered.rest {
         let mut found = Vec::new();
@@ -464,24 +466,20 @@ fn check(rendered: &Rendered, roots: &Roots) {
             if chosen(&url) {
                 continue;
             }
-            // A push payload names commits by their pages, as GitHub's does.
-            // Its `repository.url` is the repository's page too, which
-            // e2e_webhooks checks.
-            if what == "delivery \"push\"" {
-                if path == ".repository.url" {
-                    continue;
-                }
-                let page = path == ".compare"
+            // A push payload names its repository and its commits by their
+            // pages, as GitHub's does.
+            if what == "delivery \"push\""
+                && (path == ".repository.url"
+                    || path == ".compare"
                     || path == ".head_commit.url"
-                    || (path.starts_with(".commits[") && path.ends_with("].url"));
-                if page {
-                    assert!(at(&roots.web, &url), "{what} {path}: {url}");
-                    continue;
-                }
+                    || (path.starts_with(".commits[") && path.ends_with("].url")))
+            {
+                assert!(page(&url), "{what} {path}: {url}");
+                continue;
             }
             // `_links.html` is a page; every other link is a REST URL.
             if path.ends_with("._links.html.href") {
-                assert!(at(&roots.web, &url), "{what} {path}: {url}");
+                assert!(page(&url), "{what} {path}: {url}");
                 continue;
             }
             keys.insert(key.clone());
@@ -489,7 +487,7 @@ fn check(rendered: &Rendered, roots: &Roots) {
                 // An App's `external_url` is its page, as the world has no
                 // site of the App's own to name.
                 "html_url" | "clone_url" | "external_url" | "diff_url" | "patch_url" => {
-                    assert!(at(&roots.web, &url), "{what} {path}: {url}")
+                    assert!(page(&url), "{what} {path}: {url}")
                 }
                 // Avatars are never served, at a host that can't resolve.
                 "avatar_url" => assert!(
@@ -523,7 +521,7 @@ fn check(rendered: &Rendered, roots: &Roots) {
         urls(body, "", "", &mut found);
         assert!(!found.is_empty(), "{what}: {body}");
         for (_, path, url) in found {
-            assert!(at(&roots.web, &url), "{what} {path}: {url}");
+            assert!(page(&url), "{what} {path}: {url}");
         }
     }
     for key in [

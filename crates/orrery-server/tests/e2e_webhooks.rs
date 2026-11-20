@@ -459,13 +459,11 @@ async fn a_receiver_gets_a_signed_delivery_for_each_event() {
     // does in a push alone.
     assert_eq!(
         pushed["repository"]["url"],
-        pushed["repository"]["html_url"]
+        format!("{}/acme/web", s.base).as_str()
     );
-    assert!(
-        !pushed["repository"]["url"]
-            .as_str()
-            .unwrap()
-            .contains("/api/v3/")
+    assert_eq!(
+        pushed["repository"]["url"],
+        pushed["repository"]["html_url"]
     );
 
     // pull_request: the pull request as a read answers it.

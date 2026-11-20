@@ -264,26 +264,36 @@ async fn a_webhook_body_names_github_coms_hosts() {
     // The default options make deliveries and send none; each is in the log
     // with its body as it would be sent.
     let log = control_post(&inst.base, "/_orrery/log/list", json!({ "page_size": 500 }));
-    let bodies: Vec<String> = log["items"]
+    let deliveries: Vec<(&Value, String)> = log["items"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|e| e["type"] == "delivery:created")
-        .map(|e| e["object"]["body"].as_str().unwrap().to_string())
+        .map(|e| {
+            (
+                &e["object"]["event"],
+                e["object"]["body"].as_str().unwrap().to_string(),
+            )
+        })
         .collect();
-    assert!(
-        bodies
-            .iter()
-            .any(|b| b.contains("https://api.github.com/repos/acme/web")),
-        "{bodies:?}"
-    );
-    assert!(
-        bodies
-            .iter()
-            .any(|b| b.contains("https://github.com/acme/web")),
-        "{bodies:?}"
-    );
-    for body in &bodies {
+    assert!(deliveries.iter().any(|(event, _)| *event == "push"));
+    for (event, body) in &deliveries {
         assert!(!body.contains(listener(&inst)), "{body}");
+        if *event != "push" {
+            continue;
+        }
+        let push: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(push["repository"]["url"], "https://github.com/acme/web");
+        assert_eq!(
+            push["repository"]["clone_url"],
+            "https://github.com/acme/web.git"
+        );
+        assert!(
+            push["compare"]
+                .as_str()
+                .unwrap()
+                .starts_with("https://github.com/acme/web/compare/"),
+            "{body}"
+        );
     }
 }
