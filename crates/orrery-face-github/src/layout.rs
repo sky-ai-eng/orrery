@@ -77,9 +77,6 @@ impl Layout {
 
     /// github.com's layout: REST at the root of `https://api.github.com`,
     /// and web pages and git at `https://github.com`.
-    // TODO(ORR-123): no listener serves these `https://` URLs yet; a client
-    // reaches the world as github.com's hosts only over plain HTTP with the
-    // `Host` header set until the world terminates TLS.
     pub fn github_com() -> Layout {
         Layout {
             kind: Kind::GitHubCom,

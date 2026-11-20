@@ -48,6 +48,8 @@ ring = "0.17"
 # ring alone, as ureq uses it: the default would add a second crypto provider.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
+# Reads which names a served certificate covers. rustls already brings it in.
+rustls-webpki = { version = "0.103", default-features = false, features = ["std"] }
 schemars = "1.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -63,6 +65,8 @@ tokio = { version = "1", features = [
     "sync",
     "signal",
 ] }
+# The async TLS a world serves GitHub's hosts over; ring alone, as rustls is.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
