@@ -23,6 +23,7 @@ use orrery_world::{
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
 use serde::Deserialize as _;
 
+use crate::layout::rest;
 use crate::reads::{page_params, paginate};
 use crate::render::{actor_json, owner_type, repo_json, rfc3339};
 use crate::{GithubFace, github_error, internal, json_response, media, resolve_repo};
@@ -58,42 +59,42 @@ const JWT_EXP_TOO_FAR: &str = "'Expiration time' claim ('exp') is too far in the
 /// never told they are bad.
 pub fn app_router(face: GithubFace) -> Router {
     let as_app = Router::new()
-        .route("/api/v3/app", get(get_app))
-        .route("/api/v3/app/installations", get(list_installations))
+        .route(&rest("/app"), get(get_app))
+        .route(&rest("/app/installations"), get(list_installations))
         .route(
-            "/api/v3/app/installations/{id}",
+            &rest("/app/installations/{id}"),
             get(get_installation).delete(delete_installation),
         )
         .route(
-            "/api/v3/app/installations/{id}/access_tokens",
+            &rest("/app/installations/{id}/access_tokens"),
             post(create_token),
         )
         .route(
-            "/api/v3/app/installations/{id}/suspended",
+            &rest("/app/installations/{id}/suspended"),
             put(suspend_installation).delete(unsuspend_installation),
         )
         .route(
-            "/api/v3/app/hook/config",
+            &rest("/app/hook/config"),
             get(crate::webhooks::get_config).patch(crate::webhooks::patch_config),
         )
         .route(
-            "/api/v3/app/hook/deliveries",
+            &rest("/app/hook/deliveries"),
             get(crate::webhooks::list_deliveries),
         )
         .route(
-            "/api/v3/app/hook/deliveries/{id}/attempts",
+            &rest("/app/hook/deliveries/{id}/attempts"),
             post(crate::webhooks::redeliver),
         )
-        .route("/api/v3/app/", any(not_mocked))
-        .route("/api/v3/app/{*rest}", any(not_mocked))
-        .route("/api/v3/repos/{owner}/{repo}/installation", any(not_mocked))
-        .route("/api/v3/orgs/{org}/installation", any(not_mocked))
-        .route("/api/v3/users/{username}/installation", any(not_mocked))
+        .route(&rest("/app/"), any(not_mocked))
+        .route(&rest("/app/{*rest}"), any(not_mocked))
+        .route(&rest("/repos/{owner}/{repo}/installation"), any(not_mocked))
+        .route(&rest("/orgs/{org}/installation"), any(not_mocked))
+        .route(&rest("/users/{username}/installation"), any(not_mocked))
         .method_not_allowed_fallback(not_mocked)
         .layer(middleware::from_fn_with_state(face.clone(), authenticate));
     let as_client = Router::new()
-        .route("/api/v3/applications/{client_id}/token", post(check_token))
-        .route("/api/v3/applications/{client_id}/{*rest}", any(not_mocked))
+        .route(&rest("/applications/{client_id}/token"), post(check_token))
+        .route(&rest("/applications/{client_id}/{*rest}"), any(not_mocked))
         .method_not_allowed_fallback(not_mocked)
         .layer(middleware::from_fn_with_state(
             face.clone(),
@@ -343,8 +344,8 @@ async fn list_installations(
         .map(|i| installation_json(&face, i))
         .collect();
     let resp = json_response(StatusCode::OK, serde_json::Value::Array(items));
-    let base = face.base_url.trim_end_matches('/');
-    let url = format!("{base}/api/v3/app/installations");
+    let api = face.layout.api();
+    let url = format!("{api}/app/installations");
     with_link(resp, &url, &query, total as usize)
 }
 
@@ -396,8 +397,8 @@ pub(crate) async fn list_user_installations(
         StatusCode::OK,
         serde_json::json!({ "total_count": total, "installations": items }),
     );
-    let base = face.base_url.trim_end_matches('/');
-    let url = format!("{base}/api/v3/user/installations");
+    let api = face.layout.api();
+    let url = format!("{api}/user/installations");
     with_link(resp, &url, &query, total as usize)
 }
 
@@ -724,8 +725,8 @@ pub(crate) async fn list_installation_repos(
             "repositories": listed,
         }),
     );
-    let base = face.base_url.trim_end_matches('/');
-    let url = format!("{base}/api/v3/installation/repositories");
+    let api = face.layout.api();
+    let url = format!("{api}/installation/repositories");
     with_link(resp, &url, &query, total)
 }
 
@@ -826,8 +827,8 @@ fn permissions_json(permissions: &Permissions) -> serde_json::Value {
 
 /// GitHub's App object.
 pub(crate) fn app_json(face: &GithubFace, app: &App) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
-    let html_url = format!("{base}/apps/{}", app.slug);
+    let web = face.layout.web();
+    let html_url = format!("{web}/apps/{}", app.slug);
     serde_json::json!({
         "id": app.id,
         "slug": app.slug,
@@ -857,24 +858,25 @@ pub(crate) fn installation_json(
     face: &GithubFace,
     installation: &Installation,
 ) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
+    let web = face.layout.web();
     let account = &installation.account;
     let html_url = match account.kind {
         orrery_world::ActorKind::Org => format!(
-            "{base}/organizations/{}/settings/installations/{}",
+            "{web}/organizations/{}/settings/installations/{}",
             account.login, installation.id
         ),
-        _ => format!("{base}/settings/installations/{}", installation.id),
+        _ => format!("{web}/settings/installations/{}", installation.id),
     };
     serde_json::json!({
         "id": installation.id,
         "account": actor_json(account),
         "repository_selection": installation.repository_selection.as_str(),
         "access_tokens_url": format!(
-            "{base}/api/v3/app/installations/{}/access_tokens",
+            "{api}/app/installations/{}/access_tokens",
             installation.id
         ),
-        "repositories_url": format!("{base}/api/v3/installation/repositories"),
+        "repositories_url": format!("{api}/installation/repositories"),
         "html_url": html_url,
         "app_id": installation.app_id,
         "app_slug": installation.app_slug,

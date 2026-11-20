@@ -1126,7 +1126,7 @@ mod tests {
         let face = GithubFace {
             world: world.clone(),
             git: orrery_face_git::GitFace::new(world.clone()),
-            base_url: "http://world.test".to_string(),
+            layout: crate::Layout::enterprise_server("http://world.test"),
         };
         let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
         let repo = world

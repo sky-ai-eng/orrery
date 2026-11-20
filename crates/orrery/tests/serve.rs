@@ -40,6 +40,8 @@ fn split_listeners_serve_over_unix_sockets() {
             base_url: "http://world.test".to_string(),
             listen: format!("unix:{}", faces.display()),
             control: format!("unix:{}", control.display()),
+            tls_listen: None,
+            proxy_listen: None,
         }
     );
     let (faces, control) = (&ready.listen, &ready.control);
@@ -102,6 +104,8 @@ fn split_listeners_serve_over_passed_sockets() {
             base_url: "http://world.test".to_string(),
             listen: format!("unix:{}", sockets[0].1.display()),
             control: format!("unix:{}", sockets[1].1.display()),
+            tls_listen: None,
+            proxy_listen: None,
         }
     );
 
@@ -866,4 +870,252 @@ fn an_unusable_outbound_setting_stops_serve_before_the_world_is_made() {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{case}");
         assert!(!dir.path().join("instance/world").exists(), "{case}");
     }
+}
+
+/// `server.layout = "github.com"` renders github.com's hosts into every URL
+/// the world returns, on the world's own host too.
+#[test]
+fn the_github_com_layout_names_github_coms_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "",
+        "listen = \"127.0.0.1:0\"\nlayout = \"github.com\"\n",
+    );
+    let (_served, ready) = serve(&config, &[]);
+    let alice = common::mint(&ready.listen, "alice");
+    let user = common::call(&ready.listen, "GET", "/api/v3/user", Some(&alice), "", 200);
+    assert_eq!(user["url"], "https://api.github.com/users/alice");
+    assert_eq!(user["html_url"], "https://github.com/alice");
+    // The ready line still reports where the world's own host is.
+    assert_eq!(ready.base_url, format!("http://{}", ready.listen));
+}
+
+#[test]
+fn an_unknown_layout_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "",
+        "listen = \"127.0.0.1:0\"\nlayout = \"github\"\n",
+    );
+    let out = orrery_serve(&config, &[]).output().unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown variant `github`"), "{stderr}");
+}
+
+/// A certificate for `names` from an authority made for this test, written
+/// to `dir` as `cert.pem` and `key.pem`, with the authority's own as
+/// `ca.pem`; the `[server]` lines that name the certificate and its key.
+fn certificate_for(dir: &Path, names: &[&str]) -> String {
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca =
+        rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap()).unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let leaf =
+        rcgen::CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+            .unwrap()
+            .signed_by(&key, &ca)
+            .unwrap();
+    std::fs::write(dir.join("ca.pem"), ca.as_ref().pem()).unwrap();
+    let cert = dir.join("cert.pem");
+    std::fs::write(&cert, leaf.pem()).unwrap();
+    let key_path = dir.join("key.pem");
+    std::fs::write(&key_path, key.serialize_pem()).unwrap();
+    format!("tls_cert = {cert:?}\ntls_key = {key_path:?}\n")
+}
+
+/// A certificate for GitHub's two hosts, and for the loopback address a
+/// test reaches the TLS listener at.
+fn github_certificate(dir: &Path) -> String {
+    certificate_for(dir, &["github.com", "api.github.com", "127.0.0.1"])
+}
+
+/// A TLS client trusting only the authority in `dir`, through `proxy` when
+/// it is given.
+fn tls_client(dir: &Path, proxy: Option<&str>) -> ureq::Agent {
+    let pem = std::fs::read(dir.join("ca.pem")).unwrap();
+    let ca = ureq::tls::Certificate::from_pem(&pem).unwrap();
+    ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::new_with_certs(&[ca]))
+                .build(),
+        )
+        .proxy(proxy.map(|p| ureq::Proxy::new(&format!("http://{p}")).unwrap()))
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
+#[test]
+fn the_ready_line_reports_the_tls_listener_and_the_proxy() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = format!(
+        "listen = \"127.0.0.1:0\"\nlayout = \"github.com\"\n{}tls_listen = \"127.0.0.1:0\"\nproxy_listen = \"127.0.0.1:0\"\n",
+        github_certificate(dir.path())
+    );
+    let config = write_config(dir.path(), "", &server);
+    let (_served, ready) = serve(&config, &[]);
+    let tls_listen = ready.tls_listen.clone().unwrap();
+    let proxy = ready.proxy_listen.clone().unwrap();
+    for bound in [&tls_listen, &proxy] {
+        assert!(
+            bound.starts_with("127.0.0.1:") && !bound.ends_with(":0"),
+            "{ready:?}"
+        );
+    }
+    // The proxy answers from the first byte; a tunnel to another host is
+    // refused.
+    let mut stream = std::net::TcpStream::connect(&proxy).unwrap();
+    stream
+        .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+        .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 403 Forbidden\r\n"), "{answer}");
+
+    // Both serve the faces, and neither serves the control plane: not on
+    // the world's own host over TLS, and not on github.com through the
+    // proxy.
+    let alice = common::mint(&ready.listen, "alice");
+    let proxied = tls_client(dir.path(), Some(&proxy));
+    let mut user = proxied
+        .get("https://api.github.com/user")
+        .header("authorization", &format!("token {alice}"))
+        .call()
+        .unwrap();
+    assert_eq!(user.status().as_u16(), 200);
+    assert!(
+        user.body_mut()
+            .read_to_string()
+            .unwrap()
+            .contains("\"login\":\"alice\"")
+    );
+    for (agent, url) in [
+        (
+            tls_client(dir.path(), None),
+            format!("https://{tls_listen}/_orrery/healthz"),
+        ),
+        (proxied, "https://github.com/_orrery/healthz".to_string()),
+    ] {
+        let mut resp = agent.get(&url).call().unwrap();
+        let body = resp.body_mut().read_to_string().unwrap();
+        assert_eq!(resp.status().as_u16(), 501, "{url}: {body}");
+        assert!(body.contains("\"not_mocked\":true"), "{url}: {body}");
+    }
+}
+
+#[test]
+fn tls_settings_that_cannot_be_served_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let cert = github_certificate(dir.path());
+    std::fs::create_dir(dir.path().join("partial")).unwrap();
+    let missing = format!(
+        "tls_cert = {:?}\ntls_key = {:?}\nlayout = \"github.com\"\ntls_listen = \"127.0.0.1:0\"\n",
+        dir.path().join("missing.pem"),
+        dir.path().join("key.pem")
+    );
+    let cases = [
+        (
+            "tls_listen = \"127.0.0.1:0\"\n".to_string(),
+            "need server.tls_cert and server.tls_key",
+        ),
+        (
+            format!(
+                "tls_cert = {:?}\ntls_listen = \"127.0.0.1:0\"\n",
+                dir.path().join("cert.pem")
+            ),
+            "server.tls_cert and server.tls_key are set together",
+        ),
+        (
+            cert.clone(),
+            "neither server.tls_listen nor server.proxy_listen serves it",
+        ),
+        (
+            format!("{cert}proxy_listen = \"127.0.0.1:0\"\n"),
+            "server.proxy_listen needs server.layout = \"github.com\"",
+        ),
+        (missing, "missing.pem"),
+        (
+            format!("{cert}layout = \"github.com\"\nproxy_listen = \"127.0.0.1:0\"\n").replace(
+                &cert,
+                &certificate_for(&dir.path().join("partial"), &["github.com"]),
+            ),
+            "server.tls_cert does not name api.github.com",
+        ),
+        (
+            format!("{cert}tls_listen = \"127.0.0.1:0\"\n"),
+            "server.tls_listen under the \"enterprise-server\" layout needs server.base_url",
+        ),
+        (
+            format!("{cert}tls_listen = \"127.0.0.1:0\"\nbase_url = \"https://world.example\"\n"),
+            "server.tls_cert does not name world.example",
+        ),
+        (
+            format!(
+                "{cert}layout = \"github.com\"\ntls_listen = {:?}\nproxy_listen = {:?}\n",
+                format!("unix:{}", dir.path().join("one.sock").display()),
+                format!("unix:{}", dir.path().join("one.sock").display()),
+            ),
+            "server.tls_listen and server.proxy_listen are both unix:",
+        ),
+    ];
+    for (server, expected) in cases {
+        let case = tempfile::tempdir().unwrap();
+        let config = write_config(
+            case.path(),
+            "",
+            &format!("listen = \"127.0.0.1:0\"\n{server}"),
+        );
+        let out = refused(orrery_serve(&config, &[]));
+        assert!(!out.status.success(), "{server}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(expected), "{server}: {stderr}");
+        assert!(
+            !case.path().join("instance").exists(),
+            "{server}: no world was created"
+        );
+    }
+}
+
+/// A `base_url` a client can't follow, or that a path can't be appended to,
+/// is refused before a world is made.
+#[test]
+fn an_unusable_base_url_is_refused() {
+    for (base_url, why) in [
+        ("127.0.0.1:4180", "is not an http or https URL"),
+        ("ftp://world.example", "is not an http or https URL"),
+        ("/world", "is not an http or https URL"),
+        ("not a url", "is not a URL"),
+        ("https://world.example/?mode=x", "has a query"),
+        ("https://world.example/#top", "has a fragment"),
+        ("https://user:secret@world.example", "has user information"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_config(
+            dir.path(),
+            "",
+            &format!("listen = \"127.0.0.1:0\"\nbase_url = {base_url:?}\n"),
+        );
+        let out = refused(orrery_serve(&config, &[]));
+        assert!(!out.status.success(), "{base_url}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(why), "{base_url}: {stderr}");
+        assert!(
+            !dir.path().join("instance").exists(),
+            "{base_url}: no world was created"
+        );
+    }
+    // A path is kept: a world served below one by a proxy in front of it.
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "",
+        "listen = \"127.0.0.1:0\"\nbase_url = \"https://world.example/prefix\"\n",
+    );
+    let (_served, ready) = serve(&config, &[]);
+    assert_eq!(ready.base_url, "https://world.example/prefix");
 }

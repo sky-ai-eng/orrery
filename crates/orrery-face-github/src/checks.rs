@@ -70,6 +70,8 @@ pub(crate) async fn create_check_run(
     if !is_full_sha(head_sha) {
         return validation_invalid("CheckRun", "head_sha");
     }
+    // GitHub takes a sha in either case and answers the commit's own.
+    let head_sha = &head_sha.to_ascii_lowercase();
     let fields = match resolve_status_fields(&parsed, None) {
         Ok(f) => f,
         Err(resp) => return *resp,

@@ -43,7 +43,8 @@ pub(crate) fn alert_json(
     repo: &Repo,
     alert: &DependencyAlert,
 ) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
+    let web = face.layout.web();
     let full_name = repo.full_name();
     let package = serde_json::json!({ "ecosystem": alert.ecosystem, "name": alert.package });
     let vulnerability = serde_json::json!({
@@ -90,8 +91,8 @@ pub(crate) fn alert_json(
             "classification": "general",
         },
         "security_vulnerability": vulnerability,
-        "url": format!("{base}/api/v3/repos/{full_name}/dependabot/alerts/{}", alert.number),
-        "html_url": format!("{base}/{full_name}/security/dependabot/{}", alert.number),
+        "url": format!("{api}/repos/{full_name}/dependabot/alerts/{}", alert.number),
+        "html_url": format!("{web}/{full_name}/security/dependabot/{}", alert.number),
         "created_at": created,
         "updated_at": rfc3339(alert.updated_clock_unix),
         "dismissal_request": null,
@@ -389,7 +390,7 @@ fn listing(face: &GithubFace, repo: &Repo, raw_query: &str, headers: &HeaderMap)
         Ok(ends) => ends,
         Err(e) => return internal(e),
     };
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
     let link = |name: &str, cursor: Option<&str>, rel: &str| {
         let mut params = repeated.clone();
         if let Some(cursor) = cursor {
@@ -402,7 +403,7 @@ fn listing(face: &GithubFace, repo: &Repo, raw_query: &str, headers: &HeaderMap)
             params.push_str(&pair);
         }
         format!(
-            "<{base}/api/v3/repositories/{}/dependabot/alerts?{params}>; rel=\"{rel}\"",
+            "<{api}/repositories/{}/dependabot/alerts?{params}>; rel=\"{rel}\"",
             repo.id
         )
     };

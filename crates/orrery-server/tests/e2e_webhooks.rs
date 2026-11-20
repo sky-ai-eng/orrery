@@ -1310,8 +1310,11 @@ async fn a_suite_follows_its_check_runs_and_says_when_it_concludes() {
         state(),
         ("completed".to_string(), Some("success".to_string()))
     );
-    // A newer run of a name takes the older one's place.
-    let again = make(serde_json::json!({ "name": "lint", "head_sha": head_sha }));
+    // A newer run of a name takes the older one's place. Its sha names the
+    // commit in either case, and is answered in git's.
+    let shouted = head_sha.to_uppercase();
+    let again = make(serde_json::json!({ "name": "lint", "head_sha": shouted }));
+    assert_eq!(again["head_sha"], head_sha.as_str());
     assert_eq!(state(), ("queued".to_string(), None));
     set(&again, serde_json::json!({ "conclusion": "success" }));
     assert_eq!(
@@ -1382,6 +1385,36 @@ async fn a_suite_follows_its_check_runs_and_says_when_it_concludes() {
     assert_eq!(read("check-runs/999").0, 404);
     assert_eq!(read("check-suites/999").0, 404);
     assert_eq!(read("check-suites/abc").0, 404);
+
+    // A rendering no route answers is refused for what exists, and what
+    // doesn't exist is 404 whatever rendering is asked for.
+    let asked_in_html = |path: &str| {
+        agent()
+            .get(format!("{api}/repos/acme/web/{path}"))
+            .header("authorization", bearer(&s.alice))
+            .header("accept", "application/vnd.github.html+json")
+            .call()
+            .expect("an answer")
+            .status()
+            .as_u16()
+    };
+    assert_eq!(asked_in_html(&format!("check-suites/{suite_id}")), 422);
+    for missing in [
+        "check-suites/999",
+        "check-suites/999/check-runs",
+        "check-runs/999",
+        "commits/nope/check-suites",
+    ] {
+        assert_eq!(asked_in_html(missing), 404, "{missing}");
+    }
+
+    for list in ["check-suites", "check-runs"] {
+        assert_eq!(
+            read(&format!("commits/{shouted}/{list}")).2,
+            read(&format!("commits/{head_sha}/{list}")).2,
+            "{list}"
+        );
+    }
 
     // A check run on a commit no push brought to a tip makes a suite that
     // records no push.
@@ -1709,7 +1742,7 @@ async fn a_world_is_released_when_its_server_is_gone() {
     );
     let routers = orrery_server::routers(
         world.clone(),
-        "http://127.0.0.1:1".to_string(),
+        orrery_server::Layout::enterprise_server("http://127.0.0.1:1"),
         dir.path().join("snapshots"),
         orrery_server::Options::default(),
     );

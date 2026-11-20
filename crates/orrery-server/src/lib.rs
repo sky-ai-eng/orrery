@@ -1,7 +1,8 @@
 //! The HTTP host. Mounts the faces (git smart-HTTP at the root, the GitHub
 //! REST face under `/api/v3` — the GHES mount shape — and GitHub's OAuth web
 //! flow under `/login/oauth`), the `/_orrery/` control plane, face auth, and the
-//! NOT-MOCKED fallback. The faces and the control plane are separate routers so
+//! NOT-MOCKED fallback. Under github.com's layout, a layer in front of them
+//! serves each request by the host it names. The faces and the control plane are separate routers so
 //! a world can serve the control plane on a listener that no public
 //! request reaches.
 //!
@@ -21,13 +22,16 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{OriginalUri, Request, State};
-use axum::http::{HeaderMap, Method, Response, StatusCode};
+use axum::http::uri::PathAndQuery;
+use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::routing::any;
 use axum::{Router, middleware};
 use base64::Engine as _;
 use orrery_face_git::GitFace;
 use orrery_face_github::GithubFace;
+pub use orrery_face_github::layout::Layout;
+use orrery_face_github::layout::{GRAPHQL_PATH, Landing, REST_PATH, under};
 use orrery_world::World;
 
 mod alerts;
@@ -37,6 +41,7 @@ mod list;
 mod log_stream;
 mod sender;
 mod snapshots;
+pub mod tls;
 
 /// Where the control plane is mounted, on its own listener or the faces'.
 const CONTROL_PREFIX: &str = "/_orrery";
@@ -48,7 +53,6 @@ pub const BUILD_COMMIT: &str = env!("ORRERY_BUILD_COMMIT");
 #[derive(Clone)]
 pub struct AppState {
     pub world: Arc<World>,
-    pub base_url: String,
     /// The git face's handle, here for its world write gate: snapshot
     /// create/restore hold it exclusively against in-flight git traffic.
     pub git: Arc<GitFace>,
@@ -110,6 +114,7 @@ impl Default for Options {
 pub struct Routers {
     faces: Router,
     control: Router,
+    layout: Layout,
     stop: Stop,
 }
 
@@ -120,9 +125,19 @@ impl Routers {
         self.stop.clone()
     }
 
+    /// The faces alone, for a listener beside the one [`Routers::combined`]
+    /// or [`Routers::split`] serves them on, such as a TLS listener or the
+    /// HTTPS proxy ([`tls::TlsListener`]). Taken before either consumes them.
+    pub fn faces(&self) -> Router {
+        by_host(self.faces.clone().fallback(not_mocked), self.layout.clone())
+    }
+
     /// Both on one listener, the control plane at `/_orrery`.
     pub fn combined(self) -> Router {
-        self.control.merge(self.faces).fallback(not_mocked)
+        by_host(
+            self.control.merge(self.faces).fallback(not_mocked),
+            self.layout,
+        )
     }
 
     /// `(faces, control)` for two listeners. The faces router has no
@@ -131,7 +146,7 @@ impl Routers {
     /// passes paths through unchanged.
     pub fn split(self) -> (Router, Router) {
         (
-            self.faces.fallback(not_mocked),
+            by_host(self.faces.fallback(not_mocked), self.layout),
             self.control.fallback(not_mocked),
         )
     }
@@ -169,7 +184,7 @@ impl Stop {
 /// Build the routers for one world instance.
 pub fn routers(
     world: Arc<World>,
-    base_url: String,
+    layout: Layout,
     snapshots_dir: PathBuf,
     options: Options,
 ) -> Routers {
@@ -177,7 +192,7 @@ pub fn routers(
     let github = GithubFace {
         world: world.clone(),
         git: git.clone(),
-        base_url: base_url.clone(),
+        layout: layout.clone(),
     };
     // The GitHub face makes the deliveries of every write this world takes
     // from here on, and of its newest write, if a process stopped between
@@ -196,7 +211,6 @@ pub fn routers(
     };
     let state = AppState {
         world: world.clone(),
-        base_url,
         git: git.clone(),
         snapshots_dir,
         schema: orrery_face_github::graphql::schema(github.clone()),
@@ -206,10 +220,10 @@ pub fn routers(
         stopping,
     };
 
-    // GraphQL mounts at the GHES address — `/api/graphql`, a sibling of
-    // `/api/v3`, never nested under it. Consumers derive it exactly there.
+    // GraphQL mounts at the GHES address, a sibling of the REST root, never
+    // nested under it. Consumers derive it exactly there.
     let graphql = Router::new()
-        .route("/api/graphql", axum::routing::post(graphql_handler))
+        .route(GRAPHQL_PATH, axum::routing::post(graphql_handler))
         .with_state(state.clone());
 
     // The OAuth web flow lives on the web host and authenticates with client
@@ -233,7 +247,7 @@ pub fn routers(
     let faces = Router::new()
         .merge(orrery_face_git::router(git))
         .nest(
-            "/api/v3",
+            REST_PATH,
             orrery_face_github::router(github).fallback(not_mocked),
         )
         .merge(graphql)
@@ -258,8 +272,77 @@ pub fn routers(
                 &format!("{CONTROL_PREFIX}/{{*rest}}"),
                 any(control::no_such_route),
             ),
+        layout,
         stop,
     }
+}
+
+/// Under github.com's layout, `app` behind a layer that serves each request
+/// by the host it names (spec/grammar.md, "Where the face is"). It runs
+/// before `app` routes, so it can move an `api.github.com` request to the
+/// path that serves it; the request's original URI, which every not-mocked
+/// answer names, is recorded before it does.
+fn by_host(app: Router, layout: Layout) -> Router {
+    if !layout.is_github_com() {
+        return app;
+    }
+    Router::new()
+        .fallback_service(app)
+        .layer(middleware::from_fn_with_state(Arc::new(layout), land))
+}
+
+async fn land(State(layout): State<Arc<Layout>>, mut req: Request, next: Next) -> Response<Body> {
+    let host = request_host(&req);
+    let landing = {
+        let path_and_query = req.uri().path_and_query().map_or("/", PathAndQuery::as_str);
+        layout.landing(host.as_deref(), path_and_query)
+    };
+    match landing {
+        Landing::Own => next.run(req).await,
+        // The control plane is the world's own host's, never github.com's.
+        Landing::Web if under(req.uri().path(), CONTROL_PREFIX) => not_served(&req, host),
+        Landing::Web => next.run(req).await,
+        Landing::Api(served) => {
+            let mut parts = req.uri().clone().into_parts();
+            match served.parse::<PathAndQuery>() {
+                Ok(served) => parts.path_and_query = Some(served),
+                Err(_) => return not_served(&req, host),
+            }
+            match Uri::from_parts(parts) {
+                Ok(uri) => *req.uri_mut() = uri,
+                Err(_) => return not_served(&req, host),
+            }
+            next.run(req).await
+        }
+        Landing::NotServed => not_served(&req, host),
+    }
+}
+
+fn not_served(req: &Request, host: Option<String>) -> Response<Body> {
+    orrery_face_github::not_mocked_on(
+        req.method().as_str(),
+        host.as_deref().unwrap_or(""),
+        req.uri().path(),
+    )
+}
+
+/// The name of the host a request names, in lower case, without a port, the
+/// trailing dot of a fully qualified name, or any user information: from its
+/// URI's authority when it carries one, as an HTTP/2 request and an
+/// absolute-form request do, and from its `Host` header otherwise.
+fn request_host(req: &Request) -> Option<String> {
+    let authority = match req.uri().authority() {
+        Some(authority) => authority.clone(),
+        None => req
+            .headers()
+            .get(axum::http::header::HOST)?
+            .to_str()
+            .ok()?
+            .parse::<axum::http::uri::Authority>()
+            .ok()?,
+    };
+    let host = authority.host();
+    Some(host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase())
 }
 
 /// Serve until `stop` resolves ([`Stop::requested`]), then stop accepting
