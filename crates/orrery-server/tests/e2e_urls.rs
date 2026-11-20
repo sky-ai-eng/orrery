@@ -538,6 +538,7 @@ fn check(rendered: &Rendered, roots: &Roots) {
         "access_tokens_url",
         "repositories_url",
         "check_runs_url",
+        "hooks_url",
     ] {
         assert!(keys.contains(key), "no {key} was rendered: {keys:?}");
     }

@@ -413,6 +413,17 @@ async fn a_receiver_gets_a_signed_delivery_for_each_event() {
                 received.kind()
             );
             assert!(payload["sender"]["login"].is_string());
+            // The organization that owns the repository, as GitHub names it
+            // in every payload about one.
+            let organization = &payload["organization"];
+            assert_eq!(organization["login"], "acme");
+            assert_eq!(organization["url"], format!("{api}/orgs/acme").as_str());
+            assert_eq!(
+                organization["members_url"],
+                format!("{api}/orgs/acme/members{{/member}}").as_str()
+            );
+            assert_eq!(organization["description"], serde_json::Value::Null);
+            assert!(organization.get("type").is_none(), "{organization}");
         }
     }
     let payload = |n: usize| got[n].json();
@@ -534,6 +545,42 @@ async fn a_receiver_gets_a_signed_delivery_for_each_event() {
     );
 }
 
+/// A payload about a repository a user owns names no organization.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_users_repository_names_no_organization() {
+    let s = setup_with(sending(), 204).await;
+    face_ok(
+        "POST",
+        &format!("{}/user/repos", s.api),
+        &s.alice,
+        serde_json::json!({ "name": "notes" }),
+    );
+    control_post(
+        &s.base,
+        "/_orrery/apps/helper/installations",
+        serde_json::json!({ "account": "alice" }),
+    );
+    let clock = s.inst.world.clock().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path();
+    let remote = format!("{}/alice/notes.git", s.base)
+        .replace("http://", &format!("http://x-access-token:{}@", s.alice));
+    git(src, clock, &["init", "-q", "-b", "main", "."]);
+    std::fs::write(src.join("README.md"), "# notes\n").unwrap();
+    git(src, clock, &["add", "."]);
+    git(src, clock, &["commit", "-q", "-m", "init"]);
+    git(src, clock, &["push", "-q", &remote, "main"]);
+
+    let got = s.receiver.wait(2).await;
+    let push = got
+        .iter()
+        .find(|r| r.header("x-github-event") == "push")
+        .expect("a push delivery")
+        .json();
+    assert_eq!(push["repository"]["full_name"], "alice/notes");
+    assert!(push.get("organization").is_none(), "{push}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_review_request_is_delivered_once_for_each_new_reviewer() {
     let s = setup_with(sending(), 204).await;
@@ -628,6 +675,7 @@ async fn a_review_request_is_delivered_once_for_each_new_reviewer() {
                 "action",
                 "installation",
                 "number",
+                "organization",
                 "pull_request",
                 "repository",
                 "requested_reviewer",
@@ -757,7 +805,14 @@ async fn an_app_is_told_of_each_move_of_a_dependabot_alert() {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["action", "alert", "installation", "repository", "sender"]
+            [
+                "action",
+                "alert",
+                "installation",
+                "organization",
+                "repository",
+                "sender"
+            ]
         );
         assert_eq!(payload["repository"]["full_name"], "acme/web");
         // The alert is GitHub's alert object, as REST answers it.
@@ -1467,6 +1522,7 @@ async fn a_suite_follows_its_check_runs_and_says_when_it_concludes() {
             "action",
             "check_suite",
             "installation",
+            "organization",
             "repository",
             "sender"
         ]
