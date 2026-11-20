@@ -866,9 +866,19 @@ pub enum AccessLevel {
     Admin,
 }
 
+impl AccessLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AccessLevel::Read => "read",
+            AccessLevel::Write => "write",
+            AccessLevel::Admin => "admin",
+        }
+    }
+}
+
 /// What an app, an installation, or an installation token may do, by
-/// permission name. The world records and echoes them; nothing checks a
-/// call against them.
+/// permission name. The world records them and checks no call against
+/// them: a face does, where its vendor does.
 pub type Permissions = std::collections::BTreeMap<String, AccessLevel>;
 
 /// Which of its account's repositories an installation covers.
@@ -1033,8 +1043,8 @@ pub struct InstallationToken {
     pub expires_clock_unix: i64,
 }
 
-/// What an installation token may reach: the repositories its installation
-/// covers, or the ones it was narrowed to.
+/// What an installation token may reach and do: the repositories its
+/// installation covers, or the ones it was narrowed to, and its permissions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallationGrant {
     pub installation_id: i64,
@@ -1046,9 +1056,18 @@ pub struct InstallationGrant {
     /// Whether the installation is suspended. Its tokens still name their
     /// caller, so a face can say why it refuses them.
     pub suspended: bool,
+    /// What the token may do, by permission name.
+    pub permissions: Permissions,
 }
 
 impl InstallationGrant {
+    /// Whether the token holds the permission `name` at `level` or above.
+    pub fn permits(&self, name: &str, level: AccessLevel) -> bool {
+        self.permissions
+            .get(name)
+            .is_some_and(|held| *held >= level)
+    }
+
     pub fn covers(&self, repo: &Repo) -> bool {
         match &self.repos {
             Some(ids) => ids.contains(&repo.id),

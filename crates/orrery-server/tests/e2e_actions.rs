@@ -18,6 +18,11 @@ struct Seeded {
 /// alice/web with `main` and a one-commit `feature` branch, and an open
 /// pull request for it.
 async fn seed() -> Seeded {
+    seed_as(false).await
+}
+
+/// The same, in a repository that is private when `private` is set.
+async fn seed_as(private: bool) -> Seeded {
     let inst = boot().await;
     let base = inst.base.clone();
     let token = mint_actor(&base, "alice", "user");
@@ -25,7 +30,7 @@ async fn seed() -> Seeded {
         "POST",
         &format!("{base}/api/v3/user/repos"),
         &token,
-        json!({ "name": "web" }),
+        json!({ "name": "web", "private": private }),
     );
     let clone_url = repo["clone_url"].as_str().unwrap().to_string();
     let authed_url = clone_url.replace("http://", &format!("http://x-access-token:{token}@"));
@@ -1194,6 +1199,8 @@ struct Answer {
     content_type: Option<String>,
     disposition: Option<String>,
     error_code: Option<String>,
+    /// What GitHub says the route asks of an installation token.
+    accepted: Option<String>,
     body: Vec<u8>,
 }
 
@@ -1202,14 +1209,24 @@ impl Answer {
         String::from_utf8(self.body.clone()).unwrap()
     }
 
+    fn json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap()
+    }
+
     fn message(&self) -> (u16, String) {
-        let body: Value = serde_json::from_slice(&self.body).unwrap();
+        let body = self.json();
         (self.status, body["message"].as_str().unwrap().to_string())
     }
 }
 
 /// `method` on `url`, with `token` when one is given.
 fn fetch(method: &str, url: &str, token: Option<&str>) -> Answer {
+    send(method, url, token, None)
+}
+
+/// `method` on `url` with `body` as JSON when one is given, and no body
+/// otherwise.
+fn send(method: &str, url: &str, token: Option<&str>, body: Option<Value>) -> Answer {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
@@ -1224,13 +1241,19 @@ fn fetch(method: &str, url: &str, token: Option<&str>) -> Answer {
         "GET" => authorized(agent.get(url)).call(),
         "HEAD" => authorized(agent.head(url)).call(),
         "DELETE" => authorized(agent.delete(url)).call(),
-        "POST" => {
-            let request = agent.post(url);
-            match token {
+        "POST" | "PATCH" => {
+            let request = match method {
+                "POST" => agent.post(url),
+                _ => agent.patch(url),
+            };
+            let request = match token {
                 Some(token) => request.header("authorization", format!("token {token}")),
                 None => request,
+            };
+            match body {
+                Some(body) => request.send_json(body),
+                None => request.send_empty(),
             }
-            .send_empty()
         }
         other => panic!("no {other} here"),
     }
@@ -1246,6 +1269,7 @@ fn fetch(method: &str, url: &str, token: Option<&str>) -> Answer {
         content_type: header("content-type"),
         disposition: header("content-disposition"),
         error_code: header("x-ms-error-code"),
+        accepted: header("x-accepted-github-permissions"),
         body: resp.body_mut().read_to_vec().unwrap(),
     }
 }
@@ -1702,4 +1726,358 @@ async fn a_runner_writes_only_whole_lines_to_a_job_in_progress() {
         Some(json!({ "lines": ["x"] })),
     );
     assert_eq!(status, 404);
+}
+
+/// What GitHub was observed to allow an installation token on each route,
+/// by the permissions the token holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_installation_token_does_what_its_permissions_allow() {
+    // The permissions are asked of a private repository: anyone reads a
+    // public one.
+    let s = seed_as(true).await;
+    let base = s.inst.base.clone();
+    // A finished run with one job, to read and to try to write.
+    let (_, workflow) = s.control(
+        "POST",
+        "/workflows",
+        Some(json!({
+            "path": ".github/workflows/one.yml", "name": "one", "dispatch_inputs": [],
+            "jobs": [{ "name": "only" }],
+        })),
+    );
+    let run = s.runner(
+        &format!("/workflows/{}/runs", workflow["id"]),
+        Some(json!({
+            "event": "push", "head_sha": s.main_sha, "head_branch": "main", "actor": "alice",
+        })),
+    );
+    let (run_id, job) = (run["id"].as_i64().unwrap(), job_id(&run, "only"));
+    s.runner(&format!("/workflow-jobs/{job}/start"), None);
+    s.runner(
+        &format!("/workflow-jobs/{job}/complete"),
+        Some(json!({ "conclusion": "success" })),
+    );
+    let suite = s.get(&format!("actions/runs/{run_id}"))["check_suite_id"]
+        .as_i64()
+        .unwrap();
+
+    // An App that may write both, and tokens of its installation narrowed
+    // to less.
+    let app = common::control_post(
+        &base,
+        "/_orrery/apps",
+        json!({
+            "slug": "ci-app", "name": "CI App", "owner": "alice",
+            "callback_urls": ["https://app.test/callback"],
+            "permissions": { "actions": "write", "checks": "write", "metadata": "read" },
+        }),
+    );
+    let key = common::app_key();
+    common::control_post(
+        &base,
+        "/_orrery/apps/ci-app/keys",
+        json!({ "public_key": key.public_pem }),
+    );
+    let installation = common::control_post(
+        &base,
+        "/_orrery/apps/ci-app/installations",
+        json!({ "account": "alice" }),
+    );
+    let issued = |body: Value| {
+        let jwt = key.jwt(app["id"].clone(), s.inst.world.clock().unwrap());
+        let mut resp = ureq::post(format!(
+            "{base}/api/v3/app/installations/{}/access_tokens",
+            installation["id"]
+        ))
+        .header("authorization", format!("Bearer {jwt}"))
+        .send_json(body)
+        .unwrap();
+        let issued: Value = resp.body_mut().read_json().unwrap();
+        issued["token"].as_str().unwrap().to_string()
+    };
+    let issue = |permissions: Option<Value>| match permissions {
+        Some(permissions) => issued(json!({ "permissions": permissions })),
+        None => issued(json!({})),
+    };
+    // A token of every permission, narrowed to the repositories named.
+    let issue_for = |repositories: Option<Value>| issued(json!({ "repositories": repositories }));
+    let all = issue(None);
+    let read = issue(Some(json!({ "actions": "read", "checks": "read" })));
+    let none = issue(Some(json!({ "metadata": "read" })));
+    let ask = |token: &str, method: &str, path: &str, body: Option<Value>| {
+        let answer = send(method, &format!("{}/{path}", s.api), Some(token), body);
+        (answer.status, answer.accepted.unwrap_or_default())
+    };
+    let refused = |token: &str, method: &str, path: &str, body: Option<Value>| {
+        let answer = send(method, &format!("{}/{path}", s.api), Some(token), body);
+        assert_eq!(
+            answer.message(),
+            (403, "Resource not accessible by integration".to_string()),
+            "{method} {path}"
+        );
+        answer.accepted.unwrap_or_default()
+    };
+
+    // A read needs the permission to read, and is refused before the route
+    // looks for what its path names.
+    let run_path = format!("actions/runs/{run_id}");
+    for path in [
+        "actions/workflows".to_string(),
+        "actions/workflows/one.yml".to_string(),
+        "actions/workflows/nope.yml".to_string(),
+        "actions/runs".to_string(),
+        run_path.clone(),
+        "actions/runs/999".to_string(),
+        format!("{run_path}/jobs"),
+        format!("{run_path}/attempts/1"),
+        format!("{run_path}/logs"),
+        format!("actions/jobs/{job}"),
+        "actions/jobs/999".to_string(),
+        format!("actions/jobs/{job}/logs"),
+        format!("actions/jobs/{job}/steps/1/logs"),
+    ] {
+        assert_eq!(refused(&none, "GET", &path, None), "actions=read", "{path}");
+    }
+    for path in [
+        format!("commits/{}/check-runs", s.main_sha),
+        format!("commits/{}/check-suites", s.main_sha),
+        format!("check-runs/{job}"),
+        format!("check-suites/{suite}"),
+        "check-suites/999".to_string(),
+        format!("check-suites/{suite}/check-runs"),
+    ] {
+        assert_eq!(refused(&none, "GET", &path, None), "checks=read", "{path}");
+    }
+    // The one route that looks first: a check run that does not exist, or
+    // that is another repository's.
+    face_ok(
+        "POST",
+        &format!("{base}/api/v3/user/repos"),
+        &s.token,
+        json!({ "name": "open" }),
+    );
+    let open = format!("{base}/api/v3/repos/alice/open");
+    let elsewhere = format!("{open}/check-runs/{job}");
+    for token in [&none, &read] {
+        assert_eq!(
+            ask(token, "GET", "check-runs/999", None),
+            (404, "checks=read".to_string())
+        );
+        let answer = send("GET", &elsewhere, Some(token), None);
+        assert_eq!(
+            (answer.status, answer.accepted.as_deref()),
+            (404, Some("checks=read"))
+        );
+    }
+    // `HEAD` is a read, refused as one.
+    assert_eq!(
+        ask(&none, "HEAD", "actions/runs", None),
+        (403, "actions=read".to_string())
+    );
+    assert_eq!(
+        ask(&read, "HEAD", "actions/runs", None),
+        (200, "actions=read".to_string())
+    );
+    // The routes that name the repository by its id ask the same.
+    let repo_id = send("GET", &s.api, Some(&s.token), None).json()["id"]
+        .as_i64()
+        .unwrap();
+    let by_id = format!("{base}/api/v3/repositories/{repo_id}/actions/runs");
+    for (token, status) in [(&none, 403), (&read, 200)] {
+        let answer = send("GET", &by_id, Some(token), None);
+        assert_eq!(
+            (answer.status, answer.accepted.as_deref()),
+            (status, Some("actions=read"))
+        );
+    }
+
+    // A repository is looked for before the permission: one that does not
+    // exist is `404` whatever the token holds, by name and by id.
+    for url in [
+        format!("{base}/api/v3/repos/alice/nope/actions/runs"),
+        format!("{base}/api/v3/repositories/999999/actions/runs"),
+    ] {
+        for token in [&none, &read] {
+            let answer = send("GET", &url, Some(token), None);
+            assert_eq!(
+                (answer.message(), answer.accepted.as_deref()),
+                ((404, "Not Found".to_string()), Some("actions=read")),
+                "{url}"
+            );
+        }
+    }
+    // So is a private repository the token does not reach, which a token
+    // narrowed to another repository shows.
+    let elsewhere_only = issue_for(Some(json!(["open"])));
+    let unreached = send(
+        "GET",
+        &format!("{}/actions/runs", s.api),
+        Some(&elsewhere_only),
+        None,
+    );
+    assert_eq!(
+        (unreached.message(), unreached.accepted.as_deref()),
+        ((404, "Not Found".to_string()), Some("actions=read"))
+    );
+
+    // Anyone reads a public repository, so a token without the permission
+    // does, and is still told what the route asks. A write there needs the
+    // permission.
+    for (path, accepted) in [
+        ("actions/runs", "actions=read"),
+        ("actions/workflows", "actions=read"),
+    ] {
+        let answer = send("GET", &format!("{open}/{path}"), Some(&none), None);
+        assert_eq!(
+            (answer.status, answer.accepted.as_deref()),
+            (200, Some(accepted)),
+            "{path}"
+        );
+    }
+    let write = send(
+        "POST",
+        &format!("{open}/actions/runs/999/cancel"),
+        Some(&none),
+        None,
+    );
+    assert_eq!(
+        (write.message(), write.accepted.as_deref()),
+        (
+            (403, "Resource not accessible by integration".to_string()),
+            Some("actions=write")
+        )
+    );
+
+    // With the permission to read, each read answers as it does anyone.
+    for (path, status, accepted) in [
+        ("actions/runs".to_string(), 200, "actions=read"),
+        (run_path.clone(), 200, "actions=read"),
+        ("actions/runs/999".to_string(), 404, "actions=read"),
+        // A redirect to a log names no permission.
+        (format!("actions/jobs/{job}/logs"), 302, ""),
+        (format!("{run_path}/logs"), 302, ""),
+        (format!("{run_path}/attempts/1/logs"), 302, ""),
+        (format!("{run_path}/attempts/1/jobs"), 200, "actions=read"),
+        (format!("check-runs/{job}"), 200, "checks=read"),
+        ("check-suites/999".to_string(), 404, "checks=read"),
+        (
+            format!("commits/{}/check-runs", s.main_sha),
+            200,
+            "checks=read",
+        ),
+    ] {
+        assert_eq!(
+            ask(&read, "GET", &path, None),
+            (status, accepted.to_string()),
+            "{path}"
+        );
+    }
+
+    // A write needs the permission to write, and is refused before the run's
+    // state is looked at: a finished run's cancel is not the `409`.
+    for (method, path, body) in [
+        ("POST", format!("{run_path}/cancel"), None),
+        ("POST", format!("{run_path}/force-cancel"), None),
+        ("POST", format!("{run_path}/rerun"), None),
+        ("POST", format!("{run_path}/rerun-failed-jobs"), None),
+        ("POST", format!("actions/jobs/{job}/rerun"), None),
+        ("POST", "actions/runs/999/cancel".to_string(), None),
+        (
+            "POST",
+            "actions/workflows/one.yml/dispatches".to_string(),
+            Some(json!({ "ref": "main" })),
+        ),
+        ("DELETE", format!("{run_path}/logs"), None),
+        ("DELETE", run_path.clone(), None),
+    ] {
+        for token in [&read, &none] {
+            assert_eq!(
+                refused(token, method, &path, body.clone()),
+                "actions=write",
+                "{method} {path}"
+            );
+        }
+    }
+    for (method, path, body) in [
+        ("POST", "check-runs".to_string(), json!({})),
+        (
+            "PATCH",
+            "check-runs/999".to_string(),
+            json!({ "status": "completed" }),
+        ),
+        ("PATCH", format!("check-runs/{job}"), json!({ "name": "x" })),
+    ] {
+        for token in [&read, &none] {
+            assert_eq!(
+                refused(token, method, &path, Some(body.clone())),
+                "checks=write",
+                "{method} {path}"
+            );
+        }
+    }
+    assert_eq!(
+        s.get("actions/runs")["total_count"],
+        1,
+        "nothing refused ran"
+    );
+
+    // With the permission to write, each write answers as it does anyone.
+    for (method, path, body, status, accepted) in [
+        (
+            "POST",
+            format!("{run_path}/cancel"),
+            None,
+            409,
+            "actions=write",
+        ),
+        (
+            "POST",
+            "actions/runs/999/cancel".to_string(),
+            None,
+            404,
+            "actions=write",
+        ),
+        (
+            "DELETE",
+            "actions/runs/999".to_string(),
+            None,
+            404,
+            "actions=write",
+        ),
+        (
+            "POST",
+            "actions/workflows/one.yml/dispatches".to_string(),
+            Some(json!({ "ref": "nope" })),
+            422,
+            "actions=write",
+        ),
+        (
+            "PATCH",
+            "check-runs/999".to_string(),
+            Some(json!({ "status": "completed" })),
+            404,
+            "checks=write",
+        ),
+        ("DELETE", run_path.clone(), None, 204, "actions=write"),
+    ] {
+        assert_eq!(
+            ask(&all, method, &path, body),
+            (status, accepted.to_string()),
+            "{method} {path}"
+        );
+    }
+
+    // A person's token is told nothing of permissions, and a route the
+    // world does not serve says so to any token.
+    let person = send(
+        "GET",
+        &format!("{}/actions/runs", s.api),
+        Some(&s.token),
+        None,
+    );
+    assert_eq!((person.status, person.accepted), (200, None));
+    assert_eq!(
+        ask(&none, "GET", "actions/artifacts", None),
+        (501, String::new())
+    );
 }
