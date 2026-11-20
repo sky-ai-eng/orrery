@@ -28,6 +28,7 @@ use axum::{Router, middleware};
 use base64::Engine as _;
 use orrery_face_git::GitFace;
 use orrery_face_github::GithubFace;
+use orrery_face_github::layout::{GRAPHQL_PATH, REST_PATH};
 use orrery_world::World;
 
 mod alerts;
@@ -48,7 +49,6 @@ pub const BUILD_COMMIT: &str = env!("ORRERY_BUILD_COMMIT");
 #[derive(Clone)]
 pub struct AppState {
     pub world: Arc<World>,
-    pub base_url: String,
     /// The git face's handle, here for its world write gate: snapshot
     /// create/restore hold it exclusively against in-flight git traffic.
     pub git: Arc<GitFace>,
@@ -177,7 +177,7 @@ pub fn routers(
     let github = GithubFace {
         world: world.clone(),
         git: git.clone(),
-        base_url: base_url.clone(),
+        layout: orrery_face_github::Layout::enterprise_server(&base_url),
     };
     // The GitHub face makes the deliveries of every write this world takes
     // from here on, and of its newest write, if a process stopped between
@@ -196,7 +196,6 @@ pub fn routers(
     };
     let state = AppState {
         world: world.clone(),
-        base_url,
         git: git.clone(),
         snapshots_dir,
         schema: orrery_face_github::graphql::schema(github.clone()),
@@ -206,10 +205,10 @@ pub fn routers(
         stopping,
     };
 
-    // GraphQL mounts at the GHES address — `/api/graphql`, a sibling of
-    // `/api/v3`, never nested under it. Consumers derive it exactly there.
+    // GraphQL mounts at the GHES address, a sibling of the REST root, never
+    // nested under it. Consumers derive it exactly there.
     let graphql = Router::new()
-        .route("/api/graphql", axum::routing::post(graphql_handler))
+        .route(GRAPHQL_PATH, axum::routing::post(graphql_handler))
         .with_state(state.clone());
 
     // The OAuth web flow lives on the web host and authenticates with client
@@ -233,7 +232,7 @@ pub fn routers(
     let faces = Router::new()
         .merge(orrery_face_git::router(git))
         .nest(
-            "/api/v3",
+            REST_PATH,
             orrery_face_github::router(github).fallback(not_mocked),
         )
         .merge(graphql)

@@ -28,6 +28,7 @@ pub mod apps;
 mod checks;
 mod dependabot;
 pub mod graphql;
+pub mod layout;
 mod media;
 mod meta;
 pub mod nodeid;
@@ -40,15 +41,15 @@ mod signing;
 mod suites;
 pub mod webhooks;
 
+pub use layout::Layout;
 pub use render::repo_json;
 
 #[derive(Clone)]
 pub struct GithubFace {
     pub world: Arc<World>,
     pub git: Arc<GitFace>,
-    /// External base URL of this instance, e.g. `http://127.0.0.1:4180` —
-    /// what `html_url`/`clone_url` are rendered against.
-    pub base_url: String,
+    /// Where this instance's surfaces are: the roots of the URLs it renders.
+    pub layout: Layout,
 }
 
 pub fn router(face: GithubFace) -> Router {
@@ -582,7 +583,7 @@ mod ref_read_tests {
         let face = GithubFace {
             world: world.clone(),
             git: GitFace::new(world.clone()),
-            base_url: "http://world.test".to_string(),
+            layout: Layout::enterprise_server("http://world.test"),
         };
         let (alice, _) = world.create_actor("alice", ActorKind::User).unwrap();
         let Proposal {

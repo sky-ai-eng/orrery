@@ -309,12 +309,11 @@ mod tests {
         let github = orrery_face_github::GithubFace {
             world: world.clone(),
             git: git.clone(),
-            base_url: "http://world.test".to_string(),
+            layout: orrery_face_github::Layout::enterprise_server("http://world.test"),
         };
         AppState {
             log_changes: crate::log_stream::follow(&world),
             world,
-            base_url: "http://world.test".to_string(),
             git,
             snapshots_dir: dir.join("snapshots"),
             schema: orrery_face_github::graphql::schema(github),

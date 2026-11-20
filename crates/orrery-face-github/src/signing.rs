@@ -245,9 +245,9 @@ fn commit_json(
     verdict: Verdict,
     verified_at: Option<i64>,
 ) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let web = face.layout.web();
     let full_name = repo.full_name();
-    let api = format!("{base}/api/v3/repos/{full_name}");
+    let api = format!("{}/repos/{full_name}", face.layout.api());
     let ident = |i: &signature::Ident| serde_json::json!({ "name": i.name, "email": i.email, "date": rfc3339(i.unix) });
     let parents: Vec<serde_json::Value> = commit
         .parents
@@ -256,7 +256,7 @@ fn commit_json(
             serde_json::json!({
                 "sha": p,
                 "url": format!("{api}/commits/{p}"),
-                "html_url": format!("{base}/{full_name}/commit/{p}"),
+                "html_url": format!("{web}/{full_name}/commit/{p}"),
             })
         })
         .collect();
@@ -264,7 +264,7 @@ fn commit_json(
     serde_json::json!({
         "sha": commit.sha,
         "url": format!("{api}/commits/{}", commit.sha),
-        "html_url": format!("{base}/{full_name}/commit/{}", commit.sha),
+        "html_url": format!("{web}/{full_name}/commit/{}", commit.sha),
         "commit": {
             "url": format!("{api}/git/commits/{}", commit.sha),
             "author": ident(&commit.author),

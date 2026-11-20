@@ -17,8 +17,8 @@ pub(crate) fn pulls_at(
     repo: &Repo,
     sha: &str,
 ) -> Result<serde_json::Value, WorldError> {
-    let base = face.base_url.trim_end_matches('/');
-    let url = format!("{base}/api/v3/repos/{}", repo.full_name());
+    let api = face.layout.api();
+    let url = format!("{api}/repos/{}", repo.full_name());
     let end = |name: &str, sha: &str| {
         serde_json::json!({
             "ref": name,
@@ -49,7 +49,7 @@ pub(crate) fn suite_brief(
     repo: &Repo,
     suite: &CheckSuite,
 ) -> Result<serde_json::Value, WorldError> {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
     // A suite a push made is that push's: what the branch pointed at, and
     // the commit it was brought to.
     let after = suite.before_sha.as_ref().map(|_| suite.head_sha.as_str());
@@ -60,7 +60,7 @@ pub(crate) fn suite_brief(
         "head_sha": suite.head_sha,
         "status": suite.status.as_str(),
         "conclusion": suite.conclusion.map(|c| c.as_str()),
-        "url": format!("{base}/api/v3/repos/{}/check-suites/{}", repo.full_name(), suite.id),
+        "url": format!("{api}/repos/{}/check-suites/{}", repo.full_name(), suite.id),
         "before": suite.before_sha,
         "after": after,
         "pull_requests": pulls_at(face, repo, &suite.head_sha)?,
@@ -77,14 +77,14 @@ pub(crate) fn suite_json(
     repo: &Repo,
     suite: &CheckSuite,
 ) -> Result<serde_json::Value, WorldError> {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
     let latest = newest_check_runs(face.world.list_check_runs_for_suite(suite.id)?).len();
     let mut json = suite_brief(face, repo, suite)?;
     json["rerequestable"] = true.into();
     json["runs_rerequestable"] = true.into();
     json["latest_check_runs_count"] = latest.into();
     json["check_runs_url"] = format!(
-        "{base}/api/v3/repos/{}/check-suites/{}/check-runs",
+        "{api}/repos/{}/check-suites/{}/check-runs",
         repo.full_name(),
         suite.id
     )

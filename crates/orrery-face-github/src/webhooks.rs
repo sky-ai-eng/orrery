@@ -25,7 +25,9 @@ use crate::render::{
     Mergeability, actor_json, check_run_json, comment_json, full_pull_json, label_json, pull_json,
     repo_json, review_json, rfc3339, team_json, user_json,
 };
-use crate::{GithubFace, github_error, internal, invalid_request, json_response, schema_value};
+use crate::{
+    GithubFace, Layout, github_error, internal, invalid_request, json_response, schema_value,
+};
 
 /// What GitHub's sender calls itself: its name, then seven hex digits of
 /// the build it runs, which here are zeros.
@@ -233,12 +235,12 @@ pub(crate) async fn list_deliveries(
     let next = (found.len() > per_page).then(|| found.split_off(per_page)[0].id);
     let items: Vec<_> = found.iter().map(delivery_json).collect();
     let mut resp = json_response(StatusCode::OK, serde_json::Value::Array(items));
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
     let link = |cursor: String, rel: &str| {
         let mut params = repeated.clone();
         params.push(format!("cursor={cursor}"));
         format!(
-            "<{base}/api/v3/app/hook/deliveries?{}>; rel=\"{rel}\"",
+            "<{api}/app/hook/deliveries?{}>; rel=\"{rel}\"",
             params.join("&")
         )
     };
@@ -407,7 +409,7 @@ pub fn delivery_headers(delivery: &Delivery, secret: Option<&str>) -> Vec<(&'sta
 pub struct Webhooks {
     world: Weak<World>,
     git: Weak<GitFace>,
-    base_url: String,
+    layout: Layout,
 }
 
 /// The notifier to register with the world the face serves. It makes
@@ -416,7 +418,7 @@ pub fn notifier(face: &GithubFace) -> Arc<dyn Notifier> {
     Arc::new(Webhooks {
         world: Arc::downgrade(&face.world),
         git: Arc::downgrade(&face.git),
-        base_url: face.base_url.clone(),
+        layout: face.layout.clone(),
     })
 }
 
@@ -484,7 +486,7 @@ impl Notifier for Webhooks {
             face: GithubFace {
                 world: served,
                 git,
-                base_url: self.base_url.clone(),
+                layout: self.layout.clone(),
             },
         };
         match rendering.made(world, by, events) {
@@ -1116,8 +1118,8 @@ impl Rendering {
             return Ok(Vec::new());
         };
         const NONE: &str = "0000000000000000000000000000000000000000";
-        let base = face.base_url.trim_end_matches('/');
-        let html = format!("{base}/{}", repo.full_name());
+        let web = face.layout.web();
+        let html = format!("{web}/{}", repo.full_name());
         let short = |sha: &str| sha.chars().take(12).collect::<String>();
         let compare = match (pushed.before, pushed.after) {
             (Some(before), Some(after)) => {
@@ -1306,11 +1308,11 @@ fn no_reactions(url: &str) -> serde_json::Value {
 /// carries: a pull request is an issue there, with a `pull_request` field
 /// saying so.
 fn issue_json(face: &GithubFace, repo: &Repo, pull: &Pull, comments: usize) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let web = face.layout.web();
     let full_name = repo.full_name();
     let n = pull.number;
-    let api = format!("{base}/api/v3/repos/{full_name}");
-    let html = format!("{base}/{full_name}/pull/{n}");
+    let api = format!("{}/repos/{full_name}", face.layout.api());
+    let html = format!("{web}/{full_name}/pull/{n}");
     serde_json::json!({
         "url": format!("{api}/issues/{n}"),
         "repository_url": api,
