@@ -14,9 +14,10 @@ use std::path::Path;
 
 use orrery_world::{
     AccessLevel, ActorEmail, ActorKind, Attribution, CheckConclusion, CheckRunPatch, CheckStatus,
-    CommitFacts, CommitSignature, DEFAULT_T0_UNIX, Door, JobSpec, NewApp, NewCheckRun, NewPull,
-    NewWorkflow, NewWorkflowRun, OrgRole, Permissions, RefChange, RefMove, Rerun, ReviewState,
-    SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, StepConclusion, StepSpec, TeamRole, World, WorldSecret,
+    CommitFacts, CommitSignature, DEFAULT_T0_UNIX, Door, JobSpec, NewApp, NewCheckRun,
+    NewCommitStatus, NewPull, NewWorkflow, NewWorkflowRun, OrgRole, Permissions, RefChange,
+    RefMove, Rerun, ReviewState, SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, StatusState, StepConclusion,
+    StepSpec, TeamRole, World, WorldSecret,
 };
 
 /// A write by `actor_id` as the REST face makes it.
@@ -295,6 +296,17 @@ fn populate(w: &World) -> orrery_world::Result<()> {
     )?;
     w.cancel_workflow_run(gone.id, true, by(bob.id))?;
     w.delete_workflow_run(gone.id, by(bob.id))?;
+    w.create_commit_status(
+        by(bob.id),
+        NewCommitStatus {
+            repo_id: repo.id,
+            sha: HEAD_SHA,
+            context: "deploy/preview",
+            state: StatusState::Pending,
+            description: Some("Deploying"),
+            target_url: Some("https://deploy.example/1"),
+        },
+    )?;
 
     let merge = RefMove {
         name: "refs/heads/main",

@@ -351,18 +351,24 @@ pub(crate) async fn get_check_run(
     }
 }
 
-/// The commit a `{ref}` path segment names: a full sha in either case, as
-/// GitHub takes one, or the tip of a branch, or none. The caller holds the
-/// gate.
+/// Whether `s` is a commit's full id, in either case.
+pub(crate) fn is_full_sha(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The commit a `{ref}` path segment names, as GitHub resolves one: a full
+/// sha in either case, whether or not the repository holds it, or whatever
+/// else git reads as a commit, which is a branch, a tag, an abbreviated
+/// sha, or a revision such as `main~1`. The caller holds the gate.
 pub(crate) async fn commit_of(
     face: &GithubFace,
     repo: &Repo,
     git_ref: &str,
 ) -> Result<Option<String>, Box<Response<Body>>> {
-    if git_ref.len() == 40 && git_ref.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if is_full_sha(git_ref) {
         return Ok(Some(git_ref.to_ascii_lowercase()));
     }
     let _refs = face.git.read_lock(repo.id).await;
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    store::rev_parse(&bare, &format!("refs/heads/{git_ref}")).map_err(|e| Box::new(internal(e)))
+    crate::reads::resolve_commit(&bare, git_ref).map_err(|e| Box::new(internal(e)))
 }

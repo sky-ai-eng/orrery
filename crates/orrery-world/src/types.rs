@@ -382,6 +382,58 @@ pub struct IssueComment {
     pub updated_clock_unix: i64,
 }
 
+/// What a commit status says of its commit.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusState {
+    Error,
+    Failure,
+    Pending,
+    Success,
+}
+
+impl StatusState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StatusState::Error => "error",
+            StatusState::Failure => "failure",
+            StatusState::Pending => "pending",
+            StatusState::Success => "success",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<StatusState> {
+        Some(match s {
+            "error" => StatusState::Error,
+            "failure" => StatusState::Failure,
+            "pending" => StatusState::Pending,
+            "success" => StatusState::Success,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn from_db(word: &str) -> StatusState {
+        StatusState::parse(word).expect("a column's check admits only these words")
+    }
+}
+
+/// One status of a commit. A commit holds every status it was given, and
+/// the newest of a context is what that context says now.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CommitStatus {
+    pub id: i64,
+    pub repo_id: i64,
+    pub sha: String,
+    pub context: String,
+    pub state: StatusState,
+    pub description: Option<String>,
+    pub target_url: Option<String>,
+    pub creator_login: String,
+    pub created_clock_unix: i64,
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]

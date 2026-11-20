@@ -760,13 +760,19 @@ pub(crate) fn not_accessible() -> Response<Body> {
 }
 
 /// The permission GitHub asks of an installation token on a route: `actions`
-/// on one under `actions/`, and `checks` on one of check runs or suites, to
-/// read for a `GET` and to write for anything else.
+/// on one under `actions/`, `checks` on one of check runs or suites, and
+/// `statuses` on one of commit statuses, to read for a `GET` and to write
+/// for anything else.
 fn permission_needed(route: &str, method: &Method) -> Option<(&'static str, AccessLevel)> {
     let name = if route.contains("/actions/") {
         "actions"
     } else if route.contains("/check-runs") || route.contains("/check-suites") {
         "checks"
+    } else if route.contains("/statuses")
+        || route.contains("/status/")
+        || route.ends_with("/status")
+    {
+        "statuses"
     } else {
         return None;
     };

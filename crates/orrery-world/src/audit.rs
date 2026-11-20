@@ -375,6 +375,20 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
         ],
     ),
     (
+        "commit_statuses",
+        &[
+            ("id", Identity),
+            ("repo_id", Identity),
+            ("sha", Field("sha")),
+            ("context", Field("context")),
+            ("state", Field("state")),
+            ("description", Field("description")),
+            ("target_url", Field("target_url")),
+            ("creator_id", Field("creator")),
+            ("created_clock_unix", Field("created_unix")),
+        ],
+    ),
+    (
         "check_suites",
         &[
             ("id", Identity),
@@ -699,6 +713,7 @@ fn subject_of(table: &str, row: &Row) -> (Subject, Option<String>) {
         "issue_comments" => (s("comment", int(row, "id")), None),
         "check_runs" => (s("check_run", int(row, "id")), None),
         "check_suites" => (s("check_suite", int(row, "id")), None),
+        "commit_statuses" => (s("commit_status", int(row, "id")), None),
         "workflows" => (s("workflow", int(row, "id")), None),
         // A deleted run's number stays taken. The event that deletes the
         // run carries it.

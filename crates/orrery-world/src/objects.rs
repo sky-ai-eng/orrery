@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::events::*;
 use crate::types::{
     ActorEmail, ActorKind, AlertUpdate, AlertUpdateState, CheckConclusion, CheckStatus, OrgRole,
-    PullState, ReviewState, RunCancel, TeamRole,
+    PullState, ReviewState, RunCancel, StatusState, TeamRole,
 };
 use crate::{Result, WorldError, queries};
 
@@ -550,6 +550,44 @@ pub(crate) fn comment_object(conn: &Connection, id: i64) -> Result<CommentObject
                 body: r.get(3)?,
                 created_unix: r.get(4)?,
                 updated_unix: r.get(5)?,
+            })
+        },
+    )?)
+}
+
+pub(crate) fn commit_status_subject(conn: &Connection, id: i64) -> Result<CommitStatusSubject> {
+    let (repo_id, context, sha): (i64, String, String) = conn.query_row(
+        "SELECT repo_id, context, sha FROM commit_statuses WHERE id = ?1",
+        params![id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let (repo, owner) = repo_refs(conn, repo_id)?;
+    Ok(CommitStatusSubject {
+        kind: CommitStatusType::Tag,
+        id,
+        context,
+        sha,
+        repo,
+        owner,
+    })
+}
+
+pub(crate) fn commit_status_object(conn: &Connection, id: i64) -> Result<CommitStatusObject> {
+    Ok(conn.query_row(
+        "SELECT s.id, s.sha, s.context, s.state, s.description, s.target_url, a.id, a.login,
+                s.created_clock_unix
+         FROM commit_statuses s JOIN actors a ON a.id = s.creator_id WHERE s.id = ?1",
+        params![id],
+        |r| {
+            Ok(CommitStatusObject {
+                id: r.get(0)?,
+                sha: r.get(1)?,
+                context: r.get(2)?,
+                state: StatusState::from_db(&r.get::<_, String>(3)?),
+                description: r.get(4)?,
+                target_url: r.get(5)?,
+                creator: actor_ref_at(r, 6)?,
+                created_unix: r.get(8)?,
             })
         },
     )?)

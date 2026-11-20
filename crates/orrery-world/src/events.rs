@@ -12,8 +12,8 @@ use sha2::{Digest as _, Sha256};
 use crate::types::{
     ActorEmail, ActorKind, AlertScope, AlertSeverity, AlertState, AlertUpdateState,
     CheckConclusion, CheckStatus, ClockMode, DeliveryFailure, DeliveryState, DismissReason,
-    JobSpec, OrgRole, Permissions, PullState, RepositorySelection, ReviewState, RunCancel, Step,
-    TeamRole,
+    JobSpec, OrgRole, Permissions, PullState, RepositorySelection, ReviewState, RunCancel,
+    StatusState, Step, TeamRole,
 };
 
 /// How a write reached the world.
@@ -204,6 +204,7 @@ subject_type! {
     ReviewType = "review",
     CommentType = "comment",
     CheckRunType = "check_run",
+    CommitStatusType = "commit_status",
     CheckSuiteType = "check_suite",
     WorkflowType = "workflow",
     WorkflowRunType = "workflow_run",
@@ -380,6 +381,17 @@ pub struct CommentSubject {
     pub kind: CommentType,
     pub id: i64,
     pub pull: PullRef,
+    pub repo: RepoRef,
+    pub owner: ActorRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CommitStatusSubject {
+    #[serde(rename = "type")]
+    pub kind: CommitStatusType,
+    pub id: i64,
+    pub context: String,
+    pub sha: String,
     pub repo: RepoRef,
     pub owner: ActorRef,
 }
@@ -875,6 +887,18 @@ pub struct ReviewObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CommitStatusObject {
+    pub id: i64,
+    pub sha: String,
+    pub context: String,
+    pub state: StatusState,
+    pub description: Option<String>,
+    pub target_url: Option<String>,
+    pub creator: ActorRef,
+    pub created_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CommentObject {
     pub id: i64,
     pub author: ActorRef,
@@ -1151,6 +1175,7 @@ bodies! {
     TimelineItemCreated { subject: TimelineItemSubject, object: TimelineItemObject }
     ReviewSubmitted { subject: ReviewSubject, object: ReviewObject }
     CommentCreated { subject: CommentSubject, object: CommentObject }
+    CommitStatusCreated { subject: CommitStatusSubject, object: CommitStatusObject }
     CheckRunCreated { subject: CheckRunSubject, object: CheckRunObject }
     DependencyAlertCreated { subject: DependencyAlertSubject, object: DependencyAlertObject }
     DependencyAlertChanged { subject: DependencyAlertSubject, changes: DependencyAlertChanges }
@@ -1319,6 +1344,9 @@ event_types! {
     ReviewSubmitted(ReviewSubmitted) = "review:submitted",
     CommentCreated(CommentCreated) = "comment:created",
 
+    /// A status was given to a commit. One of a context the commit has a
+    /// status of already is a new status, not a change to that one.
+    CommitStatusCreated(CommitStatusCreated) = "commit_status:created",
     CheckRunCreated(CheckRunCreated) = "check_run:created",
     /// A new attempt of a workflow run listed a job it does not run again,
     /// as the job finished in the attempt before.

@@ -28,6 +28,16 @@ pub fn check(id: i64) -> String {
     format!("O_check_{id}")
 }
 
+pub fn status(id: i64) -> String {
+    format!("O_status_{id}")
+}
+
+/// What a commit's statuses come to, which is one thing for each commit of
+/// each repository: the same commit in two repositories has two.
+pub fn commit_status(repo_id: i64, sha: &str) -> String {
+    format!("O_commit_status_{repo_id}_{sha}")
+}
+
 pub fn check_suite(id: i64) -> String {
     format!("O_check_suite_{id}")
 }

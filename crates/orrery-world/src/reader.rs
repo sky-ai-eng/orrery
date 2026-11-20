@@ -36,6 +36,7 @@ pub trait WorldView {
     fn list_issue_comments(&self) -> Result<Vec<IssueComment>>;
     fn list_check_runs(&self) -> Result<Vec<CheckRun>>;
     fn list_check_suites(&self) -> Result<Vec<CheckSuite>>;
+    fn list_commit_statuses(&self) -> Result<Vec<CommitStatus>>;
     fn list_workflows(&self) -> Result<Vec<Workflow>>;
     fn list_workflow_runs(&self) -> Result<Vec<WorkflowRun>>;
     fn list_actor_addresses(&self) -> Result<Vec<ActorAddress>>;
@@ -100,6 +101,10 @@ impl WorldView for World {
 
     fn list_check_suites(&self) -> Result<Vec<CheckSuite>> {
         self.with_conn(queries::list_check_suites)
+    }
+
+    fn list_commit_statuses(&self) -> Result<Vec<CommitStatus>> {
+        self.with_conn(queries::list_commit_statuses)
     }
 
     fn list_workflows(&self) -> Result<Vec<Workflow>> {
@@ -251,6 +256,10 @@ impl WorldView for WorldReader {
 
     fn list_check_suites(&self) -> Result<Vec<CheckSuite>> {
         queries::list_check_suites(&self.conn)
+    }
+
+    fn list_commit_statuses(&self) -> Result<Vec<CommitStatus>> {
+        queries::list_commit_statuses(&self.conn)
     }
 
     fn list_workflows(&self) -> Result<Vec<Workflow>> {

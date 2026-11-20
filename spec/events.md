@@ -69,6 +69,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `comment` | `id` | `pull`, `repo`, `owner` |
 | `check_run` | `id`, `name`, `head_sha` | `repo`, `owner` |
 | `check_suite` | `id`, `head_sha` | `repo`, `owner` |
+| `commit_status` | `id`, `context`, `sha` | `repo`, `owner` |
 | `workflow` | `id`, `path` | `repo`, `owner` |
 | `workflow_run` | `id`, `workflow_id`, `workflow_path`, `run_number` | `repo`, `owner` |
 | `dependency_alert` | `id`, `number` | `repo`, `owner` |
@@ -127,6 +128,7 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `pull:updated` | a consequence of any other write that changes it | `changes` | |
 | `timeline_item:created` | a consequence only | `object` | |
 | `review:submitted` | submitting a review | `object` | `pull:review_request_removed` when the author was asked for one, or else `pull:updated` when `updated_unix` moves |
+| `commit_status:created` | giving a commit a status | `object` | none |
 | `comment:created` | commenting | `object` | `pull:updated` when `updated_unix` moves |
 | `check_run:created` | creating a check run | `object` | `check_suite:created` when its creator had no suite on the commit, then `check_suite:updated` when the suite comes to something else |
 | `check_run:carried` | a consequence only: a re-run listing, in its new attempt, a job it does not run again, as the job finished in the attempt before and under a new id | `object` | |

@@ -135,6 +135,17 @@ pub struct WorkflowRunChange {
     pub conclusion: Option<String>,
 }
 
+/// A status a commit was given. A status never changes: a context's next
+/// status is another.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CommitStatusAdded {
+    pub repo: String,
+    pub sha: String,
+    pub context: String,
+    pub state: String,
+    pub creator: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CheckRunChange {
     pub repo: String,
@@ -372,6 +383,7 @@ pub struct WorldDiff {
     pub check_runs_updated: Vec<CheckRunChange>,
     pub check_suites_added: Vec<CheckSuiteChange>,
     pub check_suites_updated: Vec<CheckSuiteChange>,
+    pub commit_statuses_added: Vec<CommitStatusAdded>,
     pub workflows_added: Vec<WorkflowAdded>,
     pub workflow_runs_added: Vec<WorkflowRunChange>,
     /// The runs whose jobs came to something else.
@@ -844,6 +856,26 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         }
     }
 
+    let from_statuses: BTreeSet<i64> = from
+        .view
+        .list_commit_statuses()?
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    let commit_statuses_added = to
+        .view
+        .list_commit_statuses()?
+        .into_iter()
+        .filter(|s| !from_statuses.contains(&s.id))
+        .map(|s| CommitStatusAdded {
+            repo: repo_name(s.repo_id),
+            sha: s.sha,
+            context: s.context,
+            state: s.state.as_str().to_string(),
+            creator: s.creator_login,
+        })
+        .collect();
+
     let from_suites: BTreeMap<i64, _> = from
         .view
         .list_check_suites()?
@@ -1148,6 +1180,7 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         check_runs_updated,
         check_suites_added,
         check_suites_updated,
+        commit_statuses_added,
         workflows_added,
         workflow_runs_added,
         workflow_runs_updated,
