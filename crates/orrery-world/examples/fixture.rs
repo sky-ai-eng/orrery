@@ -267,6 +267,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
     )?;
     let test = w.list_workflow_jobs(run.id)?[0].id;
     w.start_workflow_job(test, by(system.id))?;
+    w.append_job_log(test, &["Getting ready".to_string()], by(system.id))?;
     w.complete_workflow_step(test, StepConclusion::Success, by(system.id))?;
     w.complete_workflow_job(test, false, by(system.id))?;
     // A second attempt, asked to cancel while its job runs.

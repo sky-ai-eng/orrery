@@ -471,6 +471,23 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         started_clock_unix     INTEGER NOT NULL,
         PRIMARY KEY (run_id, attempt)
      ) STRICT;",
+    // 23: a workflow run's logs. A runner writes lines to the step of a job
+    // it is on. A job a re-run carried over names the job it was carried
+    // from, whose log is its own: NULL for every job, carried or not, made
+    // before this version, when no job had a log. A run records the attempt
+    // through which its logs were deleted, and when. And a run, its jobs,
+    // and its suite can be deleted.
+    "ALTER TABLE check_runs ADD COLUMN carried_from INTEGER REFERENCES check_runs(id);
+     ALTER TABLE workflow_runs ADD COLUMN logs_deleted_attempt INTEGER;
+     ALTER TABLE workflow_runs ADD COLUMN logs_deleted_clock_unix INTEGER;
+     CREATE TABLE workflow_job_log_lines (
+        id          INTEGER PRIMARY KEY,
+        job_id      INTEGER NOT NULL REFERENCES check_runs(id),
+        step        INTEGER NOT NULL,
+        clock_unix  INTEGER NOT NULL,
+        text        TEXT NOT NULL
+     ) STRICT;
+     CREATE INDEX workflow_job_log_lines_by_job ON workflow_job_log_lines (job_id, id);",
 ];
 
 /// The version this binary reads and writes.

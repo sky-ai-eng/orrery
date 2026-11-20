@@ -410,6 +410,17 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
             ("workflow_run_id", Field("workflow_run_id")),
             ("run_attempt", Field("run_attempt")),
             ("steps", Field("steps")),
+            ("carried_from", Field("carried_from")),
+        ],
+    ),
+    (
+        "workflow_job_log_lines",
+        &[
+            ("id", Identity),
+            ("job_id", Identity),
+            ("step", Identity),
+            ("clock_unix", Identity),
+            ("text", Identity),
         ],
     ),
     (
@@ -442,6 +453,8 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
             ("started_clock_unix", Field("started_unix")),
             ("triggering_actor_id", Field("triggering_actor")),
             ("cancel", Field("cancel")),
+            ("logs_deleted_attempt", Field("logs_deleted_attempt")),
+            ("logs_deleted_clock_unix", Field("logs_deleted_unix")),
         ],
     ),
     (
@@ -680,6 +693,9 @@ fn subject_of(table: &str, row: &Row) -> (Subject, Option<String>) {
         "check_suites" => (s("check_suite", int(row, "id")), None),
         "workflows" => (s("workflow", int(row, "id")), None),
         "workflow_runs" => (s("workflow_run", int(row, "id")), None),
+        // A line belongs to its job's log, which the events that write or
+        // delete it name.
+        "workflow_job_log_lines" => (s("check_run", int(row, "job_id")), Some("log".into())),
         // An attempt is kept by the re-run that replaces it, which moves
         // the run's `attempt` on from it.
         "workflow_run_attempts" => (
@@ -785,6 +801,9 @@ impl Carried {
                 "oauth_app:secret_issued" => fields.push(format!("secret:{}", body["n"])),
                 "oauth_authorization:exchanged" => fields.push("token".into()),
                 "app:hook_secret_issued" => fields.push("credential".into()),
+                "check_run:logged" | "check_run:log_deleted" | "check_run:deleted" => {
+                    fields.push("log".into())
+                }
                 "world:rekeyed" => carried.rekeyed = true,
                 _ => {}
             }

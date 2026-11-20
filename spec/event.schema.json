@@ -1198,6 +1198,29 @@
     "CheckRunChanges": {
       "description": "The fields of the subject that changed, each as a [`Change`].",
       "properties": {
+        "carried_from": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "completed_unix": {
           "description": "A field's value before and after a change.",
           "properties": {
@@ -1558,8 +1581,76 @@
       ],
       "type": "object"
     },
+    "CheckRunDeleted": {
+      "description": "The check run as it was. A job's log goes with it.",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/CheckRunObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/CheckRunSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "CheckRunLogDeleted": {
+      "description": "A job's log, deleted with its run's.",
+      "properties": {
+        "lines": {
+          "description": "How many lines it held.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "subject": {
+          "$ref": "#/$defs/CheckRunSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "lines"
+      ],
+      "type": "object"
+    },
+    "CheckRunLogged": {
+      "description": "Lines a runner wrote to a job's log.",
+      "properties": {
+        "lines": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "step": {
+          "description": "The number of the step they were written in, from 1.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "subject": {
+          "$ref": "#/$defs/CheckRunSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "step",
+        "lines"
+      ],
+      "type": "object"
+    },
     "CheckRunObject": {
       "properties": {
+        "carried_from": {
+          "default": null,
+          "description": "For a job a re-run carried over, the job it is a copy of, whose\nlog is its own.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "completed_unix": {
           "description": "As its creator stated it, in Unix seconds.",
           "format": "int64",
@@ -1958,6 +2049,22 @@
       "type": "object"
     },
     "CheckSuiteCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/CheckSuiteObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/CheckSuiteSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "CheckSuiteDeleted": {
+      "description": "The suite as it was.",
       "properties": {
         "object": {
           "$ref": "#/$defs/CheckSuiteObject"
@@ -7042,6 +7149,52 @@
             "null"
           ]
         },
+        "logs_deleted_attempt": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "logs_deleted_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "run_number": {
           "description": "A field's value before and after a change.",
           "properties": {
@@ -7171,6 +7324,22 @@
       ],
       "type": "object"
     },
+    "WorkflowRunDeleted": {
+      "description": "The run as it was.",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/WorkflowRunObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/WorkflowRunSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
     "WorkflowRunObject": {
       "properties": {
         "actor": {
@@ -7213,6 +7382,24 @@
         "id": {
           "format": "int64",
           "type": "integer"
+        },
+        "logs_deleted_attempt": {
+          "default": null,
+          "description": "The attempt through which its logs were deleted.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "logs_deleted_unix": {
+          "default": null,
+          "description": "When they were.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "run_number": {
           "format": "int64",
@@ -8182,6 +8369,62 @@
       "type": "object"
     },
     {
+      "$ref": "#/$defs/CheckRunLogged",
+      "description": "A runner wrote lines to the log of the step of a job it is on.",
+      "properties": {
+        "type": {
+          "const": "check_run:logged",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CheckRunLogDeleted",
+      "description": "A job's log was deleted with the logs of its run.",
+      "properties": {
+        "type": {
+          "const": "check_run:log_deleted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CheckRunDeleted",
+      "description": "A job was deleted with its run.",
+      "properties": {
+        "type": {
+          "const": "check_run:deleted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CheckSuiteDeleted",
+      "description": "A run's suite was deleted with it.",
+      "properties": {
+        "type": {
+          "const": "check_suite:deleted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
       "$ref": "#/$defs/CheckSuiteCreated",
       "description": "A push brought a commit to a branch's tip, or a check run was made\non a commit its creator had no suite for.",
       "properties": {
@@ -8257,6 +8500,34 @@
       "properties": {
         "type": {
           "const": "workflow_run:cancelled",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/WorkflowRunChanged",
+      "description": "The logs of a finished run were deleted, those of every attempt.",
+      "properties": {
+        "type": {
+          "const": "workflow_run:logs_deleted",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/WorkflowRunDeleted",
+      "description": "A finished run was deleted, with its jobs and its suite.",
+      "properties": {
+        "type": {
+          "const": "workflow_run:deleted",
           "type": "string"
         }
       },

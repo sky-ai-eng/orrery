@@ -507,6 +507,18 @@ pub struct Job {
     /// The steps the runner has listed, in order: none until it starts the
     /// job.
     pub steps: Vec<Step>,
+    /// For a job a re-run carried over, the job of the attempt before that
+    /// it is a copy of.
+    pub carried_from: Option<i64>,
+}
+
+/// One line a runner wrote to a job's log.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LogLine {
+    /// The number of the step it was written in, from 1.
+    pub step: i64,
+    pub clock_unix: i64,
+    pub text: String,
 }
 
 /// One step of a job, as its runner has brought it.
@@ -669,8 +681,12 @@ pub struct WorkflowRun {
     pub created_clock_unix: i64,
     /// When its current attempt began.
     pub started_clock_unix: i64,
-    /// When its suite's status or conclusion last changed.
+    /// When its suite's status or conclusion last changed, or its logs were
+    /// deleted, whichever is later.
     pub updated_clock_unix: i64,
+    /// The attempt through which its logs were deleted, for a run whose
+    /// logs were.
+    pub logs_deleted_attempt: Option<i64>,
 }
 
 /// One of an actor's email addresses. Every actor but the system actor holds

@@ -921,6 +921,12 @@ object! {
         /// Whether its current attempt was cancelled, and how.
         #[serde(default)]
         cancel: Option<RunCancel>,
+        /// The attempt through which its logs were deleted.
+        #[serde(default)]
+        logs_deleted_attempt: Option<i64>,
+        /// When they were.
+        #[serde(default)]
+        logs_deleted_unix: Option<i64>,
     }
 }
 
@@ -977,6 +983,10 @@ object! {
         /// starts the job.
         #[serde(default)]
         steps: Option<Vec<Step>>,
+        /// For a job a re-run carried over, the job it is a copy of, whose
+        /// log is its own.
+        #[serde(default)]
+        carried_from: Option<i64>,
     }
 }
 
@@ -1145,11 +1155,30 @@ bodies! {
     DependencyAlertCreated { subject: DependencyAlertSubject, object: DependencyAlertObject }
     DependencyAlertChanged { subject: DependencyAlertSubject, changes: DependencyAlertChanges }
     CheckRunChanged { subject: CheckRunSubject, changes: CheckRunChanges }
+    /// Lines a runner wrote to a job's log.
+    CheckRunLogged {
+        subject: CheckRunSubject,
+        /// The number of the step they were written in, from 1.
+        step: i64,
+        lines: Vec<String>,
+    }
+    /// A job's log, deleted with its run's.
+    CheckRunLogDeleted {
+        subject: CheckRunSubject,
+        /// How many lines it held.
+        lines: i64,
+    }
+    /// The check run as it was. A job's log goes with it.
+    CheckRunDeleted { subject: CheckRunSubject, object: CheckRunObject }
     CheckSuiteCreated { subject: CheckSuiteSubject, object: CheckSuiteObject }
     CheckSuiteChanged { subject: CheckSuiteSubject, changes: CheckSuiteChanges }
+    /// The suite as it was.
+    CheckSuiteDeleted { subject: CheckSuiteSubject, object: CheckSuiteObject }
     WorkflowCreated { subject: WorkflowSubject, object: WorkflowObject }
     WorkflowRunCreated { subject: WorkflowRunSubject, object: WorkflowRunObject }
     WorkflowRunChanged { subject: WorkflowRunSubject, changes: WorkflowRunChanges }
+    /// The run as it was.
+    WorkflowRunDeleted { subject: WorkflowRunSubject, object: WorkflowRunObject }
     OrgMembershipCreated { subject: OrgMembershipSubject, object: OrgMembershipObject }
     OrgMembershipChanged { subject: OrgMembershipSubject, changes: OrgMembershipChanges }
     TeamCreated { subject: TeamSubject, object: TeamObject }
@@ -1294,6 +1323,14 @@ event_types! {
     /// A new attempt of a workflow run listed a job it does not run again,
     /// as the job finished in the attempt before.
     CheckRunCarried(CheckRunCreated) = "check_run:carried",
+    /// A runner wrote lines to the log of the step of a job it is on.
+    CheckRunLogged(CheckRunLogged) = "check_run:logged",
+    /// A job's log was deleted with the logs of its run.
+    CheckRunLogDeleted(CheckRunLogDeleted) = "check_run:log_deleted",
+    /// A job was deleted with its run.
+    CheckRunDeleted(CheckRunDeleted) = "check_run:deleted",
+    /// A run's suite was deleted with it.
+    CheckSuiteDeleted(CheckSuiteDeleted) = "check_suite:deleted",
     /// A push brought a commit to a branch's tip, or a check run was made
     /// on a commit its creator had no suite for.
     CheckSuiteCreated(CheckSuiteCreated) = "check_suite:created",
@@ -1307,6 +1344,10 @@ event_types! {
     WorkflowRunRerun(WorkflowRunChanged) = "workflow_run:rerun",
     /// A run was asked to cancel, or was cancelled by force.
     WorkflowRunCancelled(WorkflowRunChanged) = "workflow_run:cancelled",
+    /// The logs of a finished run were deleted, those of every attempt.
+    WorkflowRunLogsDeleted(WorkflowRunChanged) = "workflow_run:logs_deleted",
+    /// A finished run was deleted, with its jobs and its suite.
+    WorkflowRunDeleted(WorkflowRunDeleted) = "workflow_run:deleted",
     /// The vendor reported a vulnerable dependency in a repository.
     DependencyAlertCreated(DependencyAlertCreated) = "dependency_alert:created",
     /// A person dismissed an alert.

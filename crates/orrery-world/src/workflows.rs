@@ -469,10 +469,10 @@ impl World {
                     "INSERT INTO check_runs (repo_id, head_sha, name, status, conclusion,
                                              creator_id, started_clock_unix,
                                              completed_clock_unix, created_clock_unix, suite_id,
-                                             workflow_run_id, run_attempt, steps)
+                                             workflow_run_id, run_attempt, steps, carried_from)
                      SELECT repo_id, head_sha, name, status, conclusion, creator_id,
                             started_clock_unix, completed_clock_unix, ?2, suite_id,
-                            workflow_run_id, run_attempt + 1, steps
+                            workflow_run_id, run_attempt + 1, steps, id
                      FROM check_runs WHERE id = ?1
                      RETURNING id",
                     params![job.id, clock],
@@ -489,6 +489,135 @@ impl World {
             // only now that the attempt's jobs are listed, so no statement
             // above could have returned the run as this write leaves it.
             queries::workflow_run_by_id(tx, run_id)?.ok_or(WorldError::NoSuchWorkflowRun(run_id))
+        })
+    }
+
+    /// A runner writes lines to the log of the job it is on, in the step in
+    /// progress.
+    pub fn append_job_log(&self, job_id: i64, lines: &[String], by: Attribution) -> Result<()> {
+        self.write(by, |w| {
+            let tx = w.tx;
+            let (job, _, _) = job_and_spec(tx, job_id)?;
+            let step = running_steps(&job)?
+                .iter()
+                .position(|s| s.status == StepStatus::InProgress)
+                .ok_or(WorldError::JobNotInProgress(job_id))? as i64
+                + 1;
+            let clock = queries::clock(tx)?;
+            for line in lines {
+                tx.execute(
+                    "INSERT INTO workflow_job_log_lines (job_id, step, clock_unix, text)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![job_id, step, clock, line],
+                )?;
+            }
+            w.operation(EventBody::CheckRunLogged(events::CheckRunLogged {
+                subject: objects::check_run_subject(tx, job_id)?,
+                step,
+                lines: lines.to_vec(),
+            }));
+            Ok(())
+        })
+    }
+
+    /// The lines of a job's log, oldest first. A job a re-run carried over
+    /// has the log of the job that ran.
+    pub fn job_log(&self, job_id: i64) -> Result<Vec<LogLine>> {
+        self.with_conn(|conn| queries::job_log(conn, job_id))
+    }
+
+    /// Delete the logs of a run that has finished, those of every attempt.
+    /// Deleting them again before the run is re-run changes nothing.
+    pub fn delete_workflow_run_logs(&self, run_id: i64, by: Attribution) -> Result<()> {
+        self.write(by, |w| {
+            let tx = w.tx;
+            let run = queries::workflow_run_by_id(tx, run_id)?
+                .ok_or(WorldError::NoSuchWorkflowRun(run_id))?;
+            if run.status != CheckStatus::Completed {
+                return Err(WorldError::WorkflowRunInProgress(run_id));
+            }
+            if run.logs_deleted_attempt == Some(run.attempt) {
+                return Ok(());
+            }
+            let before = objects::workflow_run_object(tx, run_id)?;
+            tx.execute(
+                "UPDATE workflow_runs
+                 SET logs_deleted_attempt = attempt,
+                     logs_deleted_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+                 WHERE id = ?1",
+                params![run_id],
+            )?;
+            w.operation(EventBody::WorkflowRunLogsDeleted(
+                events::WorkflowRunChanged {
+                    subject: objects::workflow_run_subject(tx, run_id)?,
+                    changes: events::WorkflowRunChanges::between(
+                        &before,
+                        &objects::workflow_run_object(tx, run_id)?,
+                    ),
+                },
+            ));
+            for job in queries::list_workflow_jobs(tx, run_id)? {
+                delete_job_log(w, job.id)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Delete a run that has finished, with every attempt's jobs, their
+    /// logs, and the run's suite.
+    pub fn delete_workflow_run(&self, run_id: i64, by: Attribution) -> Result<()> {
+        self.write(by, |w| {
+            let tx = w.tx;
+            let run = queries::workflow_run_by_id(tx, run_id)?
+                .ok_or(WorldError::NoSuchWorkflowRun(run_id))?;
+            if run.status != CheckStatus::Completed {
+                return Err(WorldError::WorkflowRunInProgress(run_id));
+            }
+            w.operation(EventBody::WorkflowRunDeleted(events::WorkflowRunDeleted {
+                subject: objects::workflow_run_subject(tx, run_id)?,
+                object: objects::workflow_run_object(tx, run_id)?,
+            }));
+            let suite = events::CheckSuiteDeleted {
+                subject: objects::check_suite_subject(tx, run.suite_id)?,
+                object: objects::check_suite_object(tx, run.suite_id)?,
+            };
+            // Newest first: a job carried over names an older one.
+            for job in queries::list_workflow_jobs(tx, run_id)?.iter().rev() {
+                w.emit(EventBody::CheckRunDeleted(events::CheckRunDeleted {
+                    subject: objects::check_run_subject(tx, job.id)?,
+                    object: objects::check_run_object(tx, job.id)?,
+                }));
+                tx.execute(
+                    "DELETE FROM workflow_job_log_lines WHERE job_id = ?1",
+                    params![job.id],
+                )?;
+                tx.execute("DELETE FROM check_runs WHERE id = ?1", params![job.id])?;
+            }
+            tx.execute(
+                "DELETE FROM workflow_run_attempts WHERE run_id = ?1",
+                params![run_id],
+            )?;
+            tx.execute("DELETE FROM workflow_runs WHERE id = ?1", params![run_id])?;
+            tx.execute(
+                "DELETE FROM check_suites WHERE id = ?1",
+                params![run.suite_id],
+            )?;
+            w.emit(EventBody::CheckSuiteDeleted(suite));
+            Ok(())
+        })
+    }
+
+    /// What signs a link to a log named `what` that answers until
+    /// `expires_unix`. Whoever holds a link needs no token, as with the
+    /// links GitHub hands out.
+    pub fn log_link_signature(&self, what: &str, expires_unix: i64) -> Result<String> {
+        self.with_conn(|conn| {
+            let secret = crate::credentials::world_secret(conn)?;
+            Ok(crate::credentials::log_link_signature(
+                &secret,
+                what,
+                expires_unix,
+            ))
         })
     }
 
@@ -575,6 +704,21 @@ impl World {
     ) -> Result<Vec<CheckRun>> {
         self.with_conn(|conn| queries::list_workflow_jobs_of_attempt(conn, run_id, attempt))
     }
+}
+
+/// Delete the lines of a job's own log, if it has any.
+fn delete_job_log(w: &mut log::Write<'_>, job_id: i64) -> Result<()> {
+    let lines = w.tx.execute(
+        "DELETE FROM workflow_job_log_lines WHERE job_id = ?1",
+        params![job_id],
+    )?;
+    if lines > 0 {
+        w.emit(EventBody::CheckRunLogDeleted(events::CheckRunLogDeleted {
+            subject: objects::check_run_subject(w.tx, job_id)?,
+            lines: lines as i64,
+        }));
+    }
+    Ok(())
 }
 
 /// The bot whose check runs a run's jobs are, made if the world has no

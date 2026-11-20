@@ -59,23 +59,25 @@ pub(crate) const CHECK_RUN_COLUMNS: &str = "id, repo_id, head_sha, name, status,
     details_url, external_id, output,
     (SELECT login FROM actors WHERE actors.id = check_runs.creator_id),
     started_clock_unix, completed_clock_unix, created_clock_unix, suite_id,
-    workflow_run_id, run_attempt, steps";
+    workflow_run_id, run_attempt, steps, carried_from";
 
 pub(crate) const WORKFLOW_COLUMNS: &str =
     "id, repo_id, path, name, jobs, created_clock_unix, dispatch_inputs";
 
 /// A run with what it reads through its suite: its status, its conclusion,
-/// and when they last changed.
+/// and when they last changed, which is no earlier than its logs were
+/// deleted.
 pub(crate) const WORKFLOW_RUN_COLUMNS: &str = "id, repo_id, workflow_id, suite_id, run_number,
     event, head_branch, head_sha, title,
     (SELECT login FROM actors WHERE actors.id = workflow_runs.actor_id), attempt,
     (SELECT status FROM check_suites WHERE check_suites.id = workflow_runs.suite_id),
     (SELECT conclusion FROM check_suites WHERE check_suites.id = workflow_runs.suite_id),
     created_clock_unix, started_clock_unix,
-    (SELECT updated_clock_unix FROM check_suites WHERE check_suites.id = workflow_runs.suite_id),
+    (SELECT MAX(updated_clock_unix, COALESCE(workflow_runs.logs_deleted_clock_unix, 0))
+     FROM check_suites WHERE check_suites.id = workflow_runs.suite_id),
     (SELECT login FROM actors
      WHERE actors.id = COALESCE(workflow_runs.triggering_actor_id, workflow_runs.actor_id)),
-    cancel";
+    cancel, logs_deleted_attempt";
 
 pub(crate) const CHECK_SUITE_COLUMNS: &str = "id, repo_id, head_sha, head_branch, before_sha,
     (SELECT login FROM actors WHERE actors.id = check_suites.creator_id),
@@ -218,6 +220,7 @@ pub(crate) fn row_to_check_run(r: &Row<'_>) -> rusqlite::Result<CheckRun> {
                 run_id,
                 attempt: r.get(15)?,
                 steps: json_or_default(r.get::<_, Option<String>>(16)?),
+                carried_from: r.get(17)?,
             }),
         },
     })
@@ -268,6 +271,7 @@ pub(crate) fn row_to_workflow_run(r: &Row<'_>) -> rusqlite::Result<WorkflowRun> 
         cancel: r
             .get::<_, Option<String>>(17)?
             .map(|s| RunCancel::from_db(&s)),
+        logs_deleted_attempt: r.get(18)?,
     })
 }
 
@@ -781,6 +785,41 @@ pub(crate) fn list_workflow_jobs_of_attempt(
          WHERE workflow_run_id = ?1 AND run_attempt = ?2 ORDER BY id"
     ))?;
     let rows = stmt.query_map(params![run_id, attempt], row_to_check_run)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The job whose log a job's is: itself, or for a job a re-run carried
+/// over, the job that ran.
+pub(crate) fn log_owner(conn: &Connection, job_id: i64) -> Result<i64> {
+    let mut owner = job_id;
+    loop {
+        let from: Option<i64> = conn
+            .query_row(
+                "SELECT carried_from FROM check_runs WHERE id = ?1",
+                params![owner],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        match from {
+            Some(from) => owner = from,
+            None => return Ok(owner),
+        }
+    }
+}
+
+/// The lines of a job's log, oldest first.
+pub(crate) fn job_log(conn: &Connection, job_id: i64) -> Result<Vec<LogLine>> {
+    let mut stmt = conn.prepare(
+        "SELECT step, clock_unix, text FROM workflow_job_log_lines WHERE job_id = ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map(params![log_owner(conn, job_id)?], |r| {
+        Ok(LogLine {
+            step: r.get(0)?,
+            clock_unix: r.get(1)?,
+            text: r.get(2)?,
+        })
+    })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
