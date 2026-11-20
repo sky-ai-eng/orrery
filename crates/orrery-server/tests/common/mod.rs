@@ -443,3 +443,97 @@ impl AppKey {
         )
     }
 }
+
+/// What a client needs to reach a world served as github.com's hosts over
+/// TLS: the authority to trust, and the listeners.
+pub struct GithubTls {
+    /// The test authority's certificate, PEM, which a client trusts.
+    pub ca_pem: std::path::PathBuf,
+    /// `127.0.0.1:<port>` of the listener that speaks TLS from the first
+    /// byte.
+    pub direct: String,
+    /// `127.0.0.1:<port>` of the HTTPS proxy.
+    pub proxy: String,
+    _dir: tempfile::TempDir,
+}
+
+/// Boot a local world under github.com's layout with, beside its plain
+/// listener, a TLS listener and the HTTPS proxy, each serving a certificate
+/// for GitHub's hosts from a test authority made for this world alone.
+pub async fn boot_github_com_tls() -> (Instance, GithubTls) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "orrery test authority");
+    params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+    ];
+    let ca =
+        rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap()).unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let leaf = rcgen::CertificateParams::new(vec![
+        "github.com".to_string(),
+        "api.github.com".to_string(),
+        "codeload.github.com".to_string(),
+    ])
+    .unwrap()
+    .signed_by(&key, &ca)
+    .unwrap();
+    let ca_pem = dir.path().join("ca.pem");
+    std::fs::write(&ca_pem, ca.as_ref().pem()).unwrap();
+    let cert_pem = dir.path().join("cert.pem");
+    std::fs::write(&cert_pem, leaf.pem()).unwrap();
+    let key_pem = dir.path().join("key.pem");
+    std::fs::write(&key_pem, key.serialize_pem()).unwrap();
+    let certificate =
+        orrery_server::tls::Certificate::from_pem_files(&cert_pem, &key_pem).expect("certificate");
+
+    let (instance_dir, world) = create(&WorldSecret::LOCAL);
+    let (plain, base) = bind().await;
+    let (direct, direct_base) = bind().await;
+    let (proxy, proxy_base) = bind().await;
+    let routers = orrery_server::routers(
+        world.clone(),
+        orrery_server::Layout::github_com(),
+        instance_dir.path().join("snapshots"),
+        orrery_server::Options::default(),
+    );
+    let direct_server = orrery_server::run(
+        orrery_server::tls::TlsListener::new(
+            direct,
+            &certificate,
+            orrery_server::tls::Mode::Direct,
+        ),
+        routers.faces(),
+        std::future::pending(),
+    );
+    let proxy_server = orrery_server::run(
+        orrery_server::tls::TlsListener::new(proxy, &certificate, orrery_server::tls::Mode::Proxy),
+        routers.faces(),
+        std::future::pending(),
+    );
+    let tasks = vec![
+        spawn_server(plain, routers.combined()),
+        tokio::spawn(async move { direct_server.await.expect("server run") }),
+        tokio::spawn(async move { proxy_server.await.expect("server run") }),
+    ];
+    let strip = |origin: String| origin.strip_prefix("http://").unwrap().to_string();
+    (
+        Instance {
+            dir: instance_dir,
+            world,
+            control: base.clone(),
+            base,
+            tasks,
+        },
+        GithubTls {
+            ca_pem,
+            direct: strip(direct_base),
+            proxy: strip(proxy_base),
+            _dir: dir,
+        },
+    )
+}

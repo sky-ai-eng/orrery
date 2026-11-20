@@ -41,6 +41,7 @@ mod list;
 mod log_stream;
 mod sender;
 mod snapshots;
+pub mod tls;
 
 /// Where the control plane is mounted, on its own listener or the faces'.
 const CONTROL_PREFIX: &str = "/_orrery";
@@ -122,6 +123,13 @@ impl Routers {
     /// [`Routers::combined`] or [`Routers::split`] consumes them.
     pub fn stop(&self) -> Stop {
         self.stop.clone()
+    }
+
+    /// The faces alone, for a listener beside the one [`Routers::combined`]
+    /// or [`Routers::split`] serves them on, such as a TLS listener or the
+    /// HTTPS proxy ([`tls::TlsListener`]). Taken before either consumes them.
+    pub fn faces(&self) -> Router {
+        by_host(self.faces.clone().fallback(not_mocked), self.layout.clone())
     }
 
     /// Both on one listener, the control plane at `/_orrery`.

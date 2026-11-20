@@ -58,7 +58,7 @@ Namespaced away from the face (its own path prefix/port) so it can never be mist
 {"base_url":"http://127.0.0.1:43211","listen":"127.0.0.1:43211","control":"127.0.0.1:43211"}
 ```
 
-`listen` and `control` are the bound addresses, `host:port` with the real port or `unix:/absolute/path`. A listener can also be a listening Unix socket a supervisor made and passed to `orrery serve` as an open descriptor, under the protocol of systemd's socket activation (`fd:<name>` in the config); it is reported by its path, read from the socket, as `unix:/absolute/path`. `control` is `listen` unless `server.control_listen` is set; either way the control plane is under `/_orrery` on it. `base_url` is the configured one, or the one derived from `listen`: the world's own host. Under github.com's layout no URL the world returns names it (`grammar.md`, "Where the face is"). So `listen = "127.0.0.1:0"` gets a free port and reports it, and a caller starting many worlds never picks ports in advance. Nothing else is written to stdout; logs go to stderr.
+`listen` and `control` are the bound addresses, `host:port` with the real port or `unix:/absolute/path`. A listener can also be a listening Unix socket a supervisor made and passed to `orrery serve` as an open descriptor, under the protocol of systemd's socket activation (`fd:<name>` in the config); it is reported by its path, read from the socket, as `unix:/absolute/path`. `control` is `listen` unless `server.control_listen` is set; either way the control plane is under `/_orrery` on it. `base_url` is the configured one, or the one derived from `listen`: the world's own host. Under github.com's layout no URL the world returns names it (`grammar.md`, "Where the face is"). `tls_listen` and `proxy_listen` are in the line when those listeners are configured, as bound addresses ("Reaching github.com's hosts"). So `listen = "127.0.0.1:0"` gets a free port and reports it, and a caller starting many worlds never picks ports in advance. Nothing else is written to stdout; logs go to stderr.
 
 **Stopping a world.** SIGTERM or SIGINT stops `orrery serve`, sent to its process alone or to its process group, as Ctrl-C in a terminal sends it. It stops accepting connections, ends every log stream, and gives the requests it is answering, and the git processes it started, 5 seconds to finish. A git request still running then is killed, and a push it cut off moves back what it moved (`surface-git.md`, "Starting a world"). Then the process exits with status 0, dropping any connection still open. A push in flight when the signal arrives is therefore recorded, or moved back.
 
@@ -191,6 +191,48 @@ A malformed command line (an unknown flag, a missing source, or a `--secret` tha
 **The world schema.** `orrery --version` prints a second line, `world schema <N>`, and `GET /_orrery/healthz` reports the same number as `world_schema`. It is the version this binary writes of everything a world stores: its tables, and the events it logs. A binary migrates a world to its own version when it opens it, and refuses a world at a higher version. So before moving a world from one binary to another, a caller compares the two numbers: a world the first has opened won't open in a binary whose number is lower.
 
 **The config digest.** `serve` reads its config file once, at start, so a process started before the file changed keeps the settings it read, such as the `base_url` in every clone and HTML URL, until it is restarted. `GET /_orrery/healthz` reports which file it read as `config_sha256`: the SHA-256 of the file's bytes exactly as `serve` read them, as 64 lowercase hex characters. It is computed once and never again, so editing the file while the world runs does not change it. A caller that holds the file compares the digest of its bytes with `config_sha256`, and a difference means the running process has not read that file. The digest is of the raw bytes, not of the parsed settings, so any edit changes it, a comment or whitespace included, and a caller needs no TOML parser to compare. healthz reports the digest and none of the settings, so a key added to the config later is covered and none of the file's contents reaches the control plane. A world served by embedding `orrery-server`, with no config file, reports `"config_sha256": null`.
+
+## Reaching github.com's hosts
+
+A world under github.com's layout (`grammar.md`, "Where the face is") serves `https://api.github.com` and `https://github.com`. A client reaches it as those hosts, unmodified, when its requests for them reach the world and it trusts the certificate the world serves them with.
+
+**The certificate.** `server.tls_cert` and `server.tls_key` name a PEM certificate chain, the served certificate first, and its private key. The certificate names each GitHub host a client asks for, and is signed by an authority the operator makes. No public authority signs for GitHub's hosts. Nothing in a world holds the certificate, its key, or the authority, so no snapshot carries them. One way to make them:
+
+```sh
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
+  -subj "/CN=orrery local authority" -keyout ca-key.pem -out ca.pem \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=github.com" \
+  -keyout github-hosts-key.pem -out github-hosts.csr
+printf 'subjectAltName=DNS:github.com,DNS:api.github.com,DNS:codeload.github.com,DNS:uploads.github.com,DNS:raw.githubusercontent.com\nextendedKeyUsage=serverAuth\n' \
+  > github-hosts.ext
+openssl x509 -req -in github-hosts.csr -CA ca.pem -CAkey ca-key.pem -days 30 \
+  -extfile github-hosts.ext -out github-hosts.pem
+```
+
+A client trusts `ca.pem` beside its usual roots, not in place of them, or every other HTTPS call it makes fails. A container adds it to its image's trust store (`update-ca-certificates`), and Node takes it in `NODE_EXTRA_CA_CERTS`. `SSL_CERT_FILE`, which Go, OpenSSL, and curl read, replaces their roots, so it names a bundle of the system's roots and `ca.pem` together; git's `http.sslCAInfo` and `GIT_SSL_CAINFO` replace its roots the same way. Anyone holding the authority's key can stand in for GitHub wherever the authority is trusted, so it is trusted only where the system under test runs.
+
+**The proxy.** `server.proxy_listen` is an HTTPS proxy for GitHub's hosts. A client sends it `CONNECT` to a host in `github.com` or `githubusercontent.com` on port 443 that the certificate names, the world answers `200`, and the client speaks TLS to the world inside the tunnel as it would to GitHub. A client finds it through `HTTPS_PROXY`, which Go, git, curl, and Python's `requests` read; some runtimes, Node among them, read it only when told to. The proxy opens no connection of its own (rule 6). A `CONNECT` to any other host or port is `403`, with a message naming the target and `NO_PROXY`; one to a GitHub host the certificate does not name is `403` saying so, since the client would refuse the tunnel's TLS; and any other request is `405` with `Allow: CONNECT`. Each closes the connection, and the world logs it. So a client that also reaches other hosts lists them in `NO_PROXY`. The proxy needs `server.layout = "github.com"`, the one layout that serves GitHub's hosts.
+
+**The TLS listener.** `server.tls_listen` serves the faces over TLS from the first byte, for a client that resolves GitHub's hosts to the world. In compose, the world's service takes them as network aliases and listens on port 443:
+
+```yaml
+services:
+  orrery:
+    networks:
+      default:
+        aliases: [github.com, api.github.com, codeload.github.com]
+```
+
+It serves under either layout, so a world under GitHub Enterprise Server's layout can be reached over HTTPS at its own name too. That layout starts every URL with `base_url`, so it then needs `base_url` set, to the HTTPS URL clients reach the world at.
+
+Neither TLS listener serves the control plane. `serve` refuses, before it opens a world: `tls_cert` without `tls_key` or the reverse; a certificate no TLS listener serves, or a TLS listener with no certificate; a certificate it can't read or serve, or one that does not name the hosts a client will ask for (`api.github.com` and `github.com` under github.com's layout, and an `https` `base_url`'s host under GitHub Enterprise Server's); `tls_listen` under GitHub Enterprise Server's layout with no `base_url`; the proxy under GitHub Enterprise Server's layout; and two listeners on one socket.
+
+**What this does not reach:**
+
+- A page a browser opens, such as the OAuth authorize page or a GitHub App's install page, reaches the world only if the browser also uses the proxy and trusts the authority. A browser that Playwright drives can do both; a person needs a browser profile set up for it.
+- A client that pins GitHub's certificate, or carries its roots compiled in with no way to add one (Rust's `webpki-roots`), refuses the world's certificate.
+- git over SSH (`git@github.com:…`) is not served.
 
 ## What a world sends
 
