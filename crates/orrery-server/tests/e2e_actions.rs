@@ -90,6 +90,14 @@ impl Seeded {
         run
     }
 
+    /// The run as the control plane's routes answer it, read without
+    /// moving it: its jobs of the latest attempt, from the face.
+    fn runner_state(&self, run_id: i64) -> Value {
+        let run = self.get(&format!("actions/runs/{run_id}"));
+        let jobs = self.get(&format!("actions/runs/{run_id}/jobs?per_page=100"));
+        json!({ "id": run_id, "attempt": run["run_attempt"], "jobs": jobs["jobs"] })
+    }
+
     fn get(&self, path: &str) -> Value {
         face_ok(
             "GET",
@@ -765,4 +773,340 @@ async fn graphql_reads_a_jobs_steps_and_the_run_its_suite_is() {
     assert_eq!(plain["steps"]["nodes"], json!([]));
     assert!(plain["checkSuite"]["workflowRun"].is_null());
     assert!(plain["checkSuite"]["app"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_is_rerun_cancelled_and_dispatched_through_githubs_api() {
+    let s = seed().await;
+    let bob = mint_actor(&s.inst.base, "bob", "user");
+    let post = |token: &str, path: &str, body: Option<Value>| {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let request = agent
+            .post(format!("{}/{path}", s.api))
+            .header("authorization", format!("token {token}"));
+        let mut resp = match body {
+            Some(body) => request.send_json(body),
+            None => request.send_empty(),
+        }
+        .unwrap();
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().read_to_string().unwrap();
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        )
+    };
+    let message =
+        |answer: (u16, Value)| (answer.0, answer.1["message"].as_str().unwrap().to_string());
+    let finish = |run: &Value, name: &str, conclusion: &str| {
+        let id = job_id(run, name);
+        s.runner(&format!("/workflow-jobs/{id}/start"), None);
+        s.runner(
+            &format!("/workflow-jobs/{id}/complete"),
+            Some(json!({ "conclusion": conclusion })),
+        )
+    };
+
+    // A workflow that can be dispatched, with one input.
+    let mut dispatched = ci();
+    dispatched["dispatch_inputs"] = json!(["target"]);
+    let (status, workflow) = s.control("POST", "/workflows", Some(dispatched));
+    assert_eq!(status, 201, "{workflow}");
+    assert_eq!(workflow["dispatch_inputs"], json!(["target"]));
+    let mut other = ci();
+    other["path"] = json!(".github/workflows/other.yml");
+    let (_, undispatched) = s.control("POST", "/workflows", Some(other));
+    assert!(undispatched["dispatch_inputs"].is_null());
+
+    // A dispatch starts a run on the branch's tip, started by the caller
+    // and titled by the workflow.
+    let dispatch = "actions/workflows/ci.yml/dispatches";
+    let (status, body) = post(
+        &bob,
+        dispatch,
+        Some(json!({ "ref": "feature", "inputs": { "target": "prod" } })),
+    );
+    assert_eq!((status, body), (204, Value::String(String::new())));
+    let run = s.get("actions/runs")["workflow_runs"][0].clone();
+    let run_id = run["id"].as_i64().unwrap();
+    assert_eq!(run["event"], "workflow_dispatch");
+    assert_eq!(run["display_title"], "ci");
+    assert_eq!(run["head_branch"], "feature");
+    assert_eq!(run["head_sha"], s.feature_sha.as_str());
+    assert_eq!(run["actor"]["login"], "bob");
+    assert_eq!(
+        s.get(&format!("actions/runs/{run_id}/jobs"))["total_count"],
+        2
+    );
+    // A full ref names the branch too.
+    assert_eq!(
+        post(&bob, dispatch, Some(json!({ "ref": "refs/heads/main" }))).0,
+        204
+    );
+    // What GitHub refuses, in its words.
+    assert_eq!(
+        message(post(&bob, dispatch, Some(json!({ "ref": "nope" })))),
+        (422, "No ref found for: nope".to_string())
+    );
+    assert_eq!(
+        message(post(
+            &bob,
+            dispatch,
+            Some(json!({ "ref": "main", "inputs": { "zzz": "1" } }))
+        )),
+        (422, "Unexpected inputs provided: [\"zzz\"]".to_string())
+    );
+    assert_eq!(
+        message(post(
+            &bob,
+            "actions/workflows/other.yml/dispatches",
+            Some(json!({ "ref": "main" }))
+        )),
+        (
+            422,
+            "Workflow does not have 'workflow_dispatch' trigger".to_string()
+        )
+    );
+    assert_eq!(
+        message(post(&bob, dispatch, Some(json!({})))),
+        (
+            422,
+            "Invalid request.\n\n\"ref\" wasn't supplied.".to_string()
+        )
+    );
+    assert_eq!(
+        post(
+            &bob,
+            "actions/workflows/nope.yml/dispatches",
+            Some(json!({ "ref": "main" }))
+        )
+        .0,
+        404
+    );
+    assert_eq!(
+        s.get("actions/runs")["total_count"],
+        2,
+        "nothing refused started a run"
+    );
+
+    // A run that has not finished cannot be run again.
+    let run_path = format!("actions/runs/{run_id}");
+    let state = || s.runner_state(run_id);
+    for (path, said) in [
+        (
+            format!("{run_path}/rerun"),
+            "This workflow is already running",
+        ),
+        (
+            format!("{run_path}/rerun-failed-jobs"),
+            "This workflow is already running",
+        ),
+        (
+            format!("actions/jobs/{}/rerun", job_id(&state(), "lint")),
+            "The workflow run containing this job is already running",
+        ),
+    ] {
+        assert_eq!(
+            message(post(&bob, &path, None)),
+            (403, said.to_string()),
+            "{path}"
+        );
+    }
+
+    // Attempt 1: lint passes, the tests fail, the report runs, the build
+    // is skipped.
+    finish(&state(), "lint", "success");
+    finish(&state(), "test", "failure");
+    finish(&state(), "report", "success");
+    let first = s.get(&run_path);
+    assert_eq!(
+        (&first["status"], &first["conclusion"]),
+        (&json!("completed"), &json!("failure"))
+    );
+    assert_eq!(
+        message(post(&bob, &format!("{run_path}/cancel"), None)),
+        (
+            409,
+            "Cannot cancel a workflow run that is completed.".to_string()
+        )
+    );
+    assert_eq!(post(&bob, &format!("{run_path}/force-cancel"), None).0, 409);
+
+    // Re-running what failed begins attempt 2, with lint copied under a
+    // new id and the tests queued.
+    s.inst
+        .world
+        .advance_clock(
+            30,
+            orrery_world::Attribution::new(
+                orrery_world::SYSTEM_ACTOR_ID,
+                orrery_world::Door::Control,
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        post(&s.token, &format!("{run_path}/rerun-failed-jobs"), None),
+        (201, json!({}))
+    );
+    let second = s.get(&run_path);
+    assert_eq!(second["run_attempt"], 2);
+    assert_eq!(second["status"], "queued");
+    assert_eq!(second["actor"]["login"], "bob");
+    assert_eq!(second["triggering_actor"]["login"], "alice");
+    assert_eq!(second["created_at"], first["created_at"]);
+    assert_ne!(second["run_started_at"], first["run_started_at"]);
+    assert_eq!(second["check_suite_id"], first["check_suite_id"]);
+    assert_eq!(
+        second["previous_attempt_url"],
+        format!("{}/{run_path}/attempts/1", s.api).as_str()
+    );
+    let latest = s.get(&format!("{run_path}/jobs"));
+    let brief = |jobs: &Value| -> Vec<(String, i64, String)> {
+        jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|job| {
+                (
+                    job["name"].as_str().unwrap().to_string(),
+                    job["run_attempt"].as_i64().unwrap(),
+                    job["status"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        brief(&latest),
+        [
+            ("lint".to_string(), 2, "completed".to_string()),
+            ("test".to_string(), 2, "queued".to_string()),
+        ]
+    );
+    assert_eq!(
+        s.get(&format!("{run_path}/jobs?filter=all"))["total_count"],
+        6
+    );
+
+    // The first attempt is read as it ended.
+    let kept = s.get(&format!("{run_path}/attempts/1"));
+    assert_eq!(kept["run_attempt"], 1);
+    assert_eq!(
+        (&kept["status"], &kept["conclusion"]),
+        (&json!("completed"), &json!("failure"))
+    );
+    assert_eq!(kept["run_started_at"], first["run_started_at"]);
+    assert_eq!(kept["triggering_actor"]["login"], "bob");
+    assert!(kept["previous_attempt_url"].is_null());
+    let kept_jobs = s.get(&format!("{run_path}/attempts/1/jobs"));
+    assert_eq!(kept_jobs["total_count"], 4);
+    assert!(
+        brief(&kept_jobs)
+            .iter()
+            .all(|(_, attempt, _)| *attempt == 1)
+    );
+    assert_eq!(s.get(&format!("{run_path}/attempts/2"))["run_attempt"], 2);
+    assert_eq!(s.status(&format!("{run_path}/attempts/3")), 404);
+    assert_eq!(s.status(&format!("{run_path}/attempts/3/jobs")), 404);
+
+    // Asked to cancel while the tests run: their step is cancelled, the
+    // step that runs regardless goes on, and asking again is taken again.
+    let test = job_id(&state(), "test");
+    s.runner(&format!("/workflow-jobs/{test}/start"), None);
+    s.runner(
+        &format!("/workflow-jobs/{test}/complete-step"),
+        Some(json!({ "conclusion": "success" })),
+    );
+    assert_eq!(
+        post(&bob, &format!("{run_path}/cancel"), None),
+        (202, json!({}))
+    );
+    assert_eq!(
+        post(&bob, &format!("{run_path}/cancel"), None),
+        (202, json!({}))
+    );
+    let job = s.get(&format!("actions/jobs/{test}"));
+    let concluded: Vec<&Value> = job["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| &step["conclusion"])
+        .collect();
+    assert_eq!(
+        concluded,
+        [
+            &json!("success"),
+            &json!("cancelled"),
+            &json!("skipped"),
+            &Value::Null
+        ]
+    );
+    assert_eq!(job["status"], "in_progress");
+    // The job ends as cancelled, the report still runs, and the build is
+    // listed as cancelled.
+    s.runner(
+        &format!("/workflow-jobs/{test}/complete-step"),
+        Some(json!({ "conclusion": "success" })),
+    );
+    let after = state();
+    assert_eq!(after["jobs"][1]["conclusion"], "cancelled");
+    assert_eq!(after["jobs"][3]["name"], "build");
+    assert_eq!(after["jobs"][3]["conclusion"], "cancelled");
+    finish(&after, "report", "success");
+    let ended = s.get(&run_path);
+    assert_eq!(
+        (&ended["status"], &ended["conclusion"]),
+        (&json!("completed"), &json!("cancelled"))
+    );
+
+    // Re-running one job runs it alone, and an id from an earlier attempt
+    // names the job of its name. Cancelled by force, it ends where it is.
+    let old_report = s.get(&format!("{run_path}/attempts/1/jobs"))["jobs"][2]["id"].clone();
+    assert_eq!(
+        post(&bob, &format!("actions/jobs/{old_report}/rerun"), None),
+        (201, json!({}))
+    );
+    let third = state();
+    assert_eq!(third["attempt"], 3);
+    let report = job_id(&third, "report");
+    s.runner(&format!("/workflow-jobs/{report}/start"), None);
+    assert_eq!(
+        post(&bob, &format!("{run_path}/force-cancel"), None),
+        (202, json!({}))
+    );
+    let forced = s.get(&format!("actions/jobs/{report}"));
+    assert_eq!(
+        (&forced["status"], &forced["conclusion"]),
+        (&json!("completed"), &json!("cancelled"))
+    );
+    assert_eq!(
+        forced["steps"][0]["status"], "in_progress",
+        "left as it was"
+    );
+    assert_eq!(s.get(&run_path)["conclusion"], "cancelled");
+
+    // A whole re-run copies nothing, and a run with nothing failed has
+    // nothing to retry.
+    assert_eq!(
+        post(&bob, &format!("{run_path}/rerun"), None),
+        (201, json!({}))
+    );
+    assert_eq!(brief(&s.get(&format!("{run_path}/jobs"))).len(), 2);
+    for name in ["lint", "test", "report", "build"] {
+        finish(&state(), name, "success");
+    }
+    assert_eq!(s.get(&run_path)["conclusion"], "success");
+    assert_eq!(
+        message(post(&bob, &format!("{run_path}/rerun-failed-jobs"), None)),
+        (403, "This workflow run cannot be retried".to_string())
+    );
+    for missing in [
+        "actions/runs/999/rerun",
+        "actions/runs/999/cancel",
+        "actions/jobs/999/rerun",
+    ] {
+        assert_eq!(post(&bob, missing, None).0, 404, "{missing}");
+    }
 }

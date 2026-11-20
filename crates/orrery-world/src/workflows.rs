@@ -460,6 +460,47 @@ impl World {
         })
     }
 
+    /// A run as one of its attempts left it: who started that attempt and
+    /// when, and what its jobs came to. The current attempt is the run as it
+    /// is. `None` for an attempt the run has not had.
+    pub fn workflow_run_at_attempt(
+        &self,
+        run_id: i64,
+        attempt: i64,
+    ) -> Result<Option<WorkflowRun>> {
+        self.with_conn(|conn| {
+            let Some(run) = queries::workflow_run_by_id(conn, run_id)? else {
+                return Ok(None);
+            };
+            if attempt == run.attempt {
+                return Ok(Some(run));
+            }
+            let Some(kept) = queries::workflow_run_attempt(conn, run_id, attempt)? else {
+                return Ok(None);
+            };
+            let jobs: Vec<CheckRun> = queries::list_workflow_jobs(conn, run_id)?
+                .into_iter()
+                .filter(|job| job.job.as_ref().is_some_and(|j| j.attempt == attempt))
+                .collect();
+            let updated = jobs
+                .iter()
+                .filter_map(|job| job.completed_clock_unix)
+                .max()
+                .unwrap_or(kept.started_clock_unix);
+            let (status, conclusion) = suites::rollup(jobs);
+            Ok(Some(WorkflowRun {
+                attempt,
+                triggering_actor_login: kept.triggering_actor_login,
+                started_clock_unix: kept.started_clock_unix,
+                updated_clock_unix: updated,
+                status,
+                conclusion,
+                cancel: None,
+                ..run
+            }))
+        })
+    }
+
     /// An attempt of a run that a re-run has replaced.
     pub fn workflow_run_attempt(
         &self,

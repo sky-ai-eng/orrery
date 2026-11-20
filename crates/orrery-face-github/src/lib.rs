@@ -206,6 +206,42 @@ pub fn router(face: GithubFace) -> Router {
             get(actions::list_workflow_runs),
         )
         .route(
+            "/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches",
+            post(actions::dispatch),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs/{id}/attempts/{attempt}",
+            get(actions::get_attempt),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs/{id}/attempts/{attempt}/jobs",
+            get(actions::list_attempt_jobs),
+        )
+        .route(
+            "/repositories/{id}/actions/runs/{run_id}/attempts/{attempt}/jobs",
+            get(actions::list_attempt_jobs_by_id),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs/{id}/rerun",
+            post(actions::rerun),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs/{id}/rerun-failed-jobs",
+            post(actions::rerun_failed),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/jobs/{id}/rerun",
+            post(actions::rerun_job),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs/{id}/cancel",
+            post(actions::cancel),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs/{id}/force-cancel",
+            post(actions::force_cancel),
+        )
+        .route(
             "/repositories/{id}/actions/workflows/{workflow}/runs",
             get(actions::list_workflow_runs_by_id),
         )
