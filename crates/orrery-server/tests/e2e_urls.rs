@@ -11,7 +11,7 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::{Instance, app_key, boot_with, control_post, git, mint_actor};
+use common::{Instance, app_key, boot_github_com_with, boot_with, control_post, git, mint_actor};
 use serde_json::{Value, json};
 
 /// Where URLs start: the REST root, the web root, and the web host.
@@ -185,7 +185,8 @@ fn render_everything(inst: &Instance, rest: &str, graphql: &str) -> Rendered {
     let work = tempfile::tempdir().unwrap();
     let src = work.path();
     let clock = inst.world.clock().unwrap();
-    let remote = authed(repo["clone_url"].as_str().unwrap(), &alice);
+    // Through the world's own host, which serves git under either layout.
+    let remote = authed(&format!("{base}/acme/web.git"), &alice);
     git(src, clock, &["init", "-q", "-b", "main", "."]);
     std::fs::write(src.join("README.md"), "# web\n").unwrap();
     git(src, clock, &["add", "."]);
@@ -604,7 +605,7 @@ async fn a_pages_form_posts_below_the_base_urls_path() {
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let app = orrery_server::routers(
         world,
-        format!("{origin}/prefix"),
+        orrery_server::Layout::enterprise_server(&format!("{origin}/prefix")),
         dir.path().join("snapshots"),
         orrery_server::Options::default(),
     )
@@ -645,5 +646,24 @@ async fn a_pages_form_posts_below_the_base_urls_path() {
     assert!(
         install.contains(r#"action="/prefix/apps/helper/installations/new""#),
         "{install}"
+    );
+}
+
+/// Under github.com's layout every URL names github.com's hosts, though each
+/// request came through the world's own host at the GitHub Enterprise Server
+/// paths, as a relay in front of the world sends it.
+#[tokio::test(flavor = "multi_thread")]
+async fn github_com_urls_name_github_coms_hosts() {
+    let inst = boot_github_com_with(sending()).await;
+    let rest = format!("{}/api/v3", inst.base);
+    let graphql = format!("{}/api/graphql", inst.base);
+    let rendered = render_everything(&inst, &rest, &graphql);
+    check(
+        &rendered,
+        &Roots {
+            api: "https://api.github.com".to_string(),
+            web: "https://github.com".to_string(),
+            host: "github.com".to_string(),
+        },
     );
 }

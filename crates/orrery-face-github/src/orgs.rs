@@ -1,7 +1,6 @@
 //! Organization membership and team writes (spec/surface-github.md §1.2).
-//! Responses carry GitHub's shapes; Orrery presents as a GitHub Enterprise
-//! Server, which adds an organization member directly, so every membership
-//! answers `state: active`.
+//! Responses carry GitHub's shapes. A membership is set at once, with no
+//! invitation to accept, so every one answers `state: active` (§4).
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};

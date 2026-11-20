@@ -4,7 +4,9 @@ What every route of the GitHub face shares. It is built once for the engine, not
 
 ## Where the face is
 
-Orrery presents itself as a GitHub Enterprise Server at its `base_url`, so a client that takes a GitHub Enterprise base URL needs nothing else:
+Orrery's behavior is github.com's: every behavior `surface-github.md` reports as observed was observed on github.com. Where the face's surfaces are, and so every URL it returns, is the layout `server.layout` names: `"enterprise-server"`, the default, or `"github.com"`.
+
+**GitHub Enterprise Server's layout.** The face is mounted as a GitHub Enterprise Server is, at `base_url`, whichever host a request names. A client derives this layout for any host other than github.com's own, so a client that takes a GitHub Enterprise base URL needs nothing else:
 
 | Surface | Path |
 | --- | --- |
@@ -13,7 +15,20 @@ Orrery presents itself as a GitHub Enterprise Server at its `base_url`, so a cli
 | git | `{base_url}/{owner}/{repo}[.git]/…` (`surface-git.md`) |
 | OAuth web flow | `{base_url}/login/oauth/…` |
 
-github.com's `api.github.com` and the data-residency `api.<tenant>.ghe.com` host shapes are not served. The control plane is under `/_orrery`, on the same listener unless `server.control_listen` moves it; a faces listener then answers `/_orrery/…` as surface it does not serve.
+The layout is how a client reaches a world, not a claim to be a GitHub Enterprise Server. `GET /meta` names a release (`surface-github.md` §1.9) because GitHub Enterprise Server's clients choose their requests by it.
+
+**github.com's layout.** A request is served by the host it names, in its URI or its `Host` header, with or without a port:
+
+| Host | Served |
+| --- | --- |
+| `api.github.com` | REST at the root (`/repos/…`), and GraphQL at `POST /graphql` |
+| `github.com` | git, the OAuth web flow, and the GitHub App pages, at the paths the world's own host serves them at. REST, GraphQL, and `/_orrery` are not served there. |
+| any other host under `github.com` or `githubusercontent.com` | nothing: every request is the not-mocked `501`, naming the host |
+| any other host | the world's own host, at GitHub Enterprise Server's paths, as above, so a router or relay in front of the world reaches it under its own name |
+
+Every URL the face returns names `https://api.github.com` or `https://github.com`, through whichever host the request came, webhook bodies included. `base_url` is then only the world's own host, which the ready line reports (`usage.md`), and no URL names it. `GET /meta` is not served, through any host, since github.com's names no release. A client reaches a world under this layout only where something sends github.com's hosts to the world.
+
+The data-residency `api.<tenant>.ghe.com` host shape is not served under either layout. The control plane is under `/_orrery` on the world's own host, on the same listener unless `server.control_listen` moves it; a faces listener then answers `/_orrery/…` as surface it does not serve.
 
 ## Authentication
 
@@ -62,6 +77,14 @@ A REST path or method with no route answers `501`, deliberately unlike any GitHu
             "hint": "If a consumer needs this endpoint, add it to the surface inventory (spec/surface-github.md) and implement it."}}
 ```
 
+Under github.com's layout, a request whose host decides that it is not served (a GitHub host the face does not serve, or a path GitHub does not serve on `github.com`) answers before any token is read, and names the host as well:
+
+```json
+{"message": "orrery: GET codeload.github.com/o/r/tar.gz/main is not mocked",
+ "orrery": {"not_mocked": true, "method": "GET", "host": "codeload.github.com", "path": "/o/r/tar.gz/main",
+            "hint": "…"}}
+```
+
 GraphQL marks the same fault in its `errors` entry (`surface-github.md` §3.1). A matched route with no data answers GitHub's own `404`; the two never blur.
 
 ## Pagination
@@ -74,4 +97,4 @@ REST lists page with `?per_page=&page=`: `per_page` defaults to 30 and is limite
 
 ## Rate limits
 
-Orrery doesn't rate limit. It sends no `X-RateLimit-*` headers, GraphQL `rateLimit` is `null`, and `/rate_limit` is not served: the shape of a GitHub Enterprise Server with rate limiting turned off, which GitHub's clients handle.
+Orrery doesn't rate limit. It sends no `X-RateLimit-*` headers, GraphQL `rateLimit` is `null`, and `/rate_limit` is not served: the shape of a GitHub Enterprise Server with rate limiting turned off, which GitHub's clients handle. github.com always rate limits and sends the headers, so this is a deliberate difference from it (`surface-github.md` §4), under either layout.

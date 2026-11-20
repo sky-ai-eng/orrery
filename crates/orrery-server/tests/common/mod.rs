@@ -62,6 +62,18 @@ pub async fn boot_at(dir: tempfile::TempDir, world_root: &Path) -> Instance {
     serve(dir, world, orrery_server::Options::default()).await
 }
 
+/// Boot a local world served under github.com's layout: every URL it returns
+/// names `api.github.com` or `github.com`, and a request finds its surface by
+/// the host it names. `base` is still the listener's own origin.
+pub async fn boot_github_com() -> Instance {
+    boot_github_com_with(orrery_server::Options::default()).await
+}
+
+pub async fn boot_github_com_with(options: orrery_server::Options) -> Instance {
+    let (dir, world) = create(&WorldSecret::LOCAL);
+    serve_as(dir, world, options, |_| orrery_server::Layout::github_com()).await
+}
+
 /// Boot a local world with the control plane on a listener of its own, as
 /// `orrery serve` does when `server.control_listen` is set.
 pub async fn boot_split() -> Instance {
@@ -70,7 +82,7 @@ pub async fn boot_split() -> Instance {
     let (control, control_base) = bind().await;
     let (faces_app, control_app) = orrery_server::routers(
         world.clone(),
-        base.clone(),
+        orrery_server::Layout::enterprise_server(&base),
         dir.path().join("snapshots"),
         orrery_server::Options::default(),
     )
@@ -92,10 +104,25 @@ async fn serve(
     world: Arc<World>,
     options: orrery_server::Options,
 ) -> Instance {
+    serve_as(
+        dir,
+        world,
+        options,
+        orrery_server::Layout::enterprise_server,
+    )
+    .await
+}
+
+async fn serve_as(
+    dir: tempfile::TempDir,
+    world: Arc<World>,
+    options: orrery_server::Options,
+    layout: impl FnOnce(&str) -> orrery_server::Layout,
+) -> Instance {
     let (listener, base) = bind().await;
     let app = orrery_server::routers(
         world.clone(),
-        base.clone(),
+        layout(&base),
         dir.path().join("snapshots"),
         options,
     )
@@ -143,8 +170,40 @@ pub fn git(cwd: &Path, clock_unix: i64, args: &[&str]) -> String {
 
 /// [`git`] for a run whose failure is the point.
 pub fn git_output(cwd: &Path, clock_unix: i64, args: &[&str]) -> Output {
+    git_command(cwd, clock_unix)
+        .args(args)
+        .output()
+        .expect("spawn git")
+}
+
+/// The environment variables through which a caller's own proxy and TLS
+/// settings would reach a client a test runs. Each is removed, so a test's
+/// client reaches only the world, trusting only what the test gives it.
+pub const CLIENT_NETWORK_VARS: [&str; 13] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "GIT_SSL_CAINFO",
+    "GIT_SSL_CAPATH",
+    "GIT_SSL_NO_VERIFY",
+    "GIT_SSL_CERT",
+    "GIT_SSL_KEY",
+];
+
+/// The hermetic git command [`git`] runs, for a test that adds to its
+/// arguments or environment.
+pub fn git_command(cwd: &Path, clock_unix: i64) -> Command {
     let date = format!("{clock_unix} +0000");
-    Command::new("git")
+    let mut command = Command::new("git");
+    for var in CLIENT_NETWORK_VARS {
+        command.env_remove(var);
+    }
+    command
         .current_dir(cwd)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -154,10 +213,8 @@ pub fn git_output(cwd: &Path, clock_unix: i64, args: &[&str]) -> Output {
         .env("GIT_COMMITTER_NAME", "alice")
         .env("GIT_COMMITTER_EMAIL", "alice@orrery.invalid")
         .env("GIT_AUTHOR_DATE", &date)
-        .env("GIT_COMMITTER_DATE", &date)
-        .args(args)
-        .output()
-        .expect("spawn git")
+        .env("GIT_COMMITTER_DATE", &date);
+    command
 }
 
 pub fn control_post(base: &str, path: &str, body: serde_json::Value) -> serde_json::Value {

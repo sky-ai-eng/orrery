@@ -71,7 +71,7 @@ A bot's token is refused on `GET /user`, `/user/emails`, `/user/teams`, `/user/r
 | Route | Behavior |
 | --- | --- |
 | `GET /orgs/{org}/memberships/{username}` | The membership, as the `PUT` answers it, or `404` for an organization or a user that does not exist, an account that is not an organization, and a user who is not a member, as on GitHub. |
-| `PUT /orgs/{org}/memberships/{username}` | Body optional; `role` is `member` (the default) or `admin`, else `422`. Answers `{url, state, role, organization_url, organization, user}`. Orrery presents as a GitHub Enterprise Server, which adds a member directly, so `state` is always `active`. Only a user can be a member; an unknown organization or user is `404`. |
+| `PUT /orgs/{org}/memberships/{username}` | Body optional; `role` is `member` (the default) or `admin`, else `422`. Answers `{url, state, role, organization_url, organization, user}`. A member is added at once, so `state` is always `active` (§4). Only a user can be a member; an unknown organization or user is `404`. |
 | `GET /orgs/{org}/teams` | Teams oldest first, paged; `[]` for an organization with none, `404` for a login that is not an organization. |
 | `POST /orgs/{org}/teams` | `{name, description?, privacy?}`. A missing, null, or blank `name` is `422 missing_field`; a non-string `name`, or one with no ASCII letter or digit, is `422 invalid`. The slug is the name lower-cased with each run of other characters turned into one hyphen. A name or slug already in the organization, ignoring case, is `422 already_exists`. A creator who is a member of the organization becomes the team's first maintainer. `maintainers`, `repo_names`, `parent_team_id`, and `privacy: secret` are not mocked. Answers `201` with the full team. |
 | `DELETE /orgs/{org}/teams/{team_slug}` | `204`. The team's memberships and pending review requests go with it. Team ids are never reused. |
@@ -168,6 +168,8 @@ Only a bot creates or updates check runs; any other actor gets a `403` naming th
 | `GET /meta` | `{verifiable_password_authentication: false, installed_version: "3.17.0"}`. No actor has a password to verify (rule 12). GitHub's description of 3.17 also lists `packages` and `domains`, the addresses of services Orrery does not run, so both are absent. |
 
 Clients read `installed_version` to decide which requests to send, so Orrery reports the release whose requests it serves. 3.17 is the first release without classic projects, which Orrery does not have, and the last before advanced issue search, whose syntax (parentheses and `OR`) the search in §3.2 does not parse. gh 2.89, for one, asks for a pull request's classic project cards below 3.17, and sends advanced search syntax from 3.18.
+
+Under github.com's layout, `GET /meta` is the not-mocked `501`, through any host (`grammar.md`, "Where the face is"): github.com's `/meta` names no release, and lists network addresses and keys Orrery does not have.
 
 ### 1.10 Commit signing
 
@@ -403,7 +405,7 @@ A selection naming a field, type, or argument Orrery lacks fails the whole docum
 - `node(id:)` and `nodes(ids:)`: a pull request (`PullRequest`) or a review (`PullRequestReview`). Any other id is `null`.
 - `repository(owner:, name:)` and `organization(login:)`: `null` when there is none.
 - `search(query:, type: ISSUE, first:)`: pull requests, newest first, as `{pageInfo, nodes}`. The query takes `is:pr`, `is:issue` (matches nothing), `is:open`, `is:closed`, `is:merged`, `is:unmerged`, `author:`, `reviewed-by:`, `repo:` (repeatable, any of), `merged:>=`, and `closed:>=` (a date or a timestamp; a merge is a close). Values compare ignoring case. Any other qualifier fails the field as not mocked, because answering a query Orrery half understands would return wrong results.
-- `rateLimit`: always `null`, as a GitHub Enterprise Server with rate limiting off answers.
+- `rateLimit`: always `null`, as a GitHub Enterprise Server with rate limiting off answers (`grammar.md`, "Rate limits").
 - Mutations: `markPullRequestReadyForReview` and `convertPullRequestToDraft`, each taking `input: {pullRequestId, clientMutationId?}` and answering `{pullRequest, clientMutationId}`. A pull request that is closed, or already in the requested state, is an error.
 
 An installation token (§1.11) sees the repositories it reaches and every public one. A private repository it does not reach reads as one that does not exist: `repository` is `null`, a `node` in it is `null`, a search leaves its pull requests out, and a mutation on one of them is the error of an id that does not resolve. A mutation on a pull request in a public repository it does not reach is an error with the message "Resource not accessible by integration".
@@ -513,6 +515,8 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - Orrery parses no PGP signature, so a malformed one reads `unknown_key` where GitHub answers `malformed_signature`.
 - A verdict a read reaches as `valid` has a null `verified_at`. GitHub stores the verdict then.
 - `GET /meta` needs a token, as every REST route does, where github.com answers it without one (`grammar.md`).
+- No response carries `X-RateLimit-*` headers, where github.com sends them on every response, and GraphQL `rateLimit` is `null`, which github.com never answers (`grammar.md`, "Rate limits").
+- Setting a user's organization membership adds them at once and answers `state: active`. github.com sends an invitation and answers `pending` until the user accepts it, and a GitHub Enterprise Server adds them at once. Invitations are not modeled.
 - A diff's `index` lines abbreviate object ids to 7 hex digits. GitHub's length grows with the repository, as git's default does (7 digits were observed on a small repository and 9 on a larger one), but git picks that length from how the repository's objects are packed, which a replayed world need not share.
 - A hunk header's trailing context is the one git picks, by default the nearest line above the hunk that starts with a letter, `_`, or `$`. GitHub picks it by the file's language, so in an HTML file it names the nearest heading.
 - `Accept` media types match ignoring case, and every `Accept` header counts. GitHub answers JSON to `application/vnd.github.v3.DIFF`, and reads only the first `Accept` header.

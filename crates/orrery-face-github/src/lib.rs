@@ -53,8 +53,14 @@ pub struct GithubFace {
 }
 
 pub fn router(face: GithubFace) -> Router {
-    Router::new()
-        .route("/meta", get(meta::get_meta))
+    // github.com's `/meta` lists its network addresses and keys and names no
+    // release, so under its layout there is no such route, and the
+    // not-mocked fallback answers it through any host.
+    let router = match face.layout.is_github_com() {
+        true => Router::new(),
+        false => Router::new().route("/meta", get(meta::get_meta)),
+    };
+    router
         .route("/orgs/{org}", get(reads::get_org))
         .route("/orgs/{org}/repos", post(create_org_repo))
         .route(
@@ -453,17 +459,37 @@ pub(crate) fn orrery_unsupported_field(resource: &str, field: &str) -> Response<
 /// the request arrived with, never a nested router's remainder, so a caller
 /// finds it in its own logs.
 pub fn not_mocked(method: &str, path: &str) -> Response<Body> {
-    tracing::warn!(%method, %path, "NOT MOCKED: unimplemented surface was called");
+    not_mocked_envelope(method, None, path)
+}
+
+/// The not-mocked `501` for a request whose host decides that the face does
+/// not serve it, under github.com's layout: a GitHub host the face does not
+/// serve, or a path GitHub does not serve on that host. It names the host
+/// beside the method and the path.
+pub fn not_mocked_on(method: &str, host: &str, path: &str) -> Response<Body> {
+    not_mocked_envelope(method, Some(host), path)
+}
+
+fn not_mocked_envelope(method: &str, host: Option<&str>, path: &str) -> Response<Body> {
+    tracing::warn!(%method, host = host.unwrap_or_default(), %path, "NOT MOCKED: unimplemented surface was called");
+    let named = match host {
+        Some(host) => format!("{host}{path}"),
+        None => path.to_string(),
+    };
+    let mut orrery = serde_json::json!({
+        "not_mocked": true,
+        "method": method,
+        "path": path,
+        "hint": "If a consumer needs this endpoint, add it to the surface inventory (spec/surface-github.md) and implement it.",
+    });
+    if let Some(host) = host {
+        orrery["host"] = serde_json::json!(host);
+    }
     json_response(
         StatusCode::NOT_IMPLEMENTED,
         serde_json::json!({
-            "message": format!("orrery: {method} {path} is not mocked"),
-            "orrery": {
-                "not_mocked": true,
-                "method": method,
-                "path": path,
-                "hint": "If a consumer needs this endpoint, add it to the surface inventory (spec/surface-github.md) and implement it.",
-            },
+            "message": format!("orrery: {method} {named} is not mocked"),
+            "orrery": orrery,
         }),
     )
 }
