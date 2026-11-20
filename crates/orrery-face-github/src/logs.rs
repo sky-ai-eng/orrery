@@ -8,8 +8,8 @@ use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Method, Response, StatusCode, header};
 use axum::routing::get;
 use orrery_world::{
-    Caller, CheckRun, CheckStatus, Door, LogLine, Step, StepConclusion, StepStatus, WorkflowRun,
-    WorldError,
+    Caller, CheckRun, CheckStatus, Door, LogLine, Repo, Step, StepConclusion, StepStatus, Workflow,
+    WorkflowRun, WorldError,
 };
 
 use crate::actions::{attempt_at, job_at, not_found, run_at};
@@ -59,11 +59,6 @@ fn deleted(run: &WorkflowRun, attempt: i64) -> bool {
         .is_some_and(|through| attempt <= through)
 }
 
-/// The attempt a job is of.
-fn attempt_of(job: &CheckRun) -> i64 {
-    job.job.as_ref().map_or(0, |held| held.attempt)
-}
-
 /// `GET …/actions/jobs/{id}/logs`: a redirect for any job, whether or not
 /// it has a log yet, unless its run's logs were deleted.
 pub(crate) async fn job_log(
@@ -76,15 +71,19 @@ pub(crate) async fn job_log(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    let (job, run) = match job_at(&face, &repo, &id) {
+    let (job, _) = match job_at(&face, &repo, &id) {
         Ok(found) => found,
         Err(resp) => return *resp,
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowJob") {
         return refused;
     }
-    if deleted(&run, attempt_of(&job)) {
-        return not_found();
+    // A job a re-run carried over has the log of the job that ran, so its
+    // log is gone when that one's is, whatever attempt lists it.
+    match face.world.job_log_deleted(job.id) {
+        Ok(false) => {}
+        Ok(true) => return not_found(),
+        Err(e) => return internal(e),
     }
     let what = format!("jobs/{}/job-logs.txt", job.id);
     redirect(&face, &method, &what, TEXT_LINK_SECONDS)
@@ -299,10 +298,14 @@ fn link_holds(face: &GithubFace, what: &str, query: &str) -> Result<bool, WorldE
     ) else {
         return Ok(false);
     };
-    Ok(
-        signature == face.world.log_link_signature(what, expires)?
-            && face.world.clock()? <= expires,
-    )
+    let ours = face.world.log_link_signature(what, expires)?;
+    Ok(same_bytes(signature.as_bytes(), ours.as_bytes()) && face.world.clock()? <= expires)
+}
+
+/// Whether two byte strings are the same, in time that does not depend on
+/// where they first differ: a link's signature is all that guards a log.
+fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |differ, (x, y)| differ | (x ^ y)) == 0
 }
 
 /// The refusal of a link to text that does not hold.
@@ -367,18 +370,15 @@ fn text(body: Vec<u8>) -> Response<Body> {
         .expect("static response parts are valid")
 }
 
-/// The job a store path names with its run, when it is a job.
-fn stored_job(face: &GithubFace, id: &str) -> Result<Option<(CheckRun, WorkflowRun)>, WorldError> {
+/// The job a store path names, when it is a job.
+fn stored_job(face: &GithubFace, id: &str) -> Result<Option<CheckRun>, WorldError> {
     let Ok(id) = id.parse::<i64>() else {
         return Ok(None);
     };
-    let Some(job) = face.world.check_run_by_id(id)? else {
-        return Ok(None);
-    };
-    let Some(run_id) = job.job.as_ref().map(|held| held.run_id) else {
-        return Ok(None);
-    };
-    Ok(face.world.workflow_run_by_id(run_id)?.map(|run| (job, run)))
+    Ok(face
+        .world
+        .check_run_by_id(id)?
+        .filter(|job| job.job.is_some()))
 }
 
 async fn stored_job_log(
@@ -391,14 +391,14 @@ async fn stored_job_log(
         return refused;
     }
     let read = || -> Result<Option<Vec<u8>>, WorldError> {
-        let Some((job, run)) = stored_job(&face, &id)? else {
+        let Some(job) = stored_job(&face, &id)? else {
             return Ok(None);
         };
-        if !has_log(&job) || deleted(&run, attempt_of(&job)) {
+        if !has_log(&job) {
             return Ok(None);
         }
         let lines = face.world.job_log(job.id)?;
-        Ok(Some(text_file(lines.iter().enumerate())))
+        Ok(lines.map(|lines| text_file(lines.iter().enumerate())))
     };
     match read() {
         Ok(Some(body)) => text(body),
@@ -417,7 +417,7 @@ async fn stored_step_log(
         return refused;
     }
     let read = || -> Result<Option<Vec<u8>>, WorldError> {
-        let Some((job, run)) = stored_job(&face, &id)? else {
+        let Some(job) = stored_job(&face, &id)? else {
             return Ok(None);
         };
         let n = file
@@ -426,10 +426,9 @@ async fn stored_step_log(
         let Some(n) = n.filter(|n| logged_step(&job, *n).is_some()) else {
             return Ok(None);
         };
-        if deleted(&run, attempt_of(&job)) {
+        let Some(lines) = face.world.job_log(job.id)? else {
             return Ok(None);
-        }
-        let lines = face.world.job_log(job.id)?;
+        };
         let of_step = lines.iter().enumerate().filter(|(_, line)| line.step == n);
         Ok(Some(text_file(of_step)))
     };
@@ -459,26 +458,24 @@ fn file_name(name: &str) -> String {
 /// What the archive says of how a job came to run: no log line of the
 /// job's, so it has no byte-order mark and its own stamps.
 fn system_file(
-    face: &GithubFace,
+    repo: Option<&Repo>,
+    workflow: Option<&Workflow>,
     run: &WorkflowRun,
     job: &CheckRun,
-) -> Result<Vec<u8>, WorldError> {
-    let workflow = face.world.workflow_by_id(run.workflow_id)?;
-    let repo = face.world.repo_by_id(run.repo_id)?;
+) -> Vec<u8> {
     let labels = workflow
-        .as_ref()
         .and_then(|w| w.jobs.iter().find(|spec| spec.name == job.name))
         .map(|spec| spec.labels.join(", "))
         .unwrap_or_default();
     let defined = format!(
         "{}/{}@refs/heads/{}",
         repo.map(|r| r.full_name()).unwrap_or_default(),
-        workflow.map(|w| w.path).unwrap_or_default(),
+        workflow.map(|w| w.path.as_str()).unwrap_or_default(),
         run.head_branch.as_deref().unwrap_or_default()
     );
     let listed = stamp_at_zero(job.created_clock_unix);
     let taken = stamp_at_zero(job.started_clock_unix.unwrap_or(job.created_clock_unix));
-    Ok([
+    [
         format!("{listed} Requested labels: {labels}"),
         format!("{listed} Job defined at: {defined}"),
         format!("{listed} Waiting for a runner to pick up this job..."),
@@ -488,7 +485,7 @@ fn system_file(
         ),
     ]
     .join("\n")
-    .into_bytes())
+    .into_bytes()
 }
 
 /// The files of an attempt's archive: for each job that ran in the attempt
@@ -506,15 +503,22 @@ fn archive_files(face: &GithubFace, run: &WorkflowRun) -> Result<Files, WorldErr
             .is_some_and(|held| held.carried_from.is_none())
     });
     jobs.reverse();
+    let workflow = face.world.workflow_by_id(run.workflow_id)?;
+    let repo = face.world.repo_by_id(run.repo_id)?;
     let mut files = Vec::new();
     for (number, job) in jobs.iter().enumerate().filter(|(_, job)| has_log(job)) {
         let name = file_name(&job.name);
-        let lines = face.world.job_log(job.id)?;
+        // An attempt whose logs were deleted has no archive, so a job of
+        // one that has an archive has its log.
+        let lines = face.world.job_log(job.id)?.unwrap_or_default();
         files.push((
             format!("{number}_{name}.txt"),
             text_file(lines.iter().enumerate()),
         ));
-        files.push((format!("{name}/system.txt"), system_file(face, run, job)?));
+        files.push((
+            format!("{name}/system.txt"),
+            system_file(repo.as_ref(), workflow.as_ref(), run, job),
+        ));
         let steps = job.job.as_ref().map_or(&[][..], |held| &held.steps);
         for (i, step) in steps.iter().enumerate() {
             let n = i as i64 + 1;
@@ -579,8 +583,12 @@ async fn stored_archive(
 }
 
 /// A zip of `files`, each stored as it is. Every entry is dated 1 January
-/// 1980, the earliest date the format holds, as GitHub's entries are.
+/// 1980, the earliest date the format holds, as GitHub's entries are. The
+/// format counts entries and the bytes of a name in 16 bits, so a name is
+/// cut to what fits and the entries past that count are left out.
 fn zip(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    const MOST: usize = u16::MAX as usize;
+    let files = &files[..files.len().min(MOST)];
     // Version 2.0, names in UTF-8, no compression, midnight, 1980-01-01.
     const VERSION: u16 = 20;
     const UTF8_NAMES: u16 = 0x0800;
@@ -592,6 +600,11 @@ fn zip(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     let u16le = |n: u16| n.to_le_bytes();
     let u32le = |n: usize| (n as u32).to_le_bytes();
     for (name, body) in files {
+        let mut cut = name.len().min(MOST);
+        while !name.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let name = &name[..cut];
         let offset = out.len();
         let crc = crc32(body).to_le_bytes();
         let mut common = Vec::new();

@@ -1576,6 +1576,47 @@ async fn a_runs_logs_are_read_through_links_and_deleted_with_the_run() {
         3
     );
 
+    // A re-run after the logs were deleted has logs again, in what it runs.
+    // The jobs it carries over have the logs of the jobs that ran, which
+    // are gone: the job's route is `404`, and a step's link answers
+    // nothing. The attempts before it still have no archive.
+    let rerun = fetch(
+        "POST",
+        &format!("{}/actions/jobs/{}/rerun", s.api, job_id(&state(), "build")),
+        Some(&s.token),
+    );
+    assert_eq!(rerun.status, 201);
+    let twice = job_id(&state(), "lint");
+    assert_ne!(twice, carried);
+    assert_eq!(api(&format!("actions/jobs/{twice}/logs")).status, 404);
+    let gone = api(&format!("actions/jobs/{twice}/steps/1/logs"));
+    let nothing = follow(&gone);
+    assert_eq!(
+        (gone.status, nothing.status, nothing.error_code.as_deref()),
+        (302, 404, Some("BlobNotFound"))
+    );
+    finish(&state(), "build", "success");
+    let build = job_id(&state(), "build");
+    assert_eq!(
+        follow(&api(&format!("actions/jobs/{build}/logs"))).status,
+        200
+    );
+    let third = unzip(&follow(&api(&format!("{run_path}/logs"))).body);
+    assert_eq!(
+        third
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| !name.contains('/'))
+            .collect::<Vec<_>>(),
+        ["0_build.txt"]
+    );
+    for attempt in [1, 2] {
+        assert_eq!(
+            api(&format!("{run_path}/attempts/{attempt}/logs")).status,
+            404
+        );
+    }
+
     // Deleting the run: it, its jobs, their check runs, and its suite are
     // gone, and the commit lists no check run of its.
     let deleted = delete(&run_path);
@@ -1600,6 +1641,18 @@ async fn a_runs_logs_are_read_through_links_and_deleted_with_the_run() {
     assert_eq!(s.get("actions/runs")["total_count"], 0);
     assert_eq!(delete(&run_path).status, 404);
     assert_eq!(delete(&format!("{run_path}/logs")).status, 404);
+
+    // The workflow's next run does not take the deleted run's number, and
+    // its jobs do not take the deleted jobs' ids.
+    assert_eq!(run["run_number"], 1);
+    let next = s.runner(
+        &format!("/workflows/{}/runs", workflow["id"]),
+        Some(json!({
+            "event": "push", "head_sha": s.feature_sha, "head_branch": "feature", "actor": "alice",
+        })),
+    );
+    assert_eq!(next["run_number"], 2);
+    assert!(job_id(&next, "lint") > build);
 }
 
 #[tokio::test(flavor = "multi_thread")]

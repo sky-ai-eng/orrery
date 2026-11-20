@@ -983,8 +983,8 @@ object! {
         /// starts the job.
         #[serde(default)]
         steps: Option<Vec<Step>>,
-        /// For a job a re-run carried over, the job it is a copy of, whose
-        /// log is its own.
+        /// For a job a re-run carried over, the job that ran, whose log is
+        /// its own. A job carried over again names the same job.
         #[serde(default)]
         carried_from: Option<i64>,
     }

@@ -472,12 +472,50 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (run_id, attempt)
      ) STRICT;",
     // 23: a workflow run's logs. A runner writes lines to the step of a job
-    // it is on. A job a re-run carried over names the job it was carried
-    // from, whose log is its own: NULL for every job, carried or not, made
-    // before this version, when no job had a log. A run records the attempt
-    // through which its logs were deleted, and when. And a run, its jobs,
-    // and its suite can be deleted.
-    "ALTER TABLE check_runs ADD COLUMN carried_from INTEGER REFERENCES check_runs(id);
+    // it is on. A job a re-run carried over names the job that ran, whose
+    // log is its own: NULL for every job, carried or not, made before this
+    // version, when no job had a log. A run records the attempt through
+    // which its logs were deleted, and when. And a run, its jobs, and its
+    // suite can be deleted.
+    //
+    // A deleted job's id must never name another check run, and SQLite
+    // gives a table that guarantee only when it is made, so `check_runs` is
+    // made again with AUTOINCREMENT and copied whole. No row names a job
+    // it was carried from yet, so dropping the old table leaves no
+    // reference behind. A deleted run's number is kept, since no later run
+    // of its workflow takes it.
+    "CREATE TABLE check_runs_kept (
+        id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id                INTEGER NOT NULL REFERENCES repos(id),
+        head_sha               TEXT NOT NULL,
+        name                   TEXT NOT NULL,
+        status                 TEXT NOT NULL CHECK (status IN ('queued', 'in_progress', 'completed')),
+        conclusion             TEXT CHECK (conclusion IN ('success', 'failure', 'neutral', 'cancelled',
+                                                          'skipped', 'stale', 'timed_out', 'action_required')),
+        details_url            TEXT,
+        external_id            TEXT,
+        output                 TEXT,
+        creator_id             INTEGER NOT NULL REFERENCES actors(id),
+        started_clock_unix     INTEGER,
+        completed_clock_unix   INTEGER,
+        created_clock_unix     INTEGER NOT NULL,
+        suite_id               INTEGER REFERENCES check_suites(id),
+        workflow_run_id        INTEGER REFERENCES workflow_runs(id),
+        run_attempt            INTEGER,
+        steps                  TEXT,
+        carried_from           INTEGER REFERENCES check_runs(id)
+     ) STRICT;
+     INSERT INTO check_runs_kept
+        SELECT id, repo_id, head_sha, name, status, conclusion, details_url, external_id, output,
+               creator_id, started_clock_unix, completed_clock_unix, created_clock_unix, suite_id,
+               workflow_run_id, run_attempt, steps, NULL
+        FROM check_runs;
+     DROP TABLE check_runs;
+     ALTER TABLE check_runs_kept RENAME TO check_runs;
+     CREATE INDEX check_runs_by_commit ON check_runs (repo_id, head_sha);
+     CREATE INDEX check_runs_by_suite ON check_runs (suite_id);
+     CREATE INDEX check_runs_by_workflow_run ON check_runs (workflow_run_id)
+        WHERE workflow_run_id IS NOT NULL;
      ALTER TABLE workflow_runs ADD COLUMN logs_deleted_attempt INTEGER;
      ALTER TABLE workflow_runs ADD COLUMN logs_deleted_clock_unix INTEGER;
      CREATE TABLE workflow_job_log_lines (
@@ -487,7 +525,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         clock_unix  INTEGER NOT NULL,
         text        TEXT NOT NULL
      ) STRICT;
-     CREATE INDEX workflow_job_log_lines_by_job ON workflow_job_log_lines (job_id, id);",
+     CREATE INDEX workflow_job_log_lines_by_job ON workflow_job_log_lines (job_id, id);
+     CREATE TABLE deleted_workflow_runs (
+        run_id      INTEGER PRIMARY KEY,
+        workflow_id INTEGER NOT NULL REFERENCES workflows(id),
+        run_number  INTEGER NOT NULL
+     ) STRICT;
+     CREATE INDEX deleted_workflow_runs_by_workflow ON deleted_workflow_runs (workflow_id);",
 ];
 
 /// The version this binary reads and writes.

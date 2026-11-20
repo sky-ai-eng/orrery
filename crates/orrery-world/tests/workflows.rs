@@ -917,10 +917,11 @@ fn a_rerun_that_runs_nothing_still_begins_and_ends() {
     );
 }
 
-/// A job's log as `(step, text)`.
+/// A job's log as `(step, text)`, which was not deleted.
 fn log_of(s: &Seeded, job_id: i64) -> Vec<(i64, String)> {
     s.w.job_log(job_id)
         .unwrap()
+        .expect("the log was not deleted")
         .into_iter()
         .map(|line| (line.step, line.text))
         .collect()
@@ -929,7 +930,8 @@ fn log_of(s: &Seeded, job_id: i64) -> Vec<(i64, String)> {
 #[test]
 fn a_runner_writes_a_jobs_log_and_a_run_and_its_logs_are_deleted() {
     let s = seeded();
-    let run = s.start(s.workflow(".github/workflows/ci.yml", &ci()));
+    let workflow = s.workflow(".github/workflows/ci.yml", &ci());
+    let run = s.start(workflow);
     let lines = |texts: &[&str]| texts.iter().map(|t| t.to_string()).collect::<Vec<_>>();
     let a = s.job(run.id, "test (a)").id;
     // A job no runner has taken has no step to write in.
@@ -997,8 +999,10 @@ fn a_runner_writes_a_jobs_log_and_a_run_and_its_logs_are_deleted() {
         (after.status, after.conclusion),
         (ended.status, ended.conclusion)
     );
-    assert!(log_of(&s, a).is_empty());
-    assert!(log_of(&s, copy.id).is_empty());
+    for gone in [a, copy.id] {
+        assert_eq!(s.w.job_log(gone).unwrap(), None);
+        assert!(s.w.job_log_deleted(gone).unwrap());
+    }
     let logged = logged_after(&s, seq);
     assert_eq!(logged[0], "workflow_run:logs_deleted");
     // One for each job that had lines of its own: three in the first
@@ -1009,19 +1013,25 @@ fn a_runner_writes_a_jobs_log_and_a_run_and_its_logs_are_deleted() {
     assert!(logged_after(&s, seq).is_empty(), "deleted already");
 
     // A later attempt has logs again, and the mark stays on the attempts
-    // before it.
-    s.w.rerun_workflow_run(run.id, Rerun::All, s.alice_id, s.system)
+    // before it. The job it runs has a log. A job it carries over has the
+    // log of the job that ran, which was deleted, and a job carried twice
+    // still names the job that ran.
+    let build = current_job(&s, run.id, "build").id;
+    s.w.rerun_workflow_run(run.id, Rerun::Job(build), s.alice_id, s.system)
         .unwrap();
-    let third = finish("test (a)", true);
-    assert_eq!(log_of(&s, third.id), [(1, "test (a) ran".to_string())]);
-    finish("test (b)", true);
-    finish("report", true);
-    finish("build", true);
+    let third = finish("build", true);
+    assert_eq!(log_of(&s, third.id), [(1, "build ran".to_string())]);
+    assert!(!s.w.job_log_deleted(third.id).unwrap());
+    let twice = current_job(&s, run.id, "test (a)");
+    assert_eq!(twice.job.as_ref().unwrap().carried_from, Some(a));
+    assert_eq!(s.w.job_log(twice.id).unwrap(), None);
+    assert!(s.w.job_log_deleted(twice.id).unwrap());
     let again = s.w.workflow_run_by_id(run.id).unwrap().unwrap();
     assert_eq!((again.attempt, again.logs_deleted_attempt), (3, Some(2)));
 
     // Deleting the run deletes its jobs of every attempt, their logs, and
     // its suite.
+    let newest_job = s.jobs(run.id).iter().map(|job| job.id).max().unwrap();
     let seq = last_seq(&s);
     s.w.delete_workflow_run(run.id, s.system).unwrap();
     assert_eq!(s.w.workflow_run_by_id(run.id).unwrap(), None);
@@ -1037,4 +1047,16 @@ fn a_runner_writes_a_jobs_log_and_a_run_and_its_logs_are_deleted() {
         s.w.delete_workflow_run(run.id, s.system),
         Err(WorldError::NoSuchWorkflowRun(_))
     ));
+
+    // What was deleted is named by nothing later: the workflow's next run
+    // takes the next number, not the deleted run's, and its jobs take ids
+    // past the deleted jobs'.
+    assert_eq!(run.run_number, 1);
+    let next = s.start(workflow);
+    assert_eq!(next.run_number, 2);
+    assert!(next.id > run.id);
+    assert!(s.jobs(next.id).iter().all(|job| job.id > newest_job));
+    s.w.cancel_workflow_run(next.id, true, s.system).unwrap();
+    s.w.delete_workflow_run(next.id, s.system).unwrap();
+    assert_eq!(s.start(workflow).run_number, 3);
 }
