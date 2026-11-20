@@ -58,7 +58,8 @@ pub(crate) fn rollup(runs: Vec<CheckRun>) -> (CheckStatus, Option<CheckConclusio
     (CheckStatus::Completed, conclusion)
 }
 
-/// The creator's suite on a commit, made if there is none.
+/// The creator's suite on a commit, made if there is none. A workflow run's
+/// suite is the run's alone, so it is never the one.
 pub(crate) fn suite_for(
     w: &mut log::Write<'_>,
     repo_id: i64,
@@ -68,7 +69,9 @@ pub(crate) fn suite_for(
     let found =
         w.tx.query_row(
             "SELECT id FROM check_suites
-             WHERE repo_id = ?1 AND head_sha = ?2 AND creator_id = ?3 ORDER BY id LIMIT 1",
+             WHERE repo_id = ?1 AND head_sha = ?2 AND creator_id = ?3
+               AND NOT EXISTS (SELECT 1 FROM workflow_runs r WHERE r.suite_id = check_suites.id)
+             ORDER BY id LIMIT 1",
             params![repo_id, head_sha, creator_id],
             |r| r.get(0),
         )

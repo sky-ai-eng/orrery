@@ -2,9 +2,9 @@
 //! and what the run comes to.
 
 use orrery_world::{
-    ActorKind, Attribution, CheckConclusion, CheckRun, CheckStatus, Door, JobSpec, NewWorkflow,
-    NewWorkflowRun, StepConclusion, StepSpec, StepStatus, World, WorldError, WorldSecret,
-    check_jobs,
+    ActorKind, Attribution, CheckConclusion, CheckRun, CheckRunPatch, CheckStatus, Door, JobSpec,
+    NewCheckRun, NewWorkflow, NewWorkflowRun, StepConclusion, StepSpec, StepStatus, World,
+    WorldError, WorldSecret, check_jobs,
 };
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -144,6 +144,9 @@ fn names(jobs: &[CheckRun]) -> Vec<(&str, CheckStatus, Option<CheckConclusion>)>
 fn a_run_lists_each_job_when_its_needs_finish_and_ends_when_all_have() {
     let s = seeded();
     let run = s.start(s.workflow(".github/workflows/ci.yml", &ci()));
+
+    // The write answers the run a read does.
+    assert_eq!(s.w.workflow_run_by_id(run.id).unwrap(), Some(run.clone()));
 
     // The run has a suite of its own, which the runner's bot made, and the
     // jobs that need nothing are queued check runs of it.
@@ -348,6 +351,41 @@ fn runs_of_a_workflow_are_numbered_and_each_has_its_own_suite() {
             .map(|r| r.id),
         Some(second.id)
     );
+
+    // A check run the runner's bot makes through the checks API is in a
+    // suite of its own, not a run's, and a job is not written that way.
+    let bot = s.w.actor_by_login("runner").unwrap().unwrap();
+    let as_bot = Attribution::new(bot.id, Door::Rest);
+    let at = s.w.clock().unwrap();
+    let plain =
+        s.w.create_check_run(
+            as_bot,
+            NewCheckRun {
+                repo_id: s.repo_id,
+                head_sha: SHA,
+                name: "extra",
+                status: CheckStatus::Queued,
+                conclusion: None,
+                details_url: None,
+                external_id: None,
+                output: None,
+                started_clock_unix: None,
+                completed_clock_unix: None,
+            },
+            at,
+        )
+        .unwrap();
+    assert!(plain.job.is_none());
+    assert!(![first.suite_id, second.suite_id, elsewhere.suite_id].contains(&plain.suite_id));
+    let job = s.jobs(first.id)[0].id;
+    let patch = CheckRunPatch {
+        status: Some(CheckStatus::Completed),
+        ..Default::default()
+    };
+    assert!(matches!(
+        s.w.update_check_run(job, as_bot, patch, at),
+        Err(WorldError::CheckRunIsJob(_))
+    ));
 
     // The runner is one bot, made by the first run, and a login that is a
     // person's cannot be one.

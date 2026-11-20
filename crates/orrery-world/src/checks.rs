@@ -96,6 +96,11 @@ impl World {
         self.write_at(at, by, |w| {
             let tx = w.tx;
             let before = objects::check_run_object(tx, id)?;
+            // A job moves as its runner reports, which lists the jobs that
+            // were waiting for it.
+            if before.workflow_run_id.is_some() {
+                return Err(WorldError::CheckRunIsJob(id));
+            }
             let run = tx
                 .query_row(
                     &format!(

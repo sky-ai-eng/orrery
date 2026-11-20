@@ -4,7 +4,7 @@
 //! reports them. A job is a check run of the run's suite, so what a run has
 //! come to is what its suite has.
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 
 use crate::events::{self, Attribution, EventBody};
 use crate::types::*;
@@ -147,15 +147,21 @@ impl World {
                 }),
             )?;
             let clock = queries::clock(tx)?;
-            let id: i64 = tx.query_row(
-                "INSERT INTO workflow_runs (repo_id, workflow_id, suite_id, run_number, event,
-                                            head_branch, head_sha, title, actor_id, attempt,
-                                            created_clock_unix, started_clock_unix)
-                 VALUES (?1, ?2, ?3,
-                         (SELECT COALESCE(MAX(run_number), 0) + 1 FROM workflow_runs
-                          WHERE workflow_id = ?2),
-                         ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9)
-                 RETURNING id",
+            // The run reads its status through its suite, which is queued
+            // now and still is once the first jobs are, so the row the
+            // insert returns is the run as the write leaves it.
+            let run = tx.query_row(
+                &format!(
+                    "INSERT INTO workflow_runs (repo_id, workflow_id, suite_id, run_number,
+                                                event, head_branch, head_sha, title, actor_id,
+                                                attempt, created_clock_unix, started_clock_unix)
+                     VALUES (?1, ?2, ?3,
+                             (SELECT COALESCE(MAX(run_number), 0) + 1 FROM workflow_runs
+                              WHERE workflow_id = ?2),
+                             ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9)
+                     RETURNING {}",
+                    queries::WORKFLOW_RUN_COLUMNS
+                ),
                 params![
                     workflow.repo_id,
                     workflow.id,
@@ -167,15 +173,15 @@ impl World {
                     new.actor_id,
                     clock
                 ],
-                |r| r.get(0),
+                queries::row_to_workflow_run,
             )?;
             w.operation(EventBody::WorkflowRunCreated(events::WorkflowRunCreated {
-                subject: objects::workflow_run_subject(tx, id)?,
-                object: objects::workflow_run_object(tx, id)?,
+                subject: objects::workflow_run_subject(tx, run.id)?,
+                object: objects::workflow_run_object(tx, run.id)?,
             }));
-            list_ready_jobs(w, id)?;
+            list_ready_jobs(w, run.id)?;
             suites::settle(w, suite)?;
-            queries::workflow_run_by_id(tx, id)?.ok_or(WorldError::NoSuchWorkflowRun(id))
+            Ok(run)
         })
     }
 
@@ -287,15 +293,8 @@ impl World {
 /// The bot whose check runs a run's jobs are, made if the world has no
 /// actor of that login.
 fn runner(w: &mut log::Write<'_>, login: &str) -> Result<i64> {
-    let held: Option<(i64, String)> =
-        w.tx.query_row(
-            "SELECT id, kind FROM actors WHERE login = ?1",
-            params![login],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    match held {
-        Some((id, kind)) if ActorKind::from_db(&kind) == ActorKind::Bot => Ok(id),
+    match crate::apps::actor_by_login(w.tx, login)? {
+        Some(held) if held.kind == ActorKind::Bot => Ok(held.id),
         Some(_) => Err(WorldError::RunnerNotABot(login.to_string())),
         None => {
             let (bot, _) = crate::insert_actor(w.tx, login, ActorKind::Bot)?;

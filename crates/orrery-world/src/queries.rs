@@ -65,12 +65,13 @@ pub(crate) const WORKFLOW_COLUMNS: &str = "id, repo_id, path, name, jobs, create
 
 /// A run with what it reads through its suite: its status, its conclusion,
 /// and when they last changed.
-pub(crate) const WORKFLOW_RUN_SELECT: &str = "SELECT r.id, r.repo_id, r.workflow_id, r.suite_id,
-    r.run_number, r.event, r.head_branch, r.head_sha, r.title, a.login, r.attempt,
-    s.status, s.conclusion, r.created_clock_unix, r.started_clock_unix, s.updated_clock_unix
-    FROM workflow_runs r
-    JOIN actors a ON a.id = r.actor_id
-    JOIN check_suites s ON s.id = r.suite_id";
+pub(crate) const WORKFLOW_RUN_COLUMNS: &str = "id, repo_id, workflow_id, suite_id, run_number,
+    event, head_branch, head_sha, title,
+    (SELECT login FROM actors WHERE actors.id = workflow_runs.actor_id), attempt,
+    (SELECT status FROM check_suites WHERE check_suites.id = workflow_runs.suite_id),
+    (SELECT conclusion FROM check_suites WHERE check_suites.id = workflow_runs.suite_id),
+    created_clock_unix, started_clock_unix,
+    (SELECT updated_clock_unix FROM check_suites WHERE check_suites.id = workflow_runs.suite_id)";
 
 pub(crate) const CHECK_SUITE_COLUMNS: &str = "id, repo_id, head_sha, head_branch, before_sha,
     (SELECT login FROM actors WHERE actors.id = check_suites.creator_id),
@@ -629,7 +630,7 @@ pub(crate) fn list_all_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
 pub(crate) fn list_all_workflow_runs(conn: &Connection) -> Result<Vec<WorkflowRun>> {
     list(
         conn,
-        &format!("{WORKFLOW_RUN_SELECT} ORDER BY r.id"),
+        &format!("SELECT {WORKFLOW_RUN_COLUMNS} FROM workflow_runs ORDER BY id"),
         row_to_workflow_run,
     )
 }
@@ -717,7 +718,7 @@ pub(crate) fn list_workflows_for_repo(conn: &Connection, repo_id: i64) -> Result
 pub(crate) fn workflow_run_by_id(conn: &Connection, id: i64) -> Result<Option<WorkflowRun>> {
     Ok(conn
         .query_row(
-            &format!("{WORKFLOW_RUN_SELECT} WHERE r.id = ?1"),
+            &format!("SELECT {WORKFLOW_RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"),
             params![id],
             row_to_workflow_run,
         )
@@ -730,7 +731,7 @@ pub(crate) fn workflow_run_by_suite(
 ) -> Result<Option<WorkflowRun>> {
     Ok(conn
         .query_row(
-            &format!("{WORKFLOW_RUN_SELECT} WHERE r.suite_id = ?1"),
+            &format!("SELECT {WORKFLOW_RUN_COLUMNS} FROM workflow_runs WHERE suite_id = ?1"),
             params![suite_id],
             row_to_workflow_run,
         )
@@ -743,7 +744,7 @@ pub(crate) fn list_workflow_runs_for_repo(
     repo_id: i64,
 ) -> Result<Vec<WorkflowRun>> {
     let mut stmt = conn.prepare(&format!(
-        "{WORKFLOW_RUN_SELECT} WHERE r.repo_id = ?1 ORDER BY r.id DESC"
+        "SELECT {WORKFLOW_RUN_COLUMNS} FROM workflow_runs WHERE repo_id = ?1 ORDER BY id DESC"
     ))?;
     let rows = stmt.query_map(params![repo_id], row_to_workflow_run)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

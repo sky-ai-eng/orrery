@@ -428,6 +428,18 @@ async fn a_run_is_driven_by_its_runners_and_read_as_github_serves_it() {
         1
     );
     assert_eq!(count("?unknown=1&per_page=500"), 2);
+    // A filter GitHub has and a world does not is refused by name.
+    let (status, unserved) = face_answer(
+        "GET",
+        &format!("{}/actions/runs?created=%3E2026-01-01", s.api),
+        &s.token,
+        &[],
+        None,
+    );
+    assert_eq!(
+        (status, &unserved["orrery"]["field"]),
+        (422, &json!("created"))
+    );
     assert_eq!(
         s.get("actions/workflows/ci.yml/runs?event=pull_request")["total_count"],
         1
@@ -576,6 +588,17 @@ async fn a_workflow_or_a_run_that_cannot_be_is_refused_by_field() {
     assert_eq!(
         refused(&runs, start("push", &s.feature_sha, "nobody")),
         [invalid("actor")]
+    );
+    // Every name that names nothing is reported, not the first.
+    let mut lost = start("push", &"1".repeat(40), "nobody");
+    lost["head_branch"] = json!("mian");
+    assert_eq!(
+        refused(&runs, lost),
+        [
+            invalid("actor"),
+            invalid("head_sha"),
+            invalid("head_branch")
+        ]
     );
     let (status, _) = s.control(
         "POST",

@@ -19,7 +19,7 @@ use orrery_world::{
     check_jobs,
 };
 
-use crate::control::{Fault, Fields, SYSTEM, errors, internal};
+use crate::control::{Fault, Fields, SYSTEM, errors, faults, internal};
 use crate::{AppState, json};
 
 /// The login of the bot GitHub's runners write check runs as.
@@ -92,11 +92,13 @@ fn workflow_body(workflow: Workflow) -> WorkflowBody {
             needs: job.needs,
             always: job.always,
             runs_on: job.labels,
+            // The runner's own first step is not the workflow's to list.
             steps: job
                 .steps
                 .into_iter()
-                .skip(1)
-                .map(|step| StepBody {
+                .enumerate()
+                .filter(|(i, step)| *i > 0 || step.name != SET_UP)
+                .map(|(_, step)| StepBody {
                     name: step.name,
                     always: step.always,
                 })
@@ -408,7 +410,6 @@ async fn start_run(
         Ok(read) => read,
         Err(resp) => return *resp,
     };
-    let head_sha = head_sha.to_ascii_lowercase();
     // The commit is read from the bare repository, which a restore replaces
     // under the gate.
     let _gate = state.git.gate().read_owned().await;
@@ -418,56 +419,70 @@ async fn start_run(
         Ok(found) => found,
         Err(resp) => return *resp,
     };
-    let actor = match state.world.actor_by_login(&actor) {
-        Ok(Some(found)) if found.kind == ActorKind::User => found,
-        Ok(_) => return invalid(format!("no user {actor:?}"), "actor"),
+    // Each of the body's names is looked up, and every one that names
+    // nothing is reported.
+    let mut wrong = Vec::new();
+    let actor_id = match state.world.actor_by_login(&actor) {
+        Ok(Some(found)) if found.kind == ActorKind::User => Some(found.id),
+        Ok(_) => {
+            wrong.push(Fault::invalid(format!("no user {actor:?}"), "actor"));
+            None
+        }
         Err(e) => return internal(e),
     };
     let bare = store::bare_dir(&state.world.repos_dir(), &repo.owner_login, &repo.name);
     let commit = match signature::read_commit(&bare, &head_sha) {
-        Ok(Some(commit)) => commit,
+        Ok(Some(commit)) => Some(commit),
         Ok(None) => {
-            return invalid(
+            wrong.push(Fault::invalid(
                 format!("{} has no commit {head_sha}", repo.full_name()),
                 "head_sha",
-            );
+            ));
+            None
         }
         Err(e) => return internal(e),
     };
-    let title = match event.as_str() {
-        "push" => commit.message.lines().next().unwrap_or("").to_string(),
-        "pull_request" => {
-            let pulls = match state
-                .world
-                .list_pulls_for_repo(repo.id, Some(PullState::Open))
-            {
-                Ok(pulls) => pulls,
-                Err(e) => return internal(e),
-            };
-            let of = pulls
-                .into_iter()
-                .find(|pull| pull.head_sha == head_sha && pull.head_ref == head_branch);
-            match of {
-                Some(pull) => pull.title,
-                None => {
-                    return invalid(
-                        format!(
-                            "no open pull request has {head_branch:?} as its head at {head_sha}"
-                        ),
-                        "head_sha",
-                    );
-                }
-            }
+    match store::rev_parse(&bare, &format!("refs/heads/{head_branch}")) {
+        Ok(Some(_)) => {}
+        Ok(None) => wrong.push(Fault::invalid(
+            format!("{} has no branch {head_branch:?}", repo.full_name()),
+            "head_branch",
+        )),
+        Err(e) => return internal(e),
+    }
+    let mut title = workflow.name.clone();
+    if event == "pull_request" && wrong.is_empty() {
+        let pulls = match state
+            .world
+            .list_pulls_for_repo(repo.id, Some(PullState::Open))
+        {
+            Ok(pulls) => pulls,
+            Err(e) => return internal(e),
+        };
+        let of = pulls
+            .into_iter()
+            .find(|pull| pull.head_sha == head_sha && pull.head_ref == head_branch);
+        match of {
+            Some(pull) => title = pull.title,
+            None => wrong.push(Fault::invalid(
+                format!("no open pull request has {head_branch:?} as its head at {head_sha}"),
+                "head_sha",
+            )),
         }
-        _ => workflow.name.clone(),
+    }
+    let (Some(actor_id), Some(commit), true) = (actor_id, commit, wrong.is_empty()) else {
+        return faults(StatusCode::BAD_REQUEST, wrong);
     };
+    if event == "push" {
+        title = commit.message.lines().next().unwrap_or("").to_string();
+    }
     let new = NewWorkflowRun {
         workflow_id: workflow.id,
         event: &event,
         head_sha: &head_sha,
         head_branch: Some(&head_branch),
         title: &title,
-        actor_id: actor.id,
+        actor_id,
         runner: RUNNER,
     };
     answered(

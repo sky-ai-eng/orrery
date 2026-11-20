@@ -8,7 +8,8 @@ use axum::extract::{Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode, header};
 use orrery_face_git::{signature, store};
 use orrery_world::{
-    Actor, CheckRun, Repo, StepConclusion, StepStatus, Workflow, WorkflowRun, WorldError,
+    Actor, CheckRun, Pull, PullState, Repo, StepConclusion, StepStatus, Workflow, WorkflowRun,
+    WorldError,
 };
 
 use crate::reads::query_param as param;
@@ -101,7 +102,10 @@ fn workflow_json(face: &GithubFace, repo: &Repo, workflow: &Workflow) -> serde_j
             "{web}/{full_name}/blob/{}/{}",
             repo.default_branch, workflow.path
         ),
-        "badge_url": format!("{web}/{full_name}/workflows/{}/badge.svg", workflow.name),
+        "badge_url": format!(
+            "{web}/{full_name}/workflows/{}/badge.svg",
+            crate::oauth::percent_encode(&workflow.name)
+        ),
     })
 }
 
@@ -130,8 +134,9 @@ struct RunContext<'a> {
     owner: &'a Actor,
     workflows: Vec<Workflow>,
     commits: BTreeMap<String, signature::Commit>,
-    /// False for a request that asked for runs without their pull requests.
-    pulls: bool,
+    /// The repository's open pull requests: none for a request that asked
+    /// for runs without theirs.
+    open: Vec<Pull>,
 }
 
 impl<'a> RunContext<'a> {
@@ -157,13 +162,20 @@ impl<'a> RunContext<'a> {
             .into_iter()
             .map(|commit| (commit.sha.clone(), commit))
             .collect();
+        let open = match pulls {
+            true => face
+                .world
+                .list_pulls_for_repo(repo.id, Some(PullState::Open))
+                .map_err(|e| Box::new(internal(e)))?,
+            false => Vec::new(),
+        };
         Ok(RunContext {
             face,
             repo,
             owner,
             workflows,
             commits,
-            pulls,
+            open,
         })
     }
 
@@ -171,7 +183,7 @@ impl<'a> RunContext<'a> {
         self.workflows.iter().find(|w| w.id == id)
     }
 
-    fn run_json(&self, run: &WorkflowRun) -> Result<serde_json::Value, WorldError> {
+    fn run_json(&self, run: &WorkflowRun) -> serde_json::Value {
         let (face, repo) = (self.face, self.repo);
         let web = face.layout.web();
         let api = api(face, repo);
@@ -189,12 +201,9 @@ impl<'a> RunContext<'a> {
                 "committer": person(&commit.committer),
             })
         });
-        let pull_requests = match self.pulls {
-            true => crate::suites::pulls_at(face, repo, &run.head_sha)?,
-            false => serde_json::json!([]),
-        };
+        let pull_requests = crate::suites::pulls_among(face, repo, &self.open, &run.head_sha);
         let repository = short_repo_json(face, repo, self.owner);
-        Ok(serde_json::json!({
+        serde_json::json!({
             "id": run.id,
             "name": workflow.map(|w| w.name.as_str()),
             "node_id": crate::nodeid::workflow_run(run.id),
@@ -230,7 +239,7 @@ impl<'a> RunContext<'a> {
             "head_commit": head_commit,
             "repository": repository,
             "head_repository": repository,
-        }))
+        })
     }
 }
 
@@ -525,6 +534,11 @@ fn runs_page(
     workflow: Option<&Workflow>,
     query: &str,
 ) -> Response<Body> {
+    // GitHub filters on when a run was created, which a world does not, so
+    // a caller that asks is told rather than answered every run.
+    if param(query, "created").is_some() {
+        return crate::orrery_unsupported_field("WorkflowRun", "created");
+    }
     let mut runs = match face.world.list_workflow_runs_for_repo(repo.id) {
         Ok(runs) => filtered(runs, query),
         Err(e) => return internal(e),
@@ -540,16 +554,12 @@ fn runs_page(
         Ok(context) => context,
         Err(resp) => return *resp,
     };
-    let items: Result<Vec<serde_json::Value>, _> =
-        runs.iter().map(|run| context.run_json(run)).collect();
+    let items = runs.iter().map(|run| context.run_json(run)).collect();
     let path = match workflow {
         Some(workflow) => format!("actions/workflows/{}/runs", workflow.id),
         None => "actions/runs".to_string(),
     };
-    match items {
-        Ok(items) => listed(face, repo, &path, "workflow_runs", query, total, items),
-        Err(e) => internal(e),
-    }
+    listed(face, repo, &path, "workflow_runs", query, total, items)
 }
 
 pub(crate) async fn list_runs(
@@ -660,10 +670,7 @@ pub(crate) async fn get_run(
         Ok(context) => context,
         Err(resp) => return *resp,
     };
-    match context.run_json(&run) {
-        Ok(json) => json_response(StatusCode::OK, json),
-        Err(e) => internal(e),
-    }
+    json_response(StatusCode::OK, context.run_json(&run))
 }
 
 /// One page of a run's jobs, oldest first: those of its latest attempt,
