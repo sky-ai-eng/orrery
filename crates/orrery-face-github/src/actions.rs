@@ -86,7 +86,11 @@ fn rfc3339_millis(unix: i64) -> String {
     rfc3339(unix).replacen('Z', ".000Z", 1)
 }
 
-fn workflow_json(face: &GithubFace, repo: &Repo, workflow: &Workflow) -> serde_json::Value {
+pub(crate) fn workflow_json(
+    face: &GithubFace,
+    repo: &Repo,
+    workflow: &Workflow,
+) -> serde_json::Value {
     let web = face.layout.web();
     let full_name = repo.full_name();
     serde_json::json!({
@@ -128,7 +132,7 @@ fn short_repo_json(face: &GithubFace, repo: &Repo, owner: &Actor) -> serde_json:
 
 /// What a run's JSON takes beside the run: its repository, the workflows
 /// of that repository, and the commits its runs are on.
-struct RunContext<'a> {
+pub(crate) struct RunContext<'a> {
     face: &'a GithubFace,
     repo: &'a Repo,
     owner: &'a Actor,
@@ -179,11 +183,37 @@ impl<'a> RunContext<'a> {
         })
     }
 
-    fn workflow(&self, id: i64) -> Option<&Workflow> {
+    /// The context for one run's delivery. A commit the repository cannot
+    /// read is left out, as a delivery leaves out what git cannot answer.
+    pub(crate) fn for_delivery(
+        face: &'a GithubFace,
+        repo: &'a Repo,
+        owner: &'a Actor,
+        run: &WorkflowRun,
+    ) -> Result<RunContext<'a>, WorldError> {
+        let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+        let commits = signature::read_commits(&bare, &[run.head_sha.as_str()])
+            .unwrap_or_default()
+            .into_iter()
+            .map(|commit| (commit.sha.clone(), commit))
+            .collect();
+        Ok(RunContext {
+            face,
+            repo,
+            owner,
+            workflows: face.world.list_workflows_for_repo(repo.id)?,
+            commits,
+            open: face
+                .world
+                .list_pulls_for_repo(repo.id, Some(PullState::Open))?,
+        })
+    }
+
+    pub(crate) fn workflow(&self, id: i64) -> Option<&Workflow> {
         self.workflows.iter().find(|w| w.id == id)
     }
 
-    fn run_json(&self, run: &WorkflowRun) -> serde_json::Value {
+    pub(crate) fn run_json(&self, run: &WorkflowRun) -> serde_json::Value {
         let (face, repo) = (self.face, self.repo);
         let web = face.layout.web();
         let api = api(face, repo);
@@ -245,7 +275,7 @@ impl<'a> RunContext<'a> {
 
 /// A job of `run` as GitHub's `jobs` routes answer it. The machine a
 /// started job names is one of GitHub's own, numbered after the job.
-fn job_json(
+pub(crate) fn job_json(
     face: &GithubFace,
     repo: &Repo,
     run: &WorkflowRun,

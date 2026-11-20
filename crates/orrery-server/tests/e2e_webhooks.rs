@@ -1806,3 +1806,197 @@ async fn a_world_is_released_when_its_server_is_gone() {
     // must not keep the world.
     assert_eq!(std::sync::Arc::strong_count(&world), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_run_sends_what_github_sends_at_each_stage() {
+    let s = setup_with(sending(), 204).await;
+    // The App hears of runs and jobs, and of the check runs and suites
+    // they are.
+    control_post(
+        &s.base,
+        "/_orrery/apps",
+        serde_json::json!({
+            "slug": "watcher",
+            "name": "Watcher",
+            "owner": "acme",
+            "callback_urls": ["https://app.test/callback"],
+            "permissions": { "actions": "read", "checks": "read" },
+            "events": ["workflow_run", "workflow_job", "check_run", "check_suite"],
+            "webhook_url": s.receiver.url,
+            "webhook_active": true,
+        }),
+    );
+    control_post(
+        &s.base,
+        "/_orrery/apps/watcher/installations",
+        serde_json::json!({ "account": "acme" }),
+    );
+    let head_sha = s.push("feature");
+    let repo = format!("{}/_orrery/repos/acme/web", s.base);
+    let runner = |path: &str, body: serde_json::Value| {
+        let mut resp = agent()
+            .post(format!("{repo}{path}"))
+            .send_json(body)
+            .unwrap();
+        let status = resp.status().as_u16();
+        let run: serde_json::Value = resp.body_mut().read_json().unwrap();
+        assert!(status == 200 || status == 201, "{path}: {status} {run}");
+        run
+    };
+    let job_id = |run: &serde_json::Value, name: &str| {
+        run["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|job| job["name"] == name)
+            .unwrap_or_else(|| panic!("no job {name} in {run}"))["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let none = serde_json::json!({});
+    let workflow = runner(
+        "/workflows",
+        serde_json::json!({
+            "path": ".github/workflows/ci.yml",
+            "name": "ci",
+            "jobs": [
+                { "name": "test", "steps": [{ "name": "Run tests" }] },
+                { "name": "report", "needs": ["test"], "always": true },
+                { "name": "deploy", "needs": ["report"] },
+            ],
+        }),
+    );
+
+    // Starting a run asks for it and queues its first job.
+    let run = runner(
+        &format!("/workflows/{}/runs", workflow["id"]),
+        serde_json::json!({
+            "event": "push", "head_sha": head_sha, "head_branch": "feature", "actor": "alice",
+        }),
+    );
+    let test = job_id(&run, "test");
+    // A runner takes the job, and the run is in progress. A step sends
+    // nothing.
+    runner(&format!("/workflow-jobs/{test}/start"), none.clone());
+    runner(
+        &format!("/workflow-jobs/{test}/complete-step"),
+        serde_json::json!({ "conclusion": "success" }),
+    );
+    // The job finishes, and the next is queued: the run is queued again,
+    // which sends nothing.
+    let run = runner(
+        &format!("/workflow-jobs/{test}/complete"),
+        serde_json::json!({ "conclusion": "success" }),
+    );
+    let report = job_id(&run, "report");
+    // The run is in progress again, then its last job fails: the job that
+    // needed it is listed as skipped, and the run is complete.
+    runner(&format!("/workflow-jobs/{report}/start"), none.clone());
+    runner(
+        &format!("/workflow-jobs/{report}/complete"),
+        serde_json::json!({ "conclusion": "failure" }),
+    );
+
+    // The first delivery is the installation's own.
+    let got = s.receiver.wait(19).await;
+    assert_eq!(got[0].kind().0, "installation");
+    let got = &got[1..];
+    let kinds: Vec<(String, String, String)> = got
+        .iter()
+        .map(|r| {
+            let (event, action) = r.kind();
+            let payload = r.json();
+            let about = match event.as_str() {
+                "workflow_job" => payload["workflow_job"]["name"].clone(),
+                "check_run" => payload["check_run"]["name"].clone(),
+                _ => serde_json::json!(""),
+            };
+            (
+                event,
+                action.unwrap_or_default(),
+                about.as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let kind = |event: &str, action: &str, about: &str| {
+        (event.to_string(), action.to_string(), about.to_string())
+    };
+    assert_eq!(
+        kinds,
+        [
+            kind("workflow_run", "requested", ""),
+            kind("check_run", "created", "test"),
+            kind("workflow_job", "queued", "test"),
+            kind("workflow_job", "in_progress", "test"),
+            kind("workflow_run", "in_progress", ""),
+            kind("check_run", "completed", "test"),
+            kind("workflow_job", "completed", "test"),
+            kind("check_run", "created", "report"),
+            kind("workflow_job", "queued", "report"),
+            kind("workflow_job", "in_progress", "report"),
+            kind("workflow_run", "in_progress", ""),
+            kind("check_run", "completed", "report"),
+            kind("workflow_job", "completed", "report"),
+            kind("check_run", "created", "deploy"),
+            kind("check_run", "completed", "deploy"),
+            kind("workflow_job", "completed", "deploy"),
+            kind("check_suite", "completed", ""),
+            kind("workflow_run", "completed", ""),
+        ]
+    );
+
+    // A run's payload is the run and its workflow as REST answers them,
+    // from whoever started it.
+    let read = |path: &str| {
+        call(
+            "GET",
+            &format!("{}/repos/acme/web/{path}", s.api),
+            &bearer(&s.alice),
+            None,
+        )
+        .2
+    };
+    let requested = got[0].json();
+    assert_eq!(requested["workflow_run"]["status"], "queued");
+    assert_eq!(requested["workflow_run"]["head_sha"], head_sha.as_str());
+    assert_eq!(
+        requested["workflow_run"]["head_commit"]["message"],
+        "a change"
+    );
+    assert_eq!(requested["workflow"], read("actions/workflows/ci.yml"));
+    assert_eq!(requested["sender"]["login"], "alice");
+    assert_eq!(requested["repository"]["full_name"], "acme/web");
+    assert_eq!(requested["organization"]["login"], "acme");
+    assert!(requested["installation"]["id"].is_i64());
+    let completed = got[17].json();
+    assert_eq!(
+        completed["workflow_run"],
+        read(&format!("actions/runs/{}", run["id"]))
+    );
+    assert_eq!(completed["workflow_run"]["conclusion"], "failure");
+
+    // A job's payload is the job as REST answers it, steps included, as it
+    // was when the delivery was made.
+    let taken = got[3].json();
+    assert_eq!(taken["workflow_job"]["status"], "in_progress");
+    assert_eq!(taken["workflow_job"]["steps"][0]["status"], "in_progress");
+    assert_eq!(taken["workflow_job"]["steps"][1]["status"], "pending");
+    assert_eq!(taken["sender"]["login"], "alice");
+    let finished = got[6].json();
+    assert_eq!(
+        finished["workflow_job"],
+        read(&format!("actions/jobs/{test}"))
+    );
+    assert_eq!(
+        finished["workflow_job"]["steps"].as_array().unwrap().len(),
+        3
+    );
+    let skipped = got[15].json();
+    assert_eq!(skipped["workflow_job"]["conclusion"], "skipped");
+    assert_eq!(skipped["workflow_job"]["steps"], serde_json::json!([]));
+
+    // The job's check run names the Actions App, from the same sender.
+    let check = got[1].json();
+    assert_eq!(check["check_run"]["app"]["slug"], "github-actions");
+    assert_eq!(check["sender"]["login"], "alice");
+}

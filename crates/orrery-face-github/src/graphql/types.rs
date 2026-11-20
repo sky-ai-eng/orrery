@@ -83,6 +83,8 @@ pub enum CheckStatusState {
     Queued,
     InProgress,
     Completed,
+    /// A step its job has listed and not reached.
+    Pending,
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
@@ -835,10 +837,94 @@ pub struct PullRequestReviewConnection {
 
 // ---- check runs -----------------------------------------------------------
 
-#[derive(SimpleObject)]
-#[graphql(name = "WorkflowRun")]
+/// The run a check suite's check runs are the jobs of.
 pub struct GqlWorkflowRun {
+    run: world::WorkflowRun,
+}
+
+#[Object(name = "WorkflowRun")]
+impl GqlWorkflowRun {
+    async fn database_id(&self) -> Option<i64> {
+        Some(self.run.id)
+    }
+
+    async fn run_number(&self) -> i64 {
+        self.run.run_number
+    }
+
+    async fn event(&self) -> &str {
+        &self.run.event
+    }
+
+    async fn url(&self, ctx: &Context<'_>) -> Result<Option<String>, Error> {
+        let face = face(ctx);
+        let repo = face.world.repo_by_id(self.run.repo_id).map_err(internal)?;
+        Ok(repo.map(|repo| {
+            format!(
+                "{}/{}/actions/runs/{}",
+                face.layout.web(),
+                repo.full_name(),
+                self.run.id
+            )
+        }))
+    }
+
+    async fn created_at(&self) -> String {
+        rfc3339(self.run.created_clock_unix)
+    }
+
+    async fn updated_at(&self) -> String {
+        rfc3339(self.run.updated_clock_unix)
+    }
+
+    async fn workflow(&self, ctx: &Context<'_>) -> Result<Option<GqlWorkflow>, Error> {
+        let workflow = face(ctx)
+            .world
+            .workflow_by_id(self.run.workflow_id)
+            .map_err(internal)?;
+        Ok(workflow.map(|workflow| GqlWorkflow {
+            database_id: Some(workflow.id),
+            name: workflow.name,
+        }))
+    }
+}
+
+#[derive(SimpleObject)]
+#[graphql(name = "Workflow")]
+pub struct GqlWorkflow {
     pub database_id: Option<i64>,
+    pub name: String,
+}
+
+/// The App whose check runs a suite holds.
+#[derive(SimpleObject)]
+#[graphql(name = "App")]
+pub struct GqlApp {
+    pub database_id: Option<i64>,
+    pub slug: String,
+    pub name: String,
+}
+
+/// One step of a job.
+#[derive(SimpleObject)]
+#[graphql(name = "CheckStep")]
+pub struct GqlCheckStep {
+    pub number: i64,
+    pub name: String,
+    pub status: CheckStatusState,
+    pub conclusion: Option<CheckConclusionState>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    /// How long it took, for a step that has finished.
+    pub seconds_to_completion: Option<i64>,
+}
+
+#[derive(SimpleObject)]
+#[graphql(name = "CheckStepConnection")]
+pub struct CheckStepConnection {
+    pub total_count: i64,
+    pub page_info: PageInfo,
+    pub nodes: Vec<GqlCheckStep>,
 }
 
 pub struct GqlCheckSuite {
@@ -859,10 +945,36 @@ impl GqlCheckSuite {
         self.suite.conclusion.map(check_conclusion)
     }
 
-    /// A world runs no workflows, so no suite is a workflow run's: the
-    /// answer GitHub gives for a check an app other than Actions made.
-    async fn workflow_run(&self) -> Option<GqlWorkflowRun> {
-        None
+    /// The App of the bot whose check runs the suite holds: GitHub's own
+    /// Actions App for a workflow run's suite in a world with no App of
+    /// that slug, and null for a bot that has no App.
+    async fn app(&self, ctx: &Context<'_>) -> Result<Option<GqlApp>, Error> {
+        let slug = &self.suite.creator_login;
+        let app = face(ctx).world.app_by_slug(slug).map_err(internal)?;
+        Ok(match app {
+            Some(app) => Some(GqlApp {
+                database_id: Some(app.id),
+                slug: app.slug,
+                name: app.name,
+            }),
+            None if slug == crate::actions::ACTIONS_APP => Some(GqlApp {
+                database_id: Some(crate::actions::ACTIONS_APP_ID),
+                slug: slug.clone(),
+                name: "GitHub Actions".to_string(),
+            }),
+            None => None,
+        })
+    }
+
+    /// The workflow run whose jobs the suite's check runs are, and null for
+    /// a suite that is no run's: the answer GitHub gives for a check an App
+    /// other than Actions made.
+    async fn workflow_run(&self, ctx: &Context<'_>) -> Result<Option<GqlWorkflowRun>, Error> {
+        let run = face(ctx)
+            .world
+            .workflow_run_by_suite(self.suite.id)
+            .map_err(internal)?;
+        Ok(run.map(|run| GqlWorkflowRun { run }))
     }
 }
 
@@ -921,6 +1033,45 @@ impl GqlCheckRun {
         let face = face(ctx);
         let repo = face.world.repo_by_id(self.run.repo_id).map_err(internal)?;
         Ok(repo.map(|repo| crate::actions::job_html_url(face, &repo, job.run_id, self.run.id)))
+    }
+
+    /// A job's steps as its runner has brought them, and none for a check
+    /// run that is no job.
+    async fn steps(&self, first: Option<i32>) -> Result<CheckStepConnection, Error> {
+        let steps: Vec<GqlCheckStep> = self
+            .run
+            .job
+            .iter()
+            .flat_map(|job| &job.steps)
+            .enumerate()
+            .map(|(i, step)| GqlCheckStep {
+                number: i as i64 + 1,
+                name: step.name.clone(),
+                status: match step.status {
+                    world::StepStatus::Pending => CheckStatusState::Pending,
+                    world::StepStatus::InProgress => CheckStatusState::InProgress,
+                    world::StepStatus::Completed => CheckStatusState::Completed,
+                },
+                conclusion: step.conclusion.map(|c| match c {
+                    world::StepConclusion::Success => CheckConclusionState::Success,
+                    world::StepConclusion::Failure => CheckConclusionState::Failure,
+                    world::StepConclusion::Skipped => CheckConclusionState::Skipped,
+                }),
+                started_at: step.started_unix.map(rfc3339),
+                completed_at: step.completed_unix.map(rfc3339),
+                seconds_to_completion: step
+                    .started_unix
+                    .zip(step.completed_unix)
+                    .map(|(started, completed)| completed - started),
+            })
+            .collect();
+        let total_count = steps.len() as i64;
+        let (nodes, page_info) = take_first("steps", steps, first)?;
+        Ok(CheckStepConnection {
+            total_count,
+            page_info,
+            nodes,
+        })
     }
 
     async fn check_suite(&self, ctx: &Context<'_>) -> Result<Option<GqlCheckSuite>, Error> {

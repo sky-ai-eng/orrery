@@ -616,3 +616,153 @@ async fn a_workflow_or_a_run_that_cannot_be_is_refused_by_field() {
     let (status, run) = s.control("POST", &runs, Some(start("schedule", &s.main_sha, "alice")));
     assert_eq!((status, &run["title"]), (201, &json!("ci")));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graphql_reads_a_jobs_steps_and_the_run_its_suite_is() {
+    let s = seed().await;
+    let (_, workflow) = s.control("POST", "/workflows", Some(ci()));
+    let run = s.runner(
+        &format!("/workflows/{}/runs", workflow["id"]),
+        Some(json!({
+            "event": "pull_request", "head_sha": s.feature_sha, "head_branch": "feature",
+            "actor": "alice",
+        })),
+    );
+    let test = job_id(&run, "test");
+    s.runner(&format!("/workflow-jobs/{test}/start"), None);
+    s.runner(
+        &format!("/workflow-jobs/{test}/complete-step"),
+        Some(json!({ "conclusion": "success" })),
+    );
+    s.inst
+        .world
+        .advance_clock(
+            7,
+            orrery_world::Attribution::new(
+                orrery_world::SYSTEM_ACTOR_ID,
+                orrery_world::Door::Control,
+            ),
+        )
+        .unwrap();
+    s.runner(
+        &format!("/workflow-jobs/{test}/complete-step"),
+        Some(json!({ "conclusion": "failure" })),
+    );
+    // A check run that is no job, on the same commit.
+    let ci_token = mint_actor(&s.inst.base, "ci", "bot");
+    face_ok(
+        "POST",
+        &format!("{}/check-runs", s.api),
+        &ci_token,
+        json!({ "name": "external", "head_sha": s.feature_sha }),
+    );
+
+    let query = r#"
+        query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest {
+            commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 50) { nodes {
+                __typename
+                ... on CheckRun {
+                    databaseId name status detailsUrl
+                    checkSuite {
+                        databaseId status
+                        app { slug databaseId }
+                        workflowRun { databaseId runNumber event url workflow { name } }
+                    }
+                    steps(first: 50) {
+                        totalCount
+                        nodes { number name status conclusion startedAt completedAt secondsToCompletion }
+                    }
+                }
+            } } } } } }
+        } } }"#;
+    let answer: Value = ureq::post(format!("{}/api/graphql", s.inst.base))
+        .header("authorization", &format!("token {}", s.token))
+        .send_json(json!({ "query": query, "variables": { "ids": ["O_pull_1"] } }))
+        .unwrap()
+        .body_mut()
+        .read_json()
+        .unwrap();
+    assert!(answer.get("errors").is_none(), "{answer}");
+    let contexts = answer["data"]["nodes"][0]["commits"]["nodes"][0]["commit"]["statusCheckRollup"]
+        ["contexts"]["nodes"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let named = |name: &str| {
+        contexts
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {contexts:?}"))
+            .clone()
+    };
+
+    // The job names its run through its suite, and its page.
+    let job = named("test");
+    assert_eq!(job["status"], "IN_PROGRESS");
+    assert_eq!(
+        job["detailsUrl"],
+        format!(
+            "{}/alice/web/actions/runs/{}/job/{test}",
+            s.inst.base, run["id"]
+        )
+        .as_str()
+    );
+    let suite = &job["checkSuite"];
+    assert_eq!(suite["databaseId"], run["check_suite_id"]);
+    assert_eq!(
+        suite["app"],
+        json!({ "slug": "github-actions", "databaseId": 15368 })
+    );
+    assert_eq!(
+        suite["workflowRun"],
+        json!({
+            "databaseId": run["id"],
+            "runNumber": 1,
+            "event": "pull_request",
+            "url": format!("{}/alice/web/actions/runs/{}", s.inst.base, run["id"]),
+            "workflow": { "name": "ci" },
+        })
+    );
+
+    // Its steps are as the runner has brought them.
+    let steps = &job["steps"];
+    assert_eq!(steps["totalCount"], 4);
+    let brief: Vec<(i64, &str, &str, &Value)> = steps["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| {
+            (
+                step["number"].as_i64().unwrap(),
+                step["name"].as_str().unwrap(),
+                step["status"].as_str().unwrap(),
+                &step["conclusion"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        brief,
+        [
+            (1, "Set up job", "COMPLETED", &json!("SUCCESS")),
+            (2, "Run tests", "COMPLETED", &json!("FAILURE")),
+            (
+                3,
+                "Never reached on failure",
+                "COMPLETED",
+                &json!("SKIPPED")
+            ),
+            (4, "Dump logs", "IN_PROGRESS", &Value::Null),
+        ]
+    );
+    assert_eq!(steps["nodes"][1]["secondsToCompletion"], 7);
+    assert!(steps["nodes"][3]["completedAt"].is_null());
+    assert!(steps["nodes"][3]["secondsToCompletion"].is_null());
+
+    // A queued job has listed no steps, and a check run that is no job has
+    // none and no run.
+    assert_eq!(named("lint")["steps"]["totalCount"], 0);
+    let plain = named("external");
+    assert_eq!(plain["steps"]["nodes"], json!([]));
+    assert!(plain["checkSuite"]["workflowRun"].is_null());
+    assert!(plain["checkSuite"]["app"].is_null());
+}

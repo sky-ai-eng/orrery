@@ -456,6 +456,7 @@ fn addressed(event: &EventBody) -> Option<(&'static str, i64)> {
         EventBody::CheckRunCreated(e) => ("check_run", e.subject.repo.id),
         EventBody::CheckRunUpdated(e) => ("check_run", e.subject.repo.id),
         EventBody::CheckSuiteUpdated(e) => ("check_suite", e.subject.repo.id),
+        EventBody::WorkflowRunCreated(e) => ("workflow_run", e.subject.repo.id),
         EventBody::DependencyAlertCreated(e) => ("dependabot_alert", e.subject.repo.id),
         EventBody::DependencyAlertDismissed(e)
         | EventBody::DependencyAlertReopened(e)
@@ -468,6 +469,17 @@ fn addressed(event: &EventBody) -> Option<(&'static str, i64)> {
         EventBody::RefDeleted(e) => ("push", e.subject.repo.id),
         _ => return None,
     })
+}
+
+/// The Actions event GitHub sends beside the one [`addressed`] names: a
+/// check run that is a job is its `workflow_job` too, and a suite that is a
+/// workflow run's is its `workflow_run`.
+fn beside(event: &EventBody) -> Option<&'static str> {
+    match event {
+        EventBody::CheckRunCreated(_) | EventBody::CheckRunUpdated(_) => Some("workflow_job"),
+        EventBody::CheckSuiteUpdated(_) => Some("workflow_run"),
+        _ => None,
+    }
 }
 
 /// An event about one installation, which only that installation's App
@@ -538,44 +550,74 @@ impl Rendering {
             let Some(repo) = world.repo_by_id(repo_id)? else {
                 continue;
             };
-            let receivers: Vec<&Installation> = installations
-                .iter()
-                .filter(|i| receives(i, &repo, name))
-                .filter(|i| apps.iter().any(|app| app.id == i.app_id))
-                .collect();
-            if receivers.is_empty() {
-                continue;
-            }
-            // GitHub names the organization that owns the repository, when
-            // one does, in every payload about it.
-            let organization = match world.actor_by_login(&repo.owner_login)? {
-                Some(owner) if owner.kind == ActorKind::Org => {
-                    Some(organization_json(&self.face.layout, &owner))
-                }
-                _ => None,
-            };
-            for outgoing in self.outgoing(world, event, sender.as_ref())? {
-                for installation in &receivers {
-                    let mut payload = outgoing.payload.clone();
-                    if let Some(organization) = &organization {
-                        payload["organization"] = organization.clone();
-                    }
-                    payload["installation"] = serde_json::json!({
-                        "id": installation.id,
-                        "node_id": installation_node_id(installation.id),
-                    });
-                    made.push(NewDelivery {
-                        app_id: installation.app_id,
-                        installation_id: Some(installation.id),
-                        repo_id: Some(repo.id),
-                        event: name.to_string(),
-                        action: outgoing.action.clone(),
-                        body: payload.to_string(),
-                    });
-                }
+            for name in [Some(name), beside(event)].into_iter().flatten() {
+                self.addressed_to(
+                    world,
+                    event,
+                    name,
+                    &repo,
+                    &apps,
+                    &installations,
+                    sender.as_ref(),
+                    &mut made,
+                )?;
             }
         }
         Ok(made)
+    }
+
+    /// The deliveries of one of GitHub's events that one of a write's
+    /// events sends, to each App that receives that event for the
+    /// repository.
+    #[allow(clippy::too_many_arguments)]
+    fn addressed_to(
+        &self,
+        world: &World,
+        event: &EventBody,
+        name: &'static str,
+        repo: &Repo,
+        apps: &[App],
+        installations: &[Installation],
+        sender: Option<&Actor>,
+        made: &mut Vec<NewDelivery>,
+    ) -> Result<(), WorldError> {
+        let receivers: Vec<&Installation> = installations
+            .iter()
+            .filter(|i| receives(i, repo, name))
+            .filter(|i| apps.iter().any(|app| app.id == i.app_id))
+            .collect();
+        if receivers.is_empty() {
+            return Ok(());
+        }
+        // GitHub names the organization that owns the repository, when
+        // one does, in every payload about it.
+        let organization = match world.actor_by_login(&repo.owner_login)? {
+            Some(owner) if owner.kind == ActorKind::Org => {
+                Some(organization_json(&self.face.layout, &owner))
+            }
+            _ => None,
+        };
+        for outgoing in self.outgoing(world, event, name, sender)? {
+            for installation in &receivers {
+                let mut payload = outgoing.payload.clone();
+                if let Some(organization) = &organization {
+                    payload["organization"] = organization.clone();
+                }
+                payload["installation"] = serde_json::json!({
+                    "id": installation.id,
+                    "node_id": installation_node_id(installation.id),
+                });
+                made.push(NewDelivery {
+                    app_id: installation.app_id,
+                    installation_id: Some(installation.id),
+                    repo_id: Some(repo.id),
+                    event: name.to_string(),
+                    action: outgoing.action.clone(),
+                    body: payload.to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// The installation an event is about, and GitHub's action for it.
@@ -674,13 +716,20 @@ impl Rendering {
         })
     }
 
-    /// What one of a write's events sends to every App that receives it.
+    /// What one of a write's events sends, as GitHub's event `name`, to
+    /// every App that receives it.
     fn outgoing(
         &self,
         world: &World,
         event: &EventBody,
+        name: &str,
         sender: Option<&Actor>,
     ) -> Result<Vec<Outgoing>, WorldError> {
+        match name {
+            "workflow_job" => return self.workflow_job(world, event),
+            "workflow_run" => return self.workflow_run(world, event),
+            _ => {}
+        }
         let face = &self.face;
         let actor = sender;
         let sender = sender.map(actor_json).unwrap_or(serde_json::Value::Null);
@@ -1035,6 +1084,94 @@ impl Rendering {
                 "check_suite": check_suite,
                 "repository": repo_json(face, &repo, &owner),
                 "sender": self.suite_sender(world, &suite)?,
+            }),
+        }])
+    }
+
+    /// GitHub's `workflow_job` for a job: `queued` when it is listed,
+    /// `in_progress` when a runner takes it, and `completed` when it
+    /// finishes, which for a job listed as skipped is all it sends. A step
+    /// sends nothing.
+    fn workflow_job(&self, world: &World, event: &EventBody) -> Result<Vec<Outgoing>, WorldError> {
+        let face = &self.face;
+        let (id, repo_id, status) = match event {
+            EventBody::CheckRunCreated(e) => (e.subject.id, e.subject.repo.id, e.object.status),
+            EventBody::CheckRunUpdated(e) => match &e.changes.status {
+                Some(status) => (e.subject.id, e.subject.repo.id, status.to),
+                None => return Ok(Vec::new()),
+            },
+            _ => return Ok(Vec::new()),
+        };
+        let (Some(repo), Some(job)) = (world.repo_by_id(repo_id)?, world.check_run_by_id(id)?)
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(held) = &job.job else {
+            return Ok(Vec::new());
+        };
+        let (Some(owner), Some(run)) = (
+            world.actor_by_login(&repo.owner_login)?,
+            world.workflow_run_by_id(held.run_id)?,
+        ) else {
+            return Ok(Vec::new());
+        };
+        let workflow = world.workflow_by_id(run.workflow_id)?;
+        let action = match status {
+            CheckStatus::Queued => "queued",
+            CheckStatus::InProgress => "in_progress",
+            CheckStatus::Completed => "completed",
+        };
+        Ok(vec![Outgoing {
+            action: Some(action.to_string()),
+            payload: serde_json::json!({
+                "action": action,
+                "workflow_job": crate::actions::job_json(face, &repo, &run, workflow.as_ref(), &job),
+                "repository": repo_json(face, &repo, &owner),
+                "sender": user_json(face, &run.actor_login),
+            }),
+        }])
+    }
+
+    /// GitHub's `workflow_run` for a run: `requested` when it starts,
+    /// `in_progress` each time it becomes so, and `completed` when it
+    /// finishes. A run that goes back to queued between jobs sends nothing.
+    fn workflow_run(&self, world: &World, event: &EventBody) -> Result<Vec<Outgoing>, WorldError> {
+        let face = &self.face;
+        let (run, action) = match event {
+            EventBody::WorkflowRunCreated(e) => {
+                (world.workflow_run_by_id(e.subject.id)?, "requested")
+            }
+            EventBody::CheckSuiteUpdated(e) => {
+                let action = match e.changes.status.as_ref().map(|status| status.to) {
+                    Some(CheckStatus::InProgress) => "in_progress",
+                    Some(CheckStatus::Completed) => "completed",
+                    _ => return Ok(Vec::new()),
+                };
+                (world.workflow_run_by_suite(e.subject.id)?, action)
+            }
+            _ => return Ok(Vec::new()),
+        };
+        let Some(run) = run else {
+            return Ok(Vec::new());
+        };
+        let Some(repo) = world.repo_by_id(run.repo_id)? else {
+            return Ok(Vec::new());
+        };
+        let Some(owner) = world.actor_by_login(&repo.owner_login)? else {
+            return Ok(Vec::new());
+        };
+        let context = crate::actions::RunContext::for_delivery(face, &repo, &owner, &run)?;
+        let workflow = context
+            .workflow(run.workflow_id)
+            .map(|workflow| crate::actions::workflow_json(face, &repo, workflow));
+        Ok(vec![Outgoing {
+            action: Some(action.to_string()),
+            payload: serde_json::json!({
+                "action": action,
+                "workflow_run": context.run_json(&run),
+                "workflow": workflow,
+                "repository": repo_json(face, &repo, &owner),
+                "sender": user_json(face, &run.actor_login),
             }),
         }])
     }
