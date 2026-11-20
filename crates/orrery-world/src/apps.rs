@@ -766,7 +766,7 @@ pub(crate) fn caller_by_installation_token(
         .query_row(
             "SELECT b.id, b.login, b.kind, b.created_clock_unix,
                     t.id, t.expires_clock_unix, i.id, i.app_id, i.repository_selection, c.login,
-                    i.suspended_clock_unix IS NOT NULL
+                    i.suspended_clock_unix IS NOT NULL, t.permissions
              FROM app_installation_tokens t
              JOIN app_installations i ON i.id = t.installation_id
              JOIN apps a ON a.id = i.app_id
@@ -784,12 +784,22 @@ pub(crate) fn caller_by_installation_token(
                     RepositorySelection::from_db(&r.get::<_, String>(8)?),
                     r.get::<_, String>(9)?,
                     r.get::<_, bool>(10)?,
+                    json_column::<Permissions>(r, 11)?,
                 ))
             },
         )
         .optional()?;
-    let Some((actor, token_id, expires, installation_id, app_id, selection, account, suspended)) =
-        found
+    let Some((
+        actor,
+        token_id,
+        expires,
+        installation_id,
+        app_id,
+        selection,
+        account,
+        suspended,
+        permissions,
+    )) = found
     else {
         return Ok(None);
     };
@@ -819,6 +829,7 @@ pub(crate) fn caller_by_installation_token(
             account,
             repos,
             suspended,
+            permissions,
         }),
     }))
 }

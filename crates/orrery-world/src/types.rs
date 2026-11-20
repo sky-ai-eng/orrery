@@ -867,8 +867,8 @@ pub enum AccessLevel {
 }
 
 /// What an app, an installation, or an installation token may do, by
-/// permission name. The world records and echoes them; nothing checks a
-/// call against them.
+/// permission name. The world records them and checks no call against
+/// them: a face does, where its vendor does.
 pub type Permissions = std::collections::BTreeMap<String, AccessLevel>;
 
 /// Which of its account's repositories an installation covers.
@@ -1046,6 +1046,17 @@ pub struct InstallationGrant {
     /// Whether the installation is suspended. Its tokens still name their
     /// caller, so a face can say why it refuses them.
     pub suspended: bool,
+    /// What the token may do, by permission name.
+    pub permissions: Permissions,
+}
+
+impl InstallationGrant {
+    /// Whether the token holds the permission `name` at `level` or above.
+    pub fn permits(&self, name: &str, level: AccessLevel) -> bool {
+        self.permissions
+            .get(name)
+            .is_some_and(|held| *held >= level)
+    }
 }
 
 impl InstallationGrant {

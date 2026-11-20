@@ -759,8 +759,31 @@ pub(crate) fn not_accessible() -> Response<Body> {
     )
 }
 
-/// Keep an installation token to what its installation covers, on every
-/// REST route about one repository or one organization.
+/// The permission GitHub asks of an installation token on a route: `actions`
+/// on one under `actions/`, and `checks` on one of check runs or suites, to
+/// read for a `GET` and to write for anything else.
+fn permission_needed(route: &str, method: &Method) -> Option<(&'static str, AccessLevel)> {
+    let name = if route.contains("/actions/") {
+        "actions"
+    } else if route.contains("/check-runs") || route.contains("/check-suites") {
+        "checks"
+    } else {
+        return None;
+    };
+    let level = match *method {
+        Method::GET | Method::HEAD => AccessLevel::Read,
+        _ => AccessLevel::Write,
+    };
+    Some((name, level))
+}
+
+/// Keep an installation token to what its installation covers and to what
+/// its permissions allow, on every REST route about one repository or one
+/// organization.
+///
+/// GitHub checks a permission before it looks for what the path names, so
+/// this runs ahead of the handler: a run that does not exist is refused a
+/// token without the permission, and is a `404` to one with it.
 ///
 /// The repository and the organization are read from the route's own path
 /// parameters, as the handler reads them, so the two never disagree about
@@ -781,7 +804,8 @@ pub(crate) async fn limit_installation(
     };
     let param = |name: &str| params.iter().find(|(key, _)| *key == name).map(|(_, v)| v);
     let write = !matches!(*req.method(), Method::GET | Method::HEAD);
-    let by_id = matched.is_some_and(|m| m.as_str().contains("/repositories/{id}"));
+    let route = matched.as_ref().map_or("", |m| m.as_str());
+    let by_id = route.contains("/repositories/{id}");
     let repo = match (param("owner"), param("repo"), param("id")) {
         (Some(owner), Some(name), _) => match resolve_repo(&face, owner, name) {
             Ok((repo, _)) => Some(repo),
@@ -818,7 +842,40 @@ pub(crate) async fn limit_installation(
             Err(e) => return internal(e),
         }
     }
-    next.run(req).await
+    let Some((name, level)) = permission_needed(route, req.method()) else {
+        return next.run(req).await;
+    };
+    // The one route where GitHub looks first: a check run that does not
+    // exist is a `404` whatever the token may do.
+    let missing = !write
+        && route.ends_with("/check-runs/{id}")
+        && match param("id").map(|id| id.parse::<i64>()) {
+            Some(Ok(id)) => match face.world.check_run_by_id(id) {
+                Ok(found) => found.is_none(),
+                Err(e) => return internal(e),
+            },
+            _ => true,
+        };
+    let permitted = caller
+        .installation
+        .as_ref()
+        .is_some_and(|grant| grant.permits(name, level));
+    let mut resp = match permitted || missing {
+        true => next.run(req).await,
+        false => not_accessible(),
+    };
+    // GitHub tells an installation token what the route asks of it, on
+    // every answer.
+    let level = match level {
+        AccessLevel::Read => "read",
+        AccessLevel::Write => "write",
+        AccessLevel::Admin => "admin",
+    };
+    if let Ok(accepted) = format!("{name}={level}").parse() {
+        resp.headers_mut()
+            .insert("x-accepted-github-permissions", accepted);
+    }
+    resp
 }
 
 fn permissions_json(permissions: &Permissions) -> serde_json::Value {

@@ -113,7 +113,9 @@ async fn setup() -> Setup {
             "name": "Helper",
             "owner": "acme",
             "callback_urls": ["https://app.test/callback", "https://app.test/connect"],
-            "permissions": { "contents": "write", "metadata": "read", "members": "read" },
+            "permissions": {
+                "checks": "write", "contents": "write", "metadata": "read", "members": "read",
+            },
             "events": ["push", "pull_request"],
         }),
     );
@@ -193,7 +195,9 @@ async fn an_app_reads_itself_and_its_installations() {
     assert_eq!(app["owner"]["type"], "Organization");
     assert_eq!(
         app["permissions"],
-        serde_json::json!({ "contents": "write", "members": "read", "metadata": "read" })
+        serde_json::json!({
+            "checks": "write", "contents": "write", "members": "read", "metadata": "read"
+        })
     );
     assert_eq!(app["events"], serde_json::json!(["push", "pull_request"]));
     assert_eq!(app["html_url"], format!("{}/apps/helper", s.base));
@@ -735,7 +739,9 @@ async fn an_installation_token_fetches_and_pushes_what_it_reaches() {
     let log = control_post(
         &s.base,
         "/_orrery/log/list",
-        serde_json::json!({ "sort_key": "seq", "sort_dir": "desc", "page_size": 2 }),
+        // The push is followed by the suite it makes for the App, which may
+        // write checks.
+        serde_json::json!({ "sort_key": "seq", "sort_dir": "desc", "page_size": 5 }),
     );
     let pushed = log["items"]
         .as_array()
@@ -1240,7 +1246,9 @@ async fn the_control_plane_registers_and_installs_apps() {
             "account": "alice",
             "repository_selection": "selected",
             "repositories": ["own"],
-            "permissions": { "contents": "write", "members": "read", "metadata": "read" },
+            "permissions": {
+                "checks": "write", "contents": "write", "members": "read", "metadata": "read",
+            },
             "events": ["push", "pull_request"],
         })
     );

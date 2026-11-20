@@ -257,7 +257,20 @@ It reaches the repositories its installation covers: every repository the accoun
 - GraphQL shows it the same repositories (§3.2).
 - An organization other than the account it is installed on is read as anyone reads it. Any other method on a route under `/orgs/{org}` is the same `403`, so it creates no repository and no team there. A name no organization has is the route's `404`, as it is for any caller.
 
-Permissions are recorded and echoed, not checked: no route reads a token's permissions, as none reads an OAuth token's scopes.
+Permissions are recorded and echoed, and an installation token's are checked on two families of routes, as GitHub checks them:
+
+| Routes | Permission |
+| --- | --- |
+| Every route under `…/actions/` (§1.14), logs included | `actions` |
+| Every route of check runs and check suites (§1.7): `…/check-runs…`, `…/check-suites…`, and `…/commits/{ref}/check-runs` and `/check-suites` | `checks` |
+
+- A `GET` or `HEAD` needs the permission at `read` or above, and any other method at `write` or above. A token without it is `403` "Resource not accessible by integration".
+- The permission is checked before the route looks for what its path names, or at its state: a run that does not exist is `403` to a token without `actions`, and `404` to one with it, and cancelling a finished run with `actions: read` is `403`, not `409`. The one route that looks first is `GET …/check-runs/{id}`, where a check run that does not exist is `404` to any token.
+- A repository the token does not reach is refused first, as above.
+- Every answer of these routes to an installation token, refused or not, carries `x-accepted-github-permissions`, naming what the route asks: `actions=read`, `checks=write`. A person's token gets no such header.
+- A route the world does not serve is the not-mocked `501` whatever the token holds.
+
+No other route reads a token's permissions, and none reads an OAuth token's scopes.
 
 | Route | Behavior |
 | --- | --- |
@@ -575,7 +588,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 
 **Deliberate differences:**
 
-- There are no permissions. Any authenticated actor may read any repository, create repositories in any organization, label, request reviews, review, and merge. Any user may be asked for a review, where GitHub refuses one who is not a collaborator on the repository. The one limit is the repositories an installation token reaches (§1.11). An App's, an installation's, and a token's `permissions` are recorded and echoed, and no route checks them.
+- There are no permissions. Any authenticated actor may read any repository, create repositories in any organization, label, request reviews, review, and merge. Any user may be asked for a review, where GitHub refuses one who is not a collaborator on the repository. The limits are an installation token's: the repositories it reaches, and its `actions` and `checks` permissions on the Actions and checks routes (§1.11). Every other permission of an App, an installation, or a token is recorded and echoed, and no route checks it. GraphQL checks none: a token without `checks` still reads a commit's check runs there. GitHub's refusal names the route's own documentation page as `documentation_url`, where a world names GitHub's REST documentation.
 - A `manual` world compares neither `iat` nor `exp` of an App's JWT to its clock, so it accepts one that has expired, and one that expires more than 10 minutes ahead (`usage.md`, "Time").
 - `repository(owner:, name:)` for a repository that does not exist, or that an installation token does not see, is `null` with no error. GitHub adds an error whose `type` is `NOT_FOUND`: "Could not resolve to a Repository with the name '{owner}/{name}'."
 - A bot's own token, the one its actor was created with, reaches every repository. Only an installation token is limited.
