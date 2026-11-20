@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::events::*;
 use crate::types::{
     ActorEmail, ActorKind, AlertUpdate, AlertUpdateState, CheckConclusion, CheckStatus, OrgRole,
-    PullState, ReviewState, TeamRole,
+    PullState, ReviewState, RunCancel, TeamRole,
 };
 use crate::{Result, WorldError, queries};
 
@@ -696,6 +696,7 @@ pub(crate) fn workflow_object(conn: &Connection, id: i64) -> Result<WorkflowObje
         name: workflow.name,
         jobs: workflow.jobs,
         created_unix: workflow.created_clock_unix,
+        dispatch_inputs: workflow.dispatch_inputs,
     })
 }
 
@@ -722,29 +723,42 @@ pub(crate) fn workflow_run_subject(conn: &Connection, id: i64) -> Result<Workflo
 }
 
 pub(crate) fn workflow_run_object(conn: &Connection, id: i64) -> Result<WorkflowRunObject> {
-    conn.query_row(
-        "SELECT r.id, r.suite_id, r.run_number, r.event, r.head_branch, r.head_sha, r.title,
-                a.id, a.login, r.attempt, r.created_clock_unix, r.started_clock_unix
-         FROM workflow_runs r JOIN actors a ON a.id = r.actor_id WHERE r.id = ?1",
-        params![id],
-        |r| {
-            Ok(WorkflowRunObject {
-                id: r.get(0)?,
-                suite_id: r.get(1)?,
-                run_number: r.get(2)?,
-                event: r.get(3)?,
-                head_branch: r.get(4)?,
-                head_sha: r.get(5)?,
-                title: r.get(6)?,
-                actor: actor_ref_at(r, 7)?,
-                attempt: r.get(9)?,
-                created_unix: r.get(10)?,
-                started_unix: r.get(11)?,
-            })
-        },
-    )
-    .optional()?
-    .ok_or(WorldError::NoSuchWorkflowRun(id))
+    let (object, triggering): (WorkflowRunObject, Option<i64>) = conn
+        .query_row(
+            "SELECT r.id, r.suite_id, r.run_number, r.event, r.head_branch, r.head_sha, r.title,
+                    a.id, a.login, r.attempt, r.created_clock_unix, r.started_clock_unix,
+                    r.triggering_actor_id, r.cancel
+             FROM workflow_runs r JOIN actors a ON a.id = r.actor_id WHERE r.id = ?1",
+            params![id],
+            |r| {
+                Ok((
+                    WorkflowRunObject {
+                        id: r.get(0)?,
+                        suite_id: r.get(1)?,
+                        run_number: r.get(2)?,
+                        event: r.get(3)?,
+                        head_branch: r.get(4)?,
+                        head_sha: r.get(5)?,
+                        title: r.get(6)?,
+                        actor: actor_ref_at(r, 7)?,
+                        attempt: r.get(9)?,
+                        created_unix: r.get(10)?,
+                        started_unix: r.get(11)?,
+                        triggering_actor: None,
+                        cancel: r
+                            .get::<_, Option<String>>(13)?
+                            .map(|s| RunCancel::from_db(&s)),
+                    },
+                    r.get(12)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(WorldError::NoSuchWorkflowRun(id))?;
+    Ok(WorkflowRunObject {
+        triggering_actor: triggering.map(|id| actor_ref(conn, id)).transpose()?,
+        ..object
+    })
 }
 
 pub(crate) fn org_membership_subject(

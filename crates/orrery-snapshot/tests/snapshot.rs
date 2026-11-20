@@ -1842,6 +1842,7 @@ fn diff_reports_workflows_and_what_their_runs_come_to() {
         path,
         name: "ci",
         jobs: &jobs,
+        dispatch_inputs: None,
     };
     let start = |workflow_id: i64| NewWorkflowRun {
         workflow_id,

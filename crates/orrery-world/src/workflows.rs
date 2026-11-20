@@ -15,6 +15,9 @@ pub struct NewWorkflow<'a> {
     pub path: &'a str,
     pub name: &'a str,
     pub jobs: &'a [JobSpec],
+    /// The inputs a dispatch of it may give, or none for a workflow that
+    /// cannot be dispatched.
+    pub dispatch_inputs: Option<&'a [String]>,
 }
 
 pub struct NewWorkflowRun<'a> {
@@ -98,8 +101,9 @@ impl World {
             let workflow = tx
                 .query_row(
                     &format!(
-                        "INSERT INTO workflows (repo_id, path, name, jobs, created_clock_unix)
-                         VALUES (?1, ?2, ?3, ?4, ?5)
+                        "INSERT INTO workflows (repo_id, path, name, jobs, created_clock_unix,
+                                                dispatch_inputs)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                          RETURNING {}",
                         queries::WORKFLOW_COLUMNS
                     ),
@@ -108,7 +112,9 @@ impl World {
                         new.path,
                         new.name,
                         serde_json::to_string(new.jobs).expect("job specs serialize"),
-                        queries::clock(tx)?
+                        queries::clock(tx)?,
+                        new.dispatch_inputs
+                            .map(|inputs| serde_json::to_string(inputs).expect("names serialize"))
                     ],
                     queries::row_to_workflow,
                 )
@@ -154,11 +160,12 @@ impl World {
                 &format!(
                     "INSERT INTO workflow_runs (repo_id, workflow_id, suite_id, run_number,
                                                 event, head_branch, head_sha, title, actor_id,
-                                                attempt, created_clock_unix, started_clock_unix)
+                                                attempt, created_clock_unix, started_clock_unix,
+                                                triggering_actor_id)
                      VALUES (?1, ?2, ?3,
                              (SELECT COALESCE(MAX(run_number), 0) + 1 FROM workflow_runs
                               WHERE workflow_id = ?2),
-                             ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9)
+                             ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, ?8)
                      RETURNING {}",
                     queries::WORKFLOW_RUN_COLUMNS
                 ),
@@ -261,6 +268,207 @@ impl World {
         })
     }
 
+    /// Ask a run that has not finished to cancel, or cancel it by force.
+    ///
+    /// Asked, each queued job is cancelled, and each job in progress has
+    /// its step in progress cancelled and goes on to its next step that
+    /// runs regardless, finishing as cancelled when it has none. Jobs are
+    /// then listed as they are for a run asked to cancel. By force, every
+    /// unfinished job is cancelled with its steps left as they are.
+    ///
+    /// Asking again, or asking after a cancel by force, changes nothing.
+    pub fn cancel_workflow_run(&self, run_id: i64, force: bool, by: Attribution) -> Result<()> {
+        self.write(by, |w| {
+            let tx = w.tx;
+            let run = queries::workflow_run_by_id(tx, run_id)?
+                .ok_or(WorldError::NoSuchWorkflowRun(run_id))?;
+            if run.status == CheckStatus::Completed {
+                return Err(WorldError::WorkflowRunCompleted(run_id));
+            }
+            let cancel = match force {
+                true => RunCancel::Forced,
+                false => RunCancel::Requested,
+            };
+            if run.cancel == Some(cancel) || run.cancel == Some(RunCancel::Forced) {
+                return Ok(());
+            }
+            let before = objects::workflow_run_object(tx, run_id)?;
+            tx.execute(
+                "UPDATE workflow_runs SET cancel = ?2 WHERE id = ?1",
+                params![run_id, cancel.as_str()],
+            )?;
+            w.operation(EventBody::WorkflowRunCancelled(
+                events::WorkflowRunChanged {
+                    subject: objects::workflow_run_subject(tx, run_id)?,
+                    changes: events::WorkflowRunChanges::between(
+                        &before,
+                        &objects::workflow_run_object(tx, run_id)?,
+                    ),
+                },
+            ));
+            let specs = specs(tx, run_id)?;
+            let clock = queries::clock(tx)?;
+            let unfinished = queries::list_workflow_jobs(tx, run_id)?
+                .into_iter()
+                .filter(|job| job.job.as_ref().is_some_and(|j| j.attempt == run.attempt))
+                .filter(|job| job.status != CheckStatus::Completed);
+            for job in unfinished {
+                let steps = job.job.as_ref().map_or(Vec::new(), |j| j.steps.clone());
+                let spec = specs.iter().find(|spec| spec.name == job.name);
+                match (job.status, spec) {
+                    (CheckStatus::InProgress, Some(spec)) if !force => {
+                        let mut steps = steps;
+                        advance(&mut steps, spec, StepConclusion::Cancelled, clock);
+                        write_steps(w, &job, spec, steps, clock, As::Consequence)?;
+                    }
+                    _ => {
+                        write_job(
+                            w,
+                            &job,
+                            CheckStatus::Completed,
+                            Some(CheckConclusion::Cancelled),
+                            None,
+                            Some(clock),
+                            &steps,
+                            As::Consequence,
+                        )?;
+                    }
+                }
+            }
+            list_ready_jobs(w, run_id)?;
+            suites::settle(w, run.suite_id)
+        })
+    }
+
+    /// Begin a new attempt of a run that has finished. The jobs `which`
+    /// names run again, with every job that needs one of them, and each
+    /// other job is listed in the new attempt as it finished in the last.
+    /// The attempt it replaces is kept.
+    pub fn rerun_workflow_run(
+        &self,
+        run_id: i64,
+        which: Rerun,
+        actor_id: i64,
+        by: Attribution,
+    ) -> Result<WorkflowRun> {
+        self.write(by, |w| {
+            let tx = w.tx;
+            let run = queries::workflow_run_by_id(tx, run_id)?
+                .ok_or(WorldError::NoSuchWorkflowRun(run_id))?;
+            if run.status != CheckStatus::Completed {
+                return Err(WorldError::WorkflowRunInProgress(run_id));
+            }
+            let specs = specs(tx, run_id)?;
+            let last: Vec<CheckRun> = queries::list_workflow_jobs(tx, run_id)?
+                .into_iter()
+                .filter(|job| job.job.as_ref().is_some_and(|j| j.attempt == run.attempt))
+                .collect();
+            let mut again: Vec<&str> = match which {
+                Rerun::All => specs.iter().map(|spec| spec.name.as_str()).collect(),
+                Rerun::Failed => {
+                    let failed: Vec<&str> = last
+                        .iter()
+                        .filter(|job| {
+                            matches!(
+                                job.conclusion,
+                                Some(
+                                    CheckConclusion::Failure
+                                        | CheckConclusion::Cancelled
+                                        | CheckConclusion::TimedOut
+                                )
+                            )
+                        })
+                        .map(|job| job.name.as_str())
+                        .collect();
+                    if failed.is_empty() {
+                        return Err(WorldError::NothingToRerun(run_id));
+                    }
+                    failed
+                }
+                Rerun::Job(job_id) => {
+                    let job = last
+                        .iter()
+                        .find(|job| job.id == job_id)
+                        .ok_or(WorldError::NoSuchWorkflowJob(job_id))?;
+                    vec![job.name.as_str()]
+                }
+            };
+            // Every job that needs one that runs again runs again too.
+            loop {
+                let more: Vec<&str> = specs
+                    .iter()
+                    .filter(|spec| !again.contains(&spec.name.as_str()))
+                    .filter(|spec| spec.needs.iter().any(|need| again.contains(&need.as_str())))
+                    .map(|spec| spec.name.as_str())
+                    .collect();
+                if more.is_empty() {
+                    break;
+                }
+                again.extend(more);
+            }
+            let before = objects::workflow_run_object(tx, run_id)?;
+            let clock = queries::clock(tx)?;
+            tx.execute(
+                "INSERT INTO workflow_run_attempts (run_id, attempt, triggering_actor_id,
+                                                    started_clock_unix)
+                 SELECT id, attempt, COALESCE(triggering_actor_id, actor_id), started_clock_unix
+                 FROM workflow_runs WHERE id = ?1",
+                params![run_id],
+            )?;
+            tx.execute(
+                "UPDATE workflow_runs
+                 SET attempt = attempt + 1, started_clock_unix = ?2, triggering_actor_id = ?3,
+                     cancel = NULL
+                 WHERE id = ?1",
+                params![run_id, clock, actor_id],
+            )?;
+            w.operation(EventBody::WorkflowRunRerun(events::WorkflowRunChanged {
+                subject: objects::workflow_run_subject(tx, run_id)?,
+                changes: events::WorkflowRunChanges::between(
+                    &before,
+                    &objects::workflow_run_object(tx, run_id)?,
+                ),
+            }));
+            for job in last
+                .iter()
+                .filter(|job| !again.contains(&job.name.as_str()))
+            {
+                let id: i64 = tx.query_row(
+                    "INSERT INTO check_runs (repo_id, head_sha, name, status, conclusion,
+                                             creator_id, started_clock_unix,
+                                             completed_clock_unix, created_clock_unix, suite_id,
+                                             workflow_run_id, run_attempt, steps)
+                     SELECT repo_id, head_sha, name, status, conclusion, creator_id,
+                            started_clock_unix, completed_clock_unix, ?2, suite_id,
+                            workflow_run_id, run_attempt + 1, steps
+                     FROM check_runs WHERE id = ?1
+                     RETURNING id",
+                    params![job.id, clock],
+                    |r| r.get(0),
+                )?;
+                w.emit(EventBody::CheckRunCreated(events::CheckRunCreated {
+                    subject: objects::check_run_subject(tx, id)?,
+                    object: objects::check_run_object(tx, id)?,
+                }));
+            }
+            list_ready_jobs(w, run_id)?;
+            suites::settle(w, run.suite_id)?;
+            // The run reads its status through its suite, which the jobs
+            // listed above have just brought to something else, so it is
+            // read once they have.
+            queries::workflow_run_by_id(tx, run_id)?.ok_or(WorldError::NoSuchWorkflowRun(run_id))
+        })
+    }
+
+    /// An attempt of a run that a re-run has replaced.
+    pub fn workflow_run_attempt(
+        &self,
+        run_id: i64,
+        attempt: i64,
+    ) -> Result<Option<WorkflowRunAttempt>> {
+        self.with_conn(|conn| queries::workflow_run_attempt(conn, run_id, attempt))
+    }
+
     pub fn workflow_by_id(&self, id: i64) -> Result<Option<Workflow>> {
         self.with_conn(|conn| queries::workflow_by_id(conn, id))
     }
@@ -338,8 +546,8 @@ fn running_steps(job: &CheckRun) -> Result<Vec<Step>> {
 }
 
 /// Finish the step in progress with `conclusion`, skip each step after it
-/// that does not run after a failure when one has failed, and begin the
-/// next that runs.
+/// that does not run regardless when one has failed or been cancelled, and
+/// begin the next that runs.
 fn advance(steps: &mut [Step], spec: &JobSpec, conclusion: StepConclusion, clock: i64) {
     let Some(current) = steps
         .iter()
@@ -350,12 +558,15 @@ fn advance(steps: &mut [Step], spec: &JobSpec, conclusion: StepConclusion, clock
     steps[current].status = StepStatus::Completed;
     steps[current].conclusion = Some(conclusion);
     steps[current].completed_unix = Some(clock);
-    let failed = steps
-        .iter()
-        .any(|s| s.conclusion == Some(StepConclusion::Failure));
+    let stopped = steps.iter().any(|s| {
+        matches!(
+            s.conclusion,
+            Some(StepConclusion::Failure | StepConclusion::Cancelled)
+        )
+    });
     for (step, said) in steps.iter_mut().zip(&spec.steps).skip(current + 1) {
         step.started_unix = Some(clock);
-        if failed && !said.always {
+        if stopped && !said.always {
             step.status = StepStatus::Completed;
             step.conclusion = Some(StepConclusion::Skipped);
             step.completed_unix = Some(clock);
@@ -366,23 +577,26 @@ fn advance(steps: &mut [Step], spec: &JobSpec, conclusion: StepConclusion, clock
     }
 }
 
-/// Store a job's steps after a step finished. A job with no step left in
-/// progress finishes: its closing steps are listed, it concludes with a
-/// failure when a step failed and a success otherwise, and the jobs that
-/// were waiting for it are listed.
-fn finish_or_store(
-    w: &mut log::Write<'_>,
-    job: &CheckRun,
-    spec: &JobSpec,
-    mut steps: Vec<Step>,
-    clock: i64,
-) -> Result<CheckRun> {
-    if steps.iter().any(|s| s.status == StepStatus::InProgress) {
-        return store_job(w, job, job.status, None, None, None, &steps);
-    }
-    let failed = steps
-        .iter()
-        .any(|s| s.conclusion == Some(StepConclusion::Failure));
+/// Whether a write to a job is its write's operation or a consequence of
+/// another.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum As {
+    Operation,
+    Consequence,
+}
+
+/// What a job's steps bring it to once none is in progress: its closing
+/// steps listed, and its conclusion, which is `cancelled` when a step was,
+/// a failure when one failed, and otherwise a success.
+fn finished(spec: &JobSpec, mut steps: Vec<Step>, clock: i64) -> (Vec<Step>, CheckConclusion) {
+    let any = |conclusion| steps.iter().any(|s| s.conclusion == Some(conclusion));
+    let conclusion = if any(StepConclusion::Cancelled) {
+        CheckConclusion::Cancelled
+    } else if any(StepConclusion::Failure) {
+        CheckConclusion::Failure
+    } else {
+        CheckConclusion::Success
+    };
     steps.extend(spec.closing_steps.iter().map(|name| Step {
         name: name.clone(),
         status: StepStatus::Completed,
@@ -390,11 +604,41 @@ fn finish_or_store(
         started_unix: Some(clock),
         completed_unix: Some(clock),
     }));
-    let conclusion = match failed {
-        true => CheckConclusion::Failure,
-        false => CheckConclusion::Success,
-    };
-    store_job(
+    (steps, conclusion)
+}
+
+/// Store a job's steps after a step finished, as the write's operation. A
+/// job with no step left in progress finishes, and the jobs that were
+/// waiting for it are listed.
+fn finish_or_store(
+    w: &mut log::Write<'_>,
+    job: &CheckRun,
+    spec: &JobSpec,
+    steps: Vec<Step>,
+    clock: i64,
+) -> Result<CheckRun> {
+    let stored = write_steps(w, job, spec, steps, clock, As::Operation)?;
+    if let (CheckStatus::Completed, Some(held)) = (stored.status, &job.job) {
+        list_ready_jobs(w, held.run_id)?;
+    }
+    suites::settle(w, job.suite_id)?;
+    Ok(stored)
+}
+
+/// Write a job's steps, and its finish when none is in progress.
+fn write_steps(
+    w: &mut log::Write<'_>,
+    job: &CheckRun,
+    spec: &JobSpec,
+    steps: Vec<Step>,
+    clock: i64,
+    event: As,
+) -> Result<CheckRun> {
+    if steps.iter().any(|s| s.status == StepStatus::InProgress) {
+        return write_job(w, job, job.status, None, None, None, &steps, event);
+    }
+    let (steps, conclusion) = finished(spec, steps, clock);
+    write_job(
         w,
         job,
         CheckStatus::Completed,
@@ -402,6 +646,7 @@ fn finish_or_store(
         None,
         Some(clock),
         &steps,
+        event,
     )
 }
 
@@ -416,6 +661,35 @@ fn store_job(
     started: Option<i64>,
     completed: Option<i64>,
     steps: &[Step],
+) -> Result<CheckRun> {
+    let stored = write_job(
+        w,
+        job,
+        status,
+        conclusion,
+        started,
+        completed,
+        steps,
+        As::Operation,
+    )?;
+    if let (CheckStatus::Completed, Some(held)) = (status, &job.job) {
+        list_ready_jobs(w, held.run_id)?;
+    }
+    suites::settle(w, job.suite_id)?;
+    Ok(stored)
+}
+
+/// Write a job's state and steps, with the event that says so.
+#[allow(clippy::too_many_arguments)]
+fn write_job(
+    w: &mut log::Write<'_>,
+    job: &CheckRun,
+    status: CheckStatus,
+    conclusion: Option<CheckConclusion>,
+    started: Option<i64>,
+    completed: Option<i64>,
+    steps: &[Step],
+    event: As,
 ) -> Result<CheckRun> {
     let tx = w.tx;
     let before = objects::check_run_object(tx, job.id)?;
@@ -441,25 +715,34 @@ fn store_job(
         ],
         queries::row_to_check_run,
     )?;
-    w.operation(EventBody::CheckRunUpdated(events::CheckRunChanged {
+    let body = EventBody::CheckRunUpdated(events::CheckRunChanged {
         subject: objects::check_run_subject(tx, job.id)?,
         changes: events::CheckRunChanges::between(&before, &objects::check_run_object(tx, job.id)?),
-    }));
-    if let (CheckStatus::Completed, Some(held)) = (status, &job.job) {
-        list_ready_jobs(w, held.run_id)?;
+    });
+    match event {
+        As::Operation => w.operation(body),
+        As::Consequence => w.emit(body),
     }
-    suites::settle(w, job.suite_id)?;
     Ok(stored)
 }
 
 /// List each job of the run's current attempt that is not listed yet and
 /// whose needs have all finished: queued when each succeeded or the job
 /// runs regardless, and otherwise skipped. A job listed as skipped can
-/// finish the needs of another, so this goes on until it lists nothing.
+/// finish the needs of another, so this goes on until it lists nothing. A
+/// run asked to cancel queues only what runs regardless, and lists the rest
+/// as cancelled. One cancelled by force lists nothing more.
 fn list_ready_jobs(w: &mut log::Write<'_>, run_id: i64) -> Result<()> {
     let tx = w.tx;
     let run =
         queries::workflow_run_by_id(tx, run_id)?.ok_or(WorldError::NoSuchWorkflowRun(run_id))?;
+    if run.cancel == Some(RunCancel::Forced) {
+        return Ok(());
+    }
+    let unrun = match run.cancel {
+        Some(_) => CheckConclusion::Cancelled,
+        None => CheckConclusion::Skipped,
+    };
     let specs = specs(tx, run_id)?;
     let creator_id: i64 = tx.query_row(
         "SELECT creator_id FROM check_suites WHERE id = ?1",
@@ -483,10 +766,11 @@ fn list_ready_jobs(w: &mut log::Write<'_>, run_id: i64) -> Result<()> {
             .filter(|spec| spec.needs.iter().all(|need| finished(need).is_some()))
             .map(|spec| {
                 let runs = spec.always
-                    || spec.needs.iter().all(|need| {
-                        finished(need)
-                            .is_some_and(|job| job.conclusion == Some(CheckConclusion::Success))
-                    });
+                    || run.cancel.is_none()
+                        && spec.needs.iter().all(|need| {
+                            finished(need)
+                                .is_some_and(|job| job.conclusion == Some(CheckConclusion::Success))
+                        });
                 (spec, runs)
             })
             .collect();
@@ -497,11 +781,7 @@ fn list_ready_jobs(w: &mut log::Write<'_>, run_id: i64) -> Result<()> {
         for (spec, runs) in ready {
             let (status, conclusion, at) = match runs {
                 true => (CheckStatus::Queued, None, None),
-                false => (
-                    CheckStatus::Completed,
-                    Some(CheckConclusion::Skipped),
-                    Some(clock),
-                ),
+                false => (CheckStatus::Completed, Some(unrun), Some(clock)),
             };
             let id: i64 = tx.query_row(
                 "INSERT INTO check_runs (repo_id, head_sha, name, status, conclusion, creator_id,

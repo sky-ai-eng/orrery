@@ -58,6 +58,12 @@ pub enum WorldError {
     InvalidWorkflow { field: String, message: String },
     #[error("check run {0} is a job of a workflow run, which only its runner moves")]
     CheckRunIsJob(i64),
+    #[error("workflow run {0} has not finished")]
+    WorkflowRunInProgress(i64),
+    #[error("workflow run {0} has finished")]
+    WorkflowRunCompleted(i64),
+    #[error("workflow run {0} has no job that failed or was cancelled")]
+    NothingToRerun(i64),
     #[error("job {0} is not queued")]
     JobNotQueued(i64),
     #[error("job {0} is not in progress")]

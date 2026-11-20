@@ -339,6 +339,7 @@ async fn create_workflow(
         path: &path,
         name: &named,
         jobs: &jobs,
+        dispatch_inputs: None,
     };
     match state.world.create_workflow(new, SYSTEM) {
         Ok(workflow) => json(

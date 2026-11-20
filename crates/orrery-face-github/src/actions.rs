@@ -300,6 +300,7 @@ pub(crate) fn job_json(
                     StepConclusion::Success => "success",
                     StepConclusion::Failure => "failure",
                     StepConclusion::Skipped => "skipped",
+                    StepConclusion::Cancelled => "cancelled",
                 }),
                 "number": i + 1,
                 "started_at": step.started_unix.map(rfc3339),

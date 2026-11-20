@@ -452,6 +452,25 @@ pub(crate) const MIGRATIONS: &[&str] = &[
      ALTER TABLE check_runs ADD COLUMN steps TEXT;
      CREATE INDEX check_runs_by_workflow_run ON check_runs (workflow_run_id)
         WHERE workflow_run_id IS NOT NULL;",
+    // 22: what a workflow run's writes need. A workflow says whether it can
+    // be dispatched, and with which inputs: NULL for one that cannot. A run
+    // holds who started its current attempt, who started the run for every
+    // run made before this version, and whether that attempt was asked to
+    // cancel or was cancelled by force. An attempt a re-run has replaced is
+    // kept with who started it and when. And a step can conclude
+    // `cancelled`.
+    "ALTER TABLE workflows ADD COLUMN dispatch_inputs TEXT;
+     ALTER TABLE workflow_runs ADD COLUMN triggering_actor_id INTEGER REFERENCES actors(id);
+     UPDATE workflow_runs SET triggering_actor_id = actor_id;
+     ALTER TABLE workflow_runs ADD COLUMN cancel TEXT
+        CHECK (cancel IN ('requested', 'forced'));
+     CREATE TABLE workflow_run_attempts (
+        run_id                 INTEGER NOT NULL REFERENCES workflow_runs(id),
+        attempt                INTEGER NOT NULL,
+        triggering_actor_id    INTEGER NOT NULL REFERENCES actors(id),
+        started_clock_unix     INTEGER NOT NULL,
+        PRIMARY KEY (run_id, attempt)
+     ) STRICT;",
 ];
 
 /// The version this binary reads and writes.

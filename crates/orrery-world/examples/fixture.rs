@@ -15,7 +15,7 @@ use std::path::Path;
 use orrery_world::{
     AccessLevel, ActorEmail, ActorKind, Attribution, CheckConclusion, CheckRunPatch, CheckStatus,
     CommitFacts, CommitSignature, DEFAULT_T0_UNIX, Door, JobSpec, NewApp, NewCheckRun, NewPull,
-    NewWorkflow, NewWorkflowRun, OrgRole, Permissions, RefChange, RefMove, ReviewState,
+    NewWorkflow, NewWorkflowRun, OrgRole, Permissions, RefChange, RefMove, Rerun, ReviewState,
     SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, StepConclusion, StepSpec, TeamRole, World, WorldSecret,
 };
 
@@ -249,6 +249,7 @@ fn populate(w: &World) -> orrery_world::Result<()> {
             path: ".github/workflows/ci.yml",
             name: "ci",
             jobs: &jobs,
+            dispatch_inputs: None,
         },
         by(system.id),
     )?;
@@ -268,6 +269,16 @@ fn populate(w: &World) -> orrery_world::Result<()> {
     w.start_workflow_job(test, by(system.id))?;
     w.complete_workflow_step(test, StepConclusion::Success, by(system.id))?;
     w.complete_workflow_job(test, false, by(system.id))?;
+    // A second attempt, asked to cancel while its job runs.
+    let rerun = w.rerun_workflow_run(run.id, Rerun::Failed, bob.id, by(bob.id))?;
+    let again = w
+        .list_workflow_jobs(run.id)?
+        .into_iter()
+        .rfind(|job| job.name == "test")
+        .map(|job| job.id)
+        .expect("the job runs again");
+    w.start_workflow_job(again, by(system.id))?;
+    w.cancel_workflow_run(rerun.id, false, by(bob.id))?;
 
     let merge = RefMove {
         name: "refs/heads/main",

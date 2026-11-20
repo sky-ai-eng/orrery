@@ -539,8 +539,61 @@ pub enum StepStatus {
 pub enum StepConclusion {
     Success,
     Failure,
-    /// Not run, because a step before it failed.
+    /// Not run, because a step before it failed or was cancelled.
     Skipped,
+    /// Under way when its run was asked to cancel.
+    Cancelled,
+}
+
+/// How a run's current attempt was cancelled.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RunCancel {
+    /// Asked to cancel: its runners stop, and still run what runs
+    /// regardless.
+    Requested,
+    /// Cancelled outright, with nothing more run.
+    Forced,
+}
+
+impl RunCancel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunCancel::Requested => "requested",
+            RunCancel::Forced => "forced",
+        }
+    }
+
+    pub(crate) fn from_db(s: &str) -> RunCancel {
+        match s {
+            "forced" => RunCancel::Forced,
+            _ => RunCancel::Requested,
+        }
+    }
+}
+
+/// Which jobs a re-run of a run runs again. The rest are copied into the
+/// new attempt as they finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rerun {
+    All,
+    /// The jobs that failed or were cancelled, and every job that needs one
+    /// of them.
+    Failed,
+    /// One job, and every job that needs it.
+    Job(i64),
+}
+
+/// An attempt of a run that a re-run has replaced.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkflowRunAttempt {
+    pub run_id: i64,
+    pub attempt: i64,
+    /// Who started it.
+    pub triggering_actor_login: String,
+    pub started_clock_unix: i64,
 }
 
 /// One job of a workflow: what the workflow says of it, before any run.
@@ -581,6 +634,9 @@ pub struct Workflow {
     pub path: String,
     pub name: String,
     pub jobs: Vec<JobSpec>,
+    /// The inputs a dispatch of it may give, or none for a workflow that
+    /// cannot be dispatched.
+    pub dispatch_inputs: Option<Vec<String>>,
     pub created_clock_unix: i64,
 }
 
@@ -602,6 +658,10 @@ pub struct WorkflowRun {
     /// Who started it.
     pub actor_login: String,
     pub attempt: i64,
+    /// Who started its current attempt.
+    pub triggering_actor_login: String,
+    /// Whether its current attempt was cancelled, and how.
+    pub cancel: Option<RunCancel>,
     /// Its suite's, which its jobs bring about.
     pub status: CheckStatus,
     /// Its suite's.
