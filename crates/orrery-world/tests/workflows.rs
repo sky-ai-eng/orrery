@@ -336,7 +336,7 @@ fn runs_of_a_workflow_are_numbered_and_each_has_its_own_suite() {
     );
     assert_ne!(first.suite_id, second.suite_id);
     let listed: Vec<i64> =
-        s.w.list_workflow_runs(s.repo_id)
+        s.w.list_workflow_runs_for_repo(s.repo_id)
             .unwrap()
             .iter()
             .map(|r| r.id)

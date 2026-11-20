@@ -111,6 +111,27 @@ pub struct CheckSuiteChange {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkflowAdded {
+    pub repo: String,
+    pub path: String,
+    pub name: String,
+}
+
+/// A workflow run as the later side holds it. Its status and conclusion
+/// are what its jobs have come to.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkflowRunChange {
+    pub repo: String,
+    /// The path of its workflow.
+    pub workflow: String,
+    pub run_number: i64,
+    pub event: String,
+    pub head_sha: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CheckRunChange {
     pub repo: String,
     pub head_sha: String,
@@ -347,6 +368,10 @@ pub struct WorldDiff {
     pub check_runs_updated: Vec<CheckRunChange>,
     pub check_suites_added: Vec<CheckSuiteChange>,
     pub check_suites_updated: Vec<CheckSuiteChange>,
+    pub workflows_added: Vec<WorkflowAdded>,
+    pub workflow_runs_added: Vec<WorkflowRunChange>,
+    /// The runs whose jobs came to something else.
+    pub workflow_runs_updated: Vec<WorkflowRunChange>,
     pub org_memberships_added: Vec<OrgMembershipChange>,
     pub org_memberships_removed: Vec<OrgMembershipChange>,
     pub org_roles_changed: Vec<OrgRoleChange>,
@@ -835,6 +860,53 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         }
     }
 
+    let from_workflows: BTreeSet<i64> = from
+        .view
+        .list_workflows()?
+        .into_iter()
+        .map(|w| w.id)
+        .collect();
+    let workflows = to.view.list_workflows()?;
+    let workflows_added = workflows
+        .iter()
+        .filter(|w| !from_workflows.contains(&w.id))
+        .map(|w| WorkflowAdded {
+            repo: repo_name(w.repo_id),
+            path: w.path.clone(),
+            name: w.name.clone(),
+        })
+        .collect();
+    let from_runs: BTreeMap<i64, _> = from
+        .view
+        .list_workflow_runs()?
+        .into_iter()
+        .map(|run| (run.id, run))
+        .collect();
+    let mut workflow_runs_added = Vec::new();
+    let mut workflow_runs_updated = Vec::new();
+    for run in to.view.list_workflow_runs()? {
+        let entry = WorkflowRunChange {
+            repo: repo_name(run.repo_id),
+            workflow: workflows
+                .iter()
+                .find(|w| w.id == run.workflow_id)
+                .map(|w| w.path.clone())
+                .unwrap_or_default(),
+            run_number: run.run_number,
+            event: run.event.clone(),
+            head_sha: run.head_sha.clone(),
+            status: run.status.as_str().to_string(),
+            conclusion: run.conclusion.map(|c| c.as_str().to_string()),
+        };
+        match from_runs.get(&run.id) {
+            None => workflow_runs_added.push(entry),
+            Some(old) if (old.status, old.conclusion) != (run.status, run.conclusion) => {
+                workflow_runs_updated.push(entry)
+            }
+            Some(_) => {}
+        }
+    }
+
     let from_timeline: BTreeSet<i64> = from
         .view
         .list_timeline()?
@@ -1060,6 +1132,9 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         check_runs_updated,
         check_suites_added,
         check_suites_updated,
+        workflows_added,
+        workflow_runs_added,
+        workflow_runs_updated,
         org_memberships_added,
         org_memberships_removed,
         org_roles_changed,

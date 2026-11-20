@@ -618,6 +618,22 @@ pub(crate) fn require_pull(conn: &Connection, id: i64) -> Result<Pull> {
     pull_by_id(conn, id)?.ok_or(WorldError::NoSuchPull(id))
 }
 
+pub(crate) fn list_all_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
+    list(
+        conn,
+        &format!("SELECT {WORKFLOW_COLUMNS} FROM workflows ORDER BY id"),
+        row_to_workflow,
+    )
+}
+
+pub(crate) fn list_all_workflow_runs(conn: &Connection) -> Result<Vec<WorkflowRun>> {
+    list(
+        conn,
+        &format!("{WORKFLOW_RUN_SELECT} ORDER BY r.id"),
+        row_to_workflow_run,
+    )
+}
+
 pub(crate) fn list_check_suites(conn: &Connection) -> Result<Vec<CheckSuite>> {
     list(
         conn,
@@ -690,7 +706,7 @@ pub(crate) fn workflow_by_id(conn: &Connection, id: i64) -> Result<Option<Workfl
 }
 
 /// A repository's workflows, oldest first.
-pub(crate) fn list_workflows(conn: &Connection, repo_id: i64) -> Result<Vec<Workflow>> {
+pub(crate) fn list_workflows_for_repo(conn: &Connection, repo_id: i64) -> Result<Vec<Workflow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {WORKFLOW_COLUMNS} FROM workflows WHERE repo_id = ?1 ORDER BY id"
     ))?;
@@ -722,7 +738,10 @@ pub(crate) fn workflow_run_by_suite(
 }
 
 /// A repository's workflow runs, newest first.
-pub(crate) fn list_workflow_runs(conn: &Connection, repo_id: i64) -> Result<Vec<WorkflowRun>> {
+pub(crate) fn list_workflow_runs_for_repo(
+    conn: &Connection,
+    repo_id: i64,
+) -> Result<Vec<WorkflowRun>> {
     let mut stmt = conn.prepare(&format!(
         "{WORKFLOW_RUN_SELECT} WHERE r.repo_id = ?1 ORDER BY r.id DESC"
     ))?;

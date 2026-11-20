@@ -23,6 +23,7 @@ use axum::routing::{delete, get, post, put};
 use orrery_face_git::GitFace;
 use orrery_world::{Actor, ActorKind, Attribution, Caller, Door, Repo, World, WorldError};
 
+mod actions;
 pub mod app_flows;
 pub mod apps;
 mod checks;
@@ -187,6 +188,50 @@ pub fn router(face: GithubFace) -> Router {
         .route(
             "/repos/{owner}/{repo}/check-runs/{id}",
             get(suites::get_check_run).patch(checks::patch_check_run),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/workflows",
+            get(actions::list_workflows),
+        )
+        .route(
+            "/repositories/{id}/actions/workflows",
+            get(actions::list_workflows_by_id),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/workflows/{workflow}",
+            get(actions::get_workflow),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/workflows/{workflow}/runs",
+            get(actions::list_workflow_runs),
+        )
+        .route(
+            "/repositories/{id}/actions/workflows/{workflow}/runs",
+            get(actions::list_workflow_runs_by_id),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs",
+            get(actions::list_runs),
+        )
+        .route(
+            "/repositories/{id}/actions/runs",
+            get(actions::list_runs_by_id),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs/{id}",
+            get(actions::get_run),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs/{id}/jobs",
+            get(actions::list_jobs),
+        )
+        .route(
+            "/repositories/{id}/actions/runs/{run_id}/jobs",
+            get(actions::list_jobs_by_id),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/jobs/{id}",
+            get(actions::get_job),
         )
         .route(
             "/repos/{owner}/{repo}/check-suites/{id}",

@@ -150,7 +150,7 @@ Only a bot creates or updates check runs; any other actor gets a `403` naming th
 
 - **When one is made.** A push that brings a commit to a branch's tip makes a suite there for each App installed on the repository with write access to checks, before any check run exists: `queued`, with `head_branch` the branch, `before` what the branch pointed at (forty zeros for a new branch), and `after` the commit. A merge is such a push. An App's first check run on a commit where it has no suite makes one whose `head_branch`, `before`, and `after` are null.
 - **What it comes to.** A suite's `status` and `conclusion` follow its check runs, counting the newest run of each name: `in_progress` while any is, `queued` while any is queued or it has none, and otherwise `completed`, with the first of these conclusions any run holds: `action_required`, `timed_out`, `failure`, `cancelled`, `success`, `neutral`, `stale`, `skipped`. GitHub's API refuses `stale` as a check run's conclusion and a world accepts it, so its place is a world's own. GitHub takes a few seconds to bring a suite up to date, and a world does it in the write.
-- `latest_check_runs_count` counts the newest run of each name. `pull_requests` are the open pull requests whose head is the commit, as a check run lists them. `rerequestable` and `runs_rerequestable` are true.
+- `latest_check_runs_count` counts the newest run of each name. `pull_requests` are the open pull requests whose head is the commit, as a check run lists them. `rerequestable` is true, and so is `runs_rerequestable` except on a workflow run's suite (§1.14).
 
 ### 1.8 Branches, refs, compare, and contents
 
@@ -344,6 +344,46 @@ GitHub also takes `assignees` here, which a world keeps none of and refuses as n
 - an alert already there is `409` "Alert {n} is already open", or "is already dismissed";
 - a fixed alert is `409` "Fixed alerts cannot be dismissed or reopened".
 
+### 1.14 Actions
+
+Workflows, their runs, and a run's jobs with their steps. GitHub reads a workflow from a file, starts a run when something happens, and has its runners work through the jobs. A world does none of those by itself: a workflow is registered, a run is started, and a runner's work is reported on the control plane (`usage.md`). Which jobs a run lists, and what it comes to, follows from those reports by the rules below, and every read is here. What this section says GitHub does was observed on github.com on 2026-11-19, on a private repository with two workflows.
+
+| Route | Behavior |
+| --- | --- |
+| `GET /repos/{o}/{r}/actions/workflows` | `{total_count, workflows}`, oldest first, paged. A workflow is `id, node_id, name, path, state, created_at, updated_at, url, html_url, badge_url`. `state` is `active`. |
+| `GET /repos/{o}/{r}/actions/workflows/{workflow}` | One workflow, by its id or by its file's name (`ci.yml`). `404` for neither. |
+| `GET /repos/{o}/{r}/actions/runs` | `{total_count, workflow_runs}`, newest first, paged. `actor`, `branch`, `event`, `head_sha`, `check_suite_id`, and `status` each keep the runs that match, and a value that matches none keeps none: `head_sha` is a full sha, and `status` is a status or a conclusion. `exclude_pull_requests=true` empties each run's `pull_requests`. Any other parameter is ignored. |
+| `GET /repos/{o}/{r}/actions/workflows/{workflow}/runs` | The same, for one workflow's runs. |
+| `GET /repos/{o}/{r}/actions/runs/{id}` | One run, or `404`. Takes `exclude_pull_requests`. |
+| `GET /repos/{o}/{r}/actions/runs/{id}/jobs` | `{total_count, jobs}`, oldest first, paged: the jobs of the run's latest attempt, and with `filter=all` those of every attempt. Any other `filter` is the default. |
+| `GET /repos/{o}/{r}/actions/jobs/{id}` | One job, or `404` for an id that is no job's, a check run that is not a job included. |
+
+**Paging.** These lists take `per_page` and `page`. A `per_page` that is not 1 to 100 is the default, 30, as on GitHub. A list longer than its page answers a `Link` header whose pages are at `/repositories/{id}/…`, the repository by its id, with the query as it was asked and `page` last, in GitHub's order: `prev`, `next`, `last`, `first`. Each list is served at that path too.
+
+**A run** is `id, name, node_id, head_branch, head_sha, path, display_title, run_number, event, status, conclusion, workflow_id, check_suite_id, check_suite_node_id, url, html_url, pull_requests, created_at, updated_at, actor, run_attempt, referenced_workflows, run_started_at, triggering_actor, jobs_url, logs_url, check_suite_url, artifacts_url, cancel_url, rerun_url, previous_attempt_url, workflow_url, head_commit, repository, head_repository`.
+
+- `name` and `path` are its workflow's. `run_number` counts the workflow's runs from 1. `run_attempt` is 1, `previous_attempt_url` is null, and `referenced_workflows` is empty.
+- `display_title` is the head commit's subject for a `push`, the pull request's title for a `pull_request`, and the workflow's name for a `schedule`.
+- `actor` and `triggering_actor` are who started it.
+- `head_commit` is `id, tree_id, message, timestamp, author, committer`, the last two as `{name, email}`. `repository` and `head_repository` are the repository in GitHub's short form: `id, node_id, name, full_name, private, owner, html_url, description, fork, url`.
+- `pull_requests` are the open pull requests whose head is the commit, as a check run lists them.
+
+**A run has a check suite of its own,** which is GitHub's Actions App's, and each of its jobs is a check run of that suite. So one commit holds a suite for each run on it. The run's `status` and `conclusion` are its suite's (§1.7), and `updated_at` is when they last changed. The suite has the run's `head_branch`, and its `runs_rerequestable` is false.
+
+**Which jobs a run lists.** GitHub lists a job only once the jobs it needs have finished, so a run does not say up front how many jobs it has.
+
+- A run starts `queued`, with the jobs that need nothing queued.
+- When a job finishes, each job whose needs have all finished is listed. It is queued when each of them succeeded, or when it runs regardless of them, as a job with `if: always()` does. Otherwise it is listed already `completed` with the conclusion `skipped`, and a job that needed it is skipped in turn.
+- The run is `in_progress` while a job is, `queued` while none is and one is queued, and `completed` when every job has finished. So a run that was in progress is `queued` again between one job finishing and the next being taken, which is what GitHub answers.
+- Its conclusion is its suite's: `failure` if a job failed, and otherwise `success`. A skipped job does not count against it.
+
+**A job** is `id, run_id, workflow_name, head_branch, run_url, run_attempt, node_id, head_sha, url, html_url, status, conclusion, created_at, started_at, completed_at, name, steps, check_run_url, labels, runner_id, runner_name, runner_group_id, runner_group_name`.
+
+- Its `id` is its check run's, and so is its `node_id`. `html_url`, and its check run's `html_url` and `details_url`, are the job's page: `/{o}/{r}/actions/runs/{run}/job/{id}`. Its check run's `app` is GitHub's Actions App (`github-actions`, id 15368), whose values a world answers as GitHub does where it has no App of that slug. That id finds its check runs and suites through `app_id`. A job's check run is its runner's to move: `PATCH …/check-runs/{id}` on one is `403` "Invalid app_id `15368` - check run can only be modified by the GitHub App that created it.", which is what GitHub answers another App, and a world answers every caller.
+- A queued job has no steps, null runner fields, and a `started_at` equal to its `created_at`. A skipped job is the same, with `completed_at` equal to both.
+- A job a runner has taken is `in_progress`, and names its runner: a `runner_id`, the `runner_name` "GitHub Actions {runner_id}", and the group 0, "GitHub Actions". `labels` is what the workflow asks the job to run on.
+- **Steps** are `name, status, conclusion, number, started_at, completed_at`, numbered from 1. A taken job lists "Set up job", `in_progress`, then its own steps, `pending` with null times. One step is in progress at a time. After a step fails, each later step is `completed` as `skipped`, unless it runs regardless, as a step with `if: always()` does. "Complete job" is listed only as the job finishes, as GitHub lists it. A job with a failed step concludes `failure`, and any other `success`.
+
 ## 2. Web pages
 
 The pages a person's browser is sent to, on the web host, without an `Authorization` header. A world has no browser sessions (rule 12), so each is Orrery's stand-in for GitHub's page, and its form signs the person in.
@@ -501,6 +541,7 @@ Where GitHub's behavior has not been observed, or Orrery deliberately differs, t
 - `GET /user/repos` sorts by `pushed` by default (GitHub: `full_name`) and lists only the caller's own repositories.
 - A bot that has no App is installed nowhere, so no push makes it a suite: its suite comes from its first check run on a commit, records no push, and names `ghost` as the sender of its deliveries. A suite made by the migration that introduced suites, for a check run a world already held, records no push either.
 - Whether GitHub makes a suite at a push for an App that may only read checks, or for a suspended installation: a world makes none for either. And what a suite of only `neutral` check runs comes to, which a world answers `neutral`.
+- Actions (§1.14) differ from GitHub's in these ways. A world reads no workflow file: a workflow is what the control plane registered, whatever the repository holds at its path, and nothing starts a run but the control plane, so a push or a pull request starts none. A workflow's times end `.000Z`, where GitHub writes them with an offset (`.000-08:00`). A run's suite has `before` forty zeros, where GitHub's has what its branch pointed at before the push. Every job runs on what GitHub hosts, so each started job names a runner of GitHub's, numbered after the job. A job with `continue-on-error`, a matrix GitHub expands, a reusable workflow, and a job or step condition other than "always" have no counterpart. GitHub lists a job's steps a moment after the job starts and marks a finished job complete a moment after its last step, and a world does both at once. Not observed: a workflow whose file is deleted or disabled, and the order of two jobs listed by one finish.
 - A check run's `output` is stored and answered as sent, so it has no `annotations_count` or `annotations_url` unless the creator sent them, and `GET …/check-runs/{id}/annotations` is not mocked.
 - Only a bot creates or updates a check run, and a check run's `head_sha` and a review's `commit_id` are not checked against the repository. GitHub refuses a check run on a commit the repository does not hold with `422` "No commit found for SHA: {sha}", and refuses a person's token with `403` "You must authenticate via a GitHub App.".
 - A test merge finishes by the next read, not after a time. GitHub takes a second or two, so a client that reads again sooner than that gets null more than once on GitHub and once on Orrery. A test merge that a write started has finished by the first read after it, where a read made at once on GitHub is still null.
@@ -533,6 +574,6 @@ Every route here answers `501` until a consumer needs it:
 - repository labels, branch protection, `GET …/branches/{branch}`, tags, and refs other than branches;
 - listing commits, a commit's `files` and `stats`, trees, and statuses;
 - GPG keys and SSH authentication keys (`/user/gpg_keys`, `/user/keys`), and a single signing key (`GET /user/ssh_signing_keys/{id}`);
-- Actions: workflow runs, jobs, and logs;
+- for Actions: logs, a run's attempts and re-running it, cancelling a run, dispatching a workflow, deleting a run or its logs, artifacts, a run's timing and its pending approvals, enabling and disabling a workflow, and everything outside a repository's `actions/workflows`, `actions/runs`, and `actions/jobs`;
 - for GitHub Apps: one delivery with its request and response (`GET /app/hook/deliveries/{delivery_id}`), repository and organization webhooks (`/repos/{o}/{r}/hooks`, `/orgs/{org}/hooks`), the lookups of the installation on a repository, an organization, or a user, updating an installation from its page and the pages of an App's own settings, the installation requests an App has received (`GET /app/installation-requests`), changing an installation's repositories, `DELETE /installation/token`, and revoking or resetting a token or a grant (`/applications/{client_id}/…`);
 - REST search, organization member listings, and `/rate_limit`.

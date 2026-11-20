@@ -913,8 +913,14 @@ impl GqlCheckRun {
         self.run.completed_clock_unix.map(rfc3339)
     }
 
-    async fn details_url(&self) -> Option<String> {
-        self.run.details_url.clone()
+    /// A job's is its page, as REST answers it.
+    async fn details_url(&self, ctx: &Context<'_>) -> Result<Option<String>, Error> {
+        let Some(job) = &self.run.job else {
+            return Ok(self.run.details_url.clone());
+        };
+        let face = face(ctx);
+        let repo = face.world.repo_by_id(self.run.repo_id).map_err(internal)?;
+        Ok(repo.map(|repo| crate::actions::job_html_url(face, &repo, job.run_id, self.run.id)))
     }
 
     async fn check_suite(&self, ctx: &Context<'_>) -> Result<Option<GqlCheckSuite>, Error> {

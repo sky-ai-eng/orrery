@@ -260,8 +260,8 @@ impl World {
     }
 
     /// A repository's workflows, oldest first.
-    pub fn list_workflows(&self, repo_id: i64) -> Result<Vec<Workflow>> {
-        self.with_conn(|conn| queries::list_workflows(conn, repo_id))
+    pub fn list_workflows_for_repo(&self, repo_id: i64) -> Result<Vec<Workflow>> {
+        self.with_conn(|conn| queries::list_workflows_for_repo(conn, repo_id))
     }
 
     pub fn workflow_run_by_id(&self, id: i64) -> Result<Option<WorkflowRun>> {
@@ -274,8 +274,8 @@ impl World {
     }
 
     /// A repository's workflow runs, newest first.
-    pub fn list_workflow_runs(&self, repo_id: i64) -> Result<Vec<WorkflowRun>> {
-        self.with_conn(|conn| queries::list_workflow_runs(conn, repo_id))
+    pub fn list_workflow_runs_for_repo(&self, repo_id: i64) -> Result<Vec<WorkflowRun>> {
+        self.with_conn(|conn| queries::list_workflow_runs_for_repo(conn, repo_id))
     }
 
     /// The jobs of a run in every attempt, oldest first.

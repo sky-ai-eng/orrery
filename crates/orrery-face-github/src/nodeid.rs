@@ -32,6 +32,14 @@ pub fn check_suite(id: i64) -> String {
     format!("O_check_suite_{id}")
 }
 
+pub fn workflow(id: i64) -> String {
+    format!("O_workflow_{id}")
+}
+
+pub fn workflow_run(id: i64) -> String {
+    format!("O_workflow_run_{id}")
+}
+
 pub fn team(id: i64) -> String {
     format!("O_team_{id}")
 }

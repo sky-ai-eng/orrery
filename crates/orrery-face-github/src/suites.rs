@@ -81,7 +81,8 @@ pub(crate) fn suite_json(
     let latest = newest_check_runs(face.world.list_check_runs_for_suite(suite.id)?).len();
     let mut json = suite_brief(face, repo, suite)?;
     json["rerequestable"] = true.into();
-    json["runs_rerequestable"] = true.into();
+    // A workflow run's jobs are re-run through the run, not one by one.
+    json["runs_rerequestable"] = face.world.workflow_run_by_suite(suite.id)?.is_none().into();
     json["latest_check_runs_count"] = latest.into();
     json["check_runs_url"] = format!(
         "{api}/repos/{}/check-suites/{}/check-runs",
@@ -107,8 +108,17 @@ fn suite_with_repository(
 /// Whether `creator_login` is the bot of the App with this id, as the
 /// `app_id` filters ask.
 fn made_by(face: &GithubFace, creator_login: &str, app_id: &str) -> Result<bool, WorldError> {
-    let app = face.world.app_by_slug(creator_login)?;
-    Ok(app.is_some_and(|app| app.id.to_string() == app_id))
+    Ok(app_id_of(face, creator_login)?.is_some_and(|id| id.to_string() == app_id))
+}
+
+/// The id of the App a bot stands for: its App's in the world, or GitHub's
+/// own for the Actions bot of a world with no App of that slug.
+pub(crate) fn app_id_of(face: &GithubFace, bot_login: &str) -> Result<Option<i64>, WorldError> {
+    Ok(match face.world.app_by_slug(bot_login)? {
+        Some(app) => Some(app.id),
+        None if bot_login == crate::actions::ACTIONS_APP => Some(crate::actions::ACTIONS_APP_ID),
+        None => None,
+    })
 }
 
 /// The check runs a list answers: GitHub's filters applied to `runs`, which

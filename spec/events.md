@@ -69,6 +69,8 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `comment` | `id` | `pull`, `repo`, `owner` |
 | `check_run` | `id`, `name`, `head_sha` | `repo`, `owner` |
 | `check_suite` | `id`, `head_sha` | `repo`, `owner` |
+| `workflow` | `id`, `path` | `repo`, `owner` |
+| `workflow_run` | `id`, `workflow_id`, `workflow_path`, `run_number` | `repo`, `owner` |
 | `dependency_alert` | `id`, `number` | `repo`, `owner` |
 | `org_membership` | `member` | `owner` (the organization) |
 | `team` | `id`, `slug` | `owner` (the organization) |
@@ -127,9 +129,11 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `review:submitted` | submitting a review | `object` | `pull:review_request_removed` when the author was asked for one, or else `pull:updated` when `updated_unix` moves |
 | `comment:created` | commenting | `object` | `pull:updated` when `updated_unix` moves |
 | `check_run:created` | creating a check run | `object` | `check_suite:created` when its creator had no suite on the commit, then `check_suite:updated` when the suite comes to something else |
-| `check_run:updated` | updating one | `changes` | `check_suite:updated` when the suite comes to something else |
-| `check_suite:created` | a consequence only: of a push or a merge that brings a commit to a branch's tip, for each app that may write checks there, and of a check run on a commit its creator has no suite for | `object` | |
+| `check_run:updated` | updating one, or a runner's work on a job: taking it, finishing a step, or finishing it | `changes` | for a job that finished, a `check_run:created` for each job its finish listed; then `check_suite:updated` when the suite comes to something else |
+| `check_suite:created` | a consequence only: of a push or a merge that brings a commit to a branch's tip, for each app that may write checks there, of a check run on a commit its creator has no suite for, and of the start of a workflow run, which has a suite to itself | `object` | |
 | `check_suite:updated` | a consequence only: of a check run's write that brings its suite to another status or conclusion | `changes` | |
+| `workflow:created` | registering a workflow | `object` | none |
+| `workflow_run:created` | starting a run of a workflow | `object` | `actor:created` for the runner's bot when the world had none; `check_suite:created` for the run's own suite; a `check_run:created` for each job that needs nothing |
 | `repo:dependency_alerts_set` | turning a repository's dependency alerts on or off | `changes` | none |
 | `dependency_alert:created` | the vendor reporting a vulnerable dependency | `object` | none |
 | `dependency_alert:dismissed`, `dependency_alert:reopened` | a person dismissing an alert, or reopening one | `changes` | none |

@@ -36,6 +36,8 @@ pub trait WorldView {
     fn list_issue_comments(&self) -> Result<Vec<IssueComment>>;
     fn list_check_runs(&self) -> Result<Vec<CheckRun>>;
     fn list_check_suites(&self) -> Result<Vec<CheckSuite>>;
+    fn list_workflows(&self) -> Result<Vec<Workflow>>;
+    fn list_workflow_runs(&self) -> Result<Vec<WorkflowRun>>;
     fn list_actor_addresses(&self) -> Result<Vec<ActorAddress>>;
     fn list_oauth_apps(&self) -> Result<Vec<OAuthApp>>;
     fn list_oauth_authorizations(&self) -> Result<Vec<OAuthAuthorization>>;
@@ -98,6 +100,14 @@ impl WorldView for World {
 
     fn list_check_suites(&self) -> Result<Vec<CheckSuite>> {
         self.with_conn(queries::list_check_suites)
+    }
+
+    fn list_workflows(&self) -> Result<Vec<Workflow>> {
+        self.with_conn(queries::list_all_workflows)
+    }
+
+    fn list_workflow_runs(&self) -> Result<Vec<WorkflowRun>> {
+        self.with_conn(queries::list_all_workflow_runs)
     }
 
     fn list_actor_addresses(&self) -> Result<Vec<ActorAddress>> {
@@ -241,6 +251,14 @@ impl WorldView for WorldReader {
 
     fn list_check_suites(&self) -> Result<Vec<CheckSuite>> {
         queries::list_check_suites(&self.conn)
+    }
+
+    fn list_workflows(&self) -> Result<Vec<Workflow>> {
+        queries::list_all_workflows(&self.conn)
+    }
+
+    fn list_workflow_runs(&self) -> Result<Vec<WorkflowRun>> {
+        queries::list_all_workflow_runs(&self.conn)
     }
 
     fn list_actor_addresses(&self) -> Result<Vec<ActorAddress>> {
