@@ -16,14 +16,14 @@ use base64::Engine as _;
 use orrery_face_git::{GitFace, store};
 use orrery_world::events::{self, Door, EventBody};
 use orrery_world::{
-    Actor, App, Attribution, CheckStatus, Delivery, DeliveryFailure, DeliveryFilter,
+    Actor, ActorKind, App, Attribution, CheckStatus, Delivery, DeliveryFailure, DeliveryFilter,
     DeliveryOutcome, Installation, NewDelivery, Notifier, Pull, PullState, Repo,
     RepositorySelection, SYSTEM_ACTOR_ID, World, WorldError, WorldView,
 };
 
 use crate::render::{
-    Mergeability, actor_json, check_run_json, comment_json, full_pull_json, label_json, pull_json,
-    repo_json, review_json, rfc3339, team_json, user_json,
+    Mergeability, actor_json, avatar_url, check_run_json, comment_json, full_pull_json, label_json,
+    pull_json, repo_json, review_json, rfc3339, team_json, user_json,
 };
 use crate::{
     GithubFace, Layout, github_error, internal, invalid_request, json_response, schema_value,
@@ -546,9 +546,20 @@ impl Rendering {
             if receivers.is_empty() {
                 continue;
             }
+            // GitHub names the organization that owns the repository, when
+            // one does, in every payload about it.
+            let organization = match world.actor_by_login(&repo.owner_login)? {
+                Some(owner) if owner.kind == ActorKind::Org => {
+                    Some(organization_json(&self.face.layout, &owner))
+                }
+                _ => None,
+            };
             for outgoing in self.outgoing(world, event, sender.as_ref())? {
                 for installation in &receivers {
                     let mut payload = outgoing.payload.clone();
+                    if let Some(organization) = &organization {
+                        payload["organization"] = organization.clone();
+                    }
                     payload["installation"] = serde_json::json!({
                         "id": installation.id,
                         "node_id": installation_node_id(installation.id),
@@ -1279,6 +1290,26 @@ fn deleted_installation(
             .unwrap_or(deleted.object.created_unix),
         suspended,
     }))
+}
+
+/// GitHub's organization object as a payload carries it, which has neither
+/// the `type` of a nested user nor an organization's profile fields.
+fn organization_json(layout: &Layout, org: &Actor) -> serde_json::Value {
+    let url = format!("{}/orgs/{}", layout.api(), org.login);
+    serde_json::json!({
+        "login": org.login,
+        "id": org.id,
+        "node_id": crate::nodeid::actor(org.id),
+        "url": url,
+        "repos_url": format!("{url}/repos"),
+        "events_url": format!("{url}/events"),
+        "hooks_url": format!("{url}/hooks"),
+        "issues_url": format!("{url}/issues"),
+        "members_url": format!("{url}/members{{/member}}"),
+        "public_members_url": format!("{url}/public_members{{/member}}"),
+        "avatar_url": avatar_url(org),
+        "description": null,
+    })
 }
 
 /// GitHub's node id for an installation, which a payload carries beside

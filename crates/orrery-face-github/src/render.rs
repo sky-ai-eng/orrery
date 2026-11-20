@@ -494,7 +494,7 @@ pub(crate) fn user_full_json(face: &GithubFace, actor: &Actor) -> serde_json::Va
     json
 }
 
-fn avatar_url(actor: &Actor) -> String {
+pub(crate) fn avatar_url(actor: &Actor) -> String {
     format!("https://orrery.invalid/avatars/{}", actor.id)
 }
 
