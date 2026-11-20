@@ -376,6 +376,9 @@ pub struct WorldDiff {
     pub workflow_runs_added: Vec<WorkflowRunChange>,
     /// The runs whose jobs came to something else.
     pub workflow_runs_updated: Vec<WorkflowRunChange>,
+    /// The runs deleted, each as the earlier side held it. Their jobs and
+    /// suites went with them.
+    pub workflow_runs_deleted: Vec<WorkflowRunChange>,
     pub org_memberships_added: Vec<OrgMembershipChange>,
     pub org_memberships_removed: Vec<OrgMembershipChange>,
     pub org_roles_changed: Vec<OrgRoleChange>,
@@ -886,32 +889,38 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         .into_iter()
         .map(|run| (run.id, run))
         .collect();
+    let run_entry = |run: &WorkflowRun| WorkflowRunChange {
+        repo: repo_name(run.repo_id),
+        workflow: workflows
+            .iter()
+            .find(|w| w.id == run.workflow_id)
+            .map(|w| w.path.clone())
+            .unwrap_or_default(),
+        run_number: run.run_number,
+        event: run.event.clone(),
+        head_sha: run.head_sha.clone(),
+        attempt: run.attempt,
+        status: run.status.as_str().to_string(),
+        conclusion: run.conclusion.map(|c| c.as_str().to_string()),
+    };
     let mut workflow_runs_added = Vec::new();
     let mut workflow_runs_updated = Vec::new();
-    for run in to.view.list_workflow_runs()? {
-        let entry = WorkflowRunChange {
-            repo: repo_name(run.repo_id),
-            workflow: workflows
-                .iter()
-                .find(|w| w.id == run.workflow_id)
-                .map(|w| w.path.clone())
-                .unwrap_or_default(),
-            run_number: run.run_number,
-            event: run.event.clone(),
-            head_sha: run.head_sha.clone(),
-            attempt: run.attempt,
-            status: run.status.as_str().to_string(),
-            conclusion: run.conclusion.map(|c| c.as_str().to_string()),
-        };
+    let to_runs = to.view.list_workflow_runs()?;
+    for run in &to_runs {
         // A re-run can end as the attempt before it did, so the attempt is
         // compared too.
         let state = |run: &WorkflowRun| (run.attempt, run.status, run.conclusion);
         match from_runs.get(&run.id) {
-            None => workflow_runs_added.push(entry),
-            Some(old) if state(old) != state(&run) => workflow_runs_updated.push(entry),
+            None => workflow_runs_added.push(run_entry(run)),
+            Some(old) if state(old) != state(run) => workflow_runs_updated.push(run_entry(run)),
             Some(_) => {}
         }
     }
+    let workflow_runs_deleted = from_runs
+        .values()
+        .filter(|old| !to_runs.iter().any(|run| run.id == old.id))
+        .map(run_entry)
+        .collect();
 
     let from_timeline: BTreeSet<i64> = from
         .view
@@ -1141,6 +1150,7 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
         workflows_added,
         workflow_runs_added,
         workflow_runs_updated,
+        workflow_runs_deleted,
         org_memberships_added,
         org_memberships_removed,
         org_roles_changed,

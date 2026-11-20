@@ -30,6 +30,7 @@ mod checks;
 mod dependabot;
 pub mod graphql;
 pub mod layout;
+pub mod logs;
 mod media;
 mod meta;
 pub mod nodeid;
@@ -255,7 +256,23 @@ pub fn router(face: GithubFace) -> Router {
         )
         .route(
             "/repos/{owner}/{repo}/actions/runs/{id}",
-            get(actions::get_run),
+            get(actions::get_run).delete(logs::delete_run),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs/{id}/logs",
+            get(logs::run_log).delete(logs::delete_logs),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs/{id}/attempts/{n}/logs",
+            get(logs::attempt_log),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/jobs/{id}/logs",
+            get(logs::job_log),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/jobs/{id}/steps/{n}/logs",
+            get(logs::step_log),
         )
         .route(
             "/repos/{owner}/{repo}/actions/runs/{id}/jobs",

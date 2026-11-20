@@ -14,6 +14,7 @@ Orrery's behavior is github.com's: every behavior `surface-github.md` reports as
 | GraphQL | `POST {base_url}/api/graphql`, a sibling of `/api/v3`, never under it |
 | git | `{base_url}/{owner}/{repo}[.git]/…` (`surface-git.md`) |
 | OAuth web flow | `{base_url}/login/oauth/…` |
+| Log links | `{base_url}/_actions-results/…`, which the log routes redirect to (`surface-github.md` §1.14). A link takes no token. |
 
 The layout is how a client reaches a world, not a claim to be a GitHub Enterprise Server. `GET /meta` names a release (`surface-github.md` §1.9) because GitHub Enterprise Server's clients choose their requests by it.
 
@@ -22,7 +23,7 @@ The layout is how a client reaches a world, not a claim to be a GitHub Enterpris
 | Host | Served |
 | --- | --- |
 | `api.github.com` | REST at the root (`/repos/…`), and GraphQL at `POST /graphql` |
-| `github.com` | git, the OAuth web flow, and the GitHub App pages, at the paths the world's own host serves them at. REST, GraphQL, and `/_orrery` are not served there. |
+| `github.com` | git, the OAuth web flow, the GitHub App pages, and log links, at the paths the world's own host serves them at. REST, GraphQL, and `/_orrery` are not served there. |
 | any other host under `github.com` or `githubusercontent.com` | nothing: every request is the not-mocked `501`, naming the host |
 | any other host | the world's own host, at GitHub Enterprise Server's paths, as above, so a router or relay in front of the world reaches it under its own name |
 

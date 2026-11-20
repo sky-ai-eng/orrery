@@ -3,7 +3,8 @@
 //! registered here, standing for a workflow file a world does not read. A
 //! run of one is started here for the events GitHub starts one on by
 //! itself. And a runner's work on a job is reported here: taking it,
-//! finishing a step, and finishing the job. Which jobs a run lists, and
+//! writing to its log, finishing a step, and finishing the job. Which jobs
+//! a run lists, and
 //! when, follows from those (`spec/surface-github.md`, "Actions"). The
 //! reads of workflows, runs, and jobs are the GitHub face's.
 
@@ -39,6 +40,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/repos/{owner}/{repo}/workflows/{id}", get(get_workflow))
         .route("/repos/{owner}/{repo}/workflows/{id}/runs", post(start_run))
         .route(&format!("{JOB}/start"), post(start_job))
+        .route(&format!("{JOB}/log"), post(write_log))
         .route(&format!("{JOB}/complete-step"), post(complete_step))
         .route(&format!("{JOB}/complete"), post(complete_job))
 }
@@ -533,11 +535,7 @@ fn job_at(
 }
 
 /// The run a job is in, after a write to the job.
-fn run_of(
-    state: &AppState,
-    job: &CheckRun,
-    written: Result<CheckRun, WorldError>,
-) -> Response<Body> {
+fn run_of<T>(state: &AppState, job: &CheckRun, written: Result<T, WorldError>) -> Response<Body> {
     let run_id = job.job.as_ref().map_or(0, |j| j.run_id);
     let run = written.and_then(|_| {
         state
@@ -580,6 +578,42 @@ async fn start_job(
         Err(resp) => return *resp,
     };
     run_of(&state, &job, state.world.start_workflow_job(job.id, SYSTEM))
+}
+
+/// A runner writes lines to the job's log, in the step in progress. GitHub
+/// serves them once the step has finished (`spec/surface-github.md`,
+/// "Logs").
+async fn write_log(
+    State(state): State<AppState>,
+    UrlPath((owner, name, job_id)): UrlPath<(String, String, String)>,
+    body: Bytes,
+) -> Response<Body> {
+    let mut fields = Fields::parse(&body);
+    let lines: Option<Vec<String>> = fields.required("lines");
+    if lines.as_ref().is_some_and(Vec::is_empty) {
+        fields.fault(Fault::invalid(
+            "lines holds at least one line".to_string(),
+            "lines",
+        ));
+    }
+    for (i, line) in lines.iter().flatten().enumerate() {
+        if line.contains(['\n', '\r']) {
+            fields.fault(Fault::invalid(
+                "a line holds no line break".to_string(),
+                format!("lines[{i}]"),
+            ));
+        }
+    }
+    let lines = match fields.finish(lines) {
+        Ok(lines) => lines,
+        Err(resp) => return *resp,
+    };
+    let job = match job_at(&state, &owner, &name, &job_id) {
+        Ok(job) => job,
+        Err(resp) => return *resp,
+    };
+    let written = state.world.append_job_log(job.id, &lines, SYSTEM);
+    run_of(&state, &job, written)
 }
 
 /// The step in progress finishes, and the next step that runs begins:

@@ -522,12 +522,12 @@ async fn a_run_is_driven_by_its_runners_and_read_as_github_serves_it() {
     assert_eq!(
         face(
             "GET",
-            &format!("{}/actions/runs/{run_id}/logs", s.api),
+            &format!("{}/actions/runs/{run_id}/artifacts", s.api),
             &s.token,
             Value::Null
         ),
         Err(501),
-        "logs are not served yet, and say so"
+        "artifacts are not served, and say so"
     );
 }
 
@@ -1184,4 +1184,469 @@ async fn a_run_is_rerun_cancelled_and_dispatched_through_githubs_api() {
     ] {
         assert_eq!(post(&bob, missing, None).0, 404, "{missing}");
     }
+}
+
+/// One answer, with no redirect followed: its status, the headers a log
+/// route's answer is told by, and its body.
+struct Answer {
+    status: u16,
+    location: Option<String>,
+    content_type: Option<String>,
+    disposition: Option<String>,
+    error_code: Option<String>,
+    body: Vec<u8>,
+}
+
+impl Answer {
+    fn text(&self) -> String {
+        String::from_utf8(self.body.clone()).unwrap()
+    }
+
+    fn message(&self) -> (u16, String) {
+        let body: Value = serde_json::from_slice(&self.body).unwrap();
+        (self.status, body["message"].as_str().unwrap().to_string())
+    }
+}
+
+/// `method` on `url`, with `token` when one is given.
+fn fetch(method: &str, url: &str, token: Option<&str>) -> Answer {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .build()
+        .into();
+    let authorized = |request: ureq::RequestBuilder<ureq::typestate::WithoutBody>| match token {
+        Some(token) => request.header("authorization", format!("token {token}")),
+        None => request,
+    };
+    let mut resp = match method {
+        "GET" => authorized(agent.get(url)).call(),
+        "HEAD" => authorized(agent.head(url)).call(),
+        "DELETE" => authorized(agent.delete(url)).call(),
+        "POST" => {
+            let request = agent.post(url);
+            match token {
+                Some(token) => request.header("authorization", format!("token {token}")),
+                None => request,
+            }
+            .send_empty()
+        }
+        other => panic!("no {other} here"),
+    }
+    .unwrap();
+    let header = |name: &str| {
+        resp.headers()
+            .get(name)
+            .map(|value| value.to_str().unwrap().to_string())
+    };
+    Answer {
+        status: resp.status().as_u16(),
+        location: header("location"),
+        content_type: header("content-type"),
+        disposition: header("content-disposition"),
+        error_code: header("x-ms-error-code"),
+        body: resp.body_mut().read_to_vec().unwrap(),
+    }
+}
+
+/// The files of a zip whose entries are stored: each name with its body.
+fn unzip(zip: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let u16_at = |at: usize| u16::from_le_bytes([zip[at], zip[at + 1]]) as usize;
+    let u32_at = |at: usize| u32::from_le_bytes(zip[at..at + 4].try_into().unwrap()) as usize;
+    let mut files = Vec::new();
+    let mut at = 0;
+    while zip[at..at + 4] == [0x50, 0x4b, 0x03, 0x04] {
+        let (size, name_len, extra) = (u32_at(at + 18), u16_at(at + 26), u16_at(at + 28));
+        let name = at + 30;
+        let body = name + name_len + extra;
+        files.push((
+            String::from_utf8(zip[name..name + name_len].to_vec()).unwrap(),
+            zip[body..body + size].to_vec(),
+        ));
+        at = body + size;
+    }
+    files
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runs_logs_are_read_through_links_and_deleted_with_the_run() {
+    let s = seed().await;
+    let base = s.inst.base.clone();
+    let system =
+        orrery_world::Attribution::new(orrery_world::SYSTEM_ACTOR_ID, orrery_world::Door::Control);
+    let api = |path: &str| fetch("GET", &format!("{}/{path}", s.api), Some(&s.token));
+    // A link is followed with no token: it carries its own authority.
+    let follow = |answer: &Answer| fetch("GET", answer.location.as_deref().unwrap(), None);
+    let write = |job: i64, lines: &[&str]| {
+        s.runner(
+            &format!("/workflow-jobs/{job}/log"),
+            Some(json!({ "lines": lines })),
+        )
+    };
+    let step = |job: i64, conclusion: &str| {
+        s.runner(
+            &format!("/workflow-jobs/{job}/complete-step"),
+            Some(json!({ "conclusion": conclusion })),
+        )
+    };
+    let finish = |run: &Value, name: &str, conclusion: &str| {
+        let id = job_id(run, name);
+        s.runner(&format!("/workflow-jobs/{id}/start"), None);
+        write(id, &[&format!("{name} ran")]);
+        s.runner(
+            &format!("/workflow-jobs/{id}/complete"),
+            Some(json!({ "conclusion": conclusion })),
+        );
+        id
+    };
+
+    let (_, workflow) = s.control("POST", "/workflows", Some(ci()));
+    let run = s.runner(
+        &format!("/workflows/{}/runs", workflow["id"]),
+        Some(json!({
+            "event": "push", "head_sha": s.feature_sha, "head_branch": "feature", "actor": "alice",
+        })),
+    );
+    let run_id = run["id"].as_i64().unwrap();
+    let run_path = format!("actions/runs/{run_id}");
+    let state = || s.runner_state(run_id);
+    let lint = job_id(&run, "lint");
+
+    // A job's log route redirects for any job, to a link on the web host.
+    // The link answers nothing until the job finishes.
+    let queued = api(&format!("actions/jobs/{lint}/logs"));
+    assert_eq!(queued.status, 302);
+    assert_eq!(
+        queued.content_type.as_deref(),
+        Some("text/html;charset=utf-8")
+    );
+    assert!(queued.body.is_empty());
+    let link = queued.location.clone().unwrap();
+    assert!(
+        link.starts_with(&format!(
+            "{base}/_actions-results/jobs/{lint}/job-logs.txt?se="
+        )),
+        "{link}"
+    );
+    let nothing = follow(&queued);
+    assert_eq!(
+        (nothing.status, nothing.error_code.as_deref()),
+        (404, Some("BlobNotFound"))
+    );
+    assert_eq!(nothing.content_type.as_deref(), Some("application/xml"));
+    assert!(nothing.text().starts_with(
+        "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>BlobNotFound</Code>"
+    ));
+    assert_eq!(
+        fetch(
+            "HEAD",
+            &format!("{}/actions/jobs/{lint}/logs", s.api),
+            Some(&s.token)
+        )
+        .status,
+        303
+    );
+    // A first attempt has no archive until it finishes.
+    assert_eq!(api(&format!("{run_path}/logs")).status, 404);
+    assert_eq!(api(&format!("{run_path}/attempts/1/logs")).status, 404);
+
+    // A runner writes to the step it is on. A step's log is there once the
+    // step finishes, while the job still runs.
+    s.runner(&format!("/workflow-jobs/{lint}/start"), None);
+    write(lint, &["Runner ready"]);
+    step(lint, "success");
+    write(lint, &["lint ok", "no warnings"]);
+    let first = follow(&api(&format!("actions/jobs/{lint}/steps/1/logs")));
+    assert_eq!(
+        (first.status, first.content_type.as_deref()),
+        (200, Some("text/plain"))
+    );
+    // The clock has not moved since the run began, so every stamp is its
+    // second.
+    let day = s.get(&run_path)["created_at"]
+        .as_str()
+        .unwrap()
+        .trim_end_matches('Z')
+        .to_string();
+    assert_eq!(
+        first.text(),
+        format!("\u{feff}{day}.0000001Z Runner ready\n")
+    );
+    for missing in ["2", "3", "0", "9", "x"] {
+        assert_eq!(
+            api(&format!("actions/jobs/{lint}/steps/{missing}/logs")).status,
+            404,
+            "step {missing}"
+        );
+    }
+    assert_eq!(
+        follow(&api(&format!("actions/jobs/{lint}/logs"))).status,
+        404
+    );
+    step(lint, "success");
+
+    // The job's log is every line under a byte-order mark, each after a
+    // stamp of its own, and a step's log is that step's lines.
+    let whole = follow(&api(&format!("actions/jobs/{lint}/logs")));
+    assert_eq!(
+        whole.text(),
+        format!(
+            "\u{feff}{day}.0000001Z Runner ready\n{day}.0000002Z lint ok\n\
+             {day}.0000003Z no warnings\n"
+        )
+    );
+    assert_eq!(
+        follow(&api(&format!("actions/jobs/{lint}/steps/2/logs"))).text(),
+        format!("\u{feff}{day}.0000002Z lint ok\n{day}.0000003Z no warnings\n")
+    );
+    assert_eq!(
+        follow(&api(&format!("actions/jobs/{lint}/steps/3/logs"))).text(),
+        "\u{feff}"
+    );
+
+    // The tests fail, the report runs, and the build is skipped. A job
+    // that never ran has a link that answers nothing, and no step logs.
+    let test = finish(&state(), "test", "failure");
+    finish(&state(), "report", "success");
+    let build = job_id(&state(), "build");
+    let skipped = api(&format!("actions/jobs/{build}/logs"));
+    assert_eq!((skipped.status, follow(&skipped).status), (302, 404));
+    assert_eq!(
+        api(&format!("actions/jobs/{build}/steps/1/logs")).status,
+        404
+    );
+    // A skipped step has none either: the tests' third step.
+    assert_eq!(
+        api(&format!("actions/jobs/{test}/steps/3/logs")).status,
+        404
+    );
+    for missing in ["actions/jobs/999/logs", "actions/jobs/999/steps/1/logs"] {
+        assert_eq!(api(missing).message(), (404, "Not Found".to_string()));
+    }
+
+    // The archive of the attempt: each job that ran, newest first and
+    // numbered so, with what the system says of it and a file per step.
+    let redirect = api(&format!("{run_path}/logs"));
+    assert_eq!(redirect.status, 302);
+    let archive = follow(&redirect);
+    let suite = s.get(&run_path)["check_suite_id"].as_i64().unwrap();
+    assert_eq!(
+        (
+            archive.status,
+            archive.content_type.as_deref(),
+            archive.disposition.as_deref()
+        ),
+        (
+            200,
+            Some("application/zip"),
+            Some(format!("attachment; filename=logs_{suite}.zip").as_str())
+        )
+    );
+    let files = unzip(&archive.body);
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "1_report.txt",
+            "report/system.txt",
+            "report/1_Set up job.txt",
+            "report/2_Complete job.txt",
+            "2_test.txt",
+            "test/system.txt",
+            "test/1_Set up job.txt",
+            "test/4_Dump logs.txt",
+            "test/5_Complete job.txt",
+            "3_lint.txt",
+            "lint/system.txt",
+            "lint/1_Set up job.txt",
+            "lint/2_Say hello.txt",
+            "lint/3_Complete job.txt",
+        ]
+    );
+    let file = |name: &str| {
+        let (_, body) = files.iter().find(|(n, _)| n == name).unwrap();
+        String::from_utf8(body.clone()).unwrap()
+    };
+    assert_eq!(file("3_lint.txt"), whole.text());
+    assert_eq!(
+        file("lint/system.txt"),
+        format!(
+            "{day}.0000000Z Requested labels: ubuntu-latest\n\
+             {day}.0000000Z Job defined at: alice/web/.github/workflows/ci.yml@refs/heads/feature\n\
+             {day}.0000000Z Waiting for a runner to pick up this job...\n\
+             {day}.0000000Z Job is about to start running on the hosted runner: \
+             GitHub Actions {}",
+            1_000_000_000 + lint
+        )
+    );
+    assert_eq!(
+        follow(&api(&format!("{run_path}/attempts/1/logs"))).body,
+        archive.body
+    );
+    assert_eq!(api(&format!("{run_path}/attempts/2/logs")).status, 404);
+    assert_eq!(api("actions/runs/999/logs").status, 404);
+
+    // A link answers only as it was signed, and only for a while: ten
+    // minutes for text, and a minute for an archive.
+    let job_link = api(&format!("actions/jobs/{lint}/logs")).location.unwrap();
+    let forged = fetch("GET", &format!("{job_link}0"), None);
+    assert_eq!(
+        (forged.status, forged.error_code.as_deref()),
+        (403, Some("AuthenticationFailed"))
+    );
+    let other = job_link.replace(&format!("jobs/{lint}/"), &format!("jobs/{test}/"));
+    assert_eq!(fetch("GET", &other, None).status, 403);
+    let archive_link = redirect.location.clone().unwrap();
+    s.inst.world.advance_clock(61, system).unwrap();
+    let late = fetch("GET", &archive_link, None);
+    assert_eq!((late.status, late.body.len()), (403, 0));
+    assert_eq!(fetch("GET", &job_link, None).status, 200);
+    s.inst.world.advance_clock(540, system).unwrap();
+    assert_eq!(fetch("GET", &job_link, None).status, 403);
+
+    // A re-run carries lint over with its log. The new attempt has an
+    // archive from its start, empty until a job of its own finishes, and
+    // neither the logs nor the run can be deleted while it runs.
+    let rerun = fetch(
+        "POST",
+        &format!("{}/{run_path}/rerun-failed-jobs", s.api),
+        Some(&s.token),
+    );
+    assert_eq!(rerun.status, 201);
+    let carried = job_id(&state(), "lint");
+    assert_ne!(carried, lint);
+    assert_eq!(
+        follow(&api(&format!("actions/jobs/{carried}/logs"))).text(),
+        whole.text()
+    );
+    assert_eq!(
+        follow(&api(&format!("actions/jobs/{carried}/steps/2/logs"))).text(),
+        file("lint/2_Say hello.txt")
+    );
+    let early = follow(&api(&format!("{run_path}/logs")));
+    assert_eq!((early.status, early.body.len()), (200, 22));
+    let delete = |path: &str| fetch("DELETE", &format!("{}/{path}", s.api), Some(&s.token));
+    assert_eq!(
+        delete(&format!("{run_path}/logs")).message(),
+        (
+            403,
+            "Unable to delete logs while the workflow is running".to_string()
+        )
+    );
+    assert_eq!(
+        delete(&run_path).message(),
+        (403, "Could not delete the workflow run".to_string())
+    );
+    finish(&state(), "test", "success");
+    finish(&state(), "report", "success");
+    finish(&state(), "build", "success");
+    // The archive of the second attempt holds the jobs that ran in it, and
+    // not the one it carried over.
+    let second = unzip(&follow(&api(&format!("{run_path}/logs"))).body);
+    let top: Vec<&str> = second
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| !name.contains('/'))
+        .collect();
+    assert_eq!(top, ["0_build.txt", "1_report.txt", "2_test.txt"]);
+
+    // Deleting the logs: the job's log and the archives are gone from the
+    // API, a step's link answers nothing, and the run's time moves.
+    let before = s.get(&run_path);
+    s.inst.world.advance_clock(30, system).unwrap();
+    for _ in 0..2 {
+        let deleted = delete(&format!("{run_path}/logs"));
+        assert_eq!((deleted.status, deleted.body.len()), (204, 0));
+    }
+    assert_eq!(api(&format!("actions/jobs/{lint}/logs")).status, 404);
+    assert_eq!(api(&format!("actions/jobs/{carried}/logs")).status, 404);
+    let gone = api(&format!("actions/jobs/{lint}/steps/1/logs"));
+    assert_eq!((gone.status, follow(&gone).status), (302, 404));
+    assert_eq!(api(&format!("{run_path}/logs")).status, 404);
+    assert_eq!(api(&format!("{run_path}/attempts/1/logs")).status, 404);
+    let after = s.get(&run_path);
+    assert_ne!(after["updated_at"], before["updated_at"]);
+    assert_eq!(after["conclusion"], before["conclusion"]);
+    assert_eq!(
+        s.get(&format!("actions/jobs/{lint}"))["steps"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    // Deleting the run: it, its jobs, their check runs, and its suite are
+    // gone, and the commit lists no check run of its.
+    let deleted = delete(&run_path);
+    assert_eq!((deleted.status, deleted.body.len()), (204, 0));
+    for missing in [
+        run_path.clone(),
+        format!("{run_path}/jobs"),
+        format!("{run_path}/attempts/1"),
+        format!("{run_path}/logs"),
+        format!("actions/jobs/{lint}"),
+        format!("actions/jobs/{lint}/logs"),
+        format!("check-runs/{lint}"),
+        format!("check-suites/{suite}"),
+        format!("check-suites/{suite}/check-runs"),
+    ] {
+        assert_eq!(api(&missing).status, 404, "{missing}");
+    }
+    assert_eq!(
+        s.get(&format!("commits/{}/check-runs?filter=all", s.feature_sha))["total_count"],
+        0
+    );
+    assert_eq!(s.get("actions/runs")["total_count"], 0);
+    assert_eq!(delete(&run_path).status, 404);
+    assert_eq!(delete(&format!("{run_path}/logs")).status, 404);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runner_writes_only_whole_lines_to_a_job_in_progress() {
+    let s = seed().await;
+    let (_, workflow) = s.control("POST", "/workflows", Some(ci()));
+    let run = s.runner(
+        &format!("/workflows/{}/runs", workflow["id"]),
+        Some(json!({
+            "event": "push", "head_sha": s.main_sha, "head_branch": "main", "actor": "alice",
+        })),
+    );
+    let lint = job_id(&run, "lint");
+    let log = format!("/workflow-jobs/{lint}/log");
+    // A queued job has no step to write in.
+    let (status, body) = s.control("POST", &log, Some(json!({ "lines": ["early"] })));
+    assert_eq!(
+        (status, faults(&body)),
+        (400, vec![fault("FAILED_PRECONDITION", None)])
+    );
+    s.runner(&format!("/workflow-jobs/{lint}/start"), None);
+    let (status, body) = s.control("POST", &log, Some(json!({ "lines": [] })));
+    assert_eq!(
+        (status, faults(&body)),
+        (400, vec![fault("INVALID_ARGUMENT", Some("lines"))])
+    );
+    let (status, body) = s.control(
+        "POST",
+        &log,
+        Some(json!({ "lines": ["fine", "two\nlines", "a\rreturn"] })),
+    );
+    assert_eq!(
+        (status, faults(&body)),
+        (
+            400,
+            vec![
+                fault("INVALID_ARGUMENT", Some("lines[1]")),
+                fault("INVALID_ARGUMENT", Some("lines[2]"))
+            ]
+        )
+    );
+    let (status, _) = s.control("POST", &log, Some(json!({ "lines": ["fine"] })));
+    assert_eq!(status, 200);
+    let (status, _) = s.control(
+        "POST",
+        "/workflow-jobs/999/log",
+        Some(json!({ "lines": ["x"] })),
+    );
+    assert_eq!(status, 404);
 }
