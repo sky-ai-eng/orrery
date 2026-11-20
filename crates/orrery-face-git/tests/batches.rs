@@ -353,6 +353,33 @@ fn ref_reads_answer_as_one_process_each_does() {
 }
 
 #[test]
+fn a_branch_is_found_by_its_exact_name_alone() {
+    let (repo, _, tips) = repo();
+    let bare = repo.bare();
+    let tip = |name: &str| tips.iter().find(|(n, _)| n == name).map(|(_, tip)| tip);
+    for name in ["main", "modify", "unrelated"] {
+        assert_eq!(
+            store::branch_tip(&bare, name).unwrap().as_ref(),
+            tip(name),
+            "{name}"
+        );
+    }
+    // Each of the first four is a commit or a tree to `rev-parse`, and none
+    // is a branch.
+    for rev in [
+        "main~1",
+        "main^{tree}",
+        "main:a.txt",
+        "main@{0}",
+        "gone",
+        "",
+        "-q",
+    ] {
+        assert_eq!(store::branch_tip(&bare, rev).unwrap(), None, "{rev:?}");
+    }
+}
+
+#[test]
 fn a_batch_of_nothing_runs_nothing() {
     let missing = Path::new("/nonexistent/repository");
     assert!(store::diff_stats_many(missing, &[]).is_empty());

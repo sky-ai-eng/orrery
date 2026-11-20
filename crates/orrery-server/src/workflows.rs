@@ -157,9 +157,8 @@ struct StepState {
 fn run_body(state: &AppState, run: WorkflowRun) -> Result<RunBody, WorldError> {
     let jobs = state
         .world
-        .list_workflow_jobs(run.id)?
+        .list_workflow_jobs_of_attempt(run.id, run.attempt)?
         .into_iter()
-        .filter(|job| job.job.as_ref().is_some_and(|j| j.attempt == run.attempt))
         .map(|job| JobState {
             id: job.id,
             name: job.name,
@@ -460,7 +459,7 @@ async fn start_run(
         }
         Err(e) => return internal(e),
     };
-    match store::rev_parse(&bare, &format!("refs/heads/{head_branch}")) {
+    match store::branch_tip(&bare, &head_branch) {
         Ok(Some(_)) => {}
         Ok(None) => wrong.push(Fault::invalid(
             format!("{} has no branch {head_branch:?}", repo.full_name()),

@@ -770,6 +770,20 @@ pub(crate) fn list_workflow_jobs(conn: &Connection, run_id: i64) -> Result<Vec<C
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// The jobs one attempt of a run lists, oldest first.
+pub(crate) fn list_workflow_jobs_of_attempt(
+    conn: &Connection,
+    run_id: i64,
+    attempt: i64,
+) -> Result<Vec<CheckRun>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CHECK_RUN_COLUMNS} FROM check_runs
+         WHERE workflow_run_id = ?1 AND run_attempt = ?2 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(params![run_id, attempt], row_to_check_run)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// An attempt of a run that a re-run has replaced.
 pub(crate) fn workflow_run_attempt(
     conn: &Connection,

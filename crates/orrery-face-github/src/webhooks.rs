@@ -964,9 +964,16 @@ impl Rendering {
                 }
             }
             // GitHub sends `completed` each time a suite comes to a
-            // conclusion, a different one from the last included.
+            // conclusion, a different one from the last included. A suite
+            // this event took out of `completed` may be complete again by
+            // the time the delivery is made, and still sends nothing here.
             EventBody::CheckSuiteUpdated(e) => {
-                self.check_suite(world, e.subject.id, e.subject.repo.id)
+                let reopened =
+                    matches!(&e.changes.status, Some(s) if s.to != CheckStatus::Completed);
+                match reopened {
+                    true => Ok(Vec::new()),
+                    false => self.check_suite(world, e.subject.id, e.subject.repo.id),
+                }
             }
             EventBody::DependencyAlertCreated(e) => {
                 let about = about(e.subject.repo.id)?;

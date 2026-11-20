@@ -582,7 +582,7 @@ pub enum Rerun {
     /// The jobs that failed or were cancelled, and every job that needs one
     /// of them.
     Failed,
-    /// One job, and every job that needs it.
+    /// One job of the run's current attempt, and every job that needs it.
     Job(i64),
 }
 

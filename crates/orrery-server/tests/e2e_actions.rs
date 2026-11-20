@@ -841,16 +841,57 @@ async fn a_run_is_rerun_cancelled_and_dispatched_through_githubs_api() {
         s.get(&format!("actions/runs/{run_id}/jobs"))["total_count"],
         2
     );
-    // A full ref names the branch too.
-    assert_eq!(
-        post(&bob, dispatch, Some(json!({ "ref": "refs/heads/main" }))).0,
-        204
+    // A full ref names the branch too, and a caller that asks is told
+    // which run it started.
+    let (status, started) = post(
+        &bob,
+        dispatch,
+        Some(json!({ "ref": "refs/heads/main", "return_run_details": true })),
     );
-    // What GitHub refuses, in its words.
+    let newest = s.get("actions/runs")["workflow_runs"][0].clone();
+    assert_eq!(newest["head_branch"], "main");
     assert_eq!(
-        message(post(&bob, dispatch, Some(json!({ "ref": "nope" })))),
-        (422, "No ref found for: nope".to_string())
+        (status, started),
+        (
+            200,
+            json!({
+                "workflow_run_id": newest["id"],
+                "run_url": newest["url"],
+                "html_url": newest["html_url"],
+            })
+        )
     );
+    // What GitHub refuses, in its words. A ref is a branch's name, not an
+    // expression git would resolve.
+    for missing in ["nope", "main~1", "main^{tree}"] {
+        assert_eq!(
+            message(post(&bob, dispatch, Some(json!({ "ref": missing })))),
+            (422, format!("No ref found for: {missing}"))
+        );
+    }
+    for (body, said) in [
+        (
+            json!({ "ref": 5 }),
+            "For 'properties/ref', 5 is not a string.",
+        ),
+        (
+            json!({ "ref": "nope", "inputs": null }),
+            "For 'properties/inputs', nil is not an object.",
+        ),
+        (
+            json!({ "ref": "main", "inputs": ["x"] }),
+            "For 'properties/inputs', [\"x\"] is not an object.",
+        ),
+        (
+            json!({ "ref": "main", "return_run_details": "yes" }),
+            "For 'properties/return_run_details', \"yes\" is not a boolean.",
+        ),
+    ] {
+        assert_eq!(
+            message(post(&bob, dispatch, Some(body))),
+            (422, format!("Invalid request.\n\n{said}"))
+        );
+    }
     assert_eq!(
         message(post(
             &bob,
@@ -978,11 +1019,12 @@ async fn a_run_is_rerun_cancelled_and_dispatched_through_githubs_api() {
             })
             .collect()
     };
+    // The job that runs is listed before the one carried over.
     assert_eq!(
         brief(&latest),
         [
-            ("lint".to_string(), 2, "completed".to_string()),
             ("test".to_string(), 2, "queued".to_string()),
+            ("lint".to_string(), 2, "completed".to_string()),
         ]
     );
     assert_eq!(
@@ -1051,9 +1093,13 @@ async fn a_run_is_rerun_cancelled_and_dispatched_through_githubs_api() {
         Some(json!({ "conclusion": "success" })),
     );
     let after = state();
-    assert_eq!(after["jobs"][1]["conclusion"], "cancelled");
-    assert_eq!(after["jobs"][3]["name"], "build");
-    assert_eq!(after["jobs"][3]["conclusion"], "cancelled");
+    let concluded = |name: &str| {
+        let jobs = after["jobs"].as_array().unwrap();
+        jobs.iter().find(|job| job["name"] == name).unwrap()["conclusion"].clone()
+    };
+    assert_eq!(concluded("test"), "cancelled");
+    assert_eq!(concluded("build"), "cancelled");
+    assert_eq!(concluded("report"), Value::Null);
     finish(&after, "report", "success");
     let ended = s.get(&run_path);
     assert_eq!(
@@ -1061,11 +1107,40 @@ async fn a_run_is_rerun_cancelled_and_dispatched_through_githubs_api() {
         (&json!("completed"), &json!("cancelled"))
     );
 
-    // Re-running one job runs it alone, and an id from an earlier attempt
-    // names the job of its name. Cancelled by force, it ends where it is.
+    // Re-running one job runs it alone, and only a job of the current
+    // attempt can be. Cancelled by force, it ends where it is.
     let old_report = s.get(&format!("{run_path}/attempts/1/jobs"))["jobs"][2]["id"].clone();
     assert_eq!(
-        post(&bob, &format!("actions/jobs/{old_report}/rerun"), None),
+        message(post(
+            &bob,
+            &format!("actions/jobs/{old_report}/rerun"),
+            None
+        )),
+        (
+            403,
+            "Only jobs from the current attempt can be re-run".to_string()
+        )
+    );
+    let rerun_report = format!("actions/jobs/{}/rerun", job_id(&state(), "report"));
+    assert_eq!(
+        message(post(
+            &bob,
+            &rerun_report,
+            Some(json!({ "enable_debug_logging": "yes" }))
+        )),
+        (
+            422,
+            "Invalid request.\n\nInvalid property /enable_debug_logging: `\"yes\"` is not of \
+             type `boolean`."
+                .to_string()
+        )
+    );
+    assert_eq!(
+        post(
+            &bob,
+            &rerun_report,
+            Some(json!({ "enable_debug_logging": true }))
+        ),
         (201, json!({}))
     );
     let third = state();

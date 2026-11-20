@@ -1291,6 +1291,9 @@ event_types! {
     CommentCreated(CommentCreated) = "comment:created",
 
     CheckRunCreated(CheckRunCreated) = "check_run:created",
+    /// A new attempt of a workflow run listed a job it does not run again,
+    /// as the job finished in the attempt before.
+    CheckRunCarried(CheckRunCreated) = "check_run:carried",
     /// A push brought a commit to a branch's tip, or a check run was made
     /// on a commit its creator had no suite for.
     CheckSuiteCreated(CheckSuiteCreated) = "check_suite:created",

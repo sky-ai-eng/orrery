@@ -464,10 +464,20 @@ fn a_workflow_whose_jobs_cannot_run_is_refused() {
 /// The jobs of the run's current attempt.
 fn current(s: &Seeded, run_id: i64) -> Vec<CheckRun> {
     let attempt = s.w.workflow_run_by_id(run_id).unwrap().unwrap().attempt;
-    s.jobs(run_id)
-        .into_iter()
-        .filter(|job| job.job.as_ref().is_some_and(|j| j.attempt == attempt))
+    s.w.list_workflow_jobs_of_attempt(run_id, attempt).unwrap()
+}
+
+/// The types of the events the log holds after `seq`.
+fn logged_after(s: &Seeded, seq: i64) -> Vec<&'static str> {
+    s.w.log_after(seq, 10_000)
+        .unwrap()
+        .iter()
+        .map(|event| event.body.type_name())
         .collect()
+}
+
+fn last_seq(s: &Seeded) -> i64 {
+    s.w.log_after(0, 10_000).unwrap().last().unwrap().seq
 }
 
 fn current_job(s: &Seeded, run_id: i64, name: &str) -> CheckRun {
@@ -561,6 +571,103 @@ fn a_run_asked_to_cancel_stops_its_jobs_and_runs_what_runs_regardless() {
     ));
 }
 
+/// What GitHub was observed to do with a run asked to cancel while a job
+/// that runs regardless was queued, another was in progress, and a third
+/// job was at a step that runs regardless.
+#[test]
+fn a_run_asked_to_cancel_leaves_what_runs_regardless_running() {
+    let s = seeded();
+    let work = || vec![step("Set up job", false), step("Work", false)];
+    let jobs = [
+        job("plain", &[], false, work()),
+        job("hold", &[], true, work()),
+        job("waiting", &[], true, work()),
+        job(
+            "steps",
+            &[],
+            false,
+            vec![
+                step("Set up job", false),
+                step("Regardless", true),
+                step("After", false),
+                step("After regardless", true),
+            ],
+        ),
+    ];
+    let run = s.start(s.workflow(".github/workflows/cancel.yml", &jobs));
+    let id = |name: &str| s.job(run.id, name).id;
+    for name in ["plain", "hold", "steps"] {
+        s.w.start_workflow_job(id(name), s.system).unwrap();
+        s.w.complete_workflow_step(id(name), StepConclusion::Success, s.system)
+            .unwrap();
+    }
+    let before = |name: &str| s.job(run.id, name);
+    let (hold, steps_job) = (before("hold"), before("steps"));
+
+    s.w.cancel_workflow_run(run.id, false, s.system).unwrap();
+    // The job that does not run regardless is cancelled at its step.
+    let plain = s.job(run.id, "plain");
+    assert_eq!(plain.conclusion, Some(CheckConclusion::Cancelled));
+    assert_eq!(
+        steps(&plain)[1..],
+        [
+            (
+                "Work",
+                StepStatus::Completed,
+                Some(StepConclusion::Cancelled)
+            ),
+            (
+                "Complete job",
+                StepStatus::Completed,
+                Some(StepConclusion::Success)
+            ),
+        ]
+    );
+    // The jobs that run regardless are as they were, queued or in progress,
+    // and so is the job whose step in progress runs regardless.
+    assert_eq!(s.job(run.id, "hold"), hold);
+    assert_eq!(s.job(run.id, "waiting").status, CheckStatus::Queued);
+    assert_eq!(s.job(run.id, "steps"), steps_job);
+
+    // That step finishes as it would have. The job is cancelled from the
+    // step after it: one skipped, one that runs regardless run.
+    s.w.complete_workflow_step(id("steps"), StepConclusion::Success, s.system)
+        .unwrap();
+    let done =
+        s.w.complete_workflow_step(id("steps"), StepConclusion::Success, s.system)
+            .unwrap();
+    assert_eq!(done.conclusion, Some(CheckConclusion::Cancelled));
+    assert_eq!(
+        steps(&done)
+            .iter()
+            .map(|(name, _, conclusion)| (*name, conclusion.unwrap()))
+            .collect::<Vec<_>>(),
+        [
+            ("Set up job", StepConclusion::Success),
+            ("Regardless", StepConclusion::Success),
+            ("After", StepConclusion::Skipped),
+            ("After regardless", StepConclusion::Success),
+            ("Complete job", StepConclusion::Success),
+        ]
+    );
+    // A job that runs regardless runs every step, and succeeds.
+    let held =
+        s.w.complete_workflow_step(id("hold"), StepConclusion::Success, s.system)
+            .unwrap();
+    assert_eq!(held.conclusion, Some(CheckConclusion::Success));
+    // The run waits for the job still queued, which a cancel by force ends.
+    assert_eq!(s.state(run.id), (CheckStatus::Queued, None));
+    s.w.cancel_workflow_run(run.id, true, s.system).unwrap();
+    assert_eq!(
+        s.job(run.id, "waiting").conclusion,
+        Some(CheckConclusion::Cancelled)
+    );
+    assert_eq!(
+        s.state(run.id),
+        (CheckStatus::Completed, Some(CheckConclusion::Cancelled))
+    );
+}
+
 #[test]
 fn a_run_cancelled_by_force_ends_where_it_stands() {
     let s = seeded();
@@ -620,6 +727,7 @@ fn a_rerun_is_a_new_attempt_that_copies_what_it_does_not_run_again() {
     // Re-running what failed: (b) and the two jobs that need it run again,
     // and (a) is copied as it finished, under a new id.
     s.w.advance_clock(60, s.system).unwrap();
+    let seq = last_seq(&s);
     let again =
         s.w.rerun_workflow_run(run.id, Rerun::Failed, bob.id, s.system)
             .unwrap();
@@ -638,15 +746,26 @@ fn a_rerun_is_a_new_attempt_that_copies_what_it_does_not_run_again() {
     assert_eq!(kept.triggering_actor_login, "alice");
     assert_eq!(kept.started_clock_unix, run.started_clock_unix);
     assert_eq!(s.w.workflow_run_attempt(run.id, 2).unwrap(), None);
+    // The job that runs is listed before the one carried over, and each
+    // is logged as what it is.
     assert_eq!(
         names(&current(&s, run.id)),
         [
+            ("test (b)", CheckStatus::Queued, None),
             (
                 "test (a)",
                 CheckStatus::Completed,
                 Some(CheckConclusion::Success)
             ),
-            ("test (b)", CheckStatus::Queued, None),
+        ]
+    );
+    assert_eq!(
+        logged_after(&s, seq),
+        [
+            "workflow_run:rerun",
+            "check_suite:updated",
+            "check_run:created",
+            "check_run:carried",
         ]
     );
     let copy = current_job(&s, run.id, "test (a)");
@@ -690,9 +809,14 @@ fn a_rerun_is_a_new_attempt_that_copies_what_it_does_not_run_again() {
         Err(WorldError::WorkflowRunInProgress(_))
     ));
     finish("build", true);
-    // A job of an earlier attempt is not one of this one's.
+    // A job of an earlier attempt cannot be re-run, and a check run that
+    // is no job of the run is not found.
     assert!(matches!(
         s.w.rerun_workflow_run(run.id, Rerun::Job(build.id), bob.id, s.system),
+        Err(WorldError::JobOfEarlierAttempt(_))
+    ));
+    assert!(matches!(
+        s.w.rerun_workflow_run(run.id, Rerun::Job(i64::MAX), bob.id, s.system),
         Err(WorldError::NoSuchWorkflowJob(_))
     ));
 
@@ -706,6 +830,89 @@ fn a_rerun_is_a_new_attempt_that_copies_what_it_does_not_run_again() {
         [
             ("test (a)", CheckStatus::Queued, None),
             ("test (b)", CheckStatus::Queued, None),
+        ]
+    );
+}
+
+/// A re-run can list every job already finished: the one job it runs again
+/// needs a job that failed. The attempt still begins and ends, so the suite
+/// is brought back to queued and to its conclusion in the one write, and a
+/// job the attempt before never listed is listed as its needs have it.
+#[test]
+fn a_rerun_that_runs_nothing_still_begins_and_ends() {
+    let s = seeded();
+    let run = s.start(s.workflow(".github/workflows/ci.yml", &ci()));
+    let finish = |name: &str, succeeded: bool| {
+        let id = current_job(&s, run.id, name).id;
+        s.w.start_workflow_job(id, s.system).unwrap();
+        s.w.complete_workflow_job(id, succeeded, s.system).unwrap()
+    };
+    finish("test (a)", true);
+    finish("test (b)", false);
+    finish("report", true);
+    let build = current_job(&s, run.id, "build");
+    assert_eq!(build.conclusion, Some(CheckConclusion::Skipped));
+    let ended = s.w.workflow_run_by_id(run.id).unwrap().unwrap();
+
+    s.w.advance_clock(60, s.system).unwrap();
+    let seq = last_seq(&s);
+    let again =
+        s.w.rerun_workflow_run(run.id, Rerun::Job(build.id), s.alice_id, s.system)
+            .unwrap();
+    assert_eq!(again.attempt, 2);
+    assert_eq!(
+        (again.status, again.conclusion),
+        (CheckStatus::Completed, Some(CheckConclusion::Failure))
+    );
+    assert_eq!(again.updated_clock_unix, ended.updated_clock_unix + 60);
+    assert_eq!(
+        logged_after(&s, seq),
+        [
+            "workflow_run:rerun",
+            "check_suite:updated",
+            "check_run:carried",
+            "check_run:carried",
+            "check_run:carried",
+            "check_run:created",
+            "check_suite:updated",
+        ]
+    );
+    assert_eq!(
+        current_job(&s, run.id, "build").conclusion,
+        Some(CheckConclusion::Skipped)
+    );
+
+    // After a cancel by force the report was never listed. Re-running one
+    // test lists it once the tests it needs have finished.
+    let forced = s.start(s.workflow(".github/workflows/again.yml", &ci()));
+    s.w.cancel_workflow_run(forced.id, true, s.system).unwrap();
+    assert_eq!(current(&s, forced.id).len(), 2);
+    let a = current_job(&s, forced.id, "test (a)").id;
+    s.w.rerun_workflow_run(forced.id, Rerun::Job(a), s.alice_id, s.system)
+        .unwrap();
+    assert_eq!(
+        names(&current(&s, forced.id)),
+        [
+            ("test (a)", CheckStatus::Queued, None),
+            (
+                "test (b)",
+                CheckStatus::Completed,
+                Some(CheckConclusion::Cancelled)
+            ),
+        ]
+    );
+    let id = current_job(&s, forced.id, "test (a)").id;
+    s.w.start_workflow_job(id, s.system).unwrap();
+    s.w.complete_workflow_job(id, true, s.system).unwrap();
+    assert_eq!(
+        names(&current(&s, forced.id))[2..],
+        [
+            ("report", CheckStatus::Queued, None),
+            (
+                "build",
+                CheckStatus::Completed,
+                Some(CheckConclusion::Skipped)
+            ),
         ]
     );
 }

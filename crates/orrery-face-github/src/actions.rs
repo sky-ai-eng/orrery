@@ -717,8 +717,12 @@ fn jobs_page(
 ) -> Response<Body> {
     let every = !of_attempt && param(query, "filter").as_deref() == Some("all");
     let read = || -> Result<(Vec<CheckRun>, Option<Workflow>), WorldError> {
-        let mut jobs = face.world.list_workflow_jobs(run.id)?;
-        jobs.retain(|job| every || job.job.as_ref().is_some_and(|j| j.attempt == run.attempt));
+        let jobs = match every {
+            true => face.world.list_workflow_jobs(run.id)?,
+            false => face
+                .world
+                .list_workflow_jobs_of_attempt(run.id, run.attempt)?,
+        };
         Ok((jobs, face.world.workflow_by_id(run.workflow_id)?))
     };
     let (jobs, workflow) = match read() {
@@ -912,6 +916,20 @@ fn taken(status: StatusCode) -> Response<Body> {
     json_response(status, serde_json::json!({}))
 }
 
+/// GitHub's refusal of a re-run whose body gives `enable_debug_logging` as
+/// anything but a boolean. Either boolean changes nothing a world serves:
+/// the flag asks the runner for more of a log, and a world's runner is its
+/// caller.
+fn refuse_rerun_body(body: &[u8]) -> Option<Response<Body>> {
+    let given: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let debug = given.get("enable_debug_logging")?;
+    (!debug.is_boolean()).then(|| {
+        crate::invalid_request(&format!(
+            "Invalid property /enable_debug_logging: `{debug}` is not of type `boolean`."
+        ))
+    })
+}
+
 /// What a re-run answers: `201 {}`, or GitHub's refusal. `running` is its
 /// message for a run that has not finished.
 fn rerun_answer(written: Result<WorkflowRun, WorldError>, running: &str) -> Response<Body> {
@@ -921,6 +939,10 @@ fn rerun_answer(written: Result<WorkflowRun, WorldError>, running: &str) -> Resp
         Err(WorldError::NothingToRerun(_)) => {
             github_error(StatusCode::FORBIDDEN, "This workflow run cannot be retried")
         }
+        Err(WorldError::JobOfEarlierAttempt(_)) => github_error(
+            StatusCode::FORBIDDEN,
+            "Only jobs from the current attempt can be re-run",
+        ),
         Err(WorldError::NoSuchWorkflowRun(_) | WorldError::NoSuchWorkflowJob(_)) => not_found(),
         Err(e) => internal(e),
     }
@@ -933,6 +955,7 @@ pub(crate) async fn rerun(
     UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
     Extension(caller): Extension<Caller>,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response<Body> {
     let by = caller.via(Door::Rest);
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
@@ -944,6 +967,9 @@ pub(crate) async fn rerun(
         Err(resp) => return *resp,
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowRun") {
+        return refused;
+    }
+    if let Some(refused) = refuse_rerun_body(&body) {
         return refused;
     }
     let written = face
@@ -959,6 +985,7 @@ pub(crate) async fn rerun_failed(
     UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
     Extension(caller): Extension<Caller>,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response<Body> {
     let by = caller.via(Door::Rest);
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
@@ -972,6 +999,9 @@ pub(crate) async fn rerun_failed(
     if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowRun") {
         return refused;
     }
+    if let Some(refused) = refuse_rerun_body(&body) {
+        return refused;
+    }
     let written = face
         .world
         .rerun_workflow_run(run.id, Rerun::Failed, caller.actor.id, by);
@@ -979,13 +1009,13 @@ pub(crate) async fn rerun_failed(
 }
 
 /// `POST …/actions/jobs/{id}/rerun`: the job runs again, with every job
-/// that needs it. A job of an earlier attempt names the job of its name in
-/// the latest.
+/// that needs it. Only a job of the run's current attempt can be.
 pub(crate) async fn rerun_job(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
     Extension(caller): Extension<Caller>,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response<Body> {
     let by = caller.via(Door::Rest);
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
@@ -996,22 +1026,11 @@ pub(crate) async fn rerun_job(
         let Ok(id) = id.parse::<i64>() else {
             return Ok(None);
         };
-        let Some(job) = face.world.check_run_by_id(id)? else {
-            return Ok(None);
-        };
-        let Some(held) = job.job.as_ref().filter(|_| job.repo_id == repo.id) else {
-            return Ok(None);
-        };
-        let Some(run) = face.world.workflow_run_by_id(held.run_id)? else {
-            return Ok(None);
-        };
-        let latest = face
+        Ok(face
             .world
-            .list_workflow_jobs(run.id)?
-            .into_iter()
-            .filter(|other| other.job.as_ref().is_some_and(|j| j.attempt == run.attempt))
-            .find(|other| other.name == job.name);
-        Ok(latest.map(|latest| (run.id, latest.id)))
+            .check_run_by_id(id)?
+            .filter(|job| job.repo_id == repo.id)
+            .and_then(|job| Some((job.job?.run_id, job.id))))
     };
     let (run_id, job_id) = match found() {
         Ok(Some(found)) => found,
@@ -1019,6 +1038,9 @@ pub(crate) async fn rerun_job(
         Err(e) => return internal(e),
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowJob") {
+        return refused;
+    }
+    if let Some(refused) = refuse_rerun_body(&body) {
         return refused;
     }
     let written = face
@@ -1089,17 +1111,10 @@ pub(crate) async fn force_cancel(
     cancel_answer(face.world.cancel_workflow_run(run.id, true, by))
 }
 
-/// What a dispatch gives: the branch to run on, and the inputs it names.
-#[derive(serde::Deserialize)]
-struct DispatchBody {
-    r#ref: Option<String>,
-    #[serde(default)]
-    inputs: BTreeMap<String, serde_json::Value>,
-}
-
 /// `POST …/actions/workflows/{workflow}/dispatches`: a `workflow_dispatch`
 /// run of the workflow starts on a branch's tip, started by the caller and
-/// titled by the workflow's name.
+/// titled by the workflow's name. The answer is empty, or names the run for
+/// a caller that asks for `return_run_details`.
 pub(crate) async fn dispatch(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, named)): UrlPath<(String, String, String)>,
@@ -1122,26 +1137,44 @@ pub(crate) async fn dispatch(
     if let Some(refused) = media::refuse_unrendered(&headers, "Workflow") {
         return refused;
     }
-    let parsed: DispatchBody = match serde_json::from_slice(&body) {
+    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(parsed) => parsed,
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
     };
-    let Some(given) = parsed.r#ref.filter(|r| !r.is_empty()) else {
-        return crate::invalid_request("\"ref\" wasn't supplied.");
+    // GitHub's schema is checked before anything the request names is
+    // looked for.
+    let mistyped = |field: &str, kind: &str| {
+        let given = crate::schema_value(&parsed[field]);
+        crate::invalid_request(&format!("For 'properties/{field}', {given} is not {kind}."))
+    };
+    let given = match parsed.get("ref") {
+        None => return crate::invalid_request("\"ref\" wasn't supplied."),
+        Some(serde_json::Value::String(given)) => given.as_str(),
+        Some(_) => return mistyped("ref", "a string"),
+    };
+    let no_inputs = serde_json::Map::new();
+    let given_inputs = match parsed.get("inputs") {
+        None => &no_inputs,
+        Some(serde_json::Value::Object(inputs)) => inputs,
+        Some(_) => return mistyped("inputs", "an object"),
+    };
+    let details = match parsed.get("return_run_details") {
+        None => false,
+        Some(serde_json::Value::Bool(details)) => *details,
+        Some(_) => return mistyped("return_run_details", "a boolean"),
     };
     let unprocessable = |message: &str| github_error(StatusCode::UNPROCESSABLE_ENTITY, message);
     let Some(inputs) = &workflow.dispatch_inputs else {
         return unprocessable("Workflow does not have 'workflow_dispatch' trigger");
     };
-    let branch = given.strip_prefix("refs/heads/").unwrap_or(&given);
+    let branch = given.strip_prefix("refs/heads/").unwrap_or(given);
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    let head_sha = match store::rev_parse(&bare, &format!("refs/heads/{branch}")) {
+    let head_sha = match store::branch_tip(&bare, branch) {
         Ok(Some(sha)) => sha,
         Ok(None) => return unprocessable(&format!("No ref found for: {given}")),
         Err(e) => return internal(e),
     };
-    let unexpected: Vec<&String> = parsed
-        .inputs
+    let unexpected: Vec<&String> = given_inputs
         .keys()
         .filter(|name| !inputs.contains(name))
         .collect();
@@ -1159,6 +1192,19 @@ pub(crate) async fn dispatch(
         runner: ACTIONS_APP,
     };
     match face.world.start_workflow_run(new, by) {
+        Ok(run) if details => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "workflow_run_id": run.id,
+                "run_url": format!("{}/actions/runs/{}", api(&face, &repo), run.id),
+                "html_url": format!(
+                    "{}/{}/actions/runs/{}",
+                    face.layout.web(),
+                    repo.full_name(),
+                    run.id
+                ),
+            }),
+        ),
         Ok(_) => crate::no_content(),
         Err(e) => internal(e),
     }

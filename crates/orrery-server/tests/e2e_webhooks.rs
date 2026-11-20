@@ -1892,7 +1892,7 @@ async fn a_workflow_run_sends_what_github_sends_at_each_stage() {
     // The run is in progress again, then its last job fails: the job that
     // needed it is listed as skipped, and the run is complete.
     runner(&format!("/workflow-jobs/{report}/start"), none.clone());
-    runner(
+    let ended = runner(
         &format!("/workflow-jobs/{report}/complete"),
         serde_json::json!({ "conclusion": "failure" }),
     );
@@ -1999,4 +1999,49 @@ async fn a_workflow_run_sends_what_github_sends_at_each_stage() {
     let check = got[1].json();
     assert_eq!(check["check_run"]["app"]["slug"], "github-actions");
     assert_eq!(check["sender"]["login"], "alice");
+
+    // Another user re-runs the job that was skipped, which can only be
+    // skipped again, so the attempt begins and ends at once. The jobs it
+    // carries over send nothing, the run is not asked for again, and the
+    // sender is still whoever started the run.
+    let bob = mint_actor(&s.base, "bob", "user");
+    let (status, _, _) = call(
+        "POST",
+        &format!(
+            "{}/repos/acme/web/actions/jobs/{}/rerun",
+            s.api,
+            job_id(&ended, "deploy")
+        ),
+        &bearer(&bob),
+        None,
+    );
+    assert_eq!(status, 201);
+    let got = s.receiver.wait(24).await;
+    let again: Vec<(String, String)> = got[19..]
+        .iter()
+        .map(|r| (r.kind().0, r.kind().1.unwrap_or_default()))
+        .collect();
+    let kind = |event: &str, action: &str| (event.to_string(), action.to_string());
+    assert_eq!(
+        again,
+        [
+            kind("check_run", "created"),
+            kind("check_run", "completed"),
+            kind("workflow_job", "completed"),
+            kind("check_suite", "completed"),
+            kind("workflow_run", "completed"),
+        ]
+    );
+    let skipped = got[21].json();
+    assert_eq!(skipped["workflow_job"]["name"], "deploy");
+    assert_eq!(skipped["workflow_job"]["run_attempt"], 2);
+    assert_eq!(skipped["sender"]["login"], "alice");
+    let completed = got[23].json();
+    assert_eq!(completed["workflow_run"]["run_attempt"], 2);
+    assert_eq!(completed["workflow_run"]["actor"]["login"], "alice");
+    assert_eq!(
+        completed["workflow_run"]["triggering_actor"]["login"],
+        "bob"
+    );
+    assert_eq!(completed["sender"]["login"], "alice");
 }
