@@ -868,9 +868,41 @@ fn an_unusable_outbound_setting_stops_serve_before_the_world_is_made() {
     }
 }
 
-/// Every URL a world returns starts with its `base_url`, so one a client
-/// can't follow, or that a path can't be appended to, is refused before a
-/// world is made.
+/// `server.layout = "github.com"` renders github.com's hosts into every URL
+/// the world returns, on the world's own host too.
+#[test]
+fn the_github_com_layout_names_github_coms_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "",
+        "listen = \"127.0.0.1:0\"\nlayout = \"github.com\"\n",
+    );
+    let (_served, ready) = serve(&config, &[]);
+    let alice = common::mint(&ready.listen, "alice");
+    let user = common::call(&ready.listen, "GET", "/api/v3/user", Some(&alice), "", 200);
+    assert_eq!(user["url"], "https://api.github.com/users/alice");
+    assert_eq!(user["html_url"], "https://github.com/alice");
+    // The ready line still reports where the world's own host is.
+    assert_eq!(ready.base_url, format!("http://{}", ready.listen));
+}
+
+#[test]
+fn an_unknown_layout_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(
+        dir.path(),
+        "",
+        "listen = \"127.0.0.1:0\"\nlayout = \"github\"\n",
+    );
+    let out = orrery_serve(&config, &[]).output().unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown variant `github`"), "{stderr}");
+}
+
+/// A `base_url` a client can't follow, or that a path can't be appended to,
+/// is refused before a world is made.
 #[test]
 fn an_unusable_base_url_is_refused() {
     for (base_url, why) in [

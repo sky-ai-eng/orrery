@@ -34,8 +34,12 @@ pub(crate) fn user_json(face: &GithubFace, login: &str) -> serde_json::Value {
 
 /// The GitHub repo object.
 pub fn repo_json(face: &GithubFace, repo: &Repo, owner: &Actor) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
-    let host = host_name(base);
+    let api = face.layout.api();
+    let web = face.layout.web();
+    // Orrery serves neither `git://` nor ssh, so `git_url` and `ssh_url` only
+    // need to be well-formed, and a port in an scp-style address is read as
+    // part of the path.
+    let host = face.layout.web_host();
     let full_name = repo.full_name();
     serde_json::json!({
         "id": repo.id,
@@ -47,9 +51,9 @@ pub fn repo_json(face: &GithubFace, repo: &Repo, owner: &Actor) -> serde_json::V
         "visibility": if repo.private { "private" } else { "public" },
         "description": repo.description,
         "fork": false,
-        "html_url": format!("{base}/{full_name}"),
-        "url": format!("{base}/api/v3/repos/{full_name}"),
-        "clone_url": format!("{base}/{full_name}.git"),
+        "html_url": format!("{web}/{full_name}"),
+        "url": format!("{api}/repos/{full_name}"),
+        "clone_url": format!("{web}/{full_name}.git"),
         "git_url": format!("git://{host}/{full_name}.git"),
         "ssh_url": format!("git@{host}:{full_name}.git"),
         "default_branch": repo.default_branch,
@@ -62,17 +66,6 @@ pub fn repo_json(face: &GithubFace, repo: &Repo, owner: &Actor) -> serde_json::V
     })
 }
 
-/// The base URL's host name, without its scheme, port, or path. Orrery serves
-/// neither `git://` nor ssh, so `git_url` and `ssh_url` only need to be
-/// well-formed, and a port in an scp-style address is read as part of the
-/// path.
-fn host_name(base: &str) -> String {
-    base.parse::<axum::http::Uri>()
-        .ok()
-        .and_then(|uri| uri.host().map(str::to_string))
-        .unwrap_or_default()
-}
-
 /// The GitHub pull request object as a list carries it. `merged_at` equals
 /// `closed_at` when merged — one instant on GitHub too. `mergeable` is null,
 /// GitHub's "not computed": a list's ETag hashes its body, and a test merge
@@ -83,7 +76,8 @@ pub(crate) fn pull_json(
     owner: &Actor,
     pull: &Pull,
 ) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
+    let web = face.layout.web();
     let full_name = repo.full_name();
     let n = pull.number;
     serde_json::json!({
@@ -96,9 +90,9 @@ pub(crate) fn pull_json(
         "body": pull.body,
         "draft": pull.draft,
         "user": user_json(face, &pull.author_login),
-        "html_url": format!("{base}/{full_name}/pull/{n}"),
-        "url": format!("{base}/api/v3/repos/{full_name}/pulls/{n}"),
-        "issue_url": format!("{base}/api/v3/repos/{full_name}/issues/{n}"),
+        "html_url": format!("{web}/{full_name}/pull/{n}"),
+        "url": format!("{api}/repos/{full_name}/pulls/{n}"),
+        "issue_url": format!("{api}/repos/{full_name}/issues/{n}"),
         "merged": pull.merged,
         "mergeable": serde_json::Value::Null,
         "merge_commit_sha": pull.merge_commit_sha,
@@ -339,7 +333,8 @@ pub(crate) fn review_json(
     pull: &Pull,
     review: &Review,
 ) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
+    let web = face.layout.web();
     let full_name = repo.full_name();
     serde_json::json!({
         "id": review.id,
@@ -348,8 +343,8 @@ pub(crate) fn review_json(
         "body": review.body,
         "state": review.state.as_str().to_ascii_uppercase(),
         "commit_id": review.commit_sha,
-        "html_url": format!("{base}/{full_name}/pull/{}#pullrequestreview-{}", pull.number, review.id),
-        "pull_request_url": format!("{base}/api/v3/repos/{full_name}/pulls/{}", pull.number),
+        "html_url": format!("{web}/{full_name}/pull/{}#pullrequestreview-{}", pull.number, review.id),
+        "pull_request_url": format!("{api}/repos/{full_name}/pulls/{}", pull.number),
         "submitted_at": rfc3339(review.submitted_clock_unix),
         "author_association": "NONE",
     })
@@ -361,16 +356,17 @@ pub(crate) fn comment_json(
     pull: &Pull,
     comment: &IssueComment,
 ) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
+    let web = face.layout.web();
     let full_name = repo.full_name();
     serde_json::json!({
         "id": comment.id,
         "node_id": crate::nodeid::comment(comment.id),
         "user": user_json(face, &comment.author_login),
         "body": comment.body,
-        "html_url": format!("{base}/{full_name}/pull/{}#issuecomment-{}", pull.number, comment.id),
-        "url": format!("{base}/api/v3/repos/{full_name}/issues/comments/{}", comment.id),
-        "issue_url": format!("{base}/api/v3/repos/{full_name}/issues/{}", pull.number),
+        "html_url": format!("{web}/{full_name}/pull/{}#issuecomment-{}", pull.number, comment.id),
+        "url": format!("{api}/repos/{full_name}/issues/comments/{}", comment.id),
+        "issue_url": format!("{api}/repos/{full_name}/issues/{}", pull.number),
         "created_at": rfc3339(comment.created_clock_unix),
         "updated_at": rfc3339(comment.updated_clock_unix),
         "author_association": "NONE",
@@ -382,7 +378,8 @@ pub(crate) fn check_run_json(
     repo: &Repo,
     run: &CheckRun,
 ) -> Result<serde_json::Value, WorldError> {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
+    let web = face.layout.web();
     let full_name = repo.full_name();
     Ok(serde_json::json!({
         "id": run.id,
@@ -393,8 +390,8 @@ pub(crate) fn check_run_json(
         "conclusion": run.conclusion.map(|c| c.as_str()),
         "external_id": run.external_id,
         "details_url": run.details_url,
-        "url": format!("{base}/api/v3/repos/{full_name}/check-runs/{}", run.id),
-        "html_url": format!("{base}/{full_name}/runs/{}", run.id),
+        "url": format!("{api}/repos/{full_name}/check-runs/{}", run.id),
+        "html_url": format!("{web}/{full_name}/runs/{}", run.id),
         "started_at": run.started_clock_unix.map(rfc3339),
         "completed_at": run.completed_clock_unix.map(rfc3339),
         "output": run.output.clone().unwrap_or(serde_json::json!({
@@ -456,12 +453,11 @@ pub(crate) fn label_json(name: &str) -> serde_json::Value {
 /// GitHub's organization object as it appears inside a team: the org-kind
 /// actor's identity plus its API addresses.
 pub(crate) fn org_json(face: &GithubFace, org_login: &str) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
     let mut json = user_json(face, org_login);
-    json["url"] = serde_json::json!(format!("{base}/api/v3/orgs/{org_login}"));
-    json["repos_url"] = serde_json::json!(format!("{base}/api/v3/orgs/{org_login}/repos"));
-    json["members_url"] =
-        serde_json::json!(format!("{base}/api/v3/orgs/{org_login}/members{{/member}}"));
+    json["url"] = serde_json::json!(format!("{api}/orgs/{org_login}"));
+    json["repos_url"] = serde_json::json!(format!("{api}/orgs/{org_login}/repos"));
+    json["members_url"] = serde_json::json!(format!("{api}/orgs/{org_login}/members{{/member}}"));
     json["description"] = serde_json::Value::Null;
     json
 }
@@ -469,10 +465,10 @@ pub(crate) fn org_json(face: &GithubFace, org_login: &str) -> serde_json::Value 
 /// GitHub's organization object as `GET /orgs/{org}` answers it: the object
 /// a team carries, plus the profile fields.
 pub(crate) fn org_full_json(face: &GithubFace, org: &Actor) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let web = face.layout.web();
     let mut json = org_json(face, &org.login);
     json["avatar_url"] = serde_json::json!(avatar_url(org));
-    json["html_url"] = serde_json::json!(format!("{base}/{}", org.login));
+    json["html_url"] = serde_json::json!(format!("{web}/{}", org.login));
     json["created_at"] = serde_json::json!(rfc3339(org.created_clock_unix));
     json["updated_at"] = serde_json::json!(rfc3339(org.created_clock_unix));
     json
@@ -481,16 +477,17 @@ pub(crate) fn org_full_json(face: &GithubFace, org: &Actor) -> serde_json::Value
 /// GitHub's user object as `GET /user` and `GET /users/{username}` answer
 /// it. Orrery keeps no display name, so `name` is the login.
 pub(crate) fn user_full_json(face: &GithubFace, actor: &Actor) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
+    let web = face.layout.web();
     let login = rest_login(actor);
     let html_url = match actor.kind {
-        ActorKind::Bot => format!("{base}/apps/{}", actor.login),
-        _ => format!("{base}/{login}"),
+        ActorKind::Bot => format!("{web}/apps/{}", actor.login),
+        _ => format!("{web}/{login}"),
     };
     let mut json = actor_json(actor);
     json["name"] = serde_json::json!(actor.login);
     json["avatar_url"] = serde_json::json!(avatar_url(actor));
-    json["url"] = serde_json::json!(format!("{base}/api/v3/users/{login}"));
+    json["url"] = serde_json::json!(format!("{api}/users/{login}"));
     json["html_url"] = serde_json::json!(html_url);
     json["created_at"] = serde_json::json!(rfc3339(actor.created_clock_unix));
     json["updated_at"] = serde_json::json!(rfc3339(actor.created_clock_unix));
@@ -505,16 +502,18 @@ fn avatar_url(actor: &Actor) -> String {
 /// `requested_teams` carry it. Orrery keeps no secret teams and no nesting,
 /// so every team is `closed` with no parent.
 pub(crate) fn team_json(face: &GithubFace, team: &Team) -> serde_json::Value {
-    let base = face.base_url.trim_end_matches('/');
+    let web = face.layout.web();
     let api = format!(
-        "{base}/api/v3/organizations/{}/team/{}",
-        team.org_id, team.id
+        "{}/organizations/{}/team/{}",
+        face.layout.api(),
+        team.org_id,
+        team.id
     );
     serde_json::json!({
         "id": team.id,
         "node_id": crate::nodeid::team(team.id),
         "url": api,
-        "html_url": format!("{base}/orgs/{}/teams/{}", team.org_login, team.slug),
+        "html_url": format!("{web}/orgs/{}/teams/{}", team.org_login, team.slug),
         "name": team.name,
         "slug": team.slug,
         "description": team.description,

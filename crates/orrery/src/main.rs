@@ -210,14 +210,48 @@ impl ClockChoice {
     }
 }
 
+/// The GitHub face's URL layout (spec/grammar.md, "Where the face is").
+#[derive(serde::Deserialize, Default, Clone, Copy)]
+enum LayoutChoice {
+    /// REST under `{base_url}/api/v3`, and web pages and git at `base_url`.
+    #[default]
+    #[serde(rename = "enterprise-server")]
+    EnterpriseServer,
+    /// github.com's own hosts, `api.github.com` and `github.com`, which every
+    /// URL the face returns names.
+    #[serde(rename = "github.com")]
+    GitHubCom,
+}
+
+impl LayoutChoice {
+    fn layout(self, base_url: &str) -> orrery_server::Layout {
+        match self {
+            LayoutChoice::EnterpriseServer => orrery_server::Layout::enterprise_server(base_url),
+            LayoutChoice::GitHubCom => orrery_server::Layout::github_com(),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            LayoutChoice::EnterpriseServer => "enterprise-server",
+            LayoutChoice::GitHubCom => "github.com",
+        }
+    }
+}
+
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct ServerConfig {
     listen: Option<Listen>,
-    /// External base URL rendered into clone/html URLs; defaults to
-    /// `http://<bound address>`. Required when `listen` is a socket, since no
-    /// URL can be derived from one.
+    /// External base URL of the world's own host, reported by the ready line
+    /// and, under GitHub Enterprise Server's layout, rendered into every URL
+    /// the face returns; defaults to `http://<bound address>`. Required when
+    /// `listen` is a socket, since no URL can be derived from one.
     base_url: Option<String>,
+    /// Where the GitHub face's surfaces are: GitHub Enterprise Server's
+    /// layout when absent.
+    #[serde(default)]
+    layout: LayoutChoice,
     /// Serve the control plane only here. Absent, it stays at `/_orrery` on
     /// `listen`.
     control_listen: Option<Listen>,
@@ -246,13 +280,14 @@ impl ServerConfig {
     }
 }
 
-/// Every URL the world returns starts with `base_url`, so it must be one a
-/// client can follow and a path can be appended to: http or https, with a
-/// host, and with no user information, query, or fragment.
+/// A client reaches the world at `base_url`, and under GitHub Enterprise
+/// Server's layout every URL the world returns starts with it, so it must be
+/// one a client can follow and a path can be appended to: http or https,
+/// with a host, and with no user information, query, or fragment.
 fn check_base_url(base_url: &str) -> anyhow::Result<()> {
     let fault = |why: &str| {
         anyhow::anyhow!(
-            "server.base_url {base_url:?} {why}: every URL the world returns starts with it, so it is an http or https URL with a host, like https://world.example"
+            "server.base_url {base_url:?} {why}: it is the URL a client reaches the world at, so it is an http or https URL with a host, like https://world.example"
         )
     };
     if base_url.contains('#') {
@@ -766,6 +801,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         listen = %listener,
         control = %control.as_ref().map_or_else(|| format!("{listener}/_orrery"), ToString::to_string),
         %base_url,
+        layout = config.server.layout.name(),
         egress = %outbound.egress(),
         clock_unix = world.clock()?,
         "orrery serving"
@@ -777,7 +813,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
     })?;
     let routers = orrery_server::routers(
         world,
-        base_url,
+        config.server.layout.layout(&base_url),
         config.instance.dir.join("snapshots"),
         orrery_server::Options {
             anonymous_git_reads: config.server.anonymous_git_reads.unwrap_or(true),

@@ -1,7 +1,6 @@
 //! Organization membership and team writes (spec/surface-github.md §1.2).
-//! Responses carry GitHub's shapes; Orrery presents as a GitHub Enterprise
-//! Server, which adds an organization member directly, so every membership
-//! answers `state: active`.
+//! Responses carry GitHub's shapes. A membership is set at once, with no
+//! invitation to accept, so every one answers `state: active` (§4).
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, State};
@@ -112,7 +111,7 @@ pub(crate) async fn get_org_membership(
 }
 
 fn membership_response(face: &GithubFace, m: &OrgMembership) -> Response<Body> {
-    let base = face.base_url.trim_end_matches('/');
+    let api = face.layout.api();
     let user = match face.world.actor_by_login(&m.member_login) {
         Ok(Some(a)) => actor_json(&a),
         Ok(None) => return internal("member actor missing"),
@@ -121,10 +120,10 @@ fn membership_response(face: &GithubFace, m: &OrgMembership) -> Response<Body> {
     json_response(
         StatusCode::OK,
         serde_json::json!({
-            "url": format!("{base}/api/v3/orgs/{}/memberships/{}", m.org_login, m.member_login),
+            "url": format!("{api}/orgs/{}/memberships/{}", m.org_login, m.member_login),
             "state": "active",
             "role": m.role.as_str(),
-            "organization_url": format!("{base}/api/v3/orgs/{}", m.org_login),
+            "organization_url": format!("{api}/orgs/{}", m.org_login),
             "organization": org_json(face, &m.org_login),
             "user": user,
         }),
@@ -261,12 +260,12 @@ pub(crate) async fn set_team_membership(
                 Ok(None) => return internal("team missing after membership write"),
                 Err(e) => return internal(e),
             };
-            let base = face.base_url.trim_end_matches('/');
+            let api = face.layout.api();
             json_response(
                 StatusCode::OK,
                 serde_json::json!({
                     "url": format!(
-                        "{base}/api/v3/organizations/{}/team/{}/memberships/{}",
+                        "{api}/organizations/{}/team/{}/memberships/{}",
                         team.org_id, team.id, m.member_login
                     ),
                     "role": m.role.as_str(),

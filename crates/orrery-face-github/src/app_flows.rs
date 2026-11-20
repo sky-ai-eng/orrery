@@ -19,6 +19,7 @@ use orrery_world::{
     Actor, ActorKind, App, Attribution, Door, Installation, NewApp, Permissions, WorldError,
 };
 
+use crate::layout::rest;
 use crate::oauth::{
     NOT_SIGNED_IN, SignIn, escape, html, page, redirect, sign_in_fields, signed_in, with_query,
 };
@@ -47,7 +48,7 @@ pub fn web_router(face: GithubFace, sign_in: SignIn) -> Router {
             "/organizations/{org}/settings/installations/{id}",
             get(org_installation_page),
         )
-        .route("/api/v3/app-manifests/{code}/conversions", post(convert))
+        .route(&rest("/app-manifests/{code}/conversions"), post(convert))
         .layer(Extension(sign_in))
         .with_state(face)
 }
@@ -159,6 +160,7 @@ fn registration(
         html(
             status,
             &registration_form(
+                face,
                 org,
                 query,
                 raw,
@@ -278,6 +280,7 @@ fn slug_of(name: &str) -> String {
 }
 
 fn registration_form(
+    face: &GithubFace,
     org: Option<&Actor>,
     query: &str,
     manifest: &str,
@@ -285,9 +288,10 @@ fn registration_form(
     sign_in: String,
     error: Option<&str>,
 ) -> String {
+    let web_path = face.layout.web_path();
     let action = match org {
-        Some(org) => format!("/organizations/{}/settings/apps/new", org.login),
-        None => "/settings/apps/new".to_string(),
+        Some(org) => format!("{web_path}/organizations/{}/settings/apps/new", org.login),
+        None => format!("{web_path}/settings/apps/new"),
     };
     let action = match query.is_empty() {
         true => action,
@@ -400,6 +404,7 @@ async fn install_page(
     html(
         StatusCode::OK,
         &install_form(
+            &face,
             &app,
             &query,
             account.as_ref(),
@@ -437,7 +442,15 @@ async fn install(
     let again = |status: StatusCode, error: &str| {
         html(
             status,
-            &install_form(&app, &query, chosen.as_ref(), &form, sign_in, Some(error)),
+            &install_form(
+                &face,
+                &app,
+                &query,
+                chosen.as_ref(),
+                &form,
+                sign_in,
+                Some(error),
+            ),
         )
     };
     let field = |name: &str| form.get(name).map(String::as_str).unwrap_or("").trim();
@@ -564,6 +577,7 @@ fn installation_url(face: &GithubFace, installation: &Installation) -> String {
 }
 
 fn install_form(
+    face: &GithubFace,
     app: &App,
     query: &str,
     account: Option<&Actor>,
@@ -571,9 +585,10 @@ fn install_form(
     sign_in: SignIn,
     error: Option<&str>,
 ) -> String {
+    let web_path = face.layout.web_path();
     let path = match account {
-        Some(_) => format!("/apps/{}/installations/new/permissions", app.slug),
-        None => format!("/apps/{}/installations/new", app.slug),
+        Some(_) => format!("{web_path}/apps/{}/installations/new/permissions", app.slug),
+        None => format!("{web_path}/apps/{}/installations/new", app.slug),
     };
     let action = match query.is_empty() {
         true => path,
