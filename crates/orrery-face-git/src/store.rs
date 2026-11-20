@@ -207,6 +207,19 @@ pub fn rev_parse(bare: &Path, rev: &str) -> Result<Option<String>, GitFaceError>
     Ok(Some(stdout.trim().to_string()))
 }
 
+/// The commit a branch points at; `None` when the repository has no branch
+/// of exactly that name. This reads no revision syntax, which [`rev_parse`]
+/// does: `main~1` names no branch.
+pub fn branch_tip(bare: &Path, branch: &str) -> Result<Option<String>, GitFaceError> {
+    let name = format!("refs/heads/{branch}");
+    let (status, stdout, _) =
+        run_raw(hermetic_git(bare).args(["show-ref", "--verify", "--hash", &name]))?;
+    if !status.success() {
+        return Ok(None);
+    }
+    Ok(Some(stdout.trim().to_string()))
+}
+
 /// Each of `revs` resolved as [`rev_parse`] resolves it, by one `git cat-file
 /// --batch-check` for all of them.
 pub fn rev_parse_many(bare: &Path, revs: &[&str]) -> Result<Vec<Option<String>>, GitFaceError> {

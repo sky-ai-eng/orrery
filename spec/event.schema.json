@@ -6166,6 +6166,21 @@
       ],
       "type": "string"
     },
+    "RunCancel": {
+      "description": "How a run's current attempt was cancelled.",
+      "oneOf": [
+        {
+          "const": "requested",
+          "description": "Asked to cancel: its runners stop, and still run what runs\nregardless.",
+          "type": "string"
+        },
+        {
+          "const": "forced",
+          "description": "Cancelled outright, with nothing more run.",
+          "type": "string"
+        }
+      ]
+    },
     "SshSigningKeyCreated": {
       "properties": {
         "object": {
@@ -6316,7 +6331,12 @@
         },
         {
           "const": "skipped",
-          "description": "Not run, because a step before it failed.",
+          "description": "Not run, because a step before it failed or was cancelled.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "Under way when its run was asked to cancel.",
           "type": "string"
         }
       ]
@@ -6797,6 +6817,17 @@
           "format": "int64",
           "type": "integer"
         },
+        "dispatch_inputs": {
+          "default": null,
+          "description": "The inputs a dispatch of it may give, or null for a workflow that\ncannot be dispatched.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "id": {
           "format": "int64",
           "type": "integer"
@@ -6823,6 +6854,308 @@
       ],
       "type": "object"
     },
+    "WorkflowRunChanged": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/WorkflowRunChanges"
+        },
+        "subject": {
+          "$ref": "#/$defs/WorkflowRunSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "WorkflowRunChanges": {
+      "description": "The fields of the subject that changed, each as a [`Change`].",
+      "properties": {
+        "actor": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/ActorRef"
+            },
+            "to": {
+              "$ref": "#/$defs/ActorRef"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "attempt": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "cancel": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunCancel"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunCancel"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "event": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "head_branch": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "head_sha": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "run_number": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "started_unix": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "suite_id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "to": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "triggering_actor": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActorRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActorRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "WorkflowRunCreated": {
       "properties": {
         "object": {
@@ -6847,6 +7180,18 @@
         "attempt": {
           "format": "int64",
           "type": "integer"
+        },
+        "cancel": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunCancel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether its current attempt was cancelled, and how."
         },
         "created_unix": {
           "format": "int64",
@@ -6879,12 +7224,24 @@
           "type": "integer"
         },
         "suite_id": {
-          "description": "The suite its jobs are check runs of. Its status and conclusion are\nthe run's.",
+          "description": "The suite its jobs are check runs of. Its status and conclusion\nare the run's.",
           "format": "int64",
           "type": "integer"
         },
         "title": {
           "type": "string"
+        },
+        "triggering_actor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Who started its current attempt. Events appended before a run\ncould be run again carry none, and it was `actor` then."
         }
       },
       "required": [
@@ -7811,6 +8168,20 @@
       "type": "object"
     },
     {
+      "$ref": "#/$defs/CheckRunCreated",
+      "description": "A new attempt of a workflow run listed a job it does not run again,\nas the job finished in the attempt before.",
+      "properties": {
+        "type": {
+          "const": "check_run:carried",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
       "$ref": "#/$defs/CheckSuiteCreated",
       "description": "A push brought a commit to a branch's tip, or a check run was made\non a commit its creator had no suite for.",
       "properties": {
@@ -7858,6 +8229,34 @@
       "properties": {
         "type": {
           "const": "workflow_run:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/WorkflowRunChanged",
+      "description": "A finished run began a new attempt. The attempt it replaces is kept.",
+      "properties": {
+        "type": {
+          "const": "workflow_run:rerun",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/WorkflowRunChanged",
+      "description": "A run was asked to cancel, or was cancelled by force.",
+      "properties": {
+        "type": {
+          "const": "workflow_run:cancelled",
           "type": "string"
         }
       },

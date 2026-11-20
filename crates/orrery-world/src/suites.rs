@@ -148,6 +148,26 @@ pub(crate) fn settle(w: &mut log::Write<'_>, suite_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Put a finished suite back to queued with no conclusion, as a new attempt
+/// of its run does before it lists a job. The attempt's finish is then a
+/// change to the suite even when every job it lists is finished already.
+pub(crate) fn reopen(w: &mut log::Write<'_>, suite_id: i64) -> Result<()> {
+    let before = objects::check_suite_object(w.tx, suite_id)?;
+    w.tx.execute(
+        "UPDATE check_suites
+         SET status = ?2, conclusion = NULL,
+             updated_clock_unix = (SELECT clock_unix FROM world WHERE id = 1)
+         WHERE id = ?1",
+        params![suite_id, CheckStatus::Queued.as_str()],
+    )?;
+    let after = objects::check_suite_object(w.tx, suite_id)?;
+    w.emit(EventBody::CheckSuiteUpdated(events::CheckSuiteChanged {
+        subject: objects::check_suite_subject(w.tx, suite_id)?,
+        changes: events::CheckSuiteChanges::between(&before, &after),
+    }));
+    Ok(())
+}
+
 /// Make a suite on each commit a push brought to a branch's tip, for each
 /// app installed on the repository that may write checks and has none
 /// there.

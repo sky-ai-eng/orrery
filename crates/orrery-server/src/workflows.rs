@@ -80,6 +80,9 @@ struct WorkflowBody {
     id: i64,
     path: String,
     name: String,
+    /// The inputs a dispatch of the workflow may give: null for a workflow
+    /// with no `workflow_dispatch` trigger.
+    dispatch_inputs: Option<Vec<String>>,
     jobs: Vec<JobBody>,
 }
 
@@ -109,6 +112,7 @@ fn workflow_body(workflow: Workflow) -> WorkflowBody {
         id: workflow.id,
         path: workflow.path,
         name: workflow.name,
+        dispatch_inputs: workflow.dispatch_inputs,
         jobs,
     }
 }
@@ -153,9 +157,8 @@ struct StepState {
 fn run_body(state: &AppState, run: WorkflowRun) -> Result<RunBody, WorldError> {
     let jobs = state
         .world
-        .list_workflow_jobs(run.id)?
+        .list_workflow_jobs_of_attempt(run.id, run.attempt)?
         .into_iter()
-        .filter(|job| job.job.as_ref().is_some_and(|j| j.attempt == run.attempt))
         .map(|job| JobState {
             id: job.id,
             name: job.name,
@@ -260,7 +263,9 @@ fn answered(
 
 /// Register a workflow in a repository: what GitHub does when it reads a
 /// workflow file. Each job begins with the runner's "Set up job" and ends
-/// with its "Complete job", which a body does not list.
+/// with its "Complete job", which a body does not list. `dispatch_inputs`
+/// is for a workflow with a `workflow_dispatch` trigger: the inputs it
+/// takes, which may be none.
 async fn create_workflow(
     State(state): State<AppState>,
     UrlPath((owner, name)): UrlPath<(String, String)>,
@@ -270,6 +275,17 @@ async fn create_workflow(
     let path: Option<String> = fields.required("path");
     let named: Option<String> = fields.required("name");
     let jobs: Option<Vec<JobBody>> = fields.required("jobs");
+    let dispatch_inputs: Option<Vec<String>> = fields.optional("dispatch_inputs");
+    if let Some(inputs) = &dispatch_inputs {
+        for (i, input) in inputs.iter().enumerate() {
+            if input.trim().is_empty() || inputs[..i].contains(input) {
+                fields.fault(Fault::invalid(
+                    "an input's name is not blank, and is given once".to_string(),
+                    format!("dispatch_inputs[{i}]"),
+                ));
+            }
+        }
+    }
     if let Some(path) = &path {
         let file = path.strip_prefix(".github/workflows/").unwrap_or("");
         let stem = file
@@ -339,6 +355,7 @@ async fn create_workflow(
         path: &path,
         name: &named,
         jobs: &jobs,
+        dispatch_inputs: dispatch_inputs.as_deref(),
     };
     match state.world.create_workflow(new, SYSTEM) {
         Ok(workflow) => json(
@@ -442,7 +459,7 @@ async fn start_run(
         }
         Err(e) => return internal(e),
     };
-    match store::rev_parse(&bare, &format!("refs/heads/{head_branch}")) {
+    match store::branch_tip(&bare, &head_branch) {
         Ok(Some(_)) => {}
         Ok(None) => wrong.push(Fault::invalid(
             format!("{} has no branch {head_branch:?}", repo.full_name()),

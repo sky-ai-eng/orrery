@@ -17,7 +17,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use orrery_face_git::store;
-use orrery_world::{ActorEmail, Pull, PullState, RequestedReviewer, Team, TimelineKind, WorldView};
+use orrery_world::{
+    ActorEmail, Pull, PullState, RequestedReviewer, Team, TimelineKind, WorkflowRun, WorldView,
+};
 
 use crate::Result;
 
@@ -118,7 +120,7 @@ pub struct WorkflowAdded {
 }
 
 /// A workflow run as the later side holds it. Its status and conclusion
-/// are what its jobs have come to.
+/// are what the jobs of its latest attempt have come to.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WorkflowRunChange {
     pub repo: String,
@@ -127,6 +129,8 @@ pub struct WorkflowRunChange {
     pub run_number: i64,
     pub event: String,
     pub head_sha: String,
+    /// How many times the run has run: one more for each re-run.
+    pub attempt: i64,
     pub status: String,
     pub conclusion: Option<String>,
 }
@@ -895,14 +899,16 @@ pub fn diff(from: DiffSide<'_>, to: DiffSide<'_>) -> Result<WorldDiff> {
             run_number: run.run_number,
             event: run.event.clone(),
             head_sha: run.head_sha.clone(),
+            attempt: run.attempt,
             status: run.status.as_str().to_string(),
             conclusion: run.conclusion.map(|c| c.as_str().to_string()),
         };
+        // A re-run can end as the attempt before it did, so the attempt is
+        // compared too.
+        let state = |run: &WorkflowRun| (run.attempt, run.status, run.conclusion);
         match from_runs.get(&run.id) {
             None => workflow_runs_added.push(entry),
-            Some(old) if (old.status, old.conclusion) != (run.status, run.conclusion) => {
-                workflow_runs_updated.push(entry)
-            }
+            Some(old) if state(old) != state(&run) => workflow_runs_updated.push(entry),
             Some(_) => {}
         }
     }

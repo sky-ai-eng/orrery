@@ -421,6 +421,7 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
             ("name", Field("name")),
             ("jobs", Field("jobs")),
             ("created_clock_unix", Field("created_unix")),
+            ("dispatch_inputs", Field("dispatch_inputs")),
         ],
     ),
     (
@@ -439,6 +440,17 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
             ("attempt", Field("attempt")),
             ("created_clock_unix", Field("created_unix")),
             ("started_clock_unix", Field("started_unix")),
+            ("triggering_actor_id", Field("triggering_actor")),
+            ("cancel", Field("cancel")),
+        ],
+    ),
+    (
+        "workflow_run_attempts",
+        &[
+            ("run_id", Identity),
+            ("attempt", Identity),
+            ("triggering_actor_id", Identity),
+            ("started_clock_unix", Identity),
         ],
     ),
     (
@@ -668,6 +680,12 @@ fn subject_of(table: &str, row: &Row) -> (Subject, Option<String>) {
         "check_suites" => (s("check_suite", int(row, "id")), None),
         "workflows" => (s("workflow", int(row, "id")), None),
         "workflow_runs" => (s("workflow_run", int(row, "id")), None),
+        // An attempt is kept by the re-run that replaces it, which moves
+        // the run's `attempt` on from it.
+        "workflow_run_attempts" => (
+            s("workflow_run", int(row, "run_id")),
+            Some("attempt".into()),
+        ),
         "dependency_alerts" => (s("dependency_alert", int(row, "id")), None),
         "ssh_signing_keys" => (s("ssh_signing_key", int(row, "id")), None),
         "commit_verifications" => (

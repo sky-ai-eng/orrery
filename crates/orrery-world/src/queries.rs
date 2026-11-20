@@ -61,7 +61,8 @@ pub(crate) const CHECK_RUN_COLUMNS: &str = "id, repo_id, head_sha, name, status,
     started_clock_unix, completed_clock_unix, created_clock_unix, suite_id,
     workflow_run_id, run_attempt, steps";
 
-pub(crate) const WORKFLOW_COLUMNS: &str = "id, repo_id, path, name, jobs, created_clock_unix";
+pub(crate) const WORKFLOW_COLUMNS: &str =
+    "id, repo_id, path, name, jobs, created_clock_unix, dispatch_inputs";
 
 /// A run with what it reads through its suite: its status, its conclusion,
 /// and when they last changed.
@@ -71,7 +72,10 @@ pub(crate) const WORKFLOW_RUN_COLUMNS: &str = "id, repo_id, workflow_id, suite_i
     (SELECT status FROM check_suites WHERE check_suites.id = workflow_runs.suite_id),
     (SELECT conclusion FROM check_suites WHERE check_suites.id = workflow_runs.suite_id),
     created_clock_unix, started_clock_unix,
-    (SELECT updated_clock_unix FROM check_suites WHERE check_suites.id = workflow_runs.suite_id)";
+    (SELECT updated_clock_unix FROM check_suites WHERE check_suites.id = workflow_runs.suite_id),
+    (SELECT login FROM actors
+     WHERE actors.id = COALESCE(workflow_runs.triggering_actor_id, workflow_runs.actor_id)),
+    cancel";
 
 pub(crate) const CHECK_SUITE_COLUMNS: &str = "id, repo_id, head_sha, head_branch, before_sha,
     (SELECT login FROM actors WHERE actors.id = check_suites.creator_id),
@@ -234,6 +238,9 @@ pub(crate) fn row_to_workflow(r: &Row<'_>) -> rusqlite::Result<Workflow> {
         name: r.get(3)?,
         jobs: json_or_default(Some(r.get::<_, String>(4)?)),
         created_clock_unix: r.get(5)?,
+        dispatch_inputs: r
+            .get::<_, Option<String>>(6)?
+            .and_then(|text| serde_json::from_str(&text).ok()),
     })
 }
 
@@ -257,6 +264,10 @@ pub(crate) fn row_to_workflow_run(r: &Row<'_>) -> rusqlite::Result<WorkflowRun> 
         created_clock_unix: r.get(13)?,
         started_clock_unix: r.get(14)?,
         updated_clock_unix: r.get(15)?,
+        triggering_actor_login: r.get(16)?,
+        cancel: r
+            .get::<_, Option<String>>(17)?
+            .map(|s| RunCancel::from_db(&s)),
     })
 }
 
@@ -757,4 +768,42 @@ pub(crate) fn list_workflow_jobs(conn: &Connection, run_id: i64) -> Result<Vec<C
     ))?;
     let rows = stmt.query_map(params![run_id], row_to_check_run)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The jobs one attempt of a run lists, oldest first.
+pub(crate) fn list_workflow_jobs_of_attempt(
+    conn: &Connection,
+    run_id: i64,
+    attempt: i64,
+) -> Result<Vec<CheckRun>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CHECK_RUN_COLUMNS} FROM check_runs
+         WHERE workflow_run_id = ?1 AND run_attempt = ?2 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(params![run_id, attempt], row_to_check_run)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// An attempt of a run that a re-run has replaced.
+pub(crate) fn workflow_run_attempt(
+    conn: &Connection,
+    run_id: i64,
+    attempt: i64,
+) -> Result<Option<WorkflowRunAttempt>> {
+    Ok(conn
+        .query_row(
+            "SELECT t.run_id, t.attempt, a.login, t.started_clock_unix
+             FROM workflow_run_attempts t JOIN actors a ON a.id = t.triggering_actor_id
+             WHERE t.run_id = ?1 AND t.attempt = ?2",
+            params![run_id, attempt],
+            |r| {
+                Ok(WorkflowRunAttempt {
+                    run_id: r.get(0)?,
+                    attempt: r.get(1)?,
+                    triggering_actor_login: r.get(2)?,
+                    started_clock_unix: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
 }

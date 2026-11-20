@@ -3,13 +3,13 @@
 
 use std::collections::BTreeMap;
 
-use axum::body::Body;
-use axum::extract::{Path as UrlPath, RawQuery, State};
+use axum::body::{Body, Bytes};
+use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode, header};
 use orrery_face_git::{signature, store};
 use orrery_world::{
-    Actor, CheckRun, Pull, PullState, Repo, StepConclusion, StepStatus, Workflow, WorkflowRun,
-    WorldError,
+    Actor, Caller, CheckRun, Door, NewWorkflowRun, Pull, PullState, Repo, Rerun, StepConclusion,
+    StepStatus, Workflow, WorkflowRun, WorldError,
 };
 
 use crate::reads::query_param as param;
@@ -257,14 +257,15 @@ impl<'a> RunContext<'a> {
             "run_attempt": run.attempt,
             "referenced_workflows": [],
             "run_started_at": rfc3339(run.started_clock_unix),
-            "triggering_actor": actor,
+            "triggering_actor": user_json(face, &run.triggering_actor_login),
             "jobs_url": format!("{url}/jobs"),
             "logs_url": format!("{url}/logs"),
             "check_suite_url": format!("{api}/check-suites/{}", run.suite_id),
             "artifacts_url": format!("{url}/artifacts"),
             "cancel_url": format!("{url}/cancel"),
             "rerun_url": format!("{url}/rerun"),
-            "previous_attempt_url": null,
+            "previous_attempt_url": (run.attempt > 1)
+                .then(|| format!("{url}/attempts/{}", run.attempt - 1)),
             "workflow_url": format!("{api}/actions/workflows/{}", run.workflow_id),
             "head_commit": head_commit,
             "repository": repository,
@@ -300,6 +301,7 @@ pub(crate) fn job_json(
                     StepConclusion::Success => "success",
                     StepConclusion::Failure => "failure",
                     StepConclusion::Skipped => "skipped",
+                    StepConclusion::Cancelled => "cancelled",
                 }),
                 "number": i + 1,
                 "started_at": step.started_unix.map(rfc3339),
@@ -703,13 +705,24 @@ pub(crate) async fn get_run(
     json_response(StatusCode::OK, context.run_json(&run))
 }
 
-/// One page of a run's jobs, oldest first: those of its latest attempt,
-/// or with `filter=all` those of every attempt.
-fn jobs_page(face: &GithubFace, repo: &Repo, run: &WorkflowRun, query: &str) -> Response<Body> {
-    let every = param(query, "filter").as_deref() == Some("all");
+/// One page of a run's jobs, oldest first: those of the attempt `run` is
+/// at, or, for a list that is not of one attempt and asks `filter=all`,
+/// those of every attempt.
+fn jobs_page(
+    face: &GithubFace,
+    repo: &Repo,
+    run: &WorkflowRun,
+    of_attempt: bool,
+    query: &str,
+) -> Response<Body> {
+    let every = !of_attempt && param(query, "filter").as_deref() == Some("all");
     let read = || -> Result<(Vec<CheckRun>, Option<Workflow>), WorldError> {
-        let mut jobs = face.world.list_workflow_jobs(run.id)?;
-        jobs.retain(|job| every || job.job.as_ref().is_some_and(|j| j.attempt == run.attempt));
+        let jobs = match every {
+            true => face.world.list_workflow_jobs(run.id)?,
+            false => face
+                .world
+                .list_workflow_jobs_of_attempt(run.id, run.attempt)?,
+        };
         Ok((jobs, face.world.workflow_by_id(run.workflow_id)?))
     };
     let (jobs, workflow) = match read() {
@@ -721,7 +734,10 @@ fn jobs_page(face: &GithubFace, repo: &Repo, run: &WorkflowRun, query: &str) -> 
         .iter()
         .map(|job| job_json(face, repo, run, workflow.as_ref(), job))
         .collect();
-    let path = format!("actions/runs/{}/jobs", run.id);
+    let path = match of_attempt {
+        true => format!("actions/runs/{}/attempts/{}/jobs", run.id, run.attempt),
+        false => format!("actions/runs/{}/jobs", run.id),
+    };
     listed(face, repo, &path, "jobs", query, total, items)
 }
 
@@ -742,7 +758,7 @@ pub(crate) async fn list_jobs(
     if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowJob") {
         return refused;
     }
-    jobs_page(&face, &repo, &run, query.as_deref().unwrap_or(""))
+    jobs_page(&face, &repo, &run, false, query.as_deref().unwrap_or(""))
 }
 
 /// `GET /repositories/{id}/actions/runs/{run_id}/jobs`: the same list, at
@@ -764,7 +780,7 @@ pub(crate) async fn list_jobs_by_id(
     if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowJob") {
         return refused;
     }
-    jobs_page(&face, &repo, &run, query.as_deref().unwrap_or(""))
+    jobs_page(&face, &repo, &run, false, query.as_deref().unwrap_or(""))
 }
 
 pub(crate) async fn get_job(
@@ -804,4 +820,392 @@ pub(crate) async fn get_job(
         StatusCode::OK,
         job_json(&face, &repo, &run, workflow.as_ref(), &job),
     )
+}
+
+/// The repository's run as its attempt `n` left it, or GitHub's 404 for an
+/// attempt it has not had.
+fn attempt_at(
+    face: &GithubFace,
+    repo: &Repo,
+    id: &str,
+    n: &str,
+) -> Result<WorkflowRun, Box<Response<Body>>> {
+    let run = run_at(face, repo, id)?;
+    let Ok(n) = n.parse::<i64>() else {
+        return Err(Box::new(not_found()));
+    };
+    match face.world.workflow_run_at_attempt(run.id, n) {
+        Ok(Some(run)) => Ok(run),
+        Ok(None) => Err(Box::new(not_found())),
+        Err(e) => Err(Box::new(internal(e))),
+    }
+}
+
+pub(crate) async fn get_attempt(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, id, n)): UrlPath<(String, String, String, String)>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let _gate = face.git.gate().read_owned().await;
+    let (repo, owner) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let run = match attempt_at(&face, &repo, &id, &n) {
+        Ok(run) => run,
+        Err(resp) => return *resp,
+    };
+    if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowRun") {
+        return refused;
+    }
+    let query = query.unwrap_or_default();
+    let pulls = param(&query, "exclude_pull_requests").as_deref() != Some("true");
+    let context = match RunContext::read(&face, &repo, &owner, &[&run], pulls) {
+        Ok(context) => context,
+        Err(resp) => return *resp,
+    };
+    json_response(StatusCode::OK, context.run_json(&run))
+}
+
+pub(crate) async fn list_attempt_jobs(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, id, n)): UrlPath<(String, String, String, String)>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let run = match attempt_at(&face, &repo, &id, &n) {
+        Ok(run) => run,
+        Err(resp) => return *resp,
+    };
+    if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowJob") {
+        return refused;
+    }
+    jobs_page(&face, &repo, &run, true, query.as_deref().unwrap_or(""))
+}
+
+/// `GET /repositories/{id}/actions/runs/{run_id}/attempts/{n}/jobs`: the
+/// same list, at the path its own `Link` header names.
+pub(crate) async fn list_attempt_jobs_by_id(
+    State(face): State<GithubFace>,
+    UrlPath((repo_id, id, n)): UrlPath<(String, String, String)>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let (repo, _) = match repo_by_id(&face, &repo_id) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let run = match attempt_at(&face, &repo, &id, &n) {
+        Ok(run) => run,
+        Err(resp) => return *resp,
+    };
+    if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowJob") {
+        return refused;
+    }
+    jobs_page(&face, &repo, &run, true, query.as_deref().unwrap_or(""))
+}
+
+/// GitHub's answer to a write it has taken and will carry out: an empty
+/// object.
+fn taken(status: StatusCode) -> Response<Body> {
+    json_response(status, serde_json::json!({}))
+}
+
+/// GitHub's refusal of a re-run whose body gives `enable_debug_logging` as
+/// anything but a boolean. Either boolean changes nothing a world serves:
+/// the flag asks the runner for more of a log, and a world's runner is its
+/// caller.
+fn refuse_rerun_body(body: &[u8]) -> Option<Response<Body>> {
+    let given: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let debug = given.get("enable_debug_logging")?;
+    (!debug.is_boolean()).then(|| {
+        crate::invalid_request(&format!(
+            "Invalid property /enable_debug_logging: `{debug}` is not of type `boolean`."
+        ))
+    })
+}
+
+/// What a re-run answers: `201 {}`, or GitHub's refusal. `running` is its
+/// message for a run that has not finished.
+fn rerun_answer(written: Result<WorkflowRun, WorldError>, running: &str) -> Response<Body> {
+    match written {
+        Ok(_) => taken(StatusCode::CREATED),
+        Err(WorldError::WorkflowRunInProgress(_)) => github_error(StatusCode::FORBIDDEN, running),
+        Err(WorldError::NothingToRerun(_)) => {
+            github_error(StatusCode::FORBIDDEN, "This workflow run cannot be retried")
+        }
+        Err(WorldError::JobOfEarlierAttempt(_)) => github_error(
+            StatusCode::FORBIDDEN,
+            "Only jobs from the current attempt can be re-run",
+        ),
+        Err(WorldError::NoSuchWorkflowRun(_) | WorldError::NoSuchWorkflowJob(_)) => not_found(),
+        Err(e) => internal(e),
+    }
+}
+
+/// `POST …/actions/runs/{id}/rerun`: every job of the run runs again, in a
+/// new attempt.
+pub(crate) async fn rerun(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let by = caller.via(Door::Rest);
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let run = match run_at(&face, &repo, &id) {
+        Ok(run) => run,
+        Err(resp) => return *resp,
+    };
+    if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowRun") {
+        return refused;
+    }
+    if let Some(refused) = refuse_rerun_body(&body) {
+        return refused;
+    }
+    let written = face
+        .world
+        .rerun_workflow_run(run.id, Rerun::All, caller.actor.id, by);
+    rerun_answer(written, "This workflow is already running")
+}
+
+/// `POST …/actions/runs/{id}/rerun-failed-jobs`: the jobs that failed or
+/// were cancelled run again, with every job that needs one of them.
+pub(crate) async fn rerun_failed(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let by = caller.via(Door::Rest);
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let run = match run_at(&face, &repo, &id) {
+        Ok(run) => run,
+        Err(resp) => return *resp,
+    };
+    if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowRun") {
+        return refused;
+    }
+    if let Some(refused) = refuse_rerun_body(&body) {
+        return refused;
+    }
+    let written = face
+        .world
+        .rerun_workflow_run(run.id, Rerun::Failed, caller.actor.id, by);
+    rerun_answer(written, "This workflow is already running")
+}
+
+/// `POST …/actions/jobs/{id}/rerun`: the job runs again, with every job
+/// that needs it. Only a job of the run's current attempt can be.
+pub(crate) async fn rerun_job(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let by = caller.via(Door::Rest);
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let found = || -> Result<Option<(i64, i64)>, WorldError> {
+        let Ok(id) = id.parse::<i64>() else {
+            return Ok(None);
+        };
+        Ok(face
+            .world
+            .check_run_by_id(id)?
+            .filter(|job| job.repo_id == repo.id)
+            .and_then(|job| Some((job.job?.run_id, job.id))))
+    };
+    let (run_id, job_id) = match found() {
+        Ok(Some(found)) => found,
+        Ok(None) => return not_found(),
+        Err(e) => return internal(e),
+    };
+    if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowJob") {
+        return refused;
+    }
+    if let Some(refused) = refuse_rerun_body(&body) {
+        return refused;
+    }
+    let written = face
+        .world
+        .rerun_workflow_run(run_id, Rerun::Job(job_id), caller.actor.id, by);
+    rerun_answer(
+        written,
+        "The workflow run containing this job is already running",
+    )
+}
+
+/// What a cancel answers: `202 {}`, or GitHub's `409` for a run that has
+/// finished.
+fn cancel_answer(written: Result<(), WorldError>) -> Response<Body> {
+    match written {
+        Ok(()) => taken(StatusCode::ACCEPTED),
+        Err(WorldError::WorkflowRunCompleted(_)) => github_error(
+            StatusCode::CONFLICT,
+            "Cannot cancel a workflow run that is completed.",
+        ),
+        Err(WorldError::NoSuchWorkflowRun(_)) => not_found(),
+        Err(e) => internal(e),
+    }
+}
+
+/// `POST …/actions/runs/{id}/cancel`: the run is asked to cancel.
+pub(crate) async fn cancel(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let by = caller.via(Door::Rest);
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let run = match run_at(&face, &repo, &id) {
+        Ok(run) => run,
+        Err(resp) => return *resp,
+    };
+    if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowRun") {
+        return refused;
+    }
+    cancel_answer(face.world.cancel_workflow_run(run.id, false, by))
+}
+
+/// `POST …/actions/runs/{id}/force-cancel`: the run is cancelled where it
+/// stands.
+pub(crate) async fn force_cancel(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let by = caller.via(Door::Rest);
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let run = match run_at(&face, &repo, &id) {
+        Ok(run) => run,
+        Err(resp) => return *resp,
+    };
+    if let Some(refused) = media::refuse_unrendered(&headers, "WorkflowRun") {
+        return refused;
+    }
+    cancel_answer(face.world.cancel_workflow_run(run.id, true, by))
+}
+
+/// `POST …/actions/workflows/{workflow}/dispatches`: a `workflow_dispatch`
+/// run of the workflow starts on a branch's tip, started by the caller and
+/// titled by the workflow's name. The answer is empty, or names the run for
+/// a caller that asks for `return_run_details`.
+pub(crate) async fn dispatch(
+    State(face): State<GithubFace>,
+    UrlPath((owner, repo_name, named)): UrlPath<(String, String, String)>,
+    Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let by = caller.via(Door::Rest);
+    // The branch is read from the bare repository, which a restore
+    // replaces under the gate.
+    let _gate = face.git.gate().read_owned().await;
+    let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
+        Ok(x) => x,
+        Err(resp) => return *resp,
+    };
+    let workflow = match workflow_at(&face, &repo, &named) {
+        Ok(workflow) => workflow,
+        Err(resp) => return *resp,
+    };
+    if let Some(refused) = media::refuse_unrendered(&headers, "Workflow") {
+        return refused;
+    }
+    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(parsed) => parsed,
+        Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
+    };
+    // GitHub's schema is checked before anything the request names is
+    // looked for.
+    let mistyped = |field: &str, kind: &str| {
+        let given = crate::schema_value(&parsed[field]);
+        crate::invalid_request(&format!("For 'properties/{field}', {given} is not {kind}."))
+    };
+    let given = match parsed.get("ref") {
+        None => return crate::invalid_request("\"ref\" wasn't supplied."),
+        Some(serde_json::Value::String(given)) => given.as_str(),
+        Some(_) => return mistyped("ref", "a string"),
+    };
+    let no_inputs = serde_json::Map::new();
+    let given_inputs = match parsed.get("inputs") {
+        None => &no_inputs,
+        Some(serde_json::Value::Object(inputs)) => inputs,
+        Some(_) => return mistyped("inputs", "an object"),
+    };
+    let details = match parsed.get("return_run_details") {
+        None => false,
+        Some(serde_json::Value::Bool(details)) => *details,
+        Some(_) => return mistyped("return_run_details", "a boolean"),
+    };
+    let unprocessable = |message: &str| github_error(StatusCode::UNPROCESSABLE_ENTITY, message);
+    let Some(inputs) = &workflow.dispatch_inputs else {
+        return unprocessable("Workflow does not have 'workflow_dispatch' trigger");
+    };
+    let branch = given.strip_prefix("refs/heads/").unwrap_or(given);
+    let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    let head_sha = match store::branch_tip(&bare, branch) {
+        Ok(Some(sha)) => sha,
+        Ok(None) => return unprocessable(&format!("No ref found for: {given}")),
+        Err(e) => return internal(e),
+    };
+    let unexpected: Vec<&String> = given_inputs
+        .keys()
+        .filter(|name| !inputs.contains(name))
+        .collect();
+    if !unexpected.is_empty() {
+        let names = serde_json::to_string(&unexpected).unwrap_or_default();
+        return unprocessable(&format!("Unexpected inputs provided: {names}"));
+    }
+    let new = NewWorkflowRun {
+        workflow_id: workflow.id,
+        event: "workflow_dispatch",
+        head_sha: &head_sha,
+        head_branch: Some(branch),
+        title: &workflow.name,
+        actor_id: caller.actor.id,
+        runner: ACTIONS_APP,
+    };
+    match face.world.start_workflow_run(new, by) {
+        Ok(run) if details => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "workflow_run_id": run.id,
+                "run_url": format!("{}/actions/runs/{}", api(&face, &repo), run.id),
+                "html_url": format!(
+                    "{}/{}/actions/runs/{}",
+                    face.layout.web(),
+                    repo.full_name(),
+                    run.id
+                ),
+            }),
+        ),
+        Ok(_) => crate::no_content(),
+        Err(e) => internal(e),
+    }
 }

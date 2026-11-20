@@ -12,7 +12,8 @@ use sha2::{Digest as _, Sha256};
 use crate::types::{
     ActorEmail, ActorKind, AlertScope, AlertSeverity, AlertState, AlertUpdateState,
     CheckConclusion, CheckStatus, ClockMode, DeliveryFailure, DeliveryState, DismissReason,
-    JobSpec, OrgRole, Permissions, PullState, RepositorySelection, ReviewState, Step, TeamRole,
+    JobSpec, OrgRole, Permissions, PullState, RepositorySelection, ReviewState, RunCancel, Step,
+    TeamRole,
 };
 
 /// How a write reached the world.
@@ -889,26 +890,38 @@ pub struct WorkflowObject {
     pub name: String,
     pub jobs: Vec<JobSpec>,
     pub created_unix: i64,
+    /// The inputs a dispatch of it may give, or null for a workflow that
+    /// cannot be dispatched.
+    #[serde(default)]
+    pub dispatch_inputs: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct WorkflowRunObject {
-    pub id: i64,
-    /// The suite its jobs are check runs of. Its status and conclusion are
-    /// the run's.
-    pub suite_id: i64,
-    pub run_number: i64,
-    /// What started it, as the caller named it.
-    pub event: String,
-    pub head_branch: Option<String>,
-    pub head_sha: String,
-    pub title: String,
-    /// Who started it.
-    pub actor: ActorRef,
-    pub attempt: i64,
-    pub created_unix: i64,
-    /// When its current attempt began.
-    pub started_unix: i64,
+object! {
+    WorkflowRunObject, WorkflowRunChanges {
+        id: i64,
+        /// The suite its jobs are check runs of. Its status and conclusion
+        /// are the run's.
+        suite_id: i64,
+        run_number: i64,
+        /// What started it, as the caller named it.
+        event: String,
+        head_branch: Option<String>,
+        head_sha: String,
+        title: String,
+        /// Who started it.
+        actor: ActorRef,
+        attempt: i64,
+        created_unix: i64,
+        /// When its current attempt began.
+        started_unix: i64,
+        /// Who started its current attempt. Events appended before a run
+        /// could be run again carry none, and it was `actor` then.
+        #[serde(default)]
+        triggering_actor: Option<ActorRef>,
+        /// Whether its current attempt was cancelled, and how.
+        #[serde(default)]
+        cancel: Option<RunCancel>,
+    }
 }
 
 object! {
@@ -1136,6 +1149,7 @@ bodies! {
     CheckSuiteChanged { subject: CheckSuiteSubject, changes: CheckSuiteChanges }
     WorkflowCreated { subject: WorkflowSubject, object: WorkflowObject }
     WorkflowRunCreated { subject: WorkflowRunSubject, object: WorkflowRunObject }
+    WorkflowRunChanged { subject: WorkflowRunSubject, changes: WorkflowRunChanges }
     OrgMembershipCreated { subject: OrgMembershipSubject, object: OrgMembershipObject }
     OrgMembershipChanged { subject: OrgMembershipSubject, changes: OrgMembershipChanges }
     TeamCreated { subject: TeamSubject, object: TeamObject }
@@ -1277,6 +1291,9 @@ event_types! {
     CommentCreated(CommentCreated) = "comment:created",
 
     CheckRunCreated(CheckRunCreated) = "check_run:created",
+    /// A new attempt of a workflow run listed a job it does not run again,
+    /// as the job finished in the attempt before.
+    CheckRunCarried(CheckRunCreated) = "check_run:carried",
     /// A push brought a commit to a branch's tip, or a check run was made
     /// on a commit its creator had no suite for.
     CheckSuiteCreated(CheckSuiteCreated) = "check_suite:created",
@@ -1286,6 +1303,10 @@ event_types! {
     WorkflowCreated(WorkflowCreated) = "workflow:created",
     /// A run of a workflow began. Its jobs are check runs.
     WorkflowRunCreated(WorkflowRunCreated) = "workflow_run:created",
+    /// A finished run began a new attempt. The attempt it replaces is kept.
+    WorkflowRunRerun(WorkflowRunChanged) = "workflow_run:rerun",
+    /// A run was asked to cancel, or was cancelled by force.
+    WorkflowRunCancelled(WorkflowRunChanged) = "workflow_run:cancelled",
     /// The vendor reported a vulnerable dependency in a repository.
     DependencyAlertCreated(DependencyAlertCreated) = "dependency_alert:created",
     /// A person dismissed an alert.

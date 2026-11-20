@@ -1056,6 +1056,7 @@ impl GqlCheckRun {
                     world::StepConclusion::Success => CheckConclusionState::Success,
                     world::StepConclusion::Failure => CheckConclusionState::Failure,
                     world::StepConclusion::Skipped => CheckConclusionState::Skipped,
+                    world::StepConclusion::Cancelled => CheckConclusionState::Cancelled,
                 }),
                 started_at: step.started_unix.map(rfc3339),
                 completed_at: step.completed_unix.map(rfc3339),

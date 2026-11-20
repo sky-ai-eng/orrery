@@ -1842,6 +1842,7 @@ fn diff_reports_workflows_and_what_their_runs_come_to() {
         path,
         name: "ci",
         jobs: &jobs,
+        dispatch_inputs: None,
     };
     let start = |workflow_id: i64| NewWorkflowRun {
         workflow_id,
@@ -1899,4 +1900,25 @@ fn diff_reports_workflows_and_what_their_runs_come_to() {
     assert_eq!(d.workflow_runs_updated[0].repo, "alice/web");
     assert_eq!(d.workflow_runs_updated[0].head_sha, ONE);
     assert_eq!(d.workflow_runs_updated[0].event, "push");
+    assert_eq!(d.workflow_runs_updated[0].attempt, 1);
+
+    // A re-run that ends as the attempt before it did is still a run
+    // updated: it is at another attempt.
+    inst.snapshot("failed");
+    w.rerun_workflow_run(first.id, orrery_world::Rerun::All, alice.id, by(alice.id))
+        .unwrap();
+    let job = w.list_workflow_jobs_of_attempt(first.id, 2).unwrap()[0].id;
+    w.start_workflow_job(job, by(alice.id)).unwrap();
+    w.complete_workflow_job(job, false, by(alice.id)).unwrap();
+    let d = inst.diff("failed", None);
+    assert_eq!(
+        view(&d.workflow_runs_updated),
+        [(
+            "ci.yml".to_string(),
+            1,
+            "completed".to_string(),
+            Some("failure".to_string())
+        )]
+    );
+    assert_eq!(d.workflow_runs_updated[0].attempt, 2);
 }
