@@ -583,7 +583,7 @@ pub(crate) fn commit_status_object(conn: &Connection, id: i64) -> Result<CommitS
                 id: r.get(0)?,
                 sha: r.get(1)?,
                 context: r.get(2)?,
-                state: status_state(&r.get::<_, String>(3)?),
+                state: StatusState::from_db(&r.get::<_, String>(3)?),
                 description: r.get(4)?,
                 target_url: r.get(5)?,
                 creator: actor_ref_at(r, 6)?,
@@ -591,11 +591,6 @@ pub(crate) fn commit_status_object(conn: &Connection, id: i64) -> Result<CommitS
             })
         },
     )?)
-}
-
-/// A stored state, which the table's check holds to the four there are.
-pub(crate) fn status_state(stored: &str) -> StatusState {
-    StatusState::parse(stored).unwrap_or(StatusState::Error)
 }
 
 pub(crate) fn check_run_subject(conn: &Connection, id: i64) -> Result<CheckRunSubject> {

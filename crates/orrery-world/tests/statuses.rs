@@ -31,7 +31,7 @@ fn a_commit_keeps_every_status_and_comes_to_the_newest_of_each_context() {
         )
     };
     let came_to = || {
-        let statuses = w.list_commit_statuses(repo.id, SHA).unwrap();
+        let statuses = w.list_commit_statuses_for_sha(repo.id, SHA).unwrap();
         let newest = newest_of_each_context(&statuses);
         let contexts: Vec<String> = newest.iter().map(|s| s.context.clone()).collect();
         (combined_state(newest), contexts)
@@ -43,7 +43,7 @@ fn a_commit_keeps_every_status_and_comes_to_the_newest_of_each_context() {
     assert_eq!(first.description.as_deref(), Some("why"));
     // The write returns the row a read finds.
     assert_eq!(
-        w.list_commit_statuses(repo.id, SHA).unwrap(),
+        w.list_commit_statuses_for_sha(repo.id, SHA).unwrap(),
         std::slice::from_ref(&first)
     );
     give("lint", StatusState::Success).unwrap();
@@ -68,7 +68,10 @@ fn a_commit_keeps_every_status_and_comes_to_the_newest_of_each_context() {
             vec!["build".to_string(), "lint".to_string()]
         )
     );
-    assert_eq!(w.list_commit_statuses(repo.id, SHA).unwrap().len(), 5);
+    assert_eq!(
+        w.list_commit_statuses_for_sha(repo.id, SHA).unwrap().len(),
+        5
+    );
 
     // A context holds as many statuses as GitHub keeps, and no more.
     for _ in 2..MAX_STATUSES_PER_CONTEXT {

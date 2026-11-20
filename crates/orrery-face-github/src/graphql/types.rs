@@ -1145,6 +1145,7 @@ impl GqlStatusContext {
 
 /// A commit's statuses: the newest of each context.
 pub struct GqlStatus {
+    repo_id: i64,
     sha: String,
     newest: Vec<world::CommitStatus>,
 }
@@ -1152,7 +1153,7 @@ pub struct GqlStatus {
 #[Object(name = "Status")]
 impl GqlStatus {
     async fn id(&self) -> ID {
-        ID(format!("O_commit_status_{}", self.sha))
+        ID(crate::nodeid::commit_status(self.repo_id, &self.sha))
     }
 
     async fn state(&self) -> StatusState {
@@ -1174,9 +1175,10 @@ fn contexts_in_order(newest: &[world::CommitStatus]) -> Vec<GqlStatusContext> {
         })
         .collect();
     contexts.sort_by(|a, b| {
-        let key =
-            |c: &GqlStatusContext| (StatusState::from(c.status.state), c.status.context.clone());
-        key(a).cmp(&key(b))
+        let key = |c: &'_ GqlStatusContext| StatusState::from(c.status.state);
+        key(a)
+            .cmp(&key(b))
+            .then_with(|| a.status.context.cmp(&b.status.context))
     });
     contexts
 }
@@ -1299,6 +1301,7 @@ impl Commit {
     async fn status(&self, ctx: &Context<'_>) -> Result<Option<GqlStatus>, Error> {
         let newest = self.newest_statuses(ctx)?;
         Ok((!newest.is_empty()).then(|| GqlStatus {
+            repo_id: self.repo.id,
             sha: self.sha.clone(),
             newest,
         }))
@@ -1310,7 +1313,7 @@ impl Commit {
     fn newest_statuses(&self, ctx: &Context<'_>) -> Result<Vec<world::CommitStatus>, Error> {
         let statuses = face(ctx)
             .world
-            .list_commit_statuses(self.repo.id, &self.sha)
+            .list_commit_statuses_for_sha(self.repo.id, &self.sha)
             .map_err(internal)?;
         Ok(world::newest_of_each_context(&statuses)
             .into_iter()

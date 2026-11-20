@@ -413,6 +413,10 @@ impl StatusState {
             _ => return None,
         })
     }
+
+    pub(crate) fn from_db(word: &str) -> StatusState {
+        StatusState::parse(word).expect("a column's check admits only these words")
+    }
 }
 
 /// One status of a commit. A commit holds every status it was given, and

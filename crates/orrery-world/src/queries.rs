@@ -71,7 +71,7 @@ pub(crate) fn row_to_commit_status(r: &Row<'_>) -> rusqlite::Result<CommitStatus
         repo_id: r.get(1)?,
         sha: r.get(2)?,
         context: r.get(3)?,
-        state: crate::objects::status_state(&r.get::<_, String>(4)?),
+        state: StatusState::from_db(&r.get::<_, String>(4)?),
         description: r.get(5)?,
         target_url: r.get(6)?,
         creator_login: r.get(7)?,

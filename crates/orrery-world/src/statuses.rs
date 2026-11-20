@@ -38,7 +38,8 @@ pub fn combined_state<'a>(newest: impl IntoIterator<Item = &'a CommitStatus>) ->
 
 impl World {
     /// Give a commit a status. A context the commit has a status of gets
-    /// another, until it holds [`MAX_STATUSES_PER_CONTEXT`].
+    /// another, until it holds [`MAX_STATUSES_PER_CONTEXT`]. A context is
+    /// the same one in either case.
     pub fn create_commit_status(
         &self,
         by: Attribution,
@@ -48,7 +49,7 @@ impl World {
             let tx = w.tx;
             let held: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM commit_statuses
-                 WHERE repo_id = ?1 AND sha = ?2 AND context = ?3",
+                 WHERE repo_id = ?1 AND sha = ?2 AND context = ?3 COLLATE NOCASE",
                 params![new.repo_id, new.sha, new.context],
                 |r| r.get(0),
             )?;
@@ -89,18 +90,26 @@ impl World {
     }
 
     /// Every status of one commit, newest first.
-    pub fn list_commit_statuses(&self, repo_id: i64, sha: &str) -> Result<Vec<CommitStatus>> {
+    pub fn list_commit_statuses_for_sha(
+        &self,
+        repo_id: i64,
+        sha: &str,
+    ) -> Result<Vec<CommitStatus>> {
         self.with_conn(|conn| queries::list_commit_statuses_for_sha(conn, repo_id, sha))
     }
 }
 
 /// The newest status of each context among `statuses`, which are newest
 /// first, in the order GitHub's combined status lists them: by that newest
-/// status, oldest first.
+/// status, oldest first. A context is the same one in either case, and is
+/// spelled as its newest status spells it.
 pub fn newest_of_each_context(statuses: &[CommitStatus]) -> Vec<&CommitStatus> {
     let mut newest: Vec<&CommitStatus> = Vec::new();
     for status in statuses {
-        if !newest.iter().any(|kept| kept.context == status.context) {
+        if !newest
+            .iter()
+            .any(|kept| kept.context.eq_ignore_ascii_case(&status.context))
+        {
             newest.push(status);
         }
     }

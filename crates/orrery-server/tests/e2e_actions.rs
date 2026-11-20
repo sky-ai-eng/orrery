@@ -1201,6 +1201,7 @@ struct Answer {
     error_code: Option<String>,
     /// What GitHub says the route asks of an installation token.
     accepted: Option<String>,
+    link: Option<String>,
     body: Vec<u8>,
 }
 
@@ -1267,6 +1268,7 @@ fn send(method: &str, url: &str, token: Option<&str>, body: Option<Value>) -> An
         status: resp.status().as_u16(),
         location: header("location"),
         content_type: header("content-type"),
+        link: header("link"),
         disposition: header("content-disposition"),
         error_code: header("x-ms-error-code"),
         accepted: header("x-accepted-github-permissions"),
@@ -2204,14 +2206,19 @@ async fn a_commit_is_given_statuses_and_comes_to_what_they_say() {
 
     // What GitHub refuses, in its words: a field of the wrong type by name,
     // then a commit it cannot find, then every other fault in one string.
+    // The types are checked in the order context, description, target_url,
+    // state, and before the commit is looked for.
     for (field, body) in [
-        ("context", json!({ "state": 5, "context": 7 })),
-        ("state", json!({ "state": 5 })),
+        (
+            "context",
+            json!({ "state": 5, "context": 7, "description": 6 }),
+        ),
         (
             "description",
-            json!({ "state": "success", "description": 5 }),
+            json!({ "state": 5, "description": 5, "target_url": 6 }),
         ),
-        ("target_url", json!({ "state": "success", "target_url": 5 })),
+        ("target_url", json!({ "state": 5, "target_url": 5 })),
+        ("state", json!({ "state": 5 })),
     ] {
         assert_eq!(
             post(&sha, body).message(),
@@ -2221,6 +2228,13 @@ async fn a_commit_is_given_statuses_and_comes_to_what_they_say() {
             )
         );
     }
+    assert_eq!(
+        post(&"0".repeat(40), json!({ "state": 5 })).message(),
+        (
+            422,
+            "Invalid value for 'state'. Must be a string.".to_string()
+        )
+    );
     for missing in ["0".repeat(40), "abc".to_string(), "nope".to_string()] {
         assert_eq!(
             post(&missing, json!({ "state": "bogus" })).message(),
@@ -2271,15 +2285,39 @@ async fn a_commit_is_given_statuses_and_comes_to_what_they_say() {
         .status,
         201
     );
-    // A commit named by a branch or in upper case is found, and is not a
-    // valid sha.
-    for named in ["feature".to_string(), sha.to_uppercase()] {
+    // A commit named by a branch, in upper case, by the start of its sha,
+    // or by a revision is found, and is not a valid sha. That fault comes
+    // first among several.
+    for named in [
+        "feature".to_string(),
+        sha.to_uppercase(),
+        sha[..7].to_string(),
+        "feature~0".to_string(),
+    ] {
         assert_eq!(
             failed(post(&named, json!({ "state": "success" }))),
             validation("Sha must be a valid hex object ID"),
             "{named}"
         );
     }
+    assert_eq!(
+        failed(post(
+            &sha[..7],
+            json!({ "state": "nope", "context": "   " })
+        )),
+        validation(
+            "Sha must be a valid hex object ID, Context can't be blank, State is not included \
+             in the list"
+        )
+    );
+    // The scheme of a URL is read in lower case alone.
+    assert_eq!(
+        failed(post(
+            &sha,
+            json!({ "state": "success", "target_url": "HTTPS://deploy.example/1" })
+        )),
+        validation("Target url must use http(s) scheme")
+    );
 
     // The combined status keeps the newest of each context, in the order of
     // those newest, and comes to a failure when any failed or errored, to
@@ -2395,13 +2433,88 @@ async fn a_commit_is_given_statuses_and_comes_to_what_they_say() {
     );
     assert_eq!(s.get(&format!("commits/{nowhere}/statuses")), json!([]));
 
+    // A read's `{ref}` is whatever git resolves: the start of a sha, a
+    // revision, or a branch. The check run lists take the same.
+    for named in [&other[..7], "feature~1", "main"] {
+        assert_eq!(
+            s.get(&format!("commits/{named}/status"))["sha"],
+            other.as_str(),
+            "{named}"
+        );
+        assert_eq!(s.get(&format!("commits/{named}/statuses")), all, "{named}");
+        assert!(s.get(&format!("commits/{named}/check-runs"))["total_count"].is_i64());
+    }
+
+    // A context is kept without the spaces around it, and an empty URL as
+    // it is. A context is the same one in either case, spelled as its
+    // newest status spells it.
+    let padded = send(
+        "POST",
+        &format!("{}/statuses/{other}", s.api),
+        Some(&s.token),
+        Some(json!({ "state": "success", "context": "  padded  ", "target_url": "" })),
+    );
+    assert_eq!(padded.status, 201, "{}", padded.text());
+    assert_eq!(
+        (&padded.json()["context"], &padded.json()["target_url"]),
+        (&json!("padded"), &json!(""))
+    );
+    on_main("Case/X", "pending");
+    assert_eq!(main_combined().0, "pending");
+    on_main("case/x", "success");
+    assert_eq!(
+        main_combined(),
+        (
+            "success".to_string(),
+            of(&[
+                ("one", "success"),
+                ("three", "success"),
+                ("four", "success"),
+                ("two", "success"),
+                ("padded", "success"),
+                ("case/x", "success")
+            ])
+        )
+    );
+
+    // A page holds 30 unless `per_page` says otherwise, 100 at most, and
+    // a `per_page` that is no positive number is 30. A page past the last
+    // is empty, and names the last.
+    let listed = |query: &str| {
+        let answer = fetch(
+            "GET",
+            &format!("{}/commits/{other}/statuses?{query}", s.api),
+            Some(&s.token),
+        );
+        (answer.json().as_array().unwrap().len(), answer.link)
+    };
+    for all_of_them in ["per_page=0", "per_page=-1", "per_page=abc", "per_page=200"] {
+        assert_eq!(listed(all_of_them), (10, None), "{all_of_them}");
+    }
+    let repo_id = send("GET", &s.api, Some(&s.token), None).json()["id"]
+        .as_i64()
+        .unwrap();
+    let at = |page: usize, rel: &str| {
+        format!(
+            "<{base}/api/v3/repositories/{repo_id}/statuses/{other}?per_page=4&page={page}>; \
+             rel=\"{rel}\""
+        )
+    };
+    assert_eq!(
+        listed("per_page=4&page=99"),
+        (
+            0,
+            Some([at(3, "prev"), at(3, "last"), at(1, "first")].join(", "))
+        )
+    );
+
     // GraphQL: a commit's statuses, and the rollup's state over them and
     // the check runs. The head of the pull request has three contexts.
     give("ext/deploy", "error");
     let query = r#"
         query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest {
             commits(last: 1) { nodes { commit {
-                status { state contexts { context state description targetUrl creator { login } } }
+                status { id state contexts { context state description targetUrl creator { login } } }
                 statusCheckRollup { state contexts(first: 50) {
                     totalCount checkRunCount statusContextCount
                     nodes { __typename ... on StatusContext { context state } ... on CheckRun { name } }
@@ -2421,6 +2534,11 @@ async fn a_commit_is_given_statuses_and_comes_to_what_they_say() {
     };
     let commit = ask();
     assert_eq!(commit["status"]["state"], "FAILURE");
+    // What a commit's statuses come to is one thing in each repository.
+    assert_eq!(
+        commit["status"]["id"],
+        format!("O_commit_status_{repo_id}_{sha}").as_str()
+    );
     // The contexts that errored come first, and the rest by name.
     assert_eq!(
         commit["status"]["contexts"],

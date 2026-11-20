@@ -392,14 +392,30 @@ fn listed(
 /// of `total`: the list's path under `/repositories/{id}`, the query as it
 /// was asked, and `page` last.
 pub(crate) fn with_page_links(
-    mut resp: Response<Body>,
+    resp: Response<Body>,
     face: &GithubFace,
     repo: &Repo,
     path: &str,
     query: &str,
     total: usize,
 ) -> Response<Body> {
-    let (per_page, page) = page_of(query);
+    page_links(resp, face, repo, path, query, total, page_of(query), false)
+}
+
+/// The same for a list that reads `(per_page, page)` from its query by a
+/// rule of its own. `last_past_end` is whether a page past the last still
+/// names the last, as GitHub's status lists do.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn page_links(
+    mut resp: Response<Body>,
+    face: &GithubFace,
+    repo: &Repo,
+    path: &str,
+    query: &str,
+    total: usize,
+    (per_page, page): (usize, usize),
+    last_past_end: bool,
+) -> Response<Body> {
     let last = total.div_ceil(per_page).max(1);
     let kept: Vec<&str> = query
         .split('&')
@@ -422,6 +438,8 @@ pub(crate) fn with_page_links(
     }
     if page < last {
         links.push(to(page + 1, "next"));
+        links.push(to(last, "last"));
+    } else if page > last && last_past_end {
         links.push(to(last, "last"));
     }
     if page > 1 {

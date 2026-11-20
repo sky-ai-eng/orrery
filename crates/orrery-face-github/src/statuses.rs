@@ -10,8 +10,10 @@ use orrery_world::{
     combined_state, newest_of_each_context,
 };
 
-use crate::actions::{page, repo_by_id, with_page_links};
+use crate::actions::{page_links, repo_by_id};
+use crate::reads::{paginate, query_param};
 use crate::render::{repo_json, rfc3339, user_json};
+use crate::suites::is_full_sha;
 use crate::{GithubFace, github_error, internal, json_response, media, resolve_repo};
 
 /// The longest description GitHub takes.
@@ -57,8 +59,19 @@ fn validation_failed(faults: &[&str]) -> Response<Body> {
     )
 }
 
-fn is_sha(s: &str) -> bool {
-    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+/// The page a status list answers, read as GitHub reads it for these
+/// lists: a `per_page` above 100 is 100, and one that is no positive number
+/// is the default, 30.
+fn page_of(query: &str) -> (usize, usize) {
+    let per_page = match query_param(query, "per_page").and_then(|v| v.parse::<usize>().ok()) {
+        Some(0) | None => 30,
+        Some(n) => n.min(100),
+    };
+    let page = query_param(query, "page")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+    (per_page, page)
 }
 
 /// `POST /repos/{o}/{r}/statuses/{sha}`: the commit gets a status. One of
@@ -85,10 +98,10 @@ pub(crate) async fn create(
         Ok(parsed) => parsed,
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
     };
-    // A field of the wrong type is refused by name, before anything is
-    // looked for. `null` is a field left out.
+    // A field of the wrong type is refused by name, in this order, before
+    // anything is looked for. `null` is a field left out.
     let mut text: [Option<&str>; 4] = [None; 4];
-    for (at, field) in ["context", "state", "description", "target_url"]
+    for (at, field) in ["context", "description", "target_url", "state"]
         .iter()
         .enumerate()
     {
@@ -103,22 +116,21 @@ pub(crate) async fn create(
             }
         }
     }
-    let [context, state, description, target_url] = text;
-    // The commit is looked for by whatever names one: a sha in either
-    // case, or a branch. Only a full sha in lower case is then valid.
-    let sha = match crate::suites::commit_of(&face, &repo, &given).await {
-        Ok(sha) => sha,
-        Err(resp) => return *resp,
-    };
-    let held = match &sha {
-        Some(sha) => {
-            let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-            match store::rev_parse(&bare, &format!("{sha}^{{commit}}")) {
-                Ok(held) => held,
-                Err(e) => return internal(e),
-            }
+    let [context, description, target_url, state] = text;
+    // The commit is looked for by whatever git reads as one: a sha in
+    // either case, an abbreviated one, a branch, a revision. Only a full
+    // sha in lower case is then valid.
+    let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    let held = {
+        let _refs = face.git.read_lock(repo.id).await;
+        let named = match is_full_sha(&given) {
+            true => given.to_ascii_lowercase(),
+            false => given.clone(),
+        };
+        match crate::reads::resolve_commit(&bare, &named) {
+            Ok(held) => held,
+            Err(e) => return internal(e),
         }
-        None => None,
     };
     let Some(sha) = held else {
         return github_error(
@@ -126,7 +138,8 @@ pub(crate) async fn create(
             &format!("No commit found for SHA: {given}"),
         );
     };
-    let context = context.unwrap_or("default");
+    // GitHub keeps a context without the spaces around it.
+    let context = context.map_or("default", str::trim);
     let state = state.and_then(StatusState::parse);
     let mut faults = Vec::new();
     if given != sha {
@@ -141,7 +154,10 @@ pub(crate) async fn create(
     if description.is_some_and(|d| d.chars().count() > MAX_DESCRIPTION) {
         faults.push("Description is too long (maximum is 140 characters)");
     }
-    if target_url.is_some_and(|url| !url.starts_with("http://") && !url.starts_with("https://")) {
+    // An empty URL is kept as one. The scheme is read in lower case alone.
+    if target_url.is_some_and(|url| {
+        !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://")
+    }) {
         faults.push("Target url must use http(s) scheme");
     }
     let Some(state) = state.filter(|_| faults.is_empty()) else {
@@ -167,33 +183,48 @@ pub(crate) async fn create(
     }
 }
 
-/// The commit a read's `{ref}` names: a full sha, whether or not the
-/// repository holds it, or a branch's tip. GitHub answers for a sha no
-/// commit has as for a commit with no statuses.
+/// What a read's `{ref}` names: a full sha, whether or not the repository
+/// holds it, or whatever else git resolves, which is a branch, a tag, an
+/// abbreviated sha, or a revision. GitHub answers for a sha no commit has
+/// as for a commit with no statuses, and resolves a name to whatever
+/// object it names: a tree's id reads as a commit with none.
 async fn read_sha(
     face: &GithubFace,
     repo: &Repo,
     git_ref: &str,
 ) -> Result<Option<String>, Box<Response<Body>>> {
-    if is_sha(git_ref) {
+    if is_full_sha(git_ref) {
         return Ok(Some(git_ref.to_ascii_lowercase()));
     }
-    crate::suites::commit_of(face, repo, git_ref).await
+    let _refs = face.git.read_lock(repo.id).await;
+    let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    store::rev_parse(&bare, git_ref).map_err(|e| Box::new(internal(e)))
 }
 
 /// Every status of the commit, newest first, as an array with page links.
 fn list_page(face: &GithubFace, repo: &Repo, sha: &str, query: &str) -> Response<Body> {
-    let statuses = match face.world.list_commit_statuses(repo.id, sha) {
+    let statuses = match face.world.list_commit_statuses_for_sha(repo.id, sha) {
         Ok(statuses) => statuses,
         Err(e) => return internal(e),
     };
     let total = statuses.len();
-    let items: Vec<serde_json::Value> = page(statuses, query)
+    let (per_page, page) = page_of(query);
+    let items: Vec<serde_json::Value> = paginate(statuses, per_page, page)
         .iter()
         .map(|status| status_json(face, repo, status, true))
         .collect();
     let resp = json_response(StatusCode::OK, serde_json::Value::Array(items));
-    with_page_links(resp, face, repo, &format!("statuses/{sha}"), query, total)
+    let path = format!("statuses/{sha}");
+    page_links(
+        resp,
+        face,
+        repo,
+        &path,
+        query,
+        total,
+        (per_page, page),
+        true,
+    )
 }
 
 /// `GET /repos/{o}/{r}/commits/{ref}/statuses`, and the same list at
@@ -232,7 +263,7 @@ pub(crate) async fn list_by_id(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    if !is_sha(&sha) {
+    if !is_full_sha(&sha) {
         return github_error(StatusCode::NOT_FOUND, "Not Found");
     }
     if let Some(refused) = media::refuse_unrendered(&headers, "CommitStatus") {
@@ -255,14 +286,15 @@ fn combined_page(
     sha: &str,
     query: &str,
 ) -> Response<Body> {
-    let statuses = match face.world.list_commit_statuses(repo.id, sha) {
+    let statuses = match face.world.list_commit_statuses_for_sha(repo.id, sha) {
         Ok(statuses) => statuses,
         Err(e) => return internal(e),
     };
     let newest = newest_of_each_context(&statuses);
     let total = newest.len();
     let state = combined_state(newest.iter().copied());
-    let items: Vec<serde_json::Value> = page(newest, query)
+    let (per_page, page) = page_of(query);
+    let items: Vec<serde_json::Value> = paginate(newest, per_page, page)
         .into_iter()
         .map(|status| status_json(face, repo, status, false))
         .collect();
@@ -283,7 +315,17 @@ fn combined_page(
             "url": format!("{commit}/status"),
         }),
     );
-    with_page_links(resp, face, repo, &format!("status/{sha}"), query, total)
+    let path = format!("status/{sha}");
+    page_links(
+        resp,
+        face,
+        repo,
+        &path,
+        query,
+        total,
+        (per_page, page),
+        true,
+    )
 }
 
 /// `GET /repos/{o}/{r}/commits/{ref}/status`: the combined status.
@@ -321,7 +363,7 @@ pub(crate) async fn combined_by_id(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    if !is_sha(&sha) {
+    if !is_full_sha(&sha) {
         return github_error(StatusCode::NOT_FOUND, "Ref not found");
     }
     if let Some(refused) = media::refuse_unrendered(&headers, "CommitStatus") {
