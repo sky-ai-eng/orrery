@@ -395,9 +395,11 @@ fn check_base_url(base_url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fail naming the first two `listeners` given one passed name or one socket
-/// path, before anything is opened. Two passed names can still be one socket,
-/// which only binding shows ([`distinct_sockets`]).
+/// Fail naming the first two `listeners` given one passed name, one socket
+/// path, or one TCP address with a port, before anything is opened. Two passed
+/// names can still be one socket, which only binding shows
+/// ([`distinct_sockets`]), and two addresses can still overlap, which binding
+/// refuses.
 fn check_listeners(listeners: &[(&str, Option<&Listen>)]) -> anyhow::Result<()> {
     let named = |pick: fn(&Listen) -> Option<String>| -> Vec<(&str, String)> {
         listeners
@@ -414,7 +416,13 @@ fn check_listeners(listeners: &[(&str, Option<&Listen>)]) -> anyhow::Result<()> 
         Listen::Unix(path) => Some(format!("unix:{}", path.display())),
         _ => None,
     });
-    distinct(&paths, "are both")
+    distinct(&paths, "are both")?;
+    // Port 0 binds a fresh port each time, so only a chosen port is shared.
+    let addresses = named(|l| match l {
+        Listen::Tcp(addr) if !addr.ends_with(":0") => Some(addr.clone()),
+        _ => None,
+    });
+    distinct(&addresses, "are both")
 }
 
 /// Fail naming the first two settings that share a value, as "a and b

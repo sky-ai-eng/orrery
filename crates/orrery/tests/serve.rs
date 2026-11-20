@@ -1048,6 +1048,10 @@ fn an_unusable_base_url_is_refused() {
         ("https://world.example/?mode=x", "has a query"),
         ("https://world.example/#top", "has a fragment"),
         ("https://user:secret@world.example", "has user information"),
+        (
+            "http://world.example:99999",
+            "has a port that is not 1 to 65535",
+        ),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let config = write_config(

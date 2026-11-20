@@ -71,7 +71,7 @@ impl Served {
     /// status, what it wrote to stdout after the ready line, and all it wrote
     /// to stderr.
     pub fn exited(&mut self, within: Duration) -> (std::process::ExitStatus, String, String) {
-        wait_until(within, "orrery serve exiting", || !self.running());
+        wait_until(within, "orrery exiting", || !self.running());
         let status = self.child.wait().unwrap();
         let stdout = self.rest_of_stdout.take().unwrap().join().unwrap();
         let stderr = self.stderr.take().unwrap().join().unwrap();
@@ -169,7 +169,7 @@ pub fn orrery_serve_passing(config: &Path, sockets: &[RawFd], names: &str) -> Co
     cmd
 }
 
-/// Run `cmd`, an `orrery serve` that should refuse to start, and return its
+/// Run `cmd`, an `orrery` process that should refuse to start, and return its
 /// output. One that starts instead is killed and fails the test, which would
 /// otherwise wait on it forever.
 pub fn refused(mut cmd: Command) -> std::process::Output {
@@ -183,7 +183,7 @@ pub fn refused(mut cmd: Command) -> std::process::Output {
         Ok(out) => out.unwrap(),
         Err(_) => {
             let _ = Command::new("kill").args(["-KILL", &pid]).status();
-            panic!("orrery serve started instead of refusing");
+            panic!("orrery started instead of refusing");
         }
     }
 }

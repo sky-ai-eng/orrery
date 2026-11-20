@@ -6,8 +6,10 @@
 
 mod common;
 
+use std::io::{BufRead, BufReader, Read, Write as _};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use common::{
@@ -393,6 +395,23 @@ fn what_the_world_does_not_serve_is_answered_by_the_relay() {
         assert_eq!(body["orrery"]["path"], path, "{body}");
     }
 
+    // Surface the world does not mock is the world's 501, naming the path
+    // the client sent, as the world does when reached as api.github.com.
+    let alice = mint(&ready.control, "alice");
+    let mut answer = proxied
+        .get("https://api.github.com/nosuch/thing")
+        .header("authorization", format!("token {alice}"))
+        .call()
+        .unwrap();
+    assert_eq!(answer.status(), 501);
+    let body: Value = answer.body_mut().read_json().unwrap();
+    assert_eq!(
+        body["message"], "orrery: GET /nosuch/thing is not mocked",
+        "{body}"
+    );
+    assert_eq!(body["orrery"]["path"], "/nosuch/thing", "{body}");
+    assert!(body["orrery"].get("host").is_none(), "{body}");
+
     // A host that is not GitHub's, on the TLS listener, is not forwarded.
     let direct = tls_client(&relay_dir, None);
     let tls_listen = relay_ready.tls_listen.unwrap();
@@ -439,6 +458,44 @@ fn a_relay_that_cannot_serve_is_refused() {
     let socket = dir.path().join("relay.sock").display().to_string();
     let unix = format!("unix:{socket}");
     let cases: Vec<(Vec<&str>, &str)> = vec![
+        (
+            joined(
+                &flags,
+                &[
+                    "--world",
+                    "https://api.github.com",
+                    "--proxy-listen",
+                    "127.0.0.1:0",
+                ],
+            ),
+            "--world \"https://api.github.com\" names one of GitHub's own hosts",
+        ),
+        (
+            joined(
+                &flags,
+                &[
+                    "--world",
+                    "http://127.0.0.1:99999",
+                    "--proxy-listen",
+                    "127.0.0.1:0",
+                ],
+            ),
+            "--world \"http://127.0.0.1:99999\" has a port that is not 1 to 65535",
+        ),
+        (
+            joined(
+                &flags,
+                &[
+                    "--world",
+                    "https://world.example",
+                    "--proxy-listen",
+                    "127.0.0.1:47999",
+                    "--tls-listen",
+                    "127.0.0.1:47999",
+                ],
+            ),
+            "--proxy-listen and --tls-listen are both 127.0.0.1:47999",
+        ),
         (
             joined(
                 &flags,
@@ -519,4 +576,137 @@ fn a_relay_that_cannot_serve_is_refused() {
 /// `flags` followed by `args`.
 fn joined<'a>(flags: &[&'a str], args: &[&'a str]) -> Vec<&'a str> {
     flags.iter().chain(args).copied().collect()
+}
+
+/// How long a side of the streaming test waits for the other.
+const STEP: Duration = Duration::from_secs(20);
+
+/// One chunk of a chunked body; empty at its end, after which its empty
+/// trailer is read.
+fn read_chunk(reader: &mut impl BufRead) -> Vec<u8> {
+    let mut size = String::new();
+    reader.read_line(&mut size).unwrap();
+    let size = usize::from_str_radix(size.trim(), 16).unwrap();
+    let mut chunk = vec![0; size];
+    reader.read_exact(&mut chunk).unwrap();
+    let mut end = String::new();
+    reader.read_line(&mut end).unwrap();
+    chunk
+}
+
+/// A request body that sends its first part, then waits until the world has
+/// read it before sending its second: a relay that read the whole body
+/// before forwarding any would wait forever.
+struct Halting {
+    sent: usize,
+    world_read_first: mpsc::Receiver<()>,
+}
+
+impl Read for Halting {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let part: &[u8] = match self.sent {
+            0 => b"first part",
+            1 => {
+                self.world_read_first.recv_timeout(STEP).map_err(|_| {
+                    std::io::Error::other("the world never read the body's first part")
+                })?;
+                b"second part"
+            }
+            _ => return Ok(0),
+        };
+        self.sent += 1;
+        buf[..part.len()].copy_from_slice(part);
+        Ok(part.len())
+    }
+}
+
+/// A world written by hand answers one request, so the test sees what the
+/// relay sends it, and when: the world's own host in `Host`, the REST path,
+/// none of the client's hop-by-hop headers, and each body streamed through a
+/// part at a time, in both directions.
+#[test]
+fn the_relay_streams_each_body_to_the_world_and_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let world_addr = listener.local_addr().unwrap();
+    let (world_read_first, client_waits) = mpsc::channel();
+    let (client_read_first, world_waits) = mpsc::channel::<()>();
+    let world = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(STEP)).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            head.push_str(&line.to_ascii_lowercase());
+        }
+        let mut body = Vec::new();
+        while body.len() < b"first part".len() {
+            body.extend(read_chunk(&mut reader));
+        }
+        world_read_first.send(()).unwrap();
+        loop {
+            let chunk = read_chunk(&mut reader);
+            if chunk.is_empty() {
+                break;
+            }
+            body.extend(chunk);
+        }
+        writer
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ntransfer-encoding: chunked\r\nconnection: close, x-world-hop\r\nx-world-hop: 1\r\n\r\nc\r\nfirst answer\r\n")
+            .unwrap();
+        writer.flush().unwrap();
+        world_waits
+            .recv_timeout(STEP)
+            .expect("the client never read the answer's first part");
+        writer
+            .write_all(b"d\r\nsecond answer\r\n0\r\n\r\n")
+            .unwrap();
+        writer.flush().unwrap();
+        (head, body)
+    });
+
+    let (_relayed, relay_ready) = relay(
+        dir.path(),
+        &format!("http://{world_addr}"),
+        &["--proxy-listen", "127.0.0.1:0"],
+    );
+    let client = tls_client(dir.path(), relay_ready.proxy_listen.as_deref());
+    let mut halting = Halting {
+        sent: 0,
+        world_read_first: client_waits,
+    };
+    let mut answer = client
+        .post("https://api.github.com/stream?x=1")
+        .header("connection", "x-client-hop")
+        .header("x-client-hop", "1")
+        .send(ureq::SendBody::from_reader(&mut halting))
+        .unwrap();
+    assert_eq!(answer.status(), 200);
+    assert!(answer.headers().get("x-world-hop").is_none());
+    let mut reader = answer.body_mut().as_reader();
+    let mut first = [0; 12];
+    reader.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"first answer");
+    client_read_first.send(()).unwrap();
+    let mut rest = String::new();
+    reader.read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "second answer");
+
+    let (head, body) = world.join().unwrap();
+    assert!(
+        head.starts_with("post /api/v3/stream?x=1 http/1.1\r\n"),
+        "{head}"
+    );
+    assert!(
+        head.contains(&format!("\r\nhost: {world_addr}\r\n")),
+        "{head}"
+    );
+    assert!(!head.contains("x-client-hop"), "{head}");
+    assert_eq!(body, b"first partsecond part");
 }

@@ -3,12 +3,14 @@
 //! layout (spec/usage.md, "Reaching a world served elsewhere").
 //!
 //! It is a client of the world, not a world. It holds no state, and the one
-//! connection it opens is to the world it was given. A request for
+//! connection it opens is to the world it was given. A request is routed as
+//! the world routes one for GitHub's hosts ([`orrery_server::route`]): one for
 //! `api.github.com` goes to the world's REST or GraphQL path, and one for
 //! `github.com` to the same path on the world, each with the world's own host
 //! in `Host`, so a world behind a router that finds it by that name is reached
 //! too. The world names GitHub's hosts in every URL it returns, so the relay
-//! changes no body, and streams each one through as it arrives.
+//! streams each body through as it arrives, and rewrites only the world's
+//! not-mocked answer, to name the path the client sent.
 
 use std::future::Future;
 use std::io;
@@ -20,47 +22,96 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::uri::Scheme;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode, Uri, Version, header};
+use axum::http::uri::{Authority, Scheme};
+use axum::http::{
+    HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode, Uri, Version, header,
+};
+use hyper::body::Incoming;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::{Connected, Connection, HttpConnector};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use orrery_face_github::layout::{Landing, Layout, RootUrlError, root_url, under};
+use orrery_face_github::layout::{Layout, RootUrlError, is_github_host, root_url};
+use orrery_server::Route;
 use rustls_pki_types::ServerName;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
-/// How long a connection to the world has to open, its TLS handshake
-/// included. Nothing after that is timed: a push or a fetch takes as long as
-/// it takes.
+/// How long a connection to the world has to open: its name looked up, TCP
+/// connected, and TLS shaken hands. Nothing after that is timed: a push or a
+/// fetch takes as long as it takes.
 const CONNECT_LIMIT: Duration = Duration::from_secs(10);
+
+/// The largest `501` the relay reads whole, to see whether it is the world's
+/// not-mocked answer, which is far smaller.
+const NOT_MOCKED_LIMIT: u64 = 64 * 1024;
 
 /// The world a relay forwards to: the root of its own host, as the world's
 /// `server.base_url` names it.
 #[derive(Clone, Debug)]
 pub struct WorldUrl {
-    /// The scheme, the authority, and the path, with no trailing slash.
+    scheme: Scheme,
+    authority: Authority,
+    /// The path the world is served below, with no trailing slash.
+    path: String,
+    /// The scheme, the authority, and the path.
     root: String,
     /// The authority, which every forwarded request names as its `Host`.
     host: HeaderValue,
 }
 
+/// A `--world` the relay can't forward to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum WorldUrlError {
+    #[error(transparent)]
+    Url(#[from] RootUrlError),
+    /// The relay serves GitHub's hosts, so a world at one of them would send
+    /// each request to GitHub, or back to the relay.
+    #[error("names one of GitHub's own hosts")]
+    GitHubHost,
+}
+
 impl WorldUrl {
-    /// `url`, which must be an `http` or `https` URL with a host and no user
+    /// `url`, which must be an `http` or `https` URL with a host that is not
+    /// GitHub's, a port from 1 to 65535 if it names one, and no user
     /// information, query, or fragment. A path is kept, for a world served
     /// below one.
-    pub fn parse(url: &str) -> Result<WorldUrl, RootUrlError> {
+    pub fn parse(url: &str) -> Result<WorldUrl, WorldUrlError> {
         let uri = root_url(url)?;
-        let authority = uri.authority().ok_or(RootUrlError::NoHost)?;
-        let host = HeaderValue::from_str(authority.as_str()).map_err(|_| RootUrlError::NotAUrl)?;
-        let scheme = uri.scheme_str().unwrap_or_default();
-        let root = format!("{scheme}://{authority}{}", uri.path().trim_end_matches('/'));
-        Ok(WorldUrl { root, host })
+        let (Some(scheme), Some(authority)) = (uri.scheme(), uri.authority()) else {
+            return Err(RootUrlError::NoHost.into());
+        };
+        if is_github_host(authority.host()) {
+            return Err(WorldUrlError::GitHubHost);
+        }
+        let path = uri.path().trim_end_matches('/').to_string();
+        Ok(WorldUrl {
+            root: format!("{scheme}://{authority}{path}"),
+            host: HeaderValue::from_str(authority.as_str())
+                .expect("an authority a URI holds is a header value"),
+            scheme: scheme.clone(),
+            authority: authority.clone(),
+            path,
+        })
     }
 
     pub fn as_str(&self) -> &str {
         &self.root
+    }
+
+    /// `at`, a path and query, on the world: below the world's path, at its
+    /// host. Only a path is an address there, so the authority stays the
+    /// world's whatever `at` holds.
+    fn address(&self, at: &str) -> Option<Uri> {
+        if !at.starts_with('/') {
+            return None;
+        }
+        Uri::builder()
+            .scheme(self.scheme.clone())
+            .authority(self.authority.clone())
+            .path_and_query(format!("{}{at}", self.path))
+            .build()
+            .ok()
     }
 }
 
@@ -91,7 +142,6 @@ impl Relay {
         let mut http = HttpConnector::new();
         http.enforce_http(false);
         http.set_nodelay(true);
-        http.set_connect_timeout(Some(CONNECT_LIMIT));
         let connector = Connector {
             http,
             tls: TlsConnector::from(Arc::new(tls)),
@@ -116,12 +166,14 @@ impl Relay {
     /// Send `req` to the world at `at`, a path and query, and answer what
     /// the world answers.
     async fn forward(&self, req: Request, at: &str) -> Response<Body> {
-        let method = req.method().clone();
-        let Ok(uri) = format!("{}{at}", self.world.root).parse::<Uri>() else {
-            return not_served(&req, orrery_server::request_host(&req));
+        let Some(address) = self.world.address(at) else {
+            return orrery_server::not_served(&req, orrery_server::request_host(&req).as_deref());
         };
+        let method = req.method().clone();
+        // The path the client asked for, which a not-mocked answer names.
+        let asked = req.uri().path().to_string();
         let (mut parts, body) = req.into_parts();
-        parts.uri = uri;
+        parts.uri = address.clone();
         parts.version = Version::HTTP_11;
         drop_hop_by_hop(&mut parts.headers);
         // The relay's own server answered a client's `Expect` already, and
@@ -129,22 +181,104 @@ impl Relay {
         parts.headers.remove(header::EXPECT);
         parts.headers.insert(header::HOST, self.world.host.clone());
         match self.client.request(Request::from_parts(parts, body)).await {
+            Ok(answer) if answer.status() == StatusCode::NOT_IMPLEMENTED => {
+                self.renamed(answer, &method, &asked, &address).await
+            }
             Ok(answer) => {
                 let (mut parts, body) = answer.into_parts();
                 drop_hop_by_hop(&mut parts.headers);
                 Response::from_parts(parts, Body::new(body))
             }
-            Err(e) => {
-                let why = causes(&e);
-                tracing::warn!(world = %self.world, %method, path = at, error = %why, "the relay could not reach the world");
-                orrery_error(
-                    StatusCode::BAD_GATEWAY,
-                    format!("orrery relay: {method} {}{at} failed: {why}", self.world),
-                    serde_json::json!({ "relay_failed": true, "world": self.world.as_str() }),
-                )
-            }
+            Err(e) => self.failed(&e, &method, &address),
         }
     }
+
+    /// The world's not-mocked `501` names the path the world was asked for,
+    /// its GitHub Enterprise Server path. It is answered as the world answers
+    /// a client that reaches it as GitHub's host directly, naming the path
+    /// the client sent. Any other answer is passed on as it is.
+    async fn renamed(
+        &self,
+        answer: Response<Incoming>,
+        method: &Method,
+        asked: &str,
+        address: &Uri,
+    ) -> Response<Body> {
+        let (mut parts, body) = answer.into_parts();
+        drop_hop_by_hop(&mut parts.headers);
+        let small = parts
+            .headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|length| length.to_str().ok()?.parse::<u64>().ok())
+            .is_some_and(|length| length <= NOT_MOCKED_LIMIT);
+        if !small {
+            return Response::from_parts(parts, Body::new(body));
+        }
+        let bytes = match axum::body::to_bytes(Body::new(body), NOT_MOCKED_LIMIT as usize).await {
+            Ok(bytes) => bytes,
+            Err(e) => return self.world_failed(&causes(&e), method, address),
+        };
+        let not_mocked = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .is_ok_and(|body| body["orrery"]["not_mocked"] == true);
+        if not_mocked {
+            return orrery_face_github::not_mocked(method.as_str(), asked);
+        }
+        Response::from_parts(parts, Body::from(bytes))
+    }
+
+    /// The answer to a request the relay could not complete with the world.
+    /// A client whose own request body failed is told so, and the world is
+    /// named only for a failure of its own. Neither names a query, which can
+    /// carry a secret, such as OAuth's `client_secret`.
+    fn failed(
+        &self,
+        e: &hyper_util::client::legacy::Error,
+        method: &Method,
+        address: &Uri,
+    ) -> Response<Body> {
+        let why = causes(e);
+        if from_the_client(e) {
+            tracing::info!(%method, path = address.path(), error = %why, "a client's request failed before the relay could forward it");
+            return orrery_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "orrery relay: the request's body failed before it reached the world: {why}"
+                ),
+                serde_json::json!({ "relay_failed": true }),
+            );
+        }
+        self.world_failed(&why, method, address)
+    }
+
+    fn world_failed(&self, why: &str, method: &Method, address: &Uri) -> Response<Body> {
+        let at = format!(
+            "{}://{}{}",
+            self.world.scheme,
+            self.world.authority,
+            address.path()
+        );
+        tracing::warn!(%method, %at, error = %why, "the relay could not reach the world");
+        orrery_error(
+            StatusCode::BAD_GATEWAY,
+            format!("orrery relay: {method} {at} failed: {why}"),
+            serde_json::json!({ "relay_failed": true, "world": self.world.as_str() }),
+        )
+    }
+}
+
+/// Whether `e` came from the client's side of the exchange: its request's
+/// body failed as the relay read it.
+fn from_the_client(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut error = Some(e);
+    while let Some(e) = error {
+        if e.downcast_ref::<hyper::Error>()
+            .is_some_and(hyper::Error::is_user)
+        {
+            return true;
+        }
+        error = e.source();
+    }
+    false
 }
 
 /// Where a request is served: at the world, for one of the GitHub hosts the
@@ -152,32 +286,11 @@ impl Relay {
 /// for a host that is not GitHub's.
 async fn relay(State(relay): State<Arc<Relay>>, req: Request) -> Response<Body> {
     let host = orrery_server::request_host(&req);
-    let path_and_query = req
-        .uri()
-        .path_and_query()
-        .map_or("/", |pq| pq.as_str())
-        .to_string();
-    let at = match relay.layout.landing(host.as_deref(), &path_and_query) {
-        Landing::Api(served) => served,
-        // The control plane is the world's own host's, never github.com's.
-        Landing::Web if under(req.uri().path(), orrery_server::CONTROL_PREFIX) => {
-            return not_served(&req, host);
-        }
-        Landing::Web => path_and_query,
-        Landing::NotServed => return not_served(&req, host),
-        Landing::Own => return misdirected(host.as_deref(), &relay.world),
-    };
-    relay.forward(req, &at).await
-}
-
-/// The `501` the world answers for a GitHub host or a path it does not
-/// serve, answered here, so it reaches no world.
-fn not_served(req: &Request, host: Option<String>) -> Response<Body> {
-    orrery_face_github::not_mocked_on(
-        req.method().as_str(),
-        host.as_deref().unwrap_or(""),
-        req.uri().path(),
-    )
+    match orrery_server::route(&relay.layout, host.as_deref(), req.uri()) {
+        Route::At(at) => relay.forward(req, &at).await,
+        Route::NotServed => orrery_server::not_served(&req, host.as_deref()),
+        Route::Own => misdirected(host.as_deref(), &relay.world),
+    }
 }
 
 /// A request for a host that is not GitHub's, which the relay does not
@@ -277,21 +390,27 @@ impl tower_service::Service<Uri> for Connector {
             .to_string();
         let tcp = self.http.call(uri);
         let tls = self.tls.clone();
-        Box::pin(async move {
+        let connecting = async move {
             let tcp = tcp.await?;
             if !https {
                 return Ok(Stream::Plain(tcp));
             }
             let name = ServerName::try_from(name)?;
-            let tls = tokio::time::timeout(CONNECT_LIMIT, tls.connect(name, tcp.into_inner()))
+            let tls = tls.connect(name, tcp.into_inner()).await?;
+            Ok(Stream::Tls(Box::new(TokioIo::new(tls))))
+        };
+        Box::pin(async move {
+            tokio::time::timeout(CONNECT_LIMIT, connecting)
                 .await
                 .map_err(|_| {
                     io::Error::new(
                         io::ErrorKind::TimedOut,
-                        "the TLS handshake with the world did not finish in time",
+                        format!(
+                            "no connection to the world opened within {} seconds",
+                            CONNECT_LIMIT.as_secs()
+                        ),
                     )
-                })??;
-            Ok(Stream::Tls(Box::new(TokioIo::new(tls))))
+                })?
         })
     }
 }
@@ -330,6 +449,24 @@ impl hyper::rt::Write for Stream {
         match self.get_mut() {
             Stream::Plain(io) => Pin::new(io).poll_write(cx, buf),
             Stream::Tls(io) => Pin::new(io.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Stream::Plain(io) => Pin::new(io).poll_write_vectored(cx, bufs),
+            Stream::Tls(io) => Pin::new(io.as_mut()).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Stream::Plain(io) => io.is_write_vectored(),
+            Stream::Tls(io) => io.is_write_vectored(),
         }
     }
 
@@ -387,8 +524,33 @@ mod tests {
             ("https://world.example/?x=1", RootUrlError::Query),
             ("https://world.example/#top", RootUrlError::Fragment),
             ("not a url", RootUrlError::NotAUrl),
+            ("http://127.0.0.1:99999", RootUrlError::Port),
         ] {
-            assert_eq!(WorldUrl::parse(url).unwrap_err(), why, "{url}");
+            assert_eq!(WorldUrl::parse(url).unwrap_err(), why.into(), "{url}");
+        }
+        for url in [
+            "https://api.github.com",
+            "https://github.com/prefix",
+            "http://GitHub.com.:8080",
+            "https://raw.githubusercontent.com",
+        ] {
+            assert_eq!(
+                WorldUrl::parse(url).unwrap_err(),
+                WorldUrlError::GitHubHost,
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_path_is_an_address_on_the_world() {
+        let world = WorldUrl::parse("http://127.0.0.1:4180/prefix").unwrap();
+        assert_eq!(
+            world.address("/api/v3/user?x=1").unwrap(),
+            "http://127.0.0.1:4180/prefix/api/v3/user?x=1"
+        );
+        for at in ["*", "", "@evil.example/", ":80/"] {
+            assert_eq!(world.address(at), None, "{at:?}");
         }
     }
 
