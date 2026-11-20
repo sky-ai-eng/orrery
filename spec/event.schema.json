@@ -1402,6 +1402,29 @@
             "null"
           ]
         },
+        "run_attempt": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "started_unix": {
           "description": "A field's value before and after a change.",
           "properties": {
@@ -1444,7 +1467,57 @@
             "null"
           ]
         },
+        "steps": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "items": {
+                "$ref": "#/$defs/Step"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "to": {
+              "items": {
+                "$ref": "#/$defs/Step"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "suite_id": {
+          "description": "A field's value before and after a change.",
+          "properties": {
+            "from": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "workflow_run_id": {
           "description": "A field's value before and after a change.",
           "properties": {
             "from": {
@@ -1537,6 +1610,15 @@
         "output": {
           "description": "Whatever JSON the creator sent."
         },
+        "run_attempt": {
+          "default": null,
+          "description": "The attempt of that run it is a job of.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "started_unix": {
           "description": "As its creator stated it, in Unix seconds.",
           "format": "int64",
@@ -1548,9 +1630,29 @@
         "status": {
           "$ref": "#/$defs/CheckStatus"
         },
+        "steps": {
+          "default": null,
+          "description": "A job's steps as its runner has brought them: none until it\nstarts the job.",
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "suite_id": {
           "default": null,
           "description": "The suite it is in. Events appended before a world held suites\ncarry none.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "workflow_run_id": {
+          "default": null,
+          "description": "The workflow run it is a job of, for a check run that is one.",
           "format": "int64",
           "type": [
             "integer",
@@ -4215,6 +4317,56 @@
       ],
       "type": "string"
     },
+    "JobSpec": {
+      "description": "One job of a workflow: what the workflow says of it, before any run.",
+      "properties": {
+        "always": {
+          "description": "Whether it runs when a job it needs did not succeed. One that does\nnot is listed as skipped.",
+          "type": "boolean"
+        },
+        "closing_steps": {
+          "description": "The steps its runner adds, already complete, as the job finishes.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "labels": {
+          "description": "What it asks of the machine that runs it.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "Unique within its workflow.",
+          "type": "string"
+        },
+        "needs": {
+          "description": "The jobs that finish before this one is listed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "steps": {
+          "description": "The steps its runner works through, in order.",
+          "items": {
+            "$ref": "#/$defs/StepSpec"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "needs",
+        "always",
+        "labels",
+        "steps",
+        "closing_steps"
+      ],
+      "type": "object"
+    },
     "OAuthAppCreated": {
       "properties": {
         "object": {
@@ -6113,6 +6265,94 @@
       ],
       "type": "string"
     },
+    "Step": {
+      "description": "One step of a job, as its runner has brought it.",
+      "properties": {
+        "completed_unix": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conclusion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StepConclusion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "started_unix": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/StepStatus"
+        }
+      },
+      "required": [
+        "name",
+        "status"
+      ],
+      "type": "object"
+    },
+    "StepConclusion": {
+      "oneOf": [
+        {
+          "enum": [
+            "success",
+            "failure"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "skipped",
+          "description": "Not run, because a step before it failed.",
+          "type": "string"
+        }
+      ]
+    },
+    "StepSpec": {
+      "properties": {
+        "always": {
+          "description": "Whether it runs after a step before it failed. One that does not is\nskipped.",
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "always"
+      ],
+      "type": "object"
+    },
+    "StepStatus": {
+      "oneOf": [
+        {
+          "enum": [
+            "in_progress",
+            "completed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "pending",
+          "description": "Listed, and not reached.",
+          "type": "string"
+        }
+      ]
+    },
     "TeamCreated": {
       "properties": {
         "object": {
@@ -6533,6 +6773,212 @@
     "TimelineItemType": {
       "enum": [
         "timeline_item"
+      ],
+      "type": "string"
+    },
+    "WorkflowCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/WorkflowObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/WorkflowSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "WorkflowObject": {
+      "properties": {
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "jobs": {
+          "items": {
+            "$ref": "#/$defs/JobSpec"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "name",
+        "jobs",
+        "created_unix"
+      ],
+      "type": "object"
+    },
+    "WorkflowRunCreated": {
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/WorkflowRunObject"
+        },
+        "subject": {
+          "$ref": "#/$defs/WorkflowRunSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "object"
+      ],
+      "type": "object"
+    },
+    "WorkflowRunObject": {
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "Who started it."
+        },
+        "attempt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "created_unix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "event": {
+          "description": "What started it, as the caller named it.",
+          "type": "string"
+        },
+        "head_branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_sha": {
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "run_number": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "started_unix": {
+          "description": "When its current attempt began.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "suite_id": {
+          "description": "The suite its jobs are check runs of. Its status and conclusion are\nthe run's.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "suite_id",
+        "run_number",
+        "event",
+        "head_sha",
+        "title",
+        "actor",
+        "attempt",
+        "created_unix",
+        "started_unix"
+      ],
+      "type": "object"
+    },
+    "WorkflowRunSubject": {
+      "description": "One run of a workflow on a commit.",
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "run_number": {
+          "description": "Its place among the runs of its workflow, from 1.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "type": {
+          "$ref": "#/$defs/WorkflowRunType"
+        },
+        "workflow_id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "workflow_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "workflow_id",
+        "workflow_path",
+        "run_number",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "WorkflowRunType": {
+      "enum": [
+        "workflow_run"
+      ],
+      "type": "string"
+    },
+    "WorkflowSubject": {
+      "description": "What stands for a workflow file in a repository.",
+      "properties": {
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/ActorRef"
+        },
+        "path": {
+          "type": "string"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "type": {
+          "$ref": "#/$defs/WorkflowType"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "path",
+        "repo",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "WorkflowType": {
+      "enum": [
+        "workflow"
       ],
       "type": "string"
     },
@@ -7384,6 +7830,34 @@
       "properties": {
         "type": {
           "const": "check_suite:updated",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/WorkflowCreated",
+      "description": "A workflow was registered in a repository.",
+      "properties": {
+        "type": {
+          "const": "workflow:created",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/WorkflowRunCreated",
+      "description": "A run of a workflow began. Its jobs are check runs.",
+      "properties": {
+        "type": {
+          "const": "workflow_run:created",
           "type": "string"
         }
       },

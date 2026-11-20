@@ -845,7 +845,7 @@ fn count_installations(conn: &Connection, app_id: i64) -> Result<i64> {
     )?)
 }
 
-fn actor_by_login(conn: &Connection, login: &str) -> Result<Option<Actor>> {
+pub(crate) fn actor_by_login(conn: &Connection, login: &str) -> Result<Option<Actor>> {
     Ok(conn
         .query_row(
             &format!(

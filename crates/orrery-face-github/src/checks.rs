@@ -137,6 +137,21 @@ pub(crate) async fn patch_check_run(
     if let Some(refused) = media::refuse_unrendered(&headers, "CheckRun") {
         return refused;
     }
+    // A job's check run is its runner's to move, and GitHub answers this to
+    // any other App that tries.
+    if existing.job.is_some() {
+        let app_id = match crate::suites::app_id_of(&face, &existing.creator_login) {
+            Ok(id) => id.unwrap_or(crate::actions::ACTIONS_APP_ID),
+            Err(e) => return internal(e),
+        };
+        return github_error(
+            StatusCode::FORBIDDEN,
+            &format!(
+                "Invalid app_id `{app_id}` - check run can only be modified by the GitHub App \
+                 that created it."
+            ),
+        );
+    }
     let parsed: CheckRunBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),

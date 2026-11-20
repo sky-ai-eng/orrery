@@ -12,7 +12,7 @@ use sha2::{Digest as _, Sha256};
 use crate::types::{
     ActorEmail, ActorKind, AlertScope, AlertSeverity, AlertState, AlertUpdateState,
     CheckConclusion, CheckStatus, ClockMode, DeliveryFailure, DeliveryState, DismissReason,
-    OrgRole, Permissions, PullState, RepositorySelection, ReviewState, TeamRole,
+    JobSpec, OrgRole, Permissions, PullState, RepositorySelection, ReviewState, Step, TeamRole,
 };
 
 /// How a write reached the world.
@@ -204,6 +204,8 @@ subject_type! {
     CommentType = "comment",
     CheckRunType = "check_run",
     CheckSuiteType = "check_suite",
+    WorkflowType = "workflow",
+    WorkflowRunType = "workflow_run",
     DependencyAlertType = "dependency_alert",
     OrgMembershipType = "org_membership",
     TeamType = "team",
@@ -399,6 +401,31 @@ pub struct CheckSuiteSubject {
     pub kind: CheckSuiteType,
     pub id: i64,
     pub head_sha: String,
+    pub repo: RepoRef,
+    pub owner: ActorRef,
+}
+
+/// What stands for a workflow file in a repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowSubject {
+    #[serde(rename = "type")]
+    pub kind: WorkflowType,
+    pub id: i64,
+    pub path: String,
+    pub repo: RepoRef,
+    pub owner: ActorRef,
+}
+
+/// One run of a workflow on a commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowRunSubject {
+    #[serde(rename = "type")]
+    pub kind: WorkflowRunType,
+    pub id: i64,
+    pub workflow_id: i64,
+    pub workflow_path: String,
+    /// Its place among the runs of its workflow, from 1.
+    pub run_number: i64,
     pub repo: RepoRef,
     pub owner: ActorRef,
 }
@@ -855,6 +882,35 @@ pub struct CommentObject {
     pub updated_unix: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowObject {
+    pub id: i64,
+    pub path: String,
+    pub name: String,
+    pub jobs: Vec<JobSpec>,
+    pub created_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowRunObject {
+    pub id: i64,
+    /// The suite its jobs are check runs of. Its status and conclusion are
+    /// the run's.
+    pub suite_id: i64,
+    pub run_number: i64,
+    /// What started it, as the caller named it.
+    pub event: String,
+    pub head_branch: Option<String>,
+    pub head_sha: String,
+    pub title: String,
+    /// Who started it.
+    pub actor: ActorRef,
+    pub attempt: i64,
+    pub created_unix: i64,
+    /// When its current attempt began.
+    pub started_unix: i64,
+}
+
 object! {
     CheckSuiteObject, CheckSuiteChanges {
         id: i64,
@@ -898,6 +954,16 @@ object! {
         /// As its creator stated it, in Unix seconds.
         completed_unix: Option<i64>,
         created_unix: i64,
+        /// The workflow run it is a job of, for a check run that is one.
+        #[serde(default)]
+        workflow_run_id: Option<i64>,
+        /// The attempt of that run it is a job of.
+        #[serde(default)]
+        run_attempt: Option<i64>,
+        /// A job's steps as its runner has brought them: none until it
+        /// starts the job.
+        #[serde(default)]
+        steps: Option<Vec<Step>>,
     }
 }
 
@@ -1068,6 +1134,8 @@ bodies! {
     CheckRunChanged { subject: CheckRunSubject, changes: CheckRunChanges }
     CheckSuiteCreated { subject: CheckSuiteSubject, object: CheckSuiteObject }
     CheckSuiteChanged { subject: CheckSuiteSubject, changes: CheckSuiteChanges }
+    WorkflowCreated { subject: WorkflowSubject, object: WorkflowObject }
+    WorkflowRunCreated { subject: WorkflowRunSubject, object: WorkflowRunObject }
     OrgMembershipCreated { subject: OrgMembershipSubject, object: OrgMembershipObject }
     OrgMembershipChanged { subject: OrgMembershipSubject, changes: OrgMembershipChanges }
     TeamCreated { subject: TeamSubject, object: TeamObject }
@@ -1214,6 +1282,10 @@ event_types! {
     CheckSuiteCreated(CheckSuiteCreated) = "check_suite:created",
     /// A suite's check runs came to something else.
     CheckSuiteUpdated(CheckSuiteChanged) = "check_suite:updated",
+    /// A workflow was registered in a repository.
+    WorkflowCreated(WorkflowCreated) = "workflow:created",
+    /// A run of a workflow began. Its jobs are check runs.
+    WorkflowRunCreated(WorkflowRunCreated) = "workflow_run:created",
     /// The vendor reported a vulnerable dependency in a repository.
     DependencyAlertCreated(DependencyAlertCreated) = "dependency_alert:created",
     /// A person dismissed an alert.

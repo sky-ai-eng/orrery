@@ -634,7 +634,8 @@ pub(crate) fn check_run_object(conn: &Connection, id: i64) -> Result<CheckRunObj
     conn.query_row(
         "SELECT c.id, c.head_sha, c.name, c.status, c.conclusion, c.details_url,
                 c.external_id, c.output, a.id, a.login, c.started_clock_unix,
-                c.completed_clock_unix, c.created_clock_unix, c.suite_id
+                c.completed_clock_unix, c.created_clock_unix, c.suite_id,
+                c.workflow_run_id, c.run_attempt, c.steps
          FROM check_runs c JOIN actors a ON a.id = c.creator_id WHERE c.id = ?1",
         params![id],
         |r| {
@@ -656,11 +657,94 @@ pub(crate) fn check_run_object(conn: &Connection, id: i64) -> Result<CheckRunObj
                 started_unix: r.get(10)?,
                 completed_unix: r.get(11)?,
                 created_unix: r.get(12)?,
+                workflow_run_id: r.get(14)?,
+                run_attempt: r.get(15)?,
+                steps: r
+                    .get::<_, Option<String>>(16)?
+                    .and_then(|s| serde_json::from_str(&s).ok()),
             })
         },
     )
     .optional()?
     .ok_or(WorldError::NoSuchCheckRun(id))
+}
+
+pub(crate) fn workflow_subject(conn: &Connection, id: i64) -> Result<WorkflowSubject> {
+    let (repo_id, path): (i64, String) = conn
+        .query_row(
+            "SELECT repo_id, path FROM workflows WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or(WorldError::NoSuchWorkflow(id))?;
+    let (repo, owner) = repo_refs(conn, repo_id)?;
+    Ok(WorkflowSubject {
+        kind: WorkflowType::Tag,
+        id,
+        path,
+        repo,
+        owner,
+    })
+}
+
+pub(crate) fn workflow_object(conn: &Connection, id: i64) -> Result<WorkflowObject> {
+    let workflow = queries::workflow_by_id(conn, id)?.ok_or(WorldError::NoSuchWorkflow(id))?;
+    Ok(WorkflowObject {
+        id,
+        path: workflow.path,
+        name: workflow.name,
+        jobs: workflow.jobs,
+        created_unix: workflow.created_clock_unix,
+    })
+}
+
+pub(crate) fn workflow_run_subject(conn: &Connection, id: i64) -> Result<WorkflowRunSubject> {
+    let (repo_id, workflow_id, workflow_path, run_number): (i64, i64, String, i64) = conn
+        .query_row(
+            "SELECT r.repo_id, r.workflow_id, w.path, r.run_number
+             FROM workflow_runs r JOIN workflows w ON w.id = r.workflow_id WHERE r.id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?
+        .ok_or(WorldError::NoSuchWorkflowRun(id))?;
+    let (repo, owner) = repo_refs(conn, repo_id)?;
+    Ok(WorkflowRunSubject {
+        kind: WorkflowRunType::Tag,
+        id,
+        workflow_id,
+        workflow_path,
+        run_number,
+        repo,
+        owner,
+    })
+}
+
+pub(crate) fn workflow_run_object(conn: &Connection, id: i64) -> Result<WorkflowRunObject> {
+    conn.query_row(
+        "SELECT r.id, r.suite_id, r.run_number, r.event, r.head_branch, r.head_sha, r.title,
+                a.id, a.login, r.attempt, r.created_clock_unix, r.started_clock_unix
+         FROM workflow_runs r JOIN actors a ON a.id = r.actor_id WHERE r.id = ?1",
+        params![id],
+        |r| {
+            Ok(WorkflowRunObject {
+                id: r.get(0)?,
+                suite_id: r.get(1)?,
+                run_number: r.get(2)?,
+                event: r.get(3)?,
+                head_branch: r.get(4)?,
+                head_sha: r.get(5)?,
+                title: r.get(6)?,
+                actor: actor_ref_at(r, 7)?,
+                attempt: r.get(9)?,
+                created_unix: r.get(10)?,
+                started_unix: r.get(11)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or(WorldError::NoSuchWorkflowRun(id))
 }
 
 pub(crate) fn org_membership_subject(

@@ -99,6 +99,43 @@ fn routes() -> Vec<Route> {
             required: &["from"],
             mistyped: ("to", json!(5)),
         },
+        Route {
+            method: "POST",
+            path: "/repos/alice/web/workflows",
+            accepted: json!({
+                "path": ".github/workflows/ci.yml",
+                "name": "ci",
+                "jobs": [{ "name": "test" }],
+            }),
+            required: &["path", "name", "jobs"],
+            mistyped: ("jobs", json!("test")),
+        },
+        Route {
+            method: "POST",
+            path: "/repos/alice/web/workflows/1/runs",
+            accepted: json!({
+                "event": "push",
+                "head_sha": "1111111111111111111111111111111111111111",
+                "head_branch": "main",
+                "actor": "alice",
+            }),
+            required: &["event", "head_sha", "head_branch", "actor"],
+            mistyped: ("actor", json!(5)),
+        },
+        Route {
+            method: "POST",
+            path: "/repos/alice/web/workflow-jobs/1/complete-step",
+            accepted: json!({ "conclusion": "success" }),
+            required: &["conclusion"],
+            mistyped: ("conclusion", json!(true)),
+        },
+        Route {
+            method: "POST",
+            path: "/repos/alice/web/workflow-jobs/1/complete",
+            accepted: json!({ "conclusion": "failure" }),
+            required: &["conclusion"],
+            mistyped: ("conclusion", json!("skipped")),
+        },
     ]
 }
 

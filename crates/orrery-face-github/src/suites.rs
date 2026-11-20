@@ -4,7 +4,9 @@ use axum::body::Body;
 use axum::extract::{Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use orrery_face_git::store;
-use orrery_world::{Actor, CheckRun, CheckSuite, PullState, Repo, WorldError, newest_check_runs};
+use orrery_world::{
+    Actor, CheckRun, CheckSuite, Pull, PullState, Repo, WorldError, newest_check_runs,
+};
 
 use crate::reads::{page_params, paginate, query_param as param};
 use crate::render::{check_run_json, repo_json, rfc3339};
@@ -17,6 +19,20 @@ pub(crate) fn pulls_at(
     repo: &Repo,
     sha: &str,
 ) -> Result<serde_json::Value, WorldError> {
+    let open = face
+        .world
+        .list_pulls_for_repo(repo.id, Some(PullState::Open))?;
+    Ok(pulls_among(face, repo, &open, sha))
+}
+
+/// Those of `open`, the repository's open pull requests, whose head is
+/// `sha`.
+pub(crate) fn pulls_among(
+    face: &GithubFace,
+    repo: &Repo,
+    open: &[Pull],
+    sha: &str,
+) -> serde_json::Value {
     let api = face.layout.api();
     let url = format!("{api}/repos/{}", repo.full_name());
     let end = |name: &str, sha: &str| {
@@ -26,10 +42,7 @@ pub(crate) fn pulls_at(
             "repo": { "id": repo.id, "url": url, "name": repo.name },
         })
     };
-    Ok(face
-        .world
-        .list_pulls_for_repo(repo.id, Some(PullState::Open))?
-        .iter()
+    open.iter()
         .filter(|pull| pull.head_sha == sha)
         .map(|pull| {
             serde_json::json!({
@@ -40,7 +53,7 @@ pub(crate) fn pulls_at(
                 "base": end(&pull.base_ref, &pull.base_sha),
             })
         })
-        .collect())
+        .collect()
 }
 
 /// A suite as a check run's webhook payload carries it.
@@ -81,7 +94,8 @@ pub(crate) fn suite_json(
     let latest = newest_check_runs(face.world.list_check_runs_for_suite(suite.id)?).len();
     let mut json = suite_brief(face, repo, suite)?;
     json["rerequestable"] = true.into();
-    json["runs_rerequestable"] = true.into();
+    // A workflow run's jobs are re-run through the run, not one by one.
+    json["runs_rerequestable"] = face.world.workflow_run_by_suite(suite.id)?.is_none().into();
     json["latest_check_runs_count"] = latest.into();
     json["check_runs_url"] = format!(
         "{api}/repos/{}/check-suites/{}/check-runs",
@@ -107,8 +121,17 @@ fn suite_with_repository(
 /// Whether `creator_login` is the bot of the App with this id, as the
 /// `app_id` filters ask.
 fn made_by(face: &GithubFace, creator_login: &str, app_id: &str) -> Result<bool, WorldError> {
-    let app = face.world.app_by_slug(creator_login)?;
-    Ok(app.is_some_and(|app| app.id.to_string() == app_id))
+    Ok(app_id_of(face, creator_login)?.is_some_and(|id| id.to_string() == app_id))
+}
+
+/// The id of the App a bot stands for: its App's in the world, or GitHub's
+/// own for the Actions bot of a world with no App of that slug.
+pub(crate) fn app_id_of(face: &GithubFace, bot_login: &str) -> Result<Option<i64>, WorldError> {
+    Ok(match face.world.app_by_slug(bot_login)? {
+        Some(app) => Some(app.id),
+        None if bot_login == crate::actions::ACTIONS_APP => Some(crate::actions::ACTIONS_APP_ID),
+        None => None,
+    })
 }
 
 /// The check runs a list answers: GitHub's filters applied to `runs`, which

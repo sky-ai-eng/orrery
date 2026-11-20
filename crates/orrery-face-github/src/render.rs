@@ -381,6 +381,15 @@ pub(crate) fn check_run_json(
     let api = face.layout.api();
     let web = face.layout.web();
     let full_name = repo.full_name();
+    // A job's check run links to the job's page, both ways.
+    let job_url = run
+        .job
+        .as_ref()
+        .map(|job| crate::actions::job_html_url(face, repo, job.run_id, run.id));
+    let html_url = job_url
+        .clone()
+        .unwrap_or_else(|| format!("{web}/{full_name}/runs/{}", run.id));
+    let details_url = job_url.or_else(|| run.details_url.clone());
     Ok(serde_json::json!({
         "id": run.id,
         "node_id": crate::nodeid::check(run.id),
@@ -389,9 +398,9 @@ pub(crate) fn check_run_json(
         "status": run.status.as_str(),
         "conclusion": run.conclusion.map(|c| c.as_str()),
         "external_id": run.external_id,
-        "details_url": run.details_url,
+        "details_url": details_url,
         "url": format!("{api}/repos/{full_name}/check-runs/{}", run.id),
-        "html_url": format!("{web}/{full_name}/runs/{}", run.id),
+        "html_url": html_url,
         "started_at": run.started_clock_unix.map(rfc3339),
         "completed_at": run.completed_clock_unix.map(rfc3339),
         "output": run.output.clone().unwrap_or(serde_json::json!({
@@ -403,13 +412,17 @@ pub(crate) fn check_run_json(
 }
 
 /// The App a check run names as its creator: the bot's App, as `GET /app`
-/// answers it, or the bot's login alone for a bot that has no App.
+/// answers it. A bot that has no App is GitHub's own Actions App when it
+/// has that App's slug, and otherwise its login alone.
 pub(crate) fn check_run_app(
     face: &GithubFace,
     creator_login: &str,
 ) -> Result<serde_json::Value, WorldError> {
     Ok(match face.world.app_by_slug(creator_login)? {
         Some(app) => crate::apps::app_json(face, &app),
+        None if creator_login == crate::actions::ACTIONS_APP => {
+            crate::actions::actions_app_json(face)
+        }
         None => serde_json::json!({ "slug": creator_login, "name": creator_login }),
     })
 }

@@ -42,6 +42,7 @@ mod log_stream;
 mod sender;
 mod snapshots;
 pub mod tls;
+mod workflows;
 
 /// Where the control plane is mounted, on its own listener or the faces'.
 const CONTROL_PREFIX: &str = "/_orrery";

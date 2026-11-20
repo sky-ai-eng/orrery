@@ -58,7 +58,20 @@ pub(crate) const COMMENT_COLUMNS: &str = "id, pull_id,
 pub(crate) const CHECK_RUN_COLUMNS: &str = "id, repo_id, head_sha, name, status, conclusion,
     details_url, external_id, output,
     (SELECT login FROM actors WHERE actors.id = check_runs.creator_id),
-    started_clock_unix, completed_clock_unix, created_clock_unix, suite_id";
+    started_clock_unix, completed_clock_unix, created_clock_unix, suite_id,
+    workflow_run_id, run_attempt, steps";
+
+pub(crate) const WORKFLOW_COLUMNS: &str = "id, repo_id, path, name, jobs, created_clock_unix";
+
+/// A run with what it reads through its suite: its status, its conclusion,
+/// and when they last changed.
+pub(crate) const WORKFLOW_RUN_COLUMNS: &str = "id, repo_id, workflow_id, suite_id, run_number,
+    event, head_branch, head_sha, title,
+    (SELECT login FROM actors WHERE actors.id = workflow_runs.actor_id), attempt,
+    (SELECT status FROM check_suites WHERE check_suites.id = workflow_runs.suite_id),
+    (SELECT conclusion FROM check_suites WHERE check_suites.id = workflow_runs.suite_id),
+    created_clock_unix, started_clock_unix,
+    (SELECT updated_clock_unix FROM check_suites WHERE check_suites.id = workflow_runs.suite_id)";
 
 pub(crate) const CHECK_SUITE_COLUMNS: &str = "id, repo_id, head_sha, head_branch, before_sha,
     (SELECT login FROM actors WHERE actors.id = check_suites.creator_id),
@@ -195,6 +208,55 @@ pub(crate) fn row_to_check_run(r: &Row<'_>) -> rusqlite::Result<CheckRun> {
         completed_clock_unix: r.get(11)?,
         created_clock_unix: r.get(12)?,
         suite_id: r.get(13)?,
+        job: match r.get::<_, Option<i64>>(14)? {
+            None => None,
+            Some(run_id) => Some(Job {
+                run_id,
+                attempt: r.get(15)?,
+                steps: json_or_default(r.get::<_, Option<String>>(16)?),
+            }),
+        },
+    })
+}
+
+/// A JSON column's value, or the type's default for a column that holds
+/// none.
+fn json_or_default<T: serde::de::DeserializeOwned + Default>(text: Option<String>) -> T {
+    text.and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn row_to_workflow(r: &Row<'_>) -> rusqlite::Result<Workflow> {
+    Ok(Workflow {
+        id: r.get(0)?,
+        repo_id: r.get(1)?,
+        path: r.get(2)?,
+        name: r.get(3)?,
+        jobs: json_or_default(Some(r.get::<_, String>(4)?)),
+        created_clock_unix: r.get(5)?,
+    })
+}
+
+pub(crate) fn row_to_workflow_run(r: &Row<'_>) -> rusqlite::Result<WorkflowRun> {
+    Ok(WorkflowRun {
+        id: r.get(0)?,
+        repo_id: r.get(1)?,
+        workflow_id: r.get(2)?,
+        suite_id: r.get(3)?,
+        run_number: r.get(4)?,
+        event: r.get(5)?,
+        head_branch: r.get(6)?,
+        head_sha: r.get(7)?,
+        title: r.get(8)?,
+        actor_login: r.get(9)?,
+        attempt: r.get(10)?,
+        status: CheckStatus::from_db(&r.get::<_, String>(11)?),
+        conclusion: r
+            .get::<_, Option<String>>(12)?
+            .map(|s| CheckConclusion::from_db(&s)),
+        created_clock_unix: r.get(13)?,
+        started_clock_unix: r.get(14)?,
+        updated_clock_unix: r.get(15)?,
     })
 }
 
@@ -557,6 +619,22 @@ pub(crate) fn require_pull(conn: &Connection, id: i64) -> Result<Pull> {
     pull_by_id(conn, id)?.ok_or(WorldError::NoSuchPull(id))
 }
 
+pub(crate) fn list_all_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
+    list(
+        conn,
+        &format!("SELECT {WORKFLOW_COLUMNS} FROM workflows ORDER BY id"),
+        row_to_workflow,
+    )
+}
+
+pub(crate) fn list_all_workflow_runs(conn: &Connection) -> Result<Vec<WorkflowRun>> {
+    list(
+        conn,
+        &format!("SELECT {WORKFLOW_RUN_COLUMNS} FROM workflow_runs ORDER BY id"),
+        row_to_workflow_run,
+    )
+}
+
 pub(crate) fn list_check_suites(conn: &Connection) -> Result<Vec<CheckSuite>> {
     list(
         conn,
@@ -615,5 +693,68 @@ pub(crate) fn list<T>(
 ) -> Result<Vec<T>> {
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], map)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn workflow_by_id(conn: &Connection, id: i64) -> Result<Option<Workflow>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {WORKFLOW_COLUMNS} FROM workflows WHERE id = ?1"),
+            params![id],
+            row_to_workflow,
+        )
+        .optional()?)
+}
+
+/// A repository's workflows, oldest first.
+pub(crate) fn list_workflows_for_repo(conn: &Connection, repo_id: i64) -> Result<Vec<Workflow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WORKFLOW_COLUMNS} FROM workflows WHERE repo_id = ?1 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(params![repo_id], row_to_workflow)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn workflow_run_by_id(conn: &Connection, id: i64) -> Result<Option<WorkflowRun>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {WORKFLOW_RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"),
+            params![id],
+            row_to_workflow_run,
+        )
+        .optional()?)
+}
+
+pub(crate) fn workflow_run_by_suite(
+    conn: &Connection,
+    suite_id: i64,
+) -> Result<Option<WorkflowRun>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {WORKFLOW_RUN_COLUMNS} FROM workflow_runs WHERE suite_id = ?1"),
+            params![suite_id],
+            row_to_workflow_run,
+        )
+        .optional()?)
+}
+
+/// A repository's workflow runs, newest first.
+pub(crate) fn list_workflow_runs_for_repo(
+    conn: &Connection,
+    repo_id: i64,
+) -> Result<Vec<WorkflowRun>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WORKFLOW_RUN_COLUMNS} FROM workflow_runs WHERE repo_id = ?1 ORDER BY id DESC"
+    ))?;
+    let rows = stmt.query_map(params![repo_id], row_to_workflow_run)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The jobs of a run in every attempt, oldest first.
+pub(crate) fn list_workflow_jobs(conn: &Connection, run_id: i64) -> Result<Vec<CheckRun>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CHECK_RUN_COLUMNS} FROM check_runs WHERE workflow_run_id = ?1 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(params![run_id], row_to_check_run)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }

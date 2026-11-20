@@ -1815,3 +1815,88 @@ fn a_restore_drops_pending_deliveries_and_issues_no_id_twice() {
     assert_eq!(diff.deliveries_added[0].state, "answered");
     assert_eq!(diff.deliveries_added[0].app, "helper");
 }
+
+#[test]
+fn diff_reports_workflows_and_what_their_runs_come_to() {
+    use orrery_world::{JobSpec, NewWorkflow, NewWorkflowRun, StepSpec};
+    let inst = Instance::new();
+    let w = &inst.world;
+    let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+    let repo = w
+        .create_repo(alice.id, "web", None, false, "main", by(alice.id))
+        .unwrap();
+    const ONE: &str = "1111111111111111111111111111111111111111";
+    let jobs = [JobSpec {
+        name: "test".to_string(),
+        needs: Vec::new(),
+        always: false,
+        labels: Vec::new(),
+        steps: vec![StepSpec {
+            name: "Set up job".to_string(),
+            always: false,
+        }],
+        closing_steps: Vec::new(),
+    }];
+    let new = |path: &'static str| NewWorkflow {
+        repo_id: repo.id,
+        path,
+        name: "ci",
+        jobs: &jobs,
+    };
+    let start = |workflow_id: i64| NewWorkflowRun {
+        workflow_id,
+        event: "push",
+        head_sha: ONE,
+        head_branch: Some("main"),
+        title: "A change",
+        actor_id: alice.id,
+        runner: "runner",
+    };
+    let held = w.create_workflow(new("ci.yml"), by(alice.id)).unwrap();
+    let first = w.start_workflow_run(start(held.id), by(alice.id)).unwrap();
+    inst.snapshot("before");
+    let none = inst.diff("before", None);
+    assert!(none.workflows_added.is_empty());
+    assert!(none.workflow_runs_added.is_empty());
+    assert!(none.workflow_runs_updated.is_empty());
+
+    // The first run's job finishes, a second run starts, and a second
+    // workflow is registered.
+    let job = w.list_workflow_jobs(first.id).unwrap()[0].id;
+    w.start_workflow_job(job, by(alice.id)).unwrap();
+    w.complete_workflow_job(job, false, by(alice.id)).unwrap();
+    w.start_workflow_run(start(held.id), by(alice.id)).unwrap();
+    w.create_workflow(new("other.yml"), by(alice.id)).unwrap();
+
+    let d = inst.diff("before", None);
+    let added: Vec<_> = d.workflows_added.iter().map(|w| w.path.as_str()).collect();
+    assert_eq!(added, ["other.yml"]);
+    let view = |runs: &[orrery_snapshot::diff::WorkflowRunChange]| -> Vec<(String, i64, String, Option<String>)> {
+        runs.iter()
+            .map(|r| {
+                (
+                    r.workflow.clone(),
+                    r.run_number,
+                    r.status.clone(),
+                    r.conclusion.clone(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        view(&d.workflow_runs_added),
+        [("ci.yml".to_string(), 2, "queued".to_string(), None)]
+    );
+    assert_eq!(
+        view(&d.workflow_runs_updated),
+        [(
+            "ci.yml".to_string(),
+            1,
+            "completed".to_string(),
+            Some("failure".to_string())
+        )]
+    );
+    assert_eq!(d.workflow_runs_updated[0].repo, "alice/web");
+    assert_eq!(d.workflow_runs_updated[0].head_sha, ONE);
+    assert_eq!(d.workflow_runs_updated[0].event, "push");
+}

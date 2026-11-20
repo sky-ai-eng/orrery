@@ -477,7 +477,7 @@ fn encode_form(pairs: &[(&str, &str)]) -> String {
         .join("&")
 }
 
-fn percent_encode(s: &str) -> String {
+pub(crate) fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

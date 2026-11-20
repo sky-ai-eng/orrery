@@ -51,6 +51,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::alerts::router())
         .merge(crate::apps::router())
         .merge(crate::snapshots::router())
+        .merge(crate::workflows::router())
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
 }
