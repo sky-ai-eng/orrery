@@ -1169,11 +1169,14 @@ impl Rendering {
                 .map(|(name, _)| name.clone()),
             _ => None,
         };
-        // A push's repository carries its times as Unix seconds, and three
-        // fields no other repository object has.
+        // A push's repository differs from every other repository object
+        // GitHub sends: its times are Unix seconds, its `url` is its page
+        // rather than its REST URL, and it carries `master_branch`,
+        // `stargazers`, `owner.name`, and `owner.email`.
         let mut repository = repo_json(face, &repo, &owner);
         repository["created_at"] = repo.created_clock_unix.into();
         repository["pushed_at"] = repo.pushed_at_clock_unix.into();
+        repository["url"] = html.clone().into();
         repository["master_branch"] = repo.default_branch.clone().into();
         repository["stargazers"] = 0.into();
         repository["owner"]["name"] = owner.login.clone().into();
