@@ -151,7 +151,7 @@ impl Webapp {
         let log = control_post(
             &self.inst.control,
             "/_orrery/log/list",
-            serde_json::json!({ "page_size": 500 }),
+            serde_json::json!({ "page_size": 200 }),
         );
         assert!(
             log.get("next_page_token").is_none(),

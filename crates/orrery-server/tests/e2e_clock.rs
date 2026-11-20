@@ -39,7 +39,7 @@ fn set_mode(base: &str, mode: &str) -> (u16, Value) {
 }
 
 fn log(base: &str) -> Vec<Value> {
-    control_post(base, "/_orrery/log/list", json!({ "page_size": 500 }))["items"]
+    control_post(base, "/_orrery/log/list", json!({ "page_size": 200 }))["items"]
         .as_array()
         .unwrap()
         .clone()

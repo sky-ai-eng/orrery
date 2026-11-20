@@ -401,7 +401,7 @@ fn render_everything(inst: &Instance, rest: &str, graphql: &str) -> Rendered {
     assert_eq!(answer.status, 200, "{}", answer.body);
     r.graphql.push(("GraphQL pull".to_string(), answer.body));
 
-    let log = control_post(base, "/_orrery/log/list", json!({ "page_size": 500 }));
+    let log = control_post(base, "/_orrery/log/list", json!({ "page_size": 200 }));
     for event in log["items"].as_array().unwrap() {
         if event["type"] == "delivery:created" {
             let what = format!("delivery {}", event["object"]["event"]);

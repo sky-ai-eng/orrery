@@ -117,7 +117,7 @@ fn append(control: &str) {
 /// The whole log, as `POST /_orrery/log/list` answers it.
 fn whole_log(control: &str) -> Vec<serde_json::Value> {
     let mut log = Vec::new();
-    let mut body = serde_json::json!({ "page_size": 500 });
+    let mut body = serde_json::json!({ "page_size": 200 });
     loop {
         let page = call(
             control,

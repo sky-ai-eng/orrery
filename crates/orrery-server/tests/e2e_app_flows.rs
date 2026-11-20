@@ -55,7 +55,7 @@ fn log_types(base: &str) -> Vec<(String, String, String)> {
     control_post(
         base,
         "/_orrery/log/list",
-        serde_json::json!({ "page_size": 500 }),
+        serde_json::json!({ "page_size": 200 }),
     )["items"]
         .as_array()
         .unwrap()
