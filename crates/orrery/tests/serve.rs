@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::{
-    Ready, Served, git, orrery_serve, orrery_serve_passing, pass_sockets, refused, request, serve,
-    start, write_config,
+    Ready, Served, certificate_for, git, github_certificate, orrery_serve, orrery_serve_passing,
+    pass_sockets, refused, request, serve, start, tls_client, write_config,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -905,51 +905,6 @@ fn an_unknown_layout_is_refused() {
     assert!(stderr.contains("unknown variant `github`"), "{stderr}");
 }
 
-/// A certificate for `names` from an authority made for this test, written
-/// to `dir` as `cert.pem` and `key.pem`, with the authority's own as
-/// `ca.pem`; the `[server]` lines that name the certificate and its key.
-fn certificate_for(dir: &Path, names: &[&str]) -> String {
-    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
-    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    let ca =
-        rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap()).unwrap();
-    let key = rcgen::KeyPair::generate().unwrap();
-    let leaf =
-        rcgen::CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
-            .unwrap()
-            .signed_by(&key, &ca)
-            .unwrap();
-    std::fs::write(dir.join("ca.pem"), ca.as_ref().pem()).unwrap();
-    let cert = dir.join("cert.pem");
-    std::fs::write(&cert, leaf.pem()).unwrap();
-    let key_path = dir.join("key.pem");
-    std::fs::write(&key_path, key.serialize_pem()).unwrap();
-    format!("tls_cert = {cert:?}\ntls_key = {key_path:?}\n")
-}
-
-/// A certificate for GitHub's two hosts, and for the loopback address a
-/// test reaches the TLS listener at.
-fn github_certificate(dir: &Path) -> String {
-    certificate_for(dir, &["github.com", "api.github.com", "127.0.0.1"])
-}
-
-/// A TLS client trusting only the authority in `dir`, through `proxy` when
-/// it is given.
-fn tls_client(dir: &Path, proxy: Option<&str>) -> ureq::Agent {
-    let pem = std::fs::read(dir.join("ca.pem")).unwrap();
-    let ca = ureq::tls::Certificate::from_pem(&pem).unwrap();
-    ureq::Agent::config_builder()
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::new_with_certs(&[ca]))
-                .build(),
-        )
-        .proxy(proxy.map(|p| ureq::Proxy::new(&format!("http://{p}")).unwrap()))
-        .http_status_as_error(false)
-        .build()
-        .into()
-}
-
 #[test]
 fn the_ready_line_reports_the_tls_listener_and_the_proxy() {
     let dir = tempfile::tempdir().unwrap();
@@ -1093,6 +1048,10 @@ fn an_unusable_base_url_is_refused() {
         ("https://world.example/?mode=x", "has a query"),
         ("https://world.example/#top", "has a fragment"),
         ("https://user:secret@world.example", "has user information"),
+        (
+            "http://world.example:99999",
+            "has a port that is not 1 to 65535",
+        ),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let config = write_config(

@@ -1,6 +1,7 @@
 //! TLS for a world served under github.com's layout, which a client reaches
 //! as `https://api.github.com` and `https://github.com` (spec/usage.md,
-//! "Reaching github.com's hosts"). A [`TlsListener`] wraps a listener and
+//! "Reaching github.com's hosts"), and for `orrery relay`, which serves those
+//! hosts for a world served elsewhere. A [`TlsListener`] wraps a listener and
 //! hands `axum::serve` the TLS streams it accepts, so their connections are
 //! served, and stopped, as a plain listener's are. It speaks TLS from the
 //! first byte, or after a `CONNECT`, as an HTTPS proxy for GitHub's hosts.
@@ -160,7 +161,7 @@ where
                         Ok(Err(e)) if e.get_ref().is_some_and(|e| e.is::<Refused>()) => {}
                         Ok(Err(e)) => tracing::warn!(
                             error = %e,
-                            "a TLS connection failed before its first request: a client that does not trust the world's certificate, or that does not speak TLS, ends here"
+                            "a TLS connection failed before its first request: a client that does not trust the served certificate, or that does not speak TLS, ends here"
                         ),
                         Err(_) => tracing::warn!(
                             limit_secs = HANDSHAKE_LIMIT.as_secs(),
@@ -281,7 +282,7 @@ where
         return Refusal::new(
             403,
             "Forbidden",
-            format!("orrery: the world's certificate does not name {host}, so a client would refuse the tunnel's TLS. A certificate that names it serves it."),
+            format!("orrery: the served certificate does not name {host}, so a client would refuse the tunnel's TLS. A certificate that names it serves it."),
         )
         .target(&target)
         .send(io)

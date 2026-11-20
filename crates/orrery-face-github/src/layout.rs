@@ -153,6 +153,61 @@ impl Layout {
     }
 }
 
+/// Why a URL can't be the root a client reaches a world at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RootUrlError {
+    #[error("is not a URL")]
+    NotAUrl,
+    #[error("is not an http or https URL")]
+    NotHttp,
+    #[error("has no host")]
+    NoHost,
+    #[error("has a port that is not 1 to 65535")]
+    Port,
+    #[error("has user information")]
+    UserInfo,
+    #[error("has a query")]
+    Query,
+    #[error("has a fragment")]
+    Fragment,
+}
+
+/// `url` as the root a client reaches a world at: an `http` or `https` URL
+/// with a host, a port from 1 to 65535 if it names one, and no user
+/// information, query, or fragment, so that a client can follow it and a
+/// path can be appended to it. Its path is kept.
+pub fn root_url(url: &str) -> Result<axum::http::Uri, RootUrlError> {
+    // `Uri` has no fragment, and refuses a `#` only as a character it
+    // doesn't take, so it is looked for first.
+    if url.contains('#') {
+        return Err(RootUrlError::Fragment);
+    }
+    let uri = url
+        .parse::<axum::http::Uri>()
+        .map_err(|_| RootUrlError::NotAUrl)?;
+    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        return Err(RootUrlError::NotHttp);
+    }
+    let authority = uri.authority().ok_or(RootUrlError::NoHost)?;
+    if authority.host().is_empty() {
+        return Err(RootUrlError::NoHost);
+    }
+    if authority.as_str().contains('@') {
+        return Err(RootUrlError::UserInfo);
+    }
+    // `Uri` takes any digits as a port, and `port_u16` is then none, so the
+    // port is read from what follows the host.
+    if let Some(port) = authority.as_str()[authority.host().len()..].strip_prefix(':')
+        && !port.parse::<u16>().is_ok_and(|port| port != 0)
+    {
+        return Err(RootUrlError::Port);
+    }
+    if uri.query().is_some() {
+        return Err(RootUrlError::Query);
+    }
+    Ok(uri)
+}
+
 /// Whether `path` is `prefix` or a path below it.
 pub fn under(path: &str, prefix: &str) -> bool {
     path.strip_prefix(prefix)
@@ -221,6 +276,30 @@ mod tests {
         let layout = Layout::enterprise_server("http://127.0.0.1:4180");
         for host in [None, Some("api.github.com"), Some("github.com")] {
             assert_eq!(layout.landing(host, "/repos/a/b"), Landing::Own);
+        }
+    }
+
+    #[test]
+    fn a_root_url_is_one_a_path_can_follow() {
+        for url in [
+            "http://127.0.0.1:4180",
+            "https://world.example/prefix",
+            "http://[::1]:1",
+            "https://world.example:65535",
+        ] {
+            assert!(root_url(url).is_ok(), "{url}");
+        }
+        for (url, why) in [
+            ("world.example", RootUrlError::NotHttp),
+            ("https://user@world.example", RootUrlError::UserInfo),
+            ("https://world.example/?x", RootUrlError::Query),
+            ("https://world.example/#x", RootUrlError::Fragment),
+            ("http://127.0.0.1:99999", RootUrlError::Port),
+            ("http://127.0.0.1:0", RootUrlError::Port),
+            ("http://127.0.0.1:", RootUrlError::Port),
+            ("http://[::1]:70000", RootUrlError::Port),
+        ] {
+            assert_eq!(root_url(url).unwrap_err(), why, "{url}");
         }
     }
 

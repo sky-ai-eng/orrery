@@ -30,8 +30,8 @@ use axum::{Router, middleware};
 use base64::Engine as _;
 use orrery_face_git::GitFace;
 use orrery_face_github::GithubFace;
-pub use orrery_face_github::layout::Layout;
 use orrery_face_github::layout::{GRAPHQL_PATH, Landing, REST_PATH, under};
+pub use orrery_face_github::layout::{Layout, RootUrlError, root_url};
 use orrery_world::World;
 
 mod alerts;
@@ -45,7 +45,7 @@ pub mod tls;
 mod workflows;
 
 /// Where the control plane is mounted, on its own listener or the faces'.
-const CONTROL_PREFIX: &str = "/_orrery";
+pub const CONTROL_PREFIX: &str = "/_orrery";
 
 /// The full SHA of the commit this binary was built from, or `unknown` when
 /// the build named none and was not run in a git checkout. See `build.rs`.
@@ -294,44 +294,84 @@ fn by_host(app: Router, layout: Layout) -> Router {
 
 async fn land(State(layout): State<Arc<Layout>>, mut req: Request, next: Next) -> Response<Body> {
     let host = request_host(&req);
-    let landing = {
-        let path_and_query = req.uri().path_and_query().map_or("/", PathAndQuery::as_str);
-        layout.landing(host.as_deref(), path_and_query)
-    };
-    match landing {
-        Landing::Own => next.run(req).await,
-        // The control plane is the world's own host's, never github.com's.
-        Landing::Web if under(req.uri().path(), CONTROL_PREFIX) => not_served(&req, host),
-        Landing::Web => next.run(req).await,
-        Landing::Api(served) => {
-            let mut parts = req.uri().clone().into_parts();
-            match served.parse::<PathAndQuery>() {
-                Ok(served) => parts.path_and_query = Some(served),
-                Err(_) => return not_served(&req, host),
-            }
-            match Uri::from_parts(parts) {
-                Ok(uri) => *req.uri_mut() = uri,
-                Err(_) => return not_served(&req, host),
+    match route(&layout, host.as_deref(), req.uri()) {
+        Route::Own => next.run(req).await,
+        Route::At(served) => {
+            if req.uri().path_and_query().map(PathAndQuery::as_str) != Some(served.as_str()) {
+                let mut parts = req.uri().clone().into_parts();
+                match served.parse::<PathAndQuery>() {
+                    Ok(served) => parts.path_and_query = Some(served),
+                    Err(_) => return not_served(&req, host.as_deref()),
+                }
+                match Uri::from_parts(parts) {
+                    Ok(uri) => *req.uri_mut() = uri,
+                    Err(_) => return not_served(&req, host.as_deref()),
+                }
             }
             next.run(req).await
         }
-        Landing::NotServed => not_served(&req, host),
+        Route::NotServed => not_served(&req, host.as_deref()),
     }
 }
 
-fn not_served(req: &Request, host: Option<String>) -> Response<Body> {
-    orrery_face_github::not_mocked_on(
-        req.method().as_str(),
-        host.as_deref().unwrap_or(""),
-        req.uri().path(),
-    )
+/// Where a world under github.com's layout serves a request, by the host it
+/// names: the world and `orrery relay` both route by it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Route {
+    /// The world's own host, which serves the request as it names it.
+    Own,
+    /// One of GitHub's hosts that the world serves: at this path and query
+    /// on the world's own host.
+    At(String),
+    /// One of GitHub's hosts, or a path on one, that the world does not
+    /// serve, which [`not_served`] answers.
+    NotServed,
+}
+
+/// Where `layout` serves a request for `host` and `uri`.
+pub fn route(layout: &Layout, host: Option<&str>, uri: &Uri) -> Route {
+    let path_and_query = uri.path_and_query().map_or("/", PathAndQuery::as_str);
+    match layout.landing(host, path_and_query) {
+        Landing::Own => Route::Own,
+        Landing::NotServed => Route::NotServed,
+        // A target that is not a path, such as `OPTIONS *`, names no
+        // surface of GitHub's hosts.
+        _ if !path_and_query.starts_with('/') => Route::NotServed,
+        // The control plane is the world's own host's, never github.com's,
+        // whichever way the path spells it.
+        Landing::Web if under(&normalized(uri.path()), CONTROL_PREFIX) => Route::NotServed,
+        Landing::Web => Route::At(path_and_query.to_string()),
+        Landing::Api(served) => Route::At(served),
+    }
+}
+
+/// `path` with its empty, `.`, and `..` segments resolved, as a server or a
+/// router in front of the world may read it.
+fn normalized(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            segment => segments.push(segment),
+        }
+    }
+    format!("/{}", segments.join("/"))
+}
+
+/// The `501` for a request [`route`] finds `NotServed`, naming its host and
+/// its path as it sent them.
+pub fn not_served(req: &Request, host: Option<&str>) -> Response<Body> {
+    orrery_face_github::not_mocked_on(req.method().as_str(), host.unwrap_or(""), req.uri().path())
 }
 
 /// The name of the host a request names, in lower case, without a port, the
 /// trailing dot of a fully qualified name, or any user information: from its
 /// URI's authority when it carries one, as an HTTP/2 request and an
 /// absolute-form request do, and from its `Host` header otherwise.
-fn request_host(req: &Request) -> Option<String> {
+pub fn request_host(req: &Request) -> Option<String> {
     let authority = match req.uri().authority() {
         Some(authority) => authority.clone(),
         None => req
@@ -502,4 +542,52 @@ pub(crate) fn json(status: StatusCode, body: serde_json::Value) -> Response<Body
         .header("content-type", "application/json; charset=utf-8")
         .body(Body::from(body.to_string()))
         .expect("static response parts are valid")
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[test]
+    fn github_coms_hosts_route_to_the_worlds_paths() {
+        let layout = Layout::github_com();
+        let at = |p: &str| Route::At(p.to_string());
+        let cases = [
+            (
+                Some("api.github.com"),
+                "/repos/a/b?x=1",
+                at("/api/v3/repos/a/b?x=1"),
+            ),
+            (Some("api.github.com"), "/graphql", at("/api/graphql")),
+            (
+                Some("github.com"),
+                "/a/b.git/info/refs",
+                at("/a/b.git/info/refs"),
+            ),
+            (Some("github.com"), "/alice/_orrery", at("/alice/_orrery")),
+            (Some("github.com"), "/_orreryx", at("/_orreryx")),
+            (Some("github.com"), "/_orrery/healthz", Route::NotServed),
+            (Some("github.com"), "//_orrery/healthz", Route::NotServed),
+            (Some("github.com"), "/./_orrery", Route::NotServed),
+            (
+                Some("github.com"),
+                "/a/../_orrery/healthz",
+                Route::NotServed,
+            ),
+            (Some("github.com"), "/api/v3/user", Route::NotServed),
+            (Some("github.com"), "*", Route::NotServed),
+            (Some("api.github.com"), "*", Route::NotServed),
+            (
+                Some("codeload.github.com"),
+                "/a/b/tar.gz/main",
+                Route::NotServed,
+            ),
+            (Some("127.0.0.1"), "/_orrery/healthz", Route::Own),
+            (None, "*", Route::Own),
+        ];
+        for (host, target, route_to) in cases {
+            let uri: Uri = target.parse().unwrap();
+            assert_eq!(route(&layout, host, &uri), route_to, "{host:?} {target}");
+        }
+    }
 }
