@@ -42,6 +42,20 @@ pub(crate) fn page_params(query: &str) -> (usize, usize) {
     (per_page, page)
 }
 
+/// The page GitHub's status and annotation lists answer: a `per_page` above
+/// 100 is 100, and one that is no positive number is the default, 30.
+pub(crate) fn page_up_to_100(query: &str) -> (usize, usize) {
+    let per_page = match query_param(query, "per_page").and_then(|v| v.parse::<usize>().ok()) {
+        Some(0) | None => 30,
+        Some(n) => n.min(100),
+    };
+    let page = query_param(query, "page")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+    (per_page, page)
+}
+
 pub(crate) fn query_param(query: &str, name: &str) -> Option<String> {
     parse_form(query.as_bytes()).remove(name)
 }

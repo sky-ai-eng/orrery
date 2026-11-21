@@ -549,6 +549,23 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         created_clock_unix INTEGER NOT NULL
      ) STRICT;
      CREATE INDEX commit_statuses_by_commit ON commit_statuses (repo_id, sha, id);",
+    // 25: a check run's annotations, each what the run says of some lines
+    // of a file. A check run keeps every annotation it is given, in the
+    // order given. `level` is whatever its writer called it.
+    "CREATE TABLE check_run_annotations (
+        id            INTEGER PRIMARY KEY,
+        check_run_id  INTEGER NOT NULL REFERENCES check_runs(id),
+        path          TEXT NOT NULL,
+        start_line    INTEGER NOT NULL,
+        end_line      INTEGER NOT NULL,
+        start_column  INTEGER,
+        end_column    INTEGER,
+        level         TEXT NOT NULL,
+        message       TEXT NOT NULL,
+        title         TEXT,
+        raw_details   TEXT
+     ) STRICT;
+     CREATE INDEX check_run_annotations_by_run ON check_run_annotations (check_run_id, id);",
 ];
 
 /// The version this binary reads and writes.

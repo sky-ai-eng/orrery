@@ -390,6 +390,15 @@ pub(crate) fn check_run_json(
         .clone()
         .unwrap_or_else(|| format!("{web}/{full_name}/runs/{}", run.id));
     let details_url = job_url.or_else(|| run.details_url.clone());
+    // GitHub answers these three of what a check run was sent as its
+    // output, and null for each it was not.
+    let said = |key: &str| {
+        run.output
+            .as_ref()
+            .and_then(|output| output.get(key))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    };
     Ok(serde_json::json!({
         "id": run.id,
         "node_id": crate::nodeid::check(run.id),
@@ -403,9 +412,16 @@ pub(crate) fn check_run_json(
         "html_url": html_url,
         "started_at": run.started_clock_unix.map(rfc3339),
         "completed_at": run.completed_clock_unix.map(rfc3339),
-        "output": run.output.clone().unwrap_or(serde_json::json!({
-            "title": null, "summary": null, "text": null, "annotations_count": 0,
-        })),
+        "output": {
+            "title": said("title"),
+            "summary": said("summary"),
+            "text": said("text"),
+            "annotations_count": run.annotations_count,
+            "annotations_url": format!(
+                "{api}/repos/{full_name}/check-runs/{}/annotations",
+                run.id
+            ),
+        },
         "check_suite": { "id": run.suite_id },
         "app": check_run_app(face, &run.creator_login)?,
     }))

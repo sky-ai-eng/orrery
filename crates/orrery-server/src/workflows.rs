@@ -15,9 +15,9 @@ use axum::http::{Response, StatusCode};
 use axum::routing::{get, post};
 use orrery_face_git::{signature, store};
 use orrery_world::{
-    ActorKind, CheckConclusion, CheckRun, CheckStatus, JobSpec, NewWorkflow, NewWorkflowRun,
-    PullState, Repo, StepConclusion, StepSpec, StepStatus, Workflow, WorkflowRun, WorldError,
-    check_jobs,
+    ActorKind, Annotation, CheckConclusion, CheckRun, CheckStatus, JobSpec, NewWorkflow,
+    NewWorkflowRun, PullState, Repo, StepConclusion, StepSpec, StepStatus, Workflow, WorkflowRun,
+    WorldError, check_jobs,
 };
 
 use crate::control::{Fault, Fields, SYSTEM, errors, faults, internal};
@@ -41,6 +41,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/repos/{owner}/{repo}/workflows/{id}/runs", post(start_run))
         .route(&format!("{JOB}/start"), post(start_job))
         .route(&format!("{JOB}/log"), post(write_log))
+        .route(&format!("{JOB}/annotations"), post(annotate_job))
         .route(&format!("{JOB}/complete-step"), post(complete_step))
         .route(&format!("{JOB}/complete"), post(complete_job))
 }
@@ -613,6 +614,131 @@ async fn write_log(
         Err(resp) => return *resp,
     };
     let written = state.world.append_job_log(job.id, &lines, SYSTEM);
+    run_of(&state, &job, written)
+}
+
+/// An annotation a runner makes of its job, as a body gives it.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnnotationBody {
+    path: String,
+    start_line: i64,
+    end_line: i64,
+    #[serde(default)]
+    start_column: Option<i64>,
+    #[serde(default)]
+    end_column: Option<i64>,
+    level: String,
+    message: String,
+    /// GitHub's runner gives an annotation an empty title and empty details
+    /// unless the step names them.
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    raw_details: String,
+}
+
+/// The levels a runner's annotation has, which are the three GitHub's
+/// workflow commands make: `notice`, `warning`, and `error`, which it
+/// stores as `failure`.
+const LEVELS: [&str; 3] = ["notice", "warning", "failure"];
+
+/// The longest message GitHub keeps of an annotation its runner makes, in
+/// characters.
+const MAX_ANNOTATION_MESSAGE: usize = 4096;
+
+/// The longest details GitHub keeps of any annotation, in characters.
+const MAX_ANNOTATION_DETAILS: usize = 65_535;
+
+/// A runner annotates the job it is on, as GitHub's does for a step's
+/// workflow commands and for a step that fails. The job keeps them after
+/// those it has (`spec/surface-github.md`, "Annotations").
+async fn annotate_job(
+    State(state): State<AppState>,
+    UrlPath((owner, name, job_id)): UrlPath<(String, String, String)>,
+    body: Bytes,
+) -> Response<Body> {
+    let mut fields = Fields::parse(&body);
+    let given: Option<Vec<AnnotationBody>> = fields.required("annotations");
+    if given.as_ref().is_some_and(Vec::is_empty) {
+        fields.fault(Fault::invalid(
+            "annotations holds at least one annotation".to_string(),
+            "annotations",
+        ));
+    }
+    for (i, a) in given.iter().flatten().enumerate() {
+        let mut fault = |message: &str, field: &str| {
+            fields.fault(Fault::invalid(
+                message.to_string(),
+                format!("annotations[{i}].{field}"),
+            ));
+        };
+        if a.path.is_empty() {
+            fault("path names a file", "path");
+        }
+        if a.message.trim().is_empty() {
+            fault("message says something", "message");
+        } else if a.message.chars().count() > MAX_ANNOTATION_MESSAGE {
+            fault("message is 4096 characters at most", "message");
+        }
+        if a.raw_details.chars().count() > MAX_ANNOTATION_DETAILS {
+            fault("raw_details is 65535 characters at most", "raw_details");
+        }
+        if !LEVELS.contains(&a.level.as_str()) {
+            fault("level is notice, warning, or failure", "level");
+        }
+        if a.start_line < 1 {
+            fault("start_line is 1 or more", "start_line");
+        }
+        if a.end_line < 1 {
+            fault("end_line is 1 or more", "end_line");
+        } else if a.end_line < a.start_line {
+            fault("end_line is start_line or after it", "end_line");
+        }
+        let columns = [
+            ("start_column", a.start_column),
+            ("end_column", a.end_column),
+        ];
+        for (field, column) in columns {
+            if column.is_some() && a.start_line != a.end_line {
+                fault("a column is of an annotation of one line", field);
+            } else if column.is_some_and(|column| column < 1) {
+                fault("a column is 1 or more", field);
+            }
+        }
+        if let (Some(start), Some(end)) = (a.start_column, a.end_column)
+            && end < start
+            && start >= 1
+            && end >= 1
+        {
+            fault("end_column is start_column or after it", "end_column");
+        }
+    }
+    let given = match fields.finish(given) {
+        Ok(given) => given,
+        Err(resp) => return *resp,
+    };
+    let job = match job_at(&state, &owner, &name, &job_id) {
+        Ok(job) => job,
+        Err(resp) => return *resp,
+    };
+    let annotations: Vec<Annotation> = given
+        .into_iter()
+        .map(|a| Annotation {
+            path: a.path,
+            start_line: a.start_line,
+            end_line: a.end_line,
+            start_column: a.start_column,
+            end_column: a.end_column,
+            level: a.level,
+            message: a.message,
+            title: Some(a.title),
+            raw_details: Some(a.raw_details),
+        })
+        .collect();
+    let written = state
+        .world
+        .annotate_workflow_job(job.id, &annotations, SYSTEM);
     run_of(&state, &job, written)
 }
 

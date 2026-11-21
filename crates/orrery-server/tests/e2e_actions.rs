@@ -1847,6 +1847,7 @@ async fn an_installation_token_does_what_its_permissions_allow() {
         format!("check-suites/{suite}"),
         "check-suites/999".to_string(),
         format!("check-suites/{suite}/check-runs"),
+        format!("check-runs/{job}/annotations"),
     ] {
         assert_eq!(refused(&none, "GET", &path, None), "checks=read", "{path}");
     }
@@ -2591,4 +2592,677 @@ async fn a_commit_is_given_statuses_and_comes_to_what_they_say() {
         Some(json!({ "status": "completed", "conclusion": "failure" })),
     );
     assert_eq!(ask()["statusCheckRollup"]["state"], "FAILURE");
+}
+
+/// What GitHub was observed to do with a check run's output and its
+/// annotations.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
+    let s = seed().await;
+    let base = s.inst.base.clone();
+    let bot = mint_actor(&base, "ci", "bot");
+    let sha = s.feature_sha.clone();
+    let runs = format!("{}/check-runs", s.api);
+    let post = |body: Value| send("POST", &runs, Some(&bot), Some(body));
+    let patch =
+        |id: i64, body: Value| send("PATCH", &format!("{runs}/{id}"), Some(&bot), Some(body));
+    let ann = |line: i64| {
+        json!({
+            "path": "README.md", "start_line": line, "end_line": line,
+            "annotation_level": "warning", "message": format!("message {line}"),
+        })
+    };
+    let with = |line: i64, more: Value| {
+        let mut annotation = ann(line);
+        for (key, value) in more.as_object().unwrap() {
+            annotation[key] = value.clone();
+        }
+        annotation
+    };
+    let without = |line: i64, key: &str| {
+        let mut annotation = ann(line);
+        annotation.as_object_mut().unwrap().remove(key);
+        annotation
+    };
+    let output =
+        |annotations: Value| json!({ "title": "T", "summary": "S", "annotations": annotations });
+    let list = |id: i64, query: &str| {
+        fetch(
+            "GET",
+            &format!("{runs}/{id}/annotations{query}"),
+            Some(&s.token),
+        )
+    };
+    let listed =
+        |id: i64| -> Vec<Value> { list(id, "?per_page=100").json().as_array().unwrap().clone() };
+    let annotations_url = |id: i64| format!("{runs}/{id}/annotations");
+    let blob = |path: &str| format!("{base}/alice/web/blob/{sha}/{path}");
+
+    // A check run sent no output answers one with nothing in it, and its
+    // list of annotations is empty.
+    let plain = post(json!({ "name": "plain", "head_sha": sha }));
+    assert_eq!(plain.status, 201, "{}", plain.text());
+    let plain = plain.json();
+    let plain_id = plain["id"].as_i64().unwrap();
+    assert_eq!(
+        plain["output"],
+        json!({
+            "title": null, "summary": null, "text": null, "annotations_count": 0,
+            "annotations_url": annotations_url(plain_id),
+        })
+    );
+    for query in ["", "?page=2"] {
+        let none = list(plain_id, query);
+        assert_eq!(
+            (none.status, none.json(), none.link),
+            (200, json!([]), None)
+        );
+    }
+    assert_eq!(
+        fetch("GET", &format!("{runs}/999/annotations"), Some(&s.token)).status,
+        404
+    );
+
+    // A new check run with three. One sent no title is titled by its path
+    // and its lines, and an empty title and empty details stay empty.
+    let made = post(json!({
+        "name": "annotated", "head_sha": sha, "status": "in_progress",
+        "output": { "title": "T", "summary": "S", "text": "X", "annotations": [
+            { "path": "README.md", "start_line": 1, "end_line": 1, "start_column": 2,
+              "end_column": 5, "annotation_level": "notice", "message": "a notice",
+              "title": "Notice title", "raw_details": "raw one" },
+            { "path": "src/main.rs", "start_line": 2, "end_line": 4,
+              "annotation_level": "warning", "message": "a warning" },
+            { "path": "no/such/file.txt", "start_line": 7, "end_line": 7,
+              "annotation_level": "failure", "message": "a failure", "title": "",
+              "raw_details": "" },
+        ] },
+    }));
+    assert_eq!(made.status, 201, "{}", made.text());
+    let made = made.json();
+    let id = made["id"].as_i64().unwrap();
+    let out = |title: &str, summary: &str, text: Value, count: usize| {
+        json!({
+            "title": title, "summary": summary, "text": text, "annotations_count": count,
+            "annotations_url": annotations_url(id),
+        })
+    };
+    assert_eq!(made["output"], out("T", "S", json!("X"), 3));
+    assert_eq!(
+        Value::Array(listed(id)),
+        json!([
+            { "path": "README.md", "blob_href": blob("README.md"), "start_line": 1,
+              "start_column": 2, "end_line": 1, "end_column": 5, "annotation_level": "notice",
+              "title": "Notice title", "message": "a notice", "raw_details": "raw one" },
+            { "path": "src/main.rs", "blob_href": blob("src/main.rs"), "start_line": 2,
+              "start_column": null, "end_line": 4, "end_column": null,
+              "annotation_level": "warning", "title": "src/main.rs#L2-L4",
+              "message": "a warning", "raw_details": null },
+            { "path": "no/such/file.txt", "blob_href": blob("no/such/file.txt"),
+              "start_line": 7, "start_column": null, "end_line": 7, "end_column": null,
+              "annotation_level": "failure", "title": "", "message": "a failure",
+              "raw_details": "" },
+        ])
+    );
+
+    // An update's output takes the place of the one before, and its
+    // annotations come after those the run has. An update with no output,
+    // or a null one, leaves both as they are.
+    let updated = patch(
+        id,
+        json!({ "output": { "title": "T2", "summary": "S2", "annotations": [ann(10), ann(11)] } }),
+    );
+    assert_eq!(updated.status, 200, "{}", updated.text());
+    assert_eq!(updated.json()["output"], out("T2", "S2", Value::Null, 5));
+    for body in [
+        json!({ "status": "in_progress" }),
+        json!({ "output": null }),
+    ] {
+        assert_eq!(
+            patch(id, body).json()["output"],
+            out("T2", "S2", Value::Null, 5)
+        );
+    }
+    assert_eq!(listed(id)[3]["title"], "README.md#L10");
+    assert_eq!(
+        patch(
+            id,
+            json!({ "output": { "title": "", "summary": "", "text": "" } })
+        )
+        .json()["output"],
+        out("", "", json!(""), 5)
+    );
+
+    // What GitHub refuses of an output's shape, in its words.
+    let refusals = [
+        (
+            json!("x"),
+            "For 'properties/output', \"x\" is not an object or null.".to_string(),
+        ),
+        (
+            json!({ "annotations": [ann(1)] }),
+            "\"summary\", \"title\" weren't supplied.".to_string(),
+        ),
+        (
+            json!({ "summary": "S" }),
+            "\"title\" wasn't supplied.".to_string(),
+        ),
+        (
+            json!({ "title": "T", "summary": "S", "text": null }),
+            "For 'properties/text', nil is not a string.".to_string(),
+        ),
+        (
+            json!({ "title": "T", "summary": "s".repeat(65_536) }),
+            "Only 65535 characters are allowed; 65536 were supplied.".to_string(),
+        ),
+        (
+            output(Value::Null),
+            "For 'properties/annotations', nil is not an array.".to_string(),
+        ),
+        (
+            output(json!({ "path": "x" })),
+            "For 'properties/annotations', {\"path\" => \"x\"} is not an array.".to_string(),
+        ),
+        (
+            output(Value::Array((1..=51).map(ann).collect())),
+            "No more than 50 items are allowed; 51 were supplied.".to_string(),
+        ),
+        (
+            output(json!(["x"])),
+            "For 'items', \"x\" is not an object.".to_string(),
+        ),
+        (
+            output(json!([without(1, "path")])),
+            "\"path\" wasn't supplied.".to_string(),
+        ),
+        // Every fault is named, one to a line: the members in GitHub's
+        // order, each item where it comes, then what the output lacks.
+        (
+            output(json!([without(1, "annotation_level"), { "path": "x" }, "x"])),
+            "\"annotation_level\" wasn't supplied.\n\
+             \"annotation_level\", \"end_line\", \"message\", \"start_line\" weren't supplied.\n\
+             For 'items', \"x\" is not an object."
+                .to_string(),
+        ),
+        (
+            json!({ "title": 5, "annotations": "a" }),
+            "For 'properties/title', 5 is not a string.\n\
+             For 'properties/annotations', \"a\" is not an array.\n\
+             \"summary\" wasn't supplied."
+                .to_string(),
+        ),
+        (
+            json!({ "title": "T", "summary": "s".repeat(65_536), "text": 7, "images": "i",
+                    "annotations": Value::Array(
+                        std::iter::once(json!("x")).chain((1..=50).map(ann)).collect()
+                    ) }),
+            "Only 65535 characters are allowed; 65536 were supplied.\n\
+             For 'properties/text', 7 is not a string.\n\
+             For 'properties/images', \"i\" is not an array.\n\
+             For 'items', \"x\" is not an object.\n\
+             No more than 50 items are allowed; 51 were supplied."
+                .to_string(),
+        ),
+        (
+            json!({ "title": "T", "summary": "S", "images": [{ "image_url": "u" }, {}],
+                    "annotations": [{ "start_line": 1 }] }),
+            "\"alt\" wasn't supplied.\n\
+             \"alt\", \"image_url\" weren't supplied.\n\
+             \"annotation_level\", \"end_line\", \"message\", \"path\" weren't supplied."
+                .to_string(),
+        ),
+    ];
+    for (given, detail) in refusals {
+        let expected = (422, format!("Invalid request.\n\n{detail}"));
+        assert_eq!(
+            patch(id, json!({ "output": given.clone() })).message(),
+            expected,
+            "{given}"
+        );
+        assert_eq!(
+            post(json!({ "name": "refused", "head_sha": sha, "output": given.clone() })).message(),
+            expected,
+            "{given}"
+        );
+    }
+    assert_eq!(listed(id).len(), 5, "nothing refused was kept");
+
+    // What GitHub keeps though its description says otherwise: a level it
+    // does not define, a line below 1, a number where a string belongs,
+    // and text cut to what it holds.
+    let kept = patch(
+        id,
+        json!({ "output": output(json!([
+            with(20, json!({ "annotation_level": "error" })),
+            with(21, json!({ "annotation_level": 5 })),
+            with(0, json!({})),
+            with(22, json!({ "start_line": "3" })),
+            with(23, json!({ "start_line": "abc" })),
+            with(24, json!({ "start_line": 24.9, "end_line": 24.9 })),
+            with(25, json!({ "start_column": "2", "end_column": "4" })),
+            with(26, json!({ "start_column": 3 })),
+            with(27, json!({ "title": "t".repeat(256) })),
+            with(28, json!({ "message": "m".repeat(65_537), "raw_details": "r".repeat(65_537) })),
+            with(29, json!({ "message": "  padded  ", "raw_details": 5, "title": null })),
+        ])) }),
+    );
+    assert_eq!(kept.status, 200, "{}", kept.text());
+    assert_eq!(kept.json()["output"]["annotations_count"], 16);
+    let all = listed(id);
+    let shown: Vec<Value> = all[5..]
+        .iter()
+        .map(|a| {
+            json!([
+                a["start_line"],
+                a["start_column"],
+                a["end_line"],
+                a["end_column"],
+                a["annotation_level"]
+            ])
+        })
+        .collect();
+    assert_eq!(
+        Value::Array(shown),
+        json!([
+            [20, null, 20, null, "error"],
+            [21, null, 21, null, "5"],
+            [0, null, 0, null, "warning"],
+            [3, null, 22, null, "warning"],
+            [0, null, 23, null, "warning"],
+            [24, null, 24, null, "warning"],
+            [25, 2, 25, 4, "warning"],
+            [26, 3, 26, null, "warning"],
+            [27, null, 27, null, "warning"],
+            [28, null, 28, null, "warning"],
+            [29, null, 29, null, "warning"],
+        ])
+    );
+    assert_eq!(all[8]["title"], "README.md#L3-L22");
+    assert_eq!(all[13]["title"].as_str().unwrap().len(), 256);
+    assert_eq!(all[14]["message"].as_str().unwrap().len(), 65_535);
+    assert_eq!(all[14]["raw_details"].as_str().unwrap().len(), 65_535);
+    assert_eq!(
+        (
+            &all[15]["message"],
+            &all[15]["raw_details"],
+            &all[15]["title"]
+        ),
+        (&json!("  padded  "), &json!("5"), &json!("README.md#L29"))
+    );
+
+    // What GitHub leaves out of an update, keeping the rest, and still
+    // answers 200.
+    let left_out = json!([
+        ann(40),
+        with(41, json!({ "start_line": 9, "end_line": 4 })),
+        with(42, json!({ "message": "" })),
+        with(43, json!({ "message": "   " })),
+        with(44, json!({ "message": null })),
+        with(45, json!({ "path": "" })),
+        with(46, json!({ "path": null })),
+        with(47, json!({ "annotation_level": "" })),
+        with(48, json!({ "annotation_level": null })),
+        with(49, json!({ "start_line": null })),
+        with(
+            50,
+            json!({ "end_line": 51, "start_column": 1, "end_column": 2 })
+        ),
+        with(52, json!({ "start_column": 5, "end_column": 2 })),
+        ann(53),
+    ]);
+    let partly = patch(id, json!({ "output": output(left_out.clone()) }));
+    assert_eq!(partly.status, 200, "{}", partly.text());
+    assert_eq!(partly.json()["output"]["annotations_count"], 18);
+    let lines: Vec<i64> = listed(id)[16..]
+        .iter()
+        .map(|a| a["start_line"].as_i64().unwrap())
+        .collect();
+    assert_eq!(lines, [40, 53]);
+
+    // A new check run is refused for one of those, and is not made.
+    let before = s.get(&format!("commits/{sha}/check-runs?filter=all"))["total_count"].clone();
+    let refused = post(json!({ "name": "refused", "head_sha": sha, "output": output(left_out) }));
+    assert_eq!(refused.status, 422);
+    assert_eq!(
+        refused.json(),
+        json!({
+            "message": "Validation Failed",
+            "errors": [{ "resource": "CheckRun", "code": "invalid", "field": "annotations" }],
+        })
+    );
+    assert_eq!(
+        s.get(&format!("commits/{sha}/check-runs?filter=all"))["total_count"],
+        before
+    );
+
+    // A type GitHub fails on outright, in an annotation it would keep: a
+    // `500` with no body, and nothing kept.
+    for (field, value) in [
+        ("path", json!(5)),
+        ("path", json!(true)),
+        ("path", json!({ "a": 1 })),
+        ("message", json!(5)),
+        ("message", json!(true)),
+        ("message", json!(["x"])),
+        ("title", json!(5)),
+        ("title", json!(true)),
+        ("title", json!(1.5)),
+        ("title", json!({ "a": 1 })),
+    ] {
+        let mut body = serde_json::Map::new();
+        body.insert(field.to_string(), value.clone());
+        let crashed = patch(
+            id,
+            json!({ "output": output(json!([ann(60), with(61, Value::Object(body))])) }),
+        );
+        assert_eq!(
+            (crashed.status, crashed.body.len()),
+            (500, 0),
+            "{field} {value}"
+        );
+    }
+    assert_eq!(listed(id).len(), 18);
+
+    // The types GitHub takes that are not the ones it describes, each kept
+    // as GitHub keeps it, and the ones it reads as nothing, which leave the
+    // annotation out whatever else it holds. An image is checked and kept
+    // nowhere.
+    let typed = post(json!({ "name": "typed", "head_sha": sha })).json()["id"]
+        .as_i64()
+        .unwrap();
+    let taken = patch(
+        typed,
+        json!({ "output": { "title": "T", "summary": "S",
+            "images": [{ "alt": "a", "image_url": "https://example.com/a.png", "caption": "c" }],
+            "annotations": [
+                with(1, json!({ "annotation_level": true })),
+                with(2, json!({ "annotation_level": false })),
+                with(3, json!({ "annotation_level": { "a": [null, 1.5], "b": "x" } })),
+                with(4, json!({ "annotation_level": [] })),
+                with(5, json!({ "raw_details": true })),
+                with(6, json!({ "raw_details": false })),
+                with(7, json!({ "raw_details": ["x"] })),
+                with(8, json!({ "title": false })),
+                with(9, json!({ "title": [] })),
+                with(10, json!({ "start_line": true })),
+                with(11, json!({ "start_column": false, "end_column": true })),
+                with(12, json!({ "start_column": [2] })),
+                with(20, json!({ "message": false })),
+                with(21, json!({ "message": [] })),
+                with(22, json!({ "message": {} })),
+                with(23, json!({ "path": false })),
+                with(24, json!({ "path": "   " })),
+                with(25, json!({ "annotation_level": "   " })),
+                with(26, json!({ "start_line": [26] })),
+                with(27, json!({ "path": "", "message": 5 })),
+                with(28, json!({ "start_line": 9, "end_line": 4, "message": 5 })),
+                with(29, json!({ "annotation_level": null, "path": 5 })),
+                with(30, json!({ "start_line": null, "title": 5 })),
+            ] } }),
+    );
+    assert_eq!(taken.status, 200, "{}", taken.text());
+    assert_eq!(
+        taken.json()["output"],
+        json!({
+            "title": "T", "summary": "S", "text": null, "annotations_count": 12,
+            "annotations_url": annotations_url(typed),
+        })
+    );
+    let shown: Vec<Value> = listed(typed)
+        .iter()
+        .map(|a| {
+            json!([
+                a["start_line"],
+                a["start_column"],
+                a["end_column"],
+                a["annotation_level"],
+                a["title"],
+                a["raw_details"]
+            ])
+        })
+        .collect();
+    assert_eq!(
+        Value::Array(shown),
+        json!([
+            [1, null, null, "1", "README.md#L1", null],
+            [2, null, null, "0", "README.md#L2", null],
+            [
+                3,
+                null,
+                null,
+                "{\"a\" => [nil, 1.5], \"b\" => \"x\"}",
+                "README.md#L3",
+                null
+            ],
+            [4, null, null, "[]", "README.md#L4", null],
+            [5, null, null, "warning", "README.md#L5", "t"],
+            [6, null, null, "warning", "README.md#L6", "f"],
+            [7, null, null, "warning", "README.md#L7", "[\"x\"]"],
+            [8, null, null, "warning", "false", null],
+            [9, null, null, "warning", "[]", null],
+            [1, null, null, "warning", "README.md#L1-L10", null],
+            [11, 0, 1, "warning", "README.md#L11", null],
+            [12, null, null, "warning", "README.md#L12", null],
+        ])
+    );
+
+    // The list is paged as the status lists are: 30 to a page, 100 at
+    // most, and a page past the last names the last.
+    let fifty = patch(
+        id,
+        json!({ "output": output(Value::Array((100..150).map(ann).collect())) }),
+    );
+    assert_eq!(fifty.json()["output"]["annotations_count"], 68);
+    let repo_id = send("GET", &s.api, Some(&s.token), None).json()["id"]
+        .as_i64()
+        .unwrap();
+    let at = |query: &str, page: usize, rel: &str| {
+        format!(
+            "<{base}/api/v3/repositories/{repo_id}/check-runs/{id}/annotations?{query}page={page}>; \
+             rel=\"{rel}\""
+        )
+    };
+    let first = list(id, "");
+    assert_eq!(first.json().as_array().unwrap().len(), 30);
+    assert_eq!(
+        first.link,
+        Some([at("", 2, "next"), at("", 3, "last")].join(", "))
+    );
+    for (query, held) in [
+        ("?per_page=200", 68),
+        ("?per_page=0", 30),
+        ("?per_page=abc", 30),
+    ] {
+        assert_eq!(
+            list(id, query).json().as_array().unwrap().len(),
+            held,
+            "{query}"
+        );
+    }
+    let past = list(id, "?per_page=50&page=9");
+    assert_eq!(past.json(), json!([]));
+    assert_eq!(
+        past.link,
+        Some(
+            [
+                at("per_page=50&", 2, "prev"),
+                at("per_page=50&", 2, "last"),
+                at("per_page=50&", 1, "first")
+            ]
+            .join(", ")
+        )
+    );
+    let by_id = fetch(
+        "GET",
+        &format!("{base}/api/v3/repositories/{repo_id}/check-runs/{id}/annotations?page=3"),
+        Some(&s.token),
+    );
+    assert_eq!(by_id.json().as_array().unwrap().len(), 8);
+
+    // GraphQL lists the same annotations, with the output's three texts.
+    let query = r#"
+        query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest {
+            commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 50) { nodes {
+                __typename
+                ... on CheckRun { name title summary text annotations(first: 2) {
+                    totalCount pageInfo { hasNextPage }
+                    nodes { path annotationLevel message title rawDetails blobUrl
+                            location { start { line column } end { line column } } }
+                } }
+            } } } } } }
+        } } }"#;
+    let answer: Value = ureq::post(format!("{base}/api/graphql"))
+        .header("authorization", &format!("token {}", s.token))
+        .send_json(json!({ "query": query, "variables": { "ids": ["O_pull_1"] } }))
+        .unwrap()
+        .body_mut()
+        .read_json()
+        .unwrap();
+    assert!(answer.get("errors").is_none(), "{answer}");
+    let contexts = answer["data"]["nodes"][0]["commits"]["nodes"][0]["commit"]["statusCheckRollup"]
+        ["contexts"]["nodes"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let annotated = contexts
+        .iter()
+        .find(|context| context["name"] == "annotated")
+        .expect("the check run is in the rollup");
+    assert_eq!(
+        annotated,
+        &json!({
+            "__typename": "CheckRun", "name": "annotated", "title": "T", "summary": "S",
+            "text": null,
+            "annotations": {
+                "totalCount": 68,
+                "pageInfo": { "hasNextPage": true },
+                "nodes": [
+                    { "path": "README.md", "annotationLevel": "NOTICE", "message": "a notice",
+                      "title": "Notice title", "rawDetails": "raw one",
+                      "blobUrl": blob("README.md"),
+                      "location": { "start": { "line": 1, "column": 2 },
+                                    "end": { "line": 1, "column": 5 } } },
+                    { "path": "src/main.rs", "annotationLevel": "WARNING",
+                      "message": "a warning", "title": "src/main.rs#L2-L4", "rawDetails": null,
+                      "blobUrl": blob("src/main.rs"),
+                      "location": { "start": { "line": 2, "column": null },
+                                    "end": { "line": 4, "column": null } } },
+                ],
+            },
+        })
+    );
+
+    // A runner annotates the job it is on, through the control plane: the
+    // job's check run lists them with the newest first, as GitHub lists a
+    // job's, and with the empty title and details GitHub's runner gives
+    // one.
+    let (_, workflow) = s.control("POST", "/workflows", Some(ci()));
+    let run = s.runner(
+        &format!("/workflows/{}/runs", workflow["id"]),
+        Some(json!({
+            "event": "push", "head_sha": sha, "head_branch": "feature", "actor": "alice",
+        })),
+    );
+    let lint = job_id(&run, "lint");
+    let annotate = format!("/workflow-jobs/{lint}/annotations");
+    let finding = json!({
+        "path": ".github", "start_line": 5, "end_line": 5, "level": "failure",
+        "message": "Process completed with exit code 1.",
+    });
+    // A queued job has no runner to annotate it.
+    let (status, body) = s.control(
+        "POST",
+        &annotate,
+        Some(json!({ "annotations": [finding.clone()] })),
+    );
+    assert_eq!(
+        (status, faults(&body)),
+        (400, vec![fault("FAILED_PRECONDITION", None)])
+    );
+    s.runner(&format!("/workflow-jobs/{lint}/start"), None);
+    let (status, body) = s.control(
+        "POST",
+        &annotate,
+        Some(json!({ "annotations": [
+            { "path": "", "start_line": 0, "end_line": 0, "level": "error", "message": " " },
+            { "path": "a", "start_line": 3, "end_line": 2, "level": "notice", "message": "m",
+              "start_column": 1 },
+            { "path": "a", "start_line": 1, "end_line": 1, "level": "notice",
+              "message": "m".repeat(4097), "raw_details": "r".repeat(65_536) },
+        ] })),
+    );
+    assert_eq!(
+        (status, faults(&body)),
+        (
+            400,
+            vec![
+                fault("INVALID_ARGUMENT", Some("annotations[0].path")),
+                fault("INVALID_ARGUMENT", Some("annotations[0].message")),
+                fault("INVALID_ARGUMENT", Some("annotations[0].level")),
+                fault("INVALID_ARGUMENT", Some("annotations[0].start_line")),
+                fault("INVALID_ARGUMENT", Some("annotations[0].end_line")),
+                fault("INVALID_ARGUMENT", Some("annotations[1].end_line")),
+                fault("INVALID_ARGUMENT", Some("annotations[1].start_column")),
+                fault("INVALID_ARGUMENT", Some("annotations[2].message")),
+                fault("INVALID_ARGUMENT", Some("annotations[2].raw_details")),
+            ]
+        )
+    );
+    let (status, body) = s.control("POST", &annotate, Some(json!({ "annotations": [] })));
+    assert_eq!(
+        (status, faults(&body)),
+        (400, vec![fault("INVALID_ARGUMENT", Some("annotations"))])
+    );
+    let (status, _) = s.control(
+        "POST",
+        &annotate,
+        Some(json!({ "annotations": [
+            { "path": "README.md", "start_line": 3, "end_line": 4, "level": "notice",
+              "message": "from a command", "title": "A notice",
+              "raw_details": "r".repeat(65_535) },
+            { "path": "README.md", "start_line": 5, "end_line": 5, "level": "warning",
+              "message": "m".repeat(4096) },
+        ] })),
+    );
+    assert_eq!(status, 200);
+    let (status, _) = s.control(
+        "POST",
+        &annotate,
+        Some(json!({ "annotations": [finding.clone()] })),
+    );
+    assert_eq!(status, 200);
+    let job = s.get(&format!("check-runs/{lint}"));
+    assert_eq!(job["output"]["annotations_count"], 3);
+    assert_eq!(
+        Value::Array(listed(lint)),
+        json!([
+            { "path": ".github", "blob_href": blob(".github"), "start_line": 5,
+              "start_column": null, "end_line": 5, "end_column": null,
+              "annotation_level": "failure", "title": "",
+              "message": "Process completed with exit code 1.", "raw_details": "" },
+            { "path": "README.md", "blob_href": blob("README.md"), "start_line": 5,
+              "start_column": null, "end_line": 5, "end_column": null,
+              "annotation_level": "warning", "title": "", "message": "m".repeat(4096),
+              "raw_details": "" },
+            { "path": "README.md", "blob_href": blob("README.md"), "start_line": 3,
+              "start_column": null, "end_line": 4, "end_column": null,
+              "annotation_level": "notice", "title": "A notice", "message": "from a command",
+              "raw_details": "r".repeat(65_535) },
+        ])
+    );
+    assert_eq!(
+        list(lint, "?per_page=1&page=3").json()[0]["title"],
+        "A notice"
+    );
+    // No App gives a job annotations: its check run is its runner's.
+    assert_eq!(
+        patch(lint, json!({ "output": output(json!([ann(1)])) })).status,
+        403
+    );
+    let (status, _) = s.control(
+        "POST",
+        "/workflow-jobs/999/annotations",
+        Some(json!({ "annotations": [finding] })),
+    );
+    assert_eq!(status, 404);
 }

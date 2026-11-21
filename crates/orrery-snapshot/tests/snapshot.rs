@@ -1153,6 +1153,7 @@ fn diff_reports_check_suites_and_what_they_come_to() {
         output: None,
         started_clock_unix: None,
         completed_clock_unix: None,
+        annotations: &[],
     };
     const ONE: &str = "1111111111111111111111111111111111111111";
     const TWO: &str = "2222222222222222222222222222222222222222";

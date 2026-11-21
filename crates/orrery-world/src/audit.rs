@@ -428,6 +428,22 @@ const TABLES: &[(&str, &[(&str, Column)])] = &[
         ],
     ),
     (
+        "check_run_annotations",
+        &[
+            ("id", Identity),
+            ("check_run_id", Identity),
+            ("path", Identity),
+            ("start_line", Identity),
+            ("end_line", Identity),
+            ("start_column", Identity),
+            ("end_column", Identity),
+            ("level", Identity),
+            ("message", Identity),
+            ("title", Identity),
+            ("raw_details", Identity),
+        ],
+    ),
+    (
         "workflow_job_log_lines",
         &[
             ("id", Identity),
@@ -722,6 +738,12 @@ fn subject_of(table: &str, row: &Row) -> (Subject, Option<String>) {
             Some("run_number".into()),
         ),
         "workflow_runs" => (s("workflow_run", int(row, "id")), None),
+        // An annotation is one of its check run's, which the events that
+        // give or delete them name.
+        "check_run_annotations" => (
+            s("check_run", int(row, "check_run_id")),
+            Some("annotations".into()),
+        ),
         // A line belongs to its job's log, which the events that write or
         // delete it name.
         "workflow_job_log_lines" => (s("check_run", int(row, "job_id")), Some("log".into())),
@@ -830,8 +852,11 @@ impl Carried {
                 "oauth_app:secret_issued" => fields.push(format!("secret:{}", body["n"])),
                 "oauth_authorization:exchanged" => fields.push("token".into()),
                 "app:hook_secret_issued" => fields.push("credential".into()),
-                "check_run:logged" | "check_run:log_deleted" | "check_run:deleted" => {
-                    fields.push("log".into())
+                "check_run:logged" | "check_run:log_deleted" => fields.push("log".into()),
+                "check_run:annotated" => fields.push("annotations".into()),
+                "check_run:deleted" => {
+                    fields.push("log".into());
+                    fields.push("annotations".into());
                 }
                 "world:rekeyed" => carried.rekeyed = true,
                 _ => {}

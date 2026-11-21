@@ -356,6 +356,7 @@ mod tests {
                         completed_clock_unix: None,
                         created_clock_unix: 100,
                         job: None,
+                        annotations_count: 0,
                     })
                 })
                 .unwrap()

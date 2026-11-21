@@ -192,6 +192,14 @@ pub fn router(face: GithubFace) -> Router {
             get(suites::get_check_run).patch(checks::patch_check_run),
         )
         .route(
+            "/repos/{owner}/{repo}/check-runs/{id}/annotations",
+            get(checks::list_annotations),
+        )
+        .route(
+            "/repositories/{id}/check-runs/{check_run_id}/annotations",
+            get(checks::list_annotations_by_id),
+        )
+        .route(
             "/repos/{owner}/{repo}/actions/workflows",
             get(actions::list_workflows),
         )
@@ -634,11 +642,163 @@ pub(crate) fn invalid_request(detail: &str) -> Response<Body> {
     )
 }
 
-/// A value as GitHub's schema messages spell it: JSON, but `nil` for null.
-pub(crate) fn schema_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "nil".to_string(),
-        other => other.to_string(),
+/// A JSON value as a request sent it. An object's members stay in the order
+/// they came in, which is the order GitHub's messages spell them in.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Sent {
+    Null,
+    Bool(bool),
+    Number(serde_json::Number),
+    String(String),
+    Array(Vec<Sent>),
+    Object(Vec<(String, Sent)>),
+}
+
+static NOTHING: Sent = Sent::Null;
+
+impl Sent {
+    /// The body a request sent, or null for one that is not JSON.
+    pub(crate) fn of(body: &[u8]) -> Sent {
+        serde_json::from_slice(body).unwrap_or(Sent::Null)
+    }
+
+    /// An object's member of this name, when the value is an object that
+    /// has one.
+    pub(crate) fn member(&self, key: &str) -> Option<&Sent> {
+        match self {
+            Sent::Object(members) => members
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value),
+            _ => None,
+        }
+    }
+
+    /// The member of this name, or null where there is none.
+    pub(crate) fn at(&self, key: &str) -> &Sent {
+        self.member(key).unwrap_or(&NOTHING)
+    }
+
+    /// An array's item at this place, or null where there is none.
+    pub(crate) fn item(&self, index: usize) -> &Sent {
+        match self {
+            Sent::Array(items) => items.get(index).unwrap_or(&NOTHING),
+            _ => &NOTHING,
+        }
+    }
+
+    /// Whether GitHub reads the value as nothing: null, false, a string of
+    /// nothing but spaces, and an array or an object that holds nothing.
+    pub(crate) fn is_blank(&self) -> bool {
+        match self {
+            Sent::Null | Sent::Bool(false) => true,
+            Sent::String(text) => text.trim().is_empty(),
+            Sent::Array(items) => items.is_empty(),
+            Sent::Object(members) => members.is_empty(),
+            Sent::Bool(true) | Sent::Number(_) => false,
+        }
+    }
+
+    /// The value as GitHub's messages spell it, which is as Ruby prints
+    /// one: JSON, but `nil` for null, and an object's members as
+    /// `"key" => value`.
+    pub(crate) fn spelled(&self) -> String {
+        match self {
+            Sent::Null => "nil".to_string(),
+            Sent::Bool(value) => value.to_string(),
+            Sent::Number(value) => value.to_string(),
+            Sent::String(value) => serde_json::Value::from(value.as_str()).to_string(),
+            Sent::Array(items) => {
+                let items: Vec<String> = items.iter().map(Sent::spelled).collect();
+                format!("[{}]", items.join(", "))
+            }
+            Sent::Object(members) => {
+                let members: Vec<String> = members
+                    .iter()
+                    .map(|(key, value)| {
+                        format!(
+                            "{} => {}",
+                            serde_json::Value::from(key.as_str()),
+                            value.spelled()
+                        )
+                    })
+                    .collect();
+                format!("{{{}}}", members.join(", "))
+            }
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Sent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Sent, D::Error> {
+        struct Reader;
+
+        impl<'de> serde::de::Visitor<'de> for Reader {
+            type Value = Sent;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+
+            fn visit_unit<E>(self) -> Result<Sent, E> {
+                Ok(Sent::Null)
+            }
+
+            fn visit_none<E>(self) -> Result<Sent, E> {
+                Ok(Sent::Null)
+            }
+
+            fn visit_some<D: serde::Deserializer<'de>>(self, inner: D) -> Result<Sent, D::Error> {
+                serde::Deserialize::deserialize(inner)
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Sent, E> {
+                Ok(Sent::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Sent, E> {
+                Ok(Sent::Number(value.into()))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Sent, E> {
+                Ok(Sent::Number(value.into()))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Sent, E> {
+                Ok(serde_json::Number::from_f64(value).map_or(Sent::Null, Sent::Number))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Sent, E> {
+                Ok(Sent::String(value.to_string()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Sent, E> {
+                Ok(Sent::String(value))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Sent, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = seq.next_element()? {
+                    items.push(item);
+                }
+                Ok(Sent::Array(items))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Sent, A::Error> {
+                let mut members: Vec<(String, Sent)> = Vec::new();
+                while let Some((key, value)) = map.next_entry::<String, Sent>()? {
+                    // A name sent twice keeps its first place and its last
+                    // value.
+                    match members.iter_mut().find(|(name, _)| *name == key) {
+                        Some(member) => member.1 = value,
+                        None => members.push((key, value)),
+                    }
+                }
+                Ok(Sent::Object(members))
+            }
+        }
+
+        deserializer.deserialize_any(Reader)
     }
 }
 
@@ -663,6 +823,36 @@ pub(crate) fn json_response(status: StatusCode, body: serde_json::Value) -> Resp
         .header("content-type", "application/json; charset=utf-8")
         .body(Body::from(body.to_string()))
         .expect("static response parts are valid")
+}
+
+#[cfg(test)]
+mod sent_tests {
+    use super::Sent;
+
+    #[test]
+    fn a_value_is_spelled_as_ruby_prints_it_in_the_order_it_was_sent() {
+        let sent = Sent::of(
+            br#"{"zeta": 1, "alpha": [1, "b", null], "mid": {"y": true, "b": 1.5}, "zeta": 2}"#,
+        );
+        assert_eq!(
+            sent.spelled(),
+            r#"{"zeta" => 2, "alpha" => [1, "b", nil], "mid" => {"y" => true, "b" => 1.5}}"#
+        );
+        assert_eq!(sent.at("alpha").item(1).spelled(), r#""b""#);
+        assert_eq!(sent.at("alpha").item(9).spelled(), "nil");
+        assert_eq!(sent.at("absent").spelled(), "nil");
+        assert_eq!(Sent::of(b"not json").spelled(), "nil");
+    }
+
+    #[test]
+    fn nothing_is_what_github_reads_as_nothing() {
+        for blank in ["null", "false", r#""""#, r#"" \t ""#, "[]", "{}"] {
+            assert!(Sent::of(blank.as_bytes()).is_blank(), "{blank}");
+        }
+        for present in ["true", "0", r#"" x ""#, "[null]", r#"{"a": null}"#] {
+            assert!(!Sent::of(present.as_bytes()).is_blank(), "{present}");
+        }
+    }
 }
 
 #[cfg(test)]

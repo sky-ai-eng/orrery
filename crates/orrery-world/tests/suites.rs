@@ -27,6 +27,7 @@ fn run<'a>(repo_id: i64, sha: &'a str, name: &'a str, status: CheckStatus) -> Ne
         output: None,
         started_clock_unix: None,
         completed_clock_unix: None,
+        annotations: &[],
     }
 }
 

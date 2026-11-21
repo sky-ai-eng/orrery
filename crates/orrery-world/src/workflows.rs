@@ -608,6 +608,10 @@ impl World {
                     "DELETE FROM workflow_job_log_lines WHERE job_id = ?1",
                     params![job.id],
                 )?;
+                tx.execute(
+                    "DELETE FROM check_run_annotations WHERE check_run_id = ?1",
+                    params![job.id],
+                )?;
                 tx.execute("DELETE FROM check_runs WHERE id = ?1", params![job.id])?;
             }
             tx.execute(
