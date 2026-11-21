@@ -133,6 +133,22 @@ fn a_check_run_keeps_each_annotation_after_those_it_has() {
         .unwrap();
     assert!(logged(before).is_empty());
 
+    // A page of them is read from either end.
+    let all = w.list_check_run_annotations(run.id).unwrap();
+    assert_eq!(
+        w.page_check_run_annotations(run.id, false, 2, 1).unwrap(),
+        all[1..3]
+    );
+    assert_eq!(
+        w.page_check_run_annotations(run.id, true, 3, 0).unwrap(),
+        [all[3].clone(), all[2].clone(), all[1].clone()]
+    );
+    assert!(
+        w.page_check_run_annotations(run.id, false, 2, usize::MAX)
+            .unwrap()
+            .is_empty()
+    );
+
     // Another check run has none of them.
     let other = w
         .create_check_run(

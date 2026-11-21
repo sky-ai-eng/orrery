@@ -1160,28 +1160,25 @@ impl GqlCheckRun {
         self.said("text")
     }
 
-    /// The check run's annotations, in the order it was given them, as
-    /// REST lists them.
+    /// The check run's annotations, as REST lists them.
     async fn annotations(
         &self,
         ctx: &Context<'_>,
         first: Option<i32>,
     ) -> Result<CheckAnnotationConnection, Error> {
         let face = face(ctx);
+        // One more than was asked for says whether there is a next page.
+        let asked = usize::try_from(first.unwrap_or_default()).unwrap_or_default();
         let kept = face
             .world
-            .list_check_run_annotations(self.run.id)
+            .page_check_run_annotations(
+                self.run.id,
+                crate::checks::lists_newest_first(&self.run),
+                asked.saturating_add(1),
+                0,
+            )
             .map_err(internal)?;
         let repo = face.world.repo_by_id(self.run.repo_id).map_err(internal)?;
-        let blob = |path: &str| match &repo {
-            Some(repo) => format!(
-                "{}/{}/blob/{}/{path}",
-                face.layout.web(),
-                repo.full_name(),
-                self.run.head_sha
-            ),
-            None => String::new(),
-        };
         let annotations: Vec<GqlCheckAnnotation> = kept
             .iter()
             .map(|a| GqlCheckAnnotation {
@@ -1193,13 +1190,12 @@ impl GqlCheckRun {
                     _ => None,
                 },
                 message: a.message.clone(),
-                title: Some(
-                    a.title
-                        .clone()
-                        .unwrap_or_else(|| crate::checks::default_title(a)),
-                ),
+                title: Some(crate::checks::title_of(a)),
                 raw_details: a.raw_details.clone(),
-                blob_url: blob(&a.path),
+                blob_url: match &repo {
+                    Some(repo) => crate::checks::blob_href(face, repo, &self.run, &a.path),
+                    None => String::new(),
+                },
                 location: CheckAnnotationSpan {
                     start: CheckAnnotationPosition {
                         line: a.start_line,
@@ -1212,10 +1208,9 @@ impl GqlCheckRun {
                 },
             })
             .collect();
-        let total_count = annotations.len() as i64;
         let (nodes, page_info) = take_first("annotations", annotations, first)?;
         Ok(CheckAnnotationConnection {
-            total_count,
+            total_count: self.run.annotations_count,
             page_info,
             nodes,
         })

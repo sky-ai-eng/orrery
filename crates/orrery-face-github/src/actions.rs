@@ -404,7 +404,8 @@ pub(crate) fn with_page_links(
 
 /// The same for a list that reads `(per_page, page)` from its query by a
 /// rule of its own. `last_past_end` is whether a page past the last still
-/// names the last, as GitHub's status lists do.
+/// names the last, as GitHub's status lists do. Such a list names no page
+/// at all when it holds nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn page_links(
     mut resp: Response<Body>,
@@ -416,6 +417,9 @@ pub(crate) fn page_links(
     (per_page, page): (usize, usize),
     last_past_end: bool,
 ) -> Response<Body> {
+    if total == 0 && last_past_end {
+        return resp;
+    }
     let last = total.div_ceil(per_page).max(1);
     let kept: Vec<&str> = query
         .split('&')
@@ -1197,7 +1201,7 @@ pub(crate) async fn dispatch(
     // GitHub's schema is checked before anything the request names is
     // looked for.
     let mistyped = |field: &str, kind: &str| {
-        let given = crate::schema_value(&parsed[field]);
+        let given = crate::Sent::of(&body).at(field).spelled();
         crate::invalid_request(&format!("For 'properties/{field}', {given} is not {kind}."))
     };
     let given = match parsed.get("ref") {

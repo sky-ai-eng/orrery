@@ -2638,8 +2638,8 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
     let annotations_url = |id: i64| format!("{runs}/{id}/annotations");
     let blob = |path: &str| format!("{base}/alice/web/blob/{sha}/{path}");
 
-    // A check run sent no output answers one with nothing in it, and has no
-    // list of annotations.
+    // A check run sent no output answers one with nothing in it, and its
+    // list of annotations is empty.
     let plain = post(json!({ "name": "plain", "head_sha": sha }));
     assert_eq!(plain.status, 201, "{}", plain.text());
     let plain = plain.json();
@@ -2651,7 +2651,13 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
             "annotations_url": annotations_url(plain_id),
         })
     );
-    assert_eq!(list(plain_id, "").message(), (404, "Not Found".to_string()));
+    for query in ["", "?page=2"] {
+        let none = list(plain_id, query);
+        assert_eq!(
+            (none.status, none.json(), none.link),
+            (200, json!([]), None)
+        );
+    }
     assert_eq!(
         fetch("GET", &format!("{runs}/999/annotations"), Some(&s.token)).status,
         404
@@ -2769,9 +2775,40 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
             output(json!([without(1, "path")])),
             "\"path\" wasn't supplied.".to_string(),
         ),
+        // Every fault is named, one to a line: the members in GitHub's
+        // order, each item where it comes, then what the output lacks.
         (
-            output(json!([without(1, "annotation_level"), { "path": "x" }])),
-            "\"annotation_level\", \"end_line\", \"message\", \"start_line\" weren't supplied."
+            output(json!([without(1, "annotation_level"), { "path": "x" }, "x"])),
+            "\"annotation_level\" wasn't supplied.\n\
+             \"annotation_level\", \"end_line\", \"message\", \"start_line\" weren't supplied.\n\
+             For 'items', \"x\" is not an object."
+                .to_string(),
+        ),
+        (
+            json!({ "title": 5, "annotations": "a" }),
+            "For 'properties/title', 5 is not a string.\n\
+             For 'properties/annotations', \"a\" is not an array.\n\
+             \"summary\" wasn't supplied."
+                .to_string(),
+        ),
+        (
+            json!({ "title": "T", "summary": "s".repeat(65_536), "text": 7, "images": "i",
+                    "annotations": Value::Array(
+                        std::iter::once(json!("x")).chain((1..=50).map(ann)).collect()
+                    ) }),
+            "Only 65535 characters are allowed; 65536 were supplied.\n\
+             For 'properties/text', 7 is not a string.\n\
+             For 'properties/images', \"i\" is not an array.\n\
+             For 'items', \"x\" is not an object.\n\
+             No more than 50 items are allowed; 51 were supplied."
+                .to_string(),
+        ),
+        (
+            json!({ "title": "T", "summary": "S", "images": [{ "image_url": "u" }, {}],
+                    "annotations": [{ "start_line": 1 }] }),
+            "\"alt\" wasn't supplied.\n\
+             \"alt\", \"image_url\" weren't supplied.\n\
+             \"annotation_level\", \"end_line\", \"message\", \"path\" weren't supplied."
                 .to_string(),
         ),
     ];
@@ -2898,18 +2935,116 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
         before
     );
 
-    // A number where GitHub fails outright: a `500` with no body, and
-    // nothing kept.
-    for field in ["path", "message", "title"] {
+    // A type GitHub fails on outright, in an annotation it would keep: a
+    // `500` with no body, and nothing kept.
+    for (field, value) in [
+        ("path", json!(5)),
+        ("path", json!(true)),
+        ("path", json!({ "a": 1 })),
+        ("message", json!(5)),
+        ("message", json!(true)),
+        ("message", json!(["x"])),
+        ("title", json!(5)),
+        ("title", json!(true)),
+        ("title", json!(1.5)),
+        ("title", json!({ "a": 1 })),
+    ] {
         let mut body = serde_json::Map::new();
-        body.insert(field.to_string(), json!(5));
+        body.insert(field.to_string(), value.clone());
         let crashed = patch(
             id,
             json!({ "output": output(json!([ann(60), with(61, Value::Object(body))])) }),
         );
-        assert_eq!((crashed.status, crashed.body.len()), (500, 0), "{field}");
+        assert_eq!(
+            (crashed.status, crashed.body.len()),
+            (500, 0),
+            "{field} {value}"
+        );
     }
     assert_eq!(listed(id).len(), 18);
+
+    // The types GitHub takes that are not the ones it describes, each kept
+    // as GitHub keeps it, and the ones it reads as nothing, which leave the
+    // annotation out whatever else it holds. An image is checked and kept
+    // nowhere.
+    let typed = post(json!({ "name": "typed", "head_sha": sha })).json()["id"]
+        .as_i64()
+        .unwrap();
+    let taken = patch(
+        typed,
+        json!({ "output": { "title": "T", "summary": "S",
+            "images": [{ "alt": "a", "image_url": "https://example.com/a.png", "caption": "c" }],
+            "annotations": [
+                with(1, json!({ "annotation_level": true })),
+                with(2, json!({ "annotation_level": false })),
+                with(3, json!({ "annotation_level": { "a": [null, 1.5], "b": "x" } })),
+                with(4, json!({ "annotation_level": [] })),
+                with(5, json!({ "raw_details": true })),
+                with(6, json!({ "raw_details": false })),
+                with(7, json!({ "raw_details": ["x"] })),
+                with(8, json!({ "title": false })),
+                with(9, json!({ "title": [] })),
+                with(10, json!({ "start_line": true })),
+                with(11, json!({ "start_column": false, "end_column": true })),
+                with(12, json!({ "start_column": [2] })),
+                with(20, json!({ "message": false })),
+                with(21, json!({ "message": [] })),
+                with(22, json!({ "message": {} })),
+                with(23, json!({ "path": false })),
+                with(24, json!({ "path": "   " })),
+                with(25, json!({ "annotation_level": "   " })),
+                with(26, json!({ "start_line": [26] })),
+                with(27, json!({ "path": "", "message": 5 })),
+                with(28, json!({ "start_line": 9, "end_line": 4, "message": 5 })),
+                with(29, json!({ "annotation_level": null, "path": 5 })),
+                with(30, json!({ "start_line": null, "title": 5 })),
+            ] } }),
+    );
+    assert_eq!(taken.status, 200, "{}", taken.text());
+    assert_eq!(
+        taken.json()["output"],
+        json!({
+            "title": "T", "summary": "S", "text": null, "annotations_count": 12,
+            "annotations_url": annotations_url(typed),
+        })
+    );
+    let shown: Vec<Value> = listed(typed)
+        .iter()
+        .map(|a| {
+            json!([
+                a["start_line"],
+                a["start_column"],
+                a["end_column"],
+                a["annotation_level"],
+                a["title"],
+                a["raw_details"]
+            ])
+        })
+        .collect();
+    assert_eq!(
+        Value::Array(shown),
+        json!([
+            [1, null, null, "1", "README.md#L1", null],
+            [2, null, null, "0", "README.md#L2", null],
+            [
+                3,
+                null,
+                null,
+                "{\"a\" => [nil, 1.5], \"b\" => \"x\"}",
+                "README.md#L3",
+                null
+            ],
+            [4, null, null, "[]", "README.md#L4", null],
+            [5, null, null, "warning", "README.md#L5", "t"],
+            [6, null, null, "warning", "README.md#L6", "f"],
+            [7, null, null, "warning", "README.md#L7", "[\"x\"]"],
+            [8, null, null, "warning", "false", null],
+            [9, null, null, "warning", "[]", null],
+            [1, null, null, "warning", "README.md#L1-L10", null],
+            [11, 0, 1, "warning", "README.md#L11", null],
+            [12, null, null, "warning", "README.md#L12", null],
+        ])
+    );
 
     // The list is paged as the status lists are: 30 to a page, 100 at
     // most, and a page past the last names the last.
@@ -3018,8 +3153,9 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
     );
 
     // A runner annotates the job it is on, through the control plane: the
-    // job's check run lists them, with the empty title and details
-    // GitHub's runner gives one.
+    // job's check run lists them with the newest first, as GitHub lists a
+    // job's, and with the empty title and details GitHub's runner gives
+    // one.
     let (_, workflow) = s.control("POST", "/workflows", Some(ci()));
     let run = s.runner(
         &format!("/workflows/{}/runs", workflow["id"]),
@@ -3051,6 +3187,8 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
             { "path": "", "start_line": 0, "end_line": 0, "level": "error", "message": " " },
             { "path": "a", "start_line": 3, "end_line": 2, "level": "notice", "message": "m",
               "start_column": 1 },
+            { "path": "a", "start_line": 1, "end_line": 1, "level": "notice",
+              "message": "m".repeat(4097), "raw_details": "r".repeat(65_536) },
         ] })),
     );
     assert_eq!(
@@ -3062,8 +3200,11 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
                 fault("INVALID_ARGUMENT", Some("annotations[0].message")),
                 fault("INVALID_ARGUMENT", Some("annotations[0].level")),
                 fault("INVALID_ARGUMENT", Some("annotations[0].start_line")),
+                fault("INVALID_ARGUMENT", Some("annotations[0].end_line")),
                 fault("INVALID_ARGUMENT", Some("annotations[1].end_line")),
                 fault("INVALID_ARGUMENT", Some("annotations[1].start_column")),
+                fault("INVALID_ARGUMENT", Some("annotations[2].message")),
+                fault("INVALID_ARGUMENT", Some("annotations[2].raw_details")),
             ]
         )
     );
@@ -3076,14 +3217,22 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
         "POST",
         &annotate,
         Some(json!({ "annotations": [
-            finding.clone(),
             { "path": "README.md", "start_line": 3, "end_line": 4, "level": "notice",
-              "message": "from a command", "title": "A notice" },
+              "message": "from a command", "title": "A notice",
+              "raw_details": "r".repeat(65_535) },
+            { "path": "README.md", "start_line": 5, "end_line": 5, "level": "warning",
+              "message": "m".repeat(4096) },
         ] })),
     );
     assert_eq!(status, 200);
+    let (status, _) = s.control(
+        "POST",
+        &annotate,
+        Some(json!({ "annotations": [finding.clone()] })),
+    );
+    assert_eq!(status, 200);
     let job = s.get(&format!("check-runs/{lint}"));
-    assert_eq!(job["output"]["annotations_count"], 2);
+    assert_eq!(job["output"]["annotations_count"], 3);
     assert_eq!(
         Value::Array(listed(lint)),
         json!([
@@ -3091,11 +3240,19 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
               "start_column": null, "end_line": 5, "end_column": null,
               "annotation_level": "failure", "title": "",
               "message": "Process completed with exit code 1.", "raw_details": "" },
+            { "path": "README.md", "blob_href": blob("README.md"), "start_line": 5,
+              "start_column": null, "end_line": 5, "end_column": null,
+              "annotation_level": "warning", "title": "", "message": "m".repeat(4096),
+              "raw_details": "" },
             { "path": "README.md", "blob_href": blob("README.md"), "start_line": 3,
               "start_column": null, "end_line": 4, "end_column": null,
               "annotation_level": "notice", "title": "A notice", "message": "from a command",
-              "raw_details": "" },
+              "raw_details": "r".repeat(65_535) },
         ])
+    );
+    assert_eq!(
+        list(lint, "?per_page=1&page=3").json()[0]["title"],
+        "A notice"
     );
     // No App gives a job annotations: its check run is its runner's.
     assert_eq!(

@@ -25,9 +25,7 @@ use crate::render::{
     Mergeability, actor_json, avatar_url, check_run_json, comment_json, full_pull_json, label_json,
     pull_json, repo_json, review_json, rfc3339, team_json, user_json,
 };
-use crate::{
-    GithubFace, Layout, github_error, internal, invalid_request, json_response, schema_value,
-};
+use crate::{GithubFace, Layout, Sent, github_error, internal, invalid_request, json_response};
 
 /// What GitHub's sender calls itself: its name, then seven hex digits of
 /// the build it runs, which here are zeros.
@@ -76,7 +74,7 @@ pub(crate) async fn patch_config(
     let Some(fields) = value.as_object() else {
         return invalid_request(&format!(
             "For 'links/2/schema', {} is not an object.",
-            schema_value(&value)
+            Sent::of(&body).spelled()
         ));
     };
     const KEYS: [&str; 4] = ["url", "content_type", "insecure_ssl", "secret"];
@@ -90,7 +88,7 @@ pub(crate) async fn patch_config(
                 Some(text) => Ok(Some(text)),
                 None => Err(Box::new(invalid_request(&format!(
                     "For 'properties/{key}', {} is not a string.",
-                    schema_value(value)
+                    Sent::of(&body).at(key).spelled()
                 )))),
             },
         }

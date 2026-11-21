@@ -643,6 +643,13 @@ struct AnnotationBody {
 /// stores as `failure`.
 const LEVELS: [&str; 3] = ["notice", "warning", "failure"];
 
+/// The longest message GitHub keeps of an annotation its runner makes, in
+/// characters.
+const MAX_ANNOTATION_MESSAGE: usize = 4096;
+
+/// The longest details GitHub keeps of any annotation, in characters.
+const MAX_ANNOTATION_DETAILS: usize = 65_535;
+
 /// A runner annotates the job it is on, as GitHub's does for a step's
 /// workflow commands and for a step that fails. The job keeps them after
 /// those it has (`spec/surface-github.md`, "Annotations").
@@ -671,6 +678,11 @@ async fn annotate_job(
         }
         if a.message.trim().is_empty() {
             fault("message says something", "message");
+        } else if a.message.chars().count() > MAX_ANNOTATION_MESSAGE {
+            fault("message is 4096 characters at most", "message");
+        }
+        if a.raw_details.chars().count() > MAX_ANNOTATION_DETAILS {
+            fault("raw_details is 65535 characters at most", "raw_details");
         }
         if !LEVELS.contains(&a.level.as_str()) {
             fault("level is notice, warning, or failure", "level");
@@ -678,7 +690,9 @@ async fn annotate_job(
         if a.start_line < 1 {
             fault("start_line is 1 or more", "start_line");
         }
-        if a.end_line < a.start_line {
+        if a.end_line < 1 {
+            fault("end_line is 1 or more", "end_line");
+        } else if a.end_line < a.start_line {
             fault("end_line is start_line or after it", "end_line");
         }
         let columns = [

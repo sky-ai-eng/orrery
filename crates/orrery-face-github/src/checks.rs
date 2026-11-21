@@ -17,8 +17,8 @@ use orrery_world::{
 
 use crate::render::check_run_json;
 use crate::{
-    GithubFace, github_error, internal, invalid_request, json_response, media,
-    orrery_unsupported_field, resolve_repo, schema_value, validation_custom, validation_invalid,
+    GithubFace, Sent, github_error, internal, invalid_request, json_response, media,
+    orrery_unsupported_field, resolve_repo, validation_custom, validation_invalid,
     validation_missing,
 };
 
@@ -32,7 +32,7 @@ struct CheckRunBody {
     completed_at: Option<String>,
     details_url: Option<String>,
     external_id: Option<String>,
-    output: Option<serde_json::Value>,
+    output: Option<Sent>,
     #[serde(flatten)]
     rest: BTreeMap<String, serde_json::Value>,
 }
@@ -267,96 +267,74 @@ enum Read {
 }
 
 impl Output {
-    /// Read `output` as GitHub does, or its `422` for a shape it refuses,
-    /// in its words and its order.
-    fn read(output: Option<&serde_json::Value>) -> Result<Output, Box<Response<Body>>> {
+    /// Read `output` as GitHub does, or its `422` for a shape it refuses.
+    /// GitHub checks every member and names every fault, one to a line: the
+    /// members in the order its schema has them, then the ones the output
+    /// lacks.
+    fn read(output: Option<&Sent>) -> Result<Output, Box<Response<Body>>> {
         let refuse = |detail: String| Box::new(invalid_request(&detail));
-        let members = match output {
-            None | Some(serde_json::Value::Null) => return Ok(Output::default()),
-            Some(serde_json::Value::Object(members)) => members,
+        let output = match output {
+            None | Some(Sent::Null) => return Ok(Output::default()),
+            Some(output @ Sent::Object(_)) => output,
             Some(other) => {
                 return Err(refuse(format!(
                     "For 'properties/output', {} is not an object or null.",
-                    schema_value(other)
+                    other.spelled()
                 )));
             }
         };
+        let mut faults: Vec<String> = Vec::new();
+        for key in ["title", "summary", "text"] {
+            match output.member(key) {
+                None => {}
+                Some(Sent::String(text)) => {
+                    let length = text.chars().count();
+                    if key != "title" && length > MAX_TEXT {
+                        faults.push(format!(
+                            "Only {MAX_TEXT} characters are allowed; {length} were supplied."
+                        ));
+                    }
+                }
+                Some(other) => faults.push(format!(
+                    "For 'properties/{key}', {} is not a string.",
+                    other.spelled()
+                )),
+            }
+        }
+        // An image is checked and then kept nowhere: no read answers one.
+        objects_of(output, "images", &["alt", "image_url"], None, &mut faults);
+        let items = objects_of(
+            output,
+            "annotations",
+            &[
+                "annotation_level",
+                "end_line",
+                "message",
+                "path",
+                "start_line",
+            ],
+            Some(MAX_ANNOTATIONS),
+            &mut faults,
+        );
         let missing: Vec<&str> = ["summary", "title"]
             .into_iter()
-            .filter(|key| !members.contains_key(*key))
+            .filter(|key| output.member(key).is_none())
             .collect();
         if !missing.is_empty() {
-            return Err(refuse(not_supplied(&missing)));
+            faults.push(not_supplied(&missing));
         }
-        for key in ["title", "summary", "text"] {
-            match members.get(key) {
-                None | Some(serde_json::Value::String(_)) => {}
-                Some(other) => {
-                    return Err(refuse(format!(
-                        "For 'properties/{key}', {} is not a string.",
-                        schema_value(other)
-                    )));
-                }
-            }
+        if !faults.is_empty() {
+            return Err(refuse(faults.join("\n")));
         }
-        for key in ["summary", "text"] {
-            let length = members
-                .get(key)
-                .and_then(|value| value.as_str())
-                .map_or(0, |text| text.chars().count());
-            if length > MAX_TEXT {
-                return Err(refuse(format!(
-                    "Only {MAX_TEXT} characters are allowed; {length} were supplied."
-                )));
-            }
-        }
-        let sent = match members.get("annotations") {
-            None => &[][..],
-            Some(serde_json::Value::Array(sent)) => sent.as_slice(),
-            Some(other) => {
-                return Err(refuse(format!(
-                    "For 'properties/annotations', {} is not an array.",
-                    schema_value(other)
-                )));
-            }
+        let text = |key: &str| match output.member(key) {
+            Some(Sent::String(text)) => Some(text.as_str()),
+            _ => None,
         };
-        if sent.len() > MAX_ANNOTATIONS {
-            return Err(refuse(format!(
-                "No more than {MAX_ANNOTATIONS} items are allowed; {} were supplied.",
-                sent.len()
-            )));
-        }
-        let mut items = Vec::with_capacity(sent.len());
-        for item in sent {
-            match item {
-                serde_json::Value::Object(item) => items.push(item),
-                other => {
-                    return Err(refuse(format!(
-                        "For 'items', {} is not an object.",
-                        schema_value(other)
-                    )));
-                }
-            }
-        }
-        // Every field any annotation lacks is named once, in name order.
-        let missing: Vec<&str> = [
-            "annotation_level",
-            "end_line",
-            "message",
-            "path",
-            "start_line",
-        ]
-        .into_iter()
-        .filter(|key| items.iter().any(|item| !item.contains_key(*key)))
-        .collect();
-        if !missing.is_empty() {
-            return Err(refuse(not_supplied(&missing)));
-        }
         let mut read = Output {
             said: Some(serde_json::json!({
-                "title": members.get("title"),
-                "summary": members.get("summary"),
-                "text": members.get("text"),
+                "title": text("title"),
+                "summary": text("summary"),
+                "text": text("text"),
             })),
             ..Output::default()
         };
@@ -371,6 +349,53 @@ impl Output {
     }
 }
 
+/// The objects in the array `output` holds as `key`, with GitHub's words
+/// for each fault of the array's shape added to `faults`: an item that is
+/// no object and an item that lacks a field of `required`, each where it
+/// comes, then more items than `most`.
+fn objects_of<'a>(
+    output: &'a Sent,
+    key: &str,
+    required: &[&str],
+    most: Option<usize>,
+    faults: &mut Vec<String>,
+) -> Vec<&'a Sent> {
+    let sent = match output.member(key) {
+        None => return Vec::new(),
+        Some(Sent::Array(sent)) => sent,
+        Some(other) => {
+            faults.push(format!(
+                "For 'properties/{key}', {} is not an array.",
+                other.spelled()
+            ));
+            return Vec::new();
+        }
+    };
+    let mut objects = Vec::with_capacity(sent.len());
+    for item in sent {
+        if !matches!(item, Sent::Object(_)) {
+            faults.push(format!("For 'items', {} is not an object.", item.spelled()));
+            continue;
+        }
+        let missing: Vec<&str> = required
+            .iter()
+            .copied()
+            .filter(|name| item.member(name).is_none())
+            .collect();
+        if !missing.is_empty() {
+            faults.push(not_supplied(&missing));
+        }
+        objects.push(item);
+    }
+    if let Some(most) = most.filter(|most| sent.len() > *most) {
+        faults.push(format!(
+            "No more than {most} items are allowed; {} were supplied.",
+            sent.len()
+        ));
+    }
+    objects
+}
+
 /// GitHub's words for required fields a request lacks.
 fn not_supplied(names: &[&str]) -> String {
     let quoted: Vec<String> = names.iter().map(|name| format!("\"{name}\"")).collect();
@@ -381,12 +406,13 @@ fn not_supplied(names: &[&str]) -> String {
 }
 
 /// A number GitHub reads from a line or a column: an integer, a number cut
-/// to one, or the digits a string starts with, which is 0 for a string that
-/// starts with none. `None` for null.
-fn whole(value: Option<&serde_json::Value>) -> Option<i64> {
-    match value? {
-        serde_json::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
-        serde_json::Value::String(s) => {
+/// to one, the digits a string starts with, which is 0 for a string that
+/// starts with none, and 1 or 0 for true or false. `None` for anything
+/// else.
+fn whole(value: &Sent) -> Option<i64> {
+    match value {
+        Sent::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        Sent::String(s) => {
             let s = s.trim_start();
             let (sign, digits) = match s.strip_prefix('-') {
                 Some(rest) => (-1, rest),
@@ -397,7 +423,8 @@ fn whole(value: Option<&serde_json::Value>) -> Option<i64> {
                 .unwrap_or(digits.len());
             Some(sign * digits[..end].parse::<i64>().unwrap_or(0))
         }
-        _ => None,
+        Sent::Bool(value) => Some(i64::from(*value)),
+        Sent::Null | Sent::Array(_) | Sent::Object(_) => None,
     }
 }
 
@@ -406,113 +433,124 @@ fn kept(text: &str) -> String {
     text.chars().take(MAX_TEXT).collect()
 }
 
-/// One annotation as GitHub reads it. It keeps a level it does not define,
-/// a line below 1, and a title of any length. It leaves out an annotation
-/// with no path, no message, or no level, one that ends before it starts,
-/// and one with a column whose lines are not one line.
-fn annotation(item: &serde_json::Map<String, serde_json::Value>) -> Read {
-    use serde_json::Value;
-    let path = match item.get("path") {
-        Some(Value::String(path)) if !path.is_empty() => path.clone(),
-        Some(Value::String(_) | Value::Null) | None => return Read::LeftOut,
-        Some(_) => return Read::Crashes,
-    };
-    let message = match item.get("message") {
-        Some(Value::String(message)) if !message.trim().is_empty() => kept(message),
-        Some(Value::String(_) | Value::Null) | None => return Read::LeftOut,
-        Some(_) => return Read::Crashes,
-    };
-    let title = match item.get("title") {
-        Some(Value::String(title)) => Some(title.clone()),
-        Some(Value::Null) | None => None,
-        Some(_) => return Read::Crashes,
-    };
-    let level = match item.get("annotation_level") {
-        Some(Value::String(level)) if !level.is_empty() => level.clone(),
-        Some(Value::Number(level)) => level.to_string(),
-        _ => return Read::LeftOut,
-    };
-    let raw_details = match item.get("raw_details") {
-        Some(Value::String(raw)) => Some(kept(raw)),
-        Some(Value::Number(raw)) => Some(raw.to_string()),
-        _ => None,
+/// One annotation as GitHub reads it, which is by what each field came to
+/// when it was observed and not by its description of them. It leaves out
+/// an annotation with no path, no message, no level, or no line, one that
+/// ends before it starts, and one with a column whose lines are not one
+/// line. Of the rest it keeps a level it does not define, a line below 1,
+/// and a title of any length, and it fails on a path, a message, or a title
+/// that is something other than a string.
+fn annotation(item: &Sent) -> Read {
+    let (path, message) = (item.at("path"), item.at("message"));
+    if path.is_blank() || message.is_blank() {
+        return Read::LeftOut;
+    }
+    let level = match item.at("annotation_level") {
+        Sent::Null => return Read::LeftOut,
+        Sent::String(level) if level.trim().is_empty() => return Read::LeftOut,
+        Sent::String(level) => level.clone(),
+        Sent::Bool(true) => "1".to_string(),
+        Sent::Bool(false) => "0".to_string(),
+        other => other.spelled(),
     };
     let (Some(start_line), Some(end_line)) =
-        (whole(item.get("start_line")), whole(item.get("end_line")))
+        (whole(item.at("start_line")), whole(item.at("end_line")))
     else {
         return Read::LeftOut;
     };
-    let (start_column, end_column) = (
-        whole(item.get("start_column")),
-        whole(item.get("end_column")),
-    );
+    let (start_column, end_column) = (whole(item.at("start_column")), whole(item.at("end_column")));
     let columns = start_column.is_some() || end_column.is_some();
     let backwards = matches!((start_column, end_column), (Some(start), Some(end)) if end < start);
     if end_line < start_line || (columns && start_line != end_line) || backwards {
         return Read::LeftOut;
     }
+    // GitHub fails on a type only in an annotation it would keep.
+    let (Sent::String(path), Sent::String(message)) = (path, message) else {
+        return Read::Crashes;
+    };
+    let title = match item.at("title") {
+        Sent::Null => None,
+        Sent::String(title) => Some(title.clone()),
+        nothing if nothing.is_blank() => Some(nothing.spelled()),
+        _ => return Read::Crashes,
+    };
+    let raw_details = match item.at("raw_details") {
+        Sent::Null => None,
+        Sent::String(raw) => Some(kept(raw)),
+        Sent::Bool(true) => Some("t".to_string()),
+        Sent::Bool(false) => Some("f".to_string()),
+        other => Some(kept(&other.spelled())),
+    };
     Read::Kept(Annotation {
-        path,
+        path: path.clone(),
         start_line,
         end_line,
         start_column,
         end_column,
         level,
-        message,
+        message: kept(message),
         title,
         raw_details,
     })
 }
 
-/// An annotation as GitHub answers it. One given no title is titled by its
-/// path and its lines.
+/// An annotation as GitHub answers it.
 pub(crate) fn annotation_json(
     face: &GithubFace,
     repo: &Repo,
     run: &CheckRun,
     annotation: &Annotation,
 ) -> serde_json::Value {
-    let title = annotation
-        .title
-        .clone()
-        .unwrap_or_else(|| default_title(annotation));
     serde_json::json!({
         "path": annotation.path,
-        "blob_href": format!(
-            "{}/{}/blob/{}/{}",
-            face.layout.web(),
-            repo.full_name(),
-            run.head_sha,
-            annotation.path
-        ),
+        "blob_href": blob_href(face, repo, run, &annotation.path),
         "start_line": annotation.start_line,
         "start_column": annotation.start_column,
         "end_line": annotation.end_line,
         "end_column": annotation.end_column,
         "annotation_level": annotation.level,
-        "title": title,
+        "title": title_of(annotation),
         "message": annotation.message,
         "raw_details": annotation.raw_details,
     })
 }
 
-/// The title GitHub gives an annotation that was sent none.
-pub(crate) fn default_title(annotation: &Annotation) -> String {
+/// Where GitHub says an annotation's file is: the path at the check run's
+/// commit, whether or not the commit holds it.
+pub(crate) fn blob_href(face: &GithubFace, repo: &Repo, run: &CheckRun, path: &str) -> String {
+    format!(
+        "{}/{}/blob/{}/{path}",
+        face.layout.web(),
+        repo.full_name(),
+        run.head_sha
+    )
+}
+
+/// An annotation's title, which for one given none is its path and its
+/// lines.
+pub(crate) fn title_of(annotation: &Annotation) -> String {
     let Annotation {
         path,
         start_line,
         end_line,
+        title,
         ..
     } = annotation;
-    match start_line == end_line {
-        true => format!("{path}#L{start_line}"),
-        false => format!("{path}#L{start_line}-L{end_line}"),
+    match title {
+        Some(title) => title.clone(),
+        None if start_line == end_line => format!("{path}#L{start_line}"),
+        None => format!("{path}#L{start_line}-L{end_line}"),
     }
 }
 
-/// `GET /repos/{o}/{r}/check-runs/{id}/annotations`: the check run's
-/// annotations in the order it was given them, a page of them. A check run
-/// with none is `404`, as one that does not exist is.
+/// Whether GitHub lists the check run's annotations with the newest first,
+/// as it does a job's, and not in the order they were given.
+pub(crate) fn lists_newest_first(run: &CheckRun) -> bool {
+    run.job.is_some()
+}
+
+/// `GET /repos/{o}/{r}/check-runs/{id}/annotations`: a page of the check
+/// run's annotations, which is empty for a check run with none.
 pub(crate) async fn list_annotations(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
@@ -523,14 +561,14 @@ pub(crate) async fn list_annotations(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    let (run, annotations) = match annotated(&face, &repo, &id) {
-        Ok(found) => found,
+    let run = match check_run_in(&face, &repo, &id) {
+        Ok(run) => run,
         Err(resp) => return *resp,
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "CheckAnnotation") {
         return refused;
     }
-    annotations_page(&face, &repo, &run, annotations, query)
+    annotations_page(&face, &repo, &run, query)
 }
 
 /// `GET /repositories/{id}/check-runs/{check_run_id}/annotations`: the same
@@ -545,33 +583,24 @@ pub(crate) async fn list_annotations_by_id(
         Ok(x) => x,
         Err(resp) => return *resp,
     };
-    let (run, annotations) = match annotated(&face, &repo, &id) {
-        Ok(found) => found,
+    let run = match check_run_in(&face, &repo, &id) {
+        Ok(run) => run,
         Err(resp) => return *resp,
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "CheckAnnotation") {
         return refused;
     }
-    annotations_page(&face, &repo, &run, annotations, query)
+    annotations_page(&face, &repo, &run, query)
 }
 
-/// The repository's check run of this id with its annotations, or GitHub's
-/// `404` for one that is not the repository's or has none.
-fn annotated(
-    face: &GithubFace,
-    repo: &Repo,
-    id: &str,
-) -> Result<(CheckRun, Vec<Annotation>), Box<Response<Body>>> {
+/// The repository's check run of this id, or GitHub's `404` for an id that
+/// is not one of the repository's.
+fn check_run_in(face: &GithubFace, repo: &Repo, id: &str) -> Result<CheckRun, Box<Response<Body>>> {
     let not_found = || Box::new(github_error(StatusCode::NOT_FOUND, "Not Found"));
     let run_id = id.parse::<i64>().map_err(|_| not_found())?;
-    let run = match face.world.check_run_by_id(run_id) {
-        Ok(Some(run)) if run.repo_id == repo.id => run,
-        Ok(_) => return Err(not_found()),
-        Err(e) => return Err(Box::new(internal(e))),
-    };
-    match face.world.list_check_run_annotations(run.id) {
-        Ok(annotations) if annotations.is_empty() => Err(not_found()),
-        Ok(annotations) => Ok((run, annotations)),
+    match face.world.check_run_by_id(run_id) {
+        Ok(Some(run)) if run.repo_id == repo.id => Ok(run),
+        Ok(_) => Err(not_found()),
         Err(e) => Err(Box::new(internal(e))),
     }
 }
@@ -580,13 +609,20 @@ fn annotations_page(
     face: &GithubFace,
     repo: &Repo,
     run: &CheckRun,
-    annotations: Vec<Annotation>,
     query: Option<String>,
 ) -> Response<Body> {
     let query = query.unwrap_or_default();
-    let total = annotations.len();
     let (per_page, page) = crate::reads::page_up_to_100(&query);
-    let items: Vec<serde_json::Value> = crate::reads::paginate(annotations, per_page, page)
+    let annotations = match face.world.page_check_run_annotations(
+        run.id,
+        lists_newest_first(run),
+        per_page,
+        (page - 1).saturating_mul(per_page),
+    ) {
+        Ok(annotations) => annotations,
+        Err(e) => return internal(e),
+    };
+    let items: Vec<serde_json::Value> = annotations
         .iter()
         .map(|annotation| annotation_json(face, repo, run, annotation))
         .collect();
@@ -598,7 +634,7 @@ fn annotations_page(
         repo,
         &path,
         &query,
-        total,
+        run.annotations_count as usize,
         (per_page, page),
         true,
     )
@@ -703,4 +739,21 @@ fn bot_only(actor: &Actor) -> Response<Body> {
 
 fn is_full_sha(s: &str) -> bool {
     s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_output_is_read_in_the_order_it_was_sent() {
+        let body: CheckRunBody = serde_json::from_str(
+            r#"{"name": "x", "output": {"summary": "S", "annotations": {"path": "x", "end_line": 1}}, "more": 1}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            body.output.unwrap().at("annotations").spelled(),
+            r#"{"path" => "x", "end_line" => 1}"#
+        );
+    }
 }

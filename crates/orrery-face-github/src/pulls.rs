@@ -19,9 +19,9 @@ use crate::render::{
     review_json,
 };
 use crate::{
-    GithubFace, github_error, internal, invalid_request, json_response, media,
-    orrery_unsupported_field, resolve_repo, schema_value, validation_custom,
-    validation_custom_field, validation_invalid, validation_invalid_message, validation_missing,
+    GithubFace, Sent, github_error, internal, invalid_request, json_response, media,
+    orrery_unsupported_field, resolve_repo, validation_custom, validation_custom_field,
+    validation_invalid, validation_invalid_message, validation_missing,
 };
 
 #[derive(serde::Deserialize)]
@@ -930,7 +930,7 @@ fn reviewers_body(body: &Bytes, link: usize) -> Result<ReviewersBody, Box<Respon
     let Some(fields) = value.as_object() else {
         return Err(refuse(&format!(
             "For 'links/{link}/schema', {} is not an object.",
-            schema_value(&value)
+            Sent::of(body).spelled()
         )));
     };
     let names = |field: &str| -> Result<Option<Vec<String>>, Box<Response<Body>>> {
@@ -940,16 +940,17 @@ fn reviewers_body(body: &Bytes, link: usize) -> Result<ReviewersBody, Box<Respon
         let Some(items) = value.as_array() else {
             return Err(refuse(&format!(
                 "For 'properties/{field}', {} is not an array.",
-                schema_value(value)
+                Sent::of(body).at(field).spelled()
             )));
         };
         items
             .iter()
-            .map(|item| match item.as_str() {
+            .enumerate()
+            .map(|(place, item)| match item.as_str() {
                 Some(name) => Ok(name.to_string()),
                 None => Err(refuse(&format!(
                     "For 'items', {} is not a string.",
-                    schema_value(item)
+                    Sent::of(body).at(field).item(place).spelled()
                 ))),
             })
             .collect::<Result<Vec<String>, _>>()

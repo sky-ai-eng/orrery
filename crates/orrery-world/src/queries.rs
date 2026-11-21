@@ -269,17 +269,32 @@ pub(crate) fn row_to_check_run(r: &Row<'_>) -> rusqlite::Result<CheckRun> {
     })
 }
 
-/// A check run's annotations, in the order it was given them.
+/// A check run's annotations, in the order it was given them or with the
+/// newest first: all of them, or the `(limit, offset)` page of them.
 pub(crate) fn list_check_run_annotations(
     conn: &Connection,
     check_run_id: i64,
+    newest_first: bool,
+    page: Option<(usize, usize)>,
 ) -> Result<Vec<Annotation>> {
-    let mut stmt = conn.prepare(
+    let order = match newest_first {
+        true => "id DESC",
+        false => "id",
+    };
+    // SQLite reads a negative limit as no limit.
+    let (limit, offset) = match page {
+        Some((limit, offset)) => (
+            i64::try_from(limit).unwrap_or(i64::MAX),
+            i64::try_from(offset).unwrap_or(i64::MAX),
+        ),
+        None => (-1, 0),
+    };
+    let mut stmt = conn.prepare(&format!(
         "SELECT path, start_line, end_line, start_column, end_column, level, message, title,
                 raw_details
-         FROM check_run_annotations WHERE check_run_id = ?1 ORDER BY id",
-    )?;
-    let rows = stmt.query_map(params![check_run_id], |r| {
+         FROM check_run_annotations WHERE check_run_id = ?1 ORDER BY {order} LIMIT ?2 OFFSET ?3"
+    ))?;
+    let rows = stmt.query_map(params![check_run_id, limit, offset], |r| {
         Ok(Annotation {
             path: r.get(0)?,
             start_line: r.get(1)?,

@@ -83,13 +83,9 @@ impl World {
                 subject: objects::check_run_subject(tx, run.id)?,
                 object: objects::check_run_object(tx, run.id)?,
             }));
-            let given = annotate(w, run.id, new.annotations)?;
+            let run = annotate(w, run, new.annotations)?;
             suites::settle(w, suite)?;
-            // The row was returned before its annotations were stored.
-            Ok(CheckRun {
-                annotations_count: given,
-                ..run
-            })
+            Ok(run)
         })
     }
 
@@ -150,15 +146,11 @@ impl World {
                     changes,
                 }));
             }
-            let given = annotate(w, id, patch.annotations)?;
+            let run = annotate(w, run, patch.annotations)?;
             if changed {
                 suites::settle(w, run.suite_id)?;
             }
-            // The row was returned before the new annotations were stored.
-            Ok(CheckRun {
-                annotations_count: run.annotations_count + given,
-                ..run
-            })
+            Ok(run)
         })
     }
 
@@ -173,7 +165,26 @@ impl World {
 
     /// A check run's annotations, in the order it was given them.
     pub fn list_check_run_annotations(&self, check_run_id: i64) -> Result<Vec<Annotation>> {
-        self.with_conn(|conn| queries::list_check_run_annotations(conn, check_run_id))
+        self.with_conn(|conn| queries::list_check_run_annotations(conn, check_run_id, false, None))
+    }
+
+    /// The `limit` annotations of a check run that come after its first
+    /// `offset`, in the order it was given them or with the newest first.
+    pub fn page_check_run_annotations(
+        &self,
+        check_run_id: i64,
+        newest_first: bool,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Annotation>> {
+        self.with_conn(|conn| {
+            queries::list_check_run_annotations(
+                conn,
+                check_run_id,
+                newest_first,
+                Some((limit, offset)),
+            )
+        })
     }
 
     /// Give a job the annotations its runner makes of it, after those it
@@ -183,7 +194,7 @@ impl World {
         job_id: i64,
         annotations: &[Annotation],
         by: Attribution,
-    ) -> Result<CheckRun> {
+    ) -> Result<()> {
         self.write(by, |w| {
             let job = queries::check_run_by_id(w.tx, job_id)?
                 .filter(|run| run.job.is_some())
@@ -191,27 +202,26 @@ impl World {
             if job.status != CheckStatus::InProgress {
                 return Err(WorldError::JobNotInProgress(job_id));
             }
-            let given = annotate(w, job_id, annotations)?;
-            Ok(CheckRun {
-                annotations_count: job.annotations_count + given,
-                ..job
-            })
+            annotate(w, job, annotations)?;
+            Ok(())
         })
     }
 }
 
 /// Store `annotations` after those the check run has, and say so: as the
 /// write's operation when nothing came before it, and otherwise as a
-/// consequence. Answers how many were stored.
+/// consequence. `run` is the row as it was read before this, and the answer
+/// is the row with these counted.
 pub(crate) fn annotate(
     w: &mut crate::log::Write<'_>,
-    check_run_id: i64,
+    run: CheckRun,
     annotations: &[Annotation],
-) -> Result<i64> {
+) -> Result<CheckRun> {
     if annotations.is_empty() {
-        return Ok(0);
+        return Ok(run);
     }
     let tx = w.tx;
+    let check_run_id = run.id;
     for a in annotations {
         tx.execute(
             "INSERT INTO check_run_annotations (check_run_id, path, start_line, end_line,
@@ -240,5 +250,8 @@ pub(crate) fn annotate(
         true => w.emit(event),
         false => w.operation(event),
     }
-    Ok(annotations.len() as i64)
+    Ok(CheckRun {
+        annotations_count: run.annotations_count + annotations.len() as i64,
+        ..run
+    })
 }
