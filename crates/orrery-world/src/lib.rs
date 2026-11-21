@@ -58,6 +58,7 @@ pub use events::{Attribution, Door, Event, EventBody, WriteSpan};
 pub use identity::{
     OAUTH_CODE_TTL_SECONDS, validate_oauth_app_callback_url, validate_oauth_app_name,
 };
+pub use log::RefTip;
 pub use pulls::NewPull;
 pub use reader::{ViewMeta, WorldReader, WorldView};
 #[cfg(feature = "test-support")]

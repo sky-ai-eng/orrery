@@ -370,5 +370,5 @@ pub(crate) async fn commit_of(
     }
     let _refs = face.git.read_lock(repo.id).await;
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    crate::reads::resolve_commit(&bare, git_ref).map_err(|e| Box::new(internal(e)))
+    crate::reads::resolve_commit(face, repo, &bare, git_ref).map_err(|e| Box::new(internal(e)))
 }

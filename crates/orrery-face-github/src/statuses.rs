@@ -112,7 +112,7 @@ pub(crate) async fn create(
             true => given.to_ascii_lowercase(),
             false => given.clone(),
         };
-        match crate::reads::resolve_commit(&bare, &named) {
+        match crate::reads::resolve_commit(&face, &repo, &bare, &named) {
             Ok(held) => held,
             Err(e) => return internal(e),
         }
@@ -183,7 +183,7 @@ async fn read_sha(
     }
     let _refs = face.git.read_lock(repo.id).await;
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    store::rev_parse(&bare, git_ref).map_err(|e| Box::new(internal(e)))
+    crate::reads::resolve(face, repo, &bare, git_ref).map_err(|e| Box::new(internal(e)))
 }
 
 /// Every status of the commit, newest first, as an array with page links.

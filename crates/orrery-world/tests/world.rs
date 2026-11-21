@@ -559,6 +559,120 @@ fn the_log_of_a_migrated_world_puts_refs_where_its_older_entries_did() {
 }
 
 #[test]
+fn a_refs_history_is_each_sha_it_held_since_it_was_made() {
+    let (_dir, w) = fresh();
+    let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();
+    let sys = w.actor_by_login("orrery").unwrap().unwrap();
+    let repo = w
+        .create_repo(alice.id, "dots", None, true, "main", by(alice.id))
+        .unwrap();
+    let other = w
+        .create_repo(alice.id, "other", None, false, "main", by(alice.id))
+        .unwrap();
+    let mv = |name, old, new, change| RefMove {
+        name,
+        old,
+        new,
+        repins: Vec::new(),
+        change,
+        forced: false,
+        commits: Vec::new(),
+        commit_count: 0,
+    };
+    let push = |repo_id, name, old, new, change| {
+        w.record_push(
+            repo_id,
+            by(alice.id),
+            &[mv(name, old, new, change)],
+            None,
+            &[],
+        )
+        .unwrap();
+    };
+    let tip = |after: i64, sha: &str| orrery_world::RefTip {
+        clock_unix: DEFAULT_T0_UNIX + after,
+        sha: sha.to_string(),
+    };
+    let history = |name| w.ref_history(repo.id, name).unwrap();
+
+    push(
+        repo.id,
+        "refs/heads/trunk",
+        ABSENT,
+        SHA_A,
+        RefChange::Created,
+    );
+    w.advance_clock(60, by(sys.id)).unwrap();
+    push(repo.id, "refs/heads/trunk", SHA_A, SHA_B, RefChange::Moved);
+    // Another branch, and a branch of the same name in another repository,
+    // are no part of it.
+    push(
+        repo.id,
+        "refs/heads/side",
+        ABSENT,
+        SHA_B,
+        RefChange::Created,
+    );
+    push(
+        other.id,
+        "refs/heads/trunk",
+        ABSENT,
+        SHA_B,
+        RefChange::Created,
+    );
+    assert_eq!(history("refs/heads/trunk"), [tip(0, SHA_A), tip(60, SHA_B)]);
+    assert_eq!(history("refs/heads/side"), [tip(60, SHA_B)]);
+    assert_eq!(history("refs/heads/none"), []);
+
+    // A delete ends the history, and a branch made again starts another.
+    w.advance_clock(60, by(sys.id)).unwrap();
+    push(
+        repo.id,
+        "refs/heads/trunk",
+        SHA_B,
+        ABSENT,
+        RefChange::Deleted,
+    );
+    assert_eq!(history("refs/heads/trunk"), []);
+    push(
+        repo.id,
+        "refs/heads/trunk",
+        ABSENT,
+        SHA_B,
+        RefChange::Created,
+    );
+    assert_eq!(history("refs/heads/trunk"), [tip(120, SHA_B)]);
+}
+
+/// The v9 fixture's log, of entries older than events, creates and moves
+/// `main`, deletes `release`, and deletes `experiment` and creates it again.
+#[test]
+fn a_migrated_worlds_older_entries_are_part_of_a_refs_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("world");
+    std::fs::create_dir_all(&root).unwrap();
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v9.db");
+    std::fs::copy(fixture, root.join("world.db")).unwrap();
+    let w = World::open(&root).unwrap();
+    let webapp = w.repo_by_owner_name("acme", "webapp").unwrap().unwrap();
+    let shas = |name| {
+        w.ref_history(webapp.id, name)
+            .unwrap()
+            .into_iter()
+            .map(|tip| tip.sha)
+            .collect::<Vec<_>>()
+    };
+    let main = shas("refs/heads/main");
+    assert_eq!(main.len(), 2, "{main:?}");
+    assert_eq!(main[1], "3333333333333333333333333333333333333333");
+    assert_eq!(
+        shas("refs/heads/experiment"),
+        ["2222222222222222222222222222222222222222"]
+    );
+    assert_eq!(shas("refs/heads/release"), [] as [String; 0]);
+}
+
+#[test]
 fn a_reader_sees_all_of_a_push_or_none_of_it() {
     let (dir, w) = fresh();
     let (alice, _) = w.create_actor("alice", ActorKind::User).unwrap();

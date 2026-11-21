@@ -271,3 +271,239 @@ async fn a_body_is_read_as_github_reads_one_on_every_route() {
         );
     }
 }
+
+/// A revision can read a branch's history: `main@{1}` is what `main` held
+/// before its last move, and `main@{yesterday}` what it held then. Each
+/// answer here is what github.com gave on 2026-11-21 for a branch moved the
+/// same way.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revision_reads_a_branchs_history_as_github_reads_it() {
+    let inst = boot().await;
+    let base = inst.base.clone();
+    let alice = mint_actor(&base, "alice", "user");
+    let bot = mint_actor(&base, "ci", "bot");
+    let repo = face_ok(
+        "POST",
+        &format!("{base}/api/v3/user/repos"),
+        &alice,
+        json!({ "name": "web" }),
+    );
+    let clone_url = repo["clone_url"].as_str().unwrap();
+    let authed_url = clone_url.replace("http://", &format!("http://x-access-token:{alice}@"));
+    let started = inst.world.clock().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path();
+    let later = |seconds: i64| {
+        common::control_post(
+            &base,
+            "/_orrery/clock/advance",
+            json!({ "seconds": seconds }),
+        );
+    };
+    git(src, started, &["init", "-b", "main", "."]);
+    // Three commits, each pushed to `main` on its own, ten seconds apart.
+    let mut commits = Vec::new();
+    for (at, file) in ["README.md", "one.txt", "two.txt"].into_iter().enumerate() {
+        if at > 0 {
+            later(10);
+        }
+        std::fs::write(src.join(file), "text\n").unwrap();
+        git(src, started, &["add", "."]);
+        git(src, started, &["commit", "-m", file]);
+        commits.push(git(src, started, &["rev-parse", "HEAD"]).trim().to_string());
+        git(src, started, &["push", &authed_url, "main"]);
+    }
+    let (oldest, middle, newest) = (&commits[0], &commits[1], &commits[2]);
+    let push = |spec: &str| {
+        git(src, started, &["push", "--force", &authed_url, spec]);
+    };
+
+    let runs = format!("{base}/api/v3/repos/alice/web/check-runs");
+    // What a new check run on `rev` answers: the commit it is on, or none
+    // for a `422`.
+    let named = |rev: &str| -> Option<String> {
+        let body = json!({ "name": "history", "head_sha": rev }).to_string();
+        let (status, answer) = send("POST", &runs, &bot, body.as_bytes());
+        let answer: Value = serde_json::from_str(&answer).unwrap_or(Value::Null);
+        match status {
+            201 => Some(answer["head_sha"].as_str().unwrap().to_string()),
+            _ => {
+                assert_eq!(
+                    (status, &answer["message"]),
+                    (422, &json!(format!("No commit found for SHA: {rev}"))),
+                    "{rev}"
+                );
+                None
+            }
+        }
+    };
+    let holds = |cases: &[(&str, Option<&String>)]| {
+        for (rev, wanted) in cases {
+            assert_eq!(named(rev).as_ref(), *wanted, "{rev}");
+        }
+    };
+    // A time as text, the way it was sent to GitHub.
+    let time = |unix: i64| {
+        jiff::Timestamp::from_second(unix)
+            .unwrap()
+            .strftime("%Y-%m-%d %H:%M:%S +0000")
+            .to_string()
+    };
+
+    holds(&[
+        ("main@{0}", Some(newest)),
+        ("main@{1}", Some(middle)),
+        ("main@{2}", Some(oldest)),
+        ("main@{500}", None),
+        ("@{0}", Some(newest)),
+        ("@{1}", Some(middle)),
+        ("HEAD@{0}", Some(newest)),
+        ("HEAD@{1}", Some(middle)),
+        // A time before the branch was made reads as what it first held.
+        ("main@{yesterday}", Some(oldest)),
+        ("main@{1.year.ago}", Some(oldest)),
+        ("main@{now}", Some(newest)),
+        ("main@{upstream}", None),
+        ("main@{push}", None),
+        ("@{-1}", None),
+        ("refs/heads/main@{0}", Some(newest)),
+        ("refs/heads/main@{1}", Some(middle)),
+    ]);
+
+    // A second branch, made at the oldest commit and moved twice.
+    later(10);
+    let made = inst.world.clock().unwrap();
+    push(&format!("{oldest}:refs/heads/hist"));
+    later(10);
+    push(&format!("{middle}:refs/heads/hist"));
+    later(10);
+    push(&format!("{newest}:refs/heads/hist"));
+    holds(&[
+        ("hist@{0}", Some(newest)),
+        ("hist@{1}", Some(middle)),
+        ("hist@{2}", Some(oldest)),
+        ("hist@{3}", None),
+        ("hist@{4}", None),
+        (&format!("hist@{{{}}}", time(made + 5)), Some(oldest)),
+        (&format!("hist@{{{}}}", time(made + 15)), Some(middle)),
+        ("hist@{1.hour.ago}", Some(oldest)),
+        ("hist@{1}~1", Some(oldest)),
+        ("hist@{01}", Some(middle)),
+        // git reads these two as times, not as counts.
+        ("hist@{+1}", Some(oldest)),
+        ("hist@{ 1}", Some(oldest)),
+        ("hist@{}", None),
+        ("hist@{garbage}", None),
+        ("hist@{never}", None),
+        ("hist@{1}@{0}", None),
+        ("refs/heads/hist@{2}", Some(oldest)),
+        ("heads/hist@{2}", Some(oldest)),
+        ("HIST@{1}", None),
+    ]);
+
+    // Forced back, the branch holds a fourth entry, and the one past its
+    // first is still nothing.
+    later(10);
+    push(&format!("{oldest}:refs/heads/hist"));
+    holds(&[
+        ("hist@{0}", Some(oldest)),
+        ("hist@{1}", Some(newest)),
+        ("hist@{3}", Some(oldest)),
+        ("hist@{4}", None),
+    ]);
+
+    // A branch that is deleted loses its history, and one made again under
+    // its name starts a new one.
+    later(10);
+    push(":refs/heads/hist");
+    holds(&[("hist@{0}", None), ("hist@{1}", None)]);
+    later(10);
+    push(&format!("{middle}:refs/heads/hist"));
+    holds(&[
+        ("hist@{0}", Some(middle)),
+        ("hist@{1}", None),
+        ("hist@{2}", None),
+        ("hist@{1.hour.ago}", Some(middle)),
+    ]);
+
+    // A tag has no history, even of what it holds now.
+    push(&format!("{middle}:refs/tags/marked"));
+    push(&format!("{newest}:refs/tags/marked"));
+    holds(&[
+        ("marked@{0}", None),
+        ("marked@{1}", None),
+        ("refs/tags/marked@{1}", None),
+    ]);
+
+    // Every read that takes a revision reads a history the same way.
+    let api = format!("{base}/api/v3/repos/alice/web");
+    let get = |path: &str| common::face_answer("GET", &format!("{api}{path}"), &alice, &[], None);
+    let before = "main%40%7B1%7D";
+    let (status, commit) = get(&format!("/commits/{before}"));
+    assert_eq!((status, &commit["sha"]), (200, &json!(middle)), "{commit}");
+    let (status, file) = get(&format!("/contents/README.md?ref={before}"));
+    assert_eq!(
+        (status, &file["path"]),
+        (200, &json!("README.md")),
+        "{file}"
+    );
+    let (status, absent) = get(&format!("/contents/two.txt?ref={before}"));
+    assert_eq!((status, &absent["message"]), (404, &json!("Not Found")));
+    let (status, combined) = get(&format!("/commits/{before}/status"));
+    assert_eq!(
+        (status, &combined["sha"]),
+        (200, &json!(middle)),
+        "{combined}"
+    );
+    let (status, listed) = get(&format!("/commits/{before}/check-runs"));
+    // The check runs above share one name, and the list keeps its newest.
+    assert_eq!(
+        (status, &listed["total_count"]),
+        (200, &json!(1)),
+        "{listed}"
+    );
+    assert_eq!(listed["check_runs"][0]["head_sha"], json!(middle));
+    let (status, compared) = get(&format!("/compare/{before}...main"));
+    assert_eq!(
+        (status, &compared["ahead_by"]),
+        (200, &json!(1)),
+        "{compared}"
+    );
+
+    // A history that names nothing is answered as any revision that names
+    // nothing is, but for the contents of a file, where GitHub fails on a
+    // history git itself gives up on.
+    for (rev, contents) in [
+        ("nosuch", (404, "No commit found for the ref nosuch")),
+        ("main%40%7B500%7D", (500, "Internal Server Error")),
+        ("main%40%7Bnever%7D", (500, "Internal Server Error")),
+        ("main%40%7Bupstream%7D", (500, "Internal Server Error")),
+        (
+            "main%40%7Bgarbage%7D",
+            (404, "No commit found for the ref main@{garbage}"),
+        ),
+        (
+            "main%40%7B-1%7D",
+            (404, "No commit found for the ref main@{-1}"),
+        ),
+        (
+            "nosuch%40%7B0%7D",
+            (404, "No commit found for the ref nosuch@{0}"),
+        ),
+        (
+            "marked%40%7B0%7D",
+            (404, "No commit found for the ref marked@{0}"),
+        ),
+    ] {
+        let (status, answer) = get(&format!("/contents/README.md?ref={rev}"));
+        assert_eq!(
+            (status, answer["message"].as_str().unwrap()),
+            contents,
+            "{rev}"
+        );
+        let (status, _) = get(&format!("/commits/{rev}/status"));
+        assert_eq!(status, 404, "{rev}");
+        let (status, _) = get(&format!("/compare/{rev}...main"));
+        assert_eq!(status, 404, "{rev}");
+    }
+}

@@ -399,7 +399,7 @@ async fn commit_named(
     };
     let _refs = face.git.read_lock(repo.id).await;
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    crate::reads::resolve_commit(&bare, name).map_err(|e| Box::new(internal(e)))
+    crate::reads::resolve_commit(face, repo, &bare, name).map_err(|e| Box::new(internal(e)))
 }
 
 /// A time a body's member names. `Ok(None)` for a member that was not
