@@ -285,6 +285,24 @@ impl Setup {
         git(src, clock, &["push", "-q", &remote, head]);
         git(src, clock, &["rev-parse", "HEAD"]).trim().to_string()
     }
+
+    /// Push two commits at once on a new branch `head`, and answer the
+    /// first, which the repository holds and no push brought to a tip.
+    fn push_two(&self, head: &str) -> String {
+        let clock = self.inst.world.clock().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let src = work.path();
+        let remote = format!("{}/acme/web.git", self.base)
+            .replace("http://", &format!("http://x-access-token:{}@", self.alice));
+        git(src, clock, &["init", "-q", "-b", head, "."]);
+        for file in ["first.txt", "second.txt"] {
+            std::fs::write(src.join(file), format!("{head}\n")).unwrap();
+            git(src, clock, &["add", "."]);
+            git(src, clock, &["commit", "-q", "-m", file]);
+        }
+        git(src, clock, &["push", "-q", &remote, head]);
+        git(src, clock, &["rev-parse", "HEAD~1"]).trim().to_string()
+    }
 }
 
 fn signed(received: &Received, secret: &str) -> bool {
@@ -1471,7 +1489,7 @@ async fn a_suite_follows_its_check_runs_and_says_when_it_concludes() {
 
     // A check run on a commit no push brought to a tip makes a suite that
     // records no push.
-    let unpushed = "1".repeat(40);
+    let unpushed = s.push_two("deep");
     let alone =
         make(serde_json::json!({ "name": "build", "head_sha": unpushed, "conclusion": "success" }));
     let (_, _, made) = read(&format!("check-suites/{}", alone["check_suite"]["id"]));

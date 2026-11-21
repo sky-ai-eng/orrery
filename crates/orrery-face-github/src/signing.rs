@@ -187,7 +187,7 @@ pub(crate) async fn get_commit(
     // state of the repository: a push records its verdicts in the commit
     // that records its refs.
     let refs = face.git.read_lock(repo.id).await;
-    let commit = match resolve_commit(&bare, &rev) {
+    let commit = match resolve_commit(&face, &repo, &bare, &rev) {
         Ok(Some(sha)) => signature::read_commit(&bare, &sha),
         Ok(None) => Ok(None),
         Err(e) => Err(e),

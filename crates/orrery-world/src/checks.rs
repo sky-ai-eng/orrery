@@ -36,6 +36,9 @@ pub struct CheckRunPatch<'a> {
     pub completed_clock_unix: Option<i64>,
     /// More of what the run says of lines of files, kept after what it has.
     pub annotations: &'a [Annotation],
+    /// Whether a run that is completed stays so whatever `status` says,
+    /// which is decided on the row as the write finds it.
+    pub keep_completed: bool,
 }
 
 impl World {
@@ -111,7 +114,8 @@ impl World {
                     &format!(
                         "UPDATE check_runs SET
                              name = COALESCE(?1, name),
-                             status = COALESCE(?2, status),
+                             status = CASE WHEN ?10 AND status = 'completed' THEN status
+                                           ELSE COALESCE(?2, status) END,
                              conclusion = COALESCE(?3, conclusion),
                              details_url = COALESCE(?4, details_url),
                              external_id = COALESCE(?5, external_id),
@@ -131,7 +135,8 @@ impl World {
                         patch.output.map(|v| v.to_string()),
                         patch.started_clock_unix,
                         patch.completed_clock_unix,
-                        id
+                        id,
+                        patch.keep_completed
                     ],
                     queries::row_to_check_run,
                 )

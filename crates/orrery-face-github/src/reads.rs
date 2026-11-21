@@ -395,14 +395,32 @@ pub(crate) async fn get_contents(
         Err(resp) => return *resp,
     };
     let query = query.unwrap_or_default();
-    let rev = query_param(&query, "ref").unwrap_or_else(|| "HEAD".to_string());
+    let given = query_param(&query, "ref").filter(|given| !given.is_empty());
+    let rev = given.clone().unwrap_or_else(|| "HEAD".to_string());
     let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
-    let spec = format!("{rev}:{path}");
     let refs = face.git.read_lock(repo.id).await;
+    let commit = match resolve_commit(&face, &repo, &bare, &rev) {
+        Ok(Some(sha)) => sha,
+        Ok(None) if given.is_some() => {
+            // GitHub fails on a history git dies of, and only on this route.
+            return match history_read_dies(&face, &repo, &bare, &rev) {
+                Ok(true) => {
+                    github_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+                }
+                Ok(false) => github_error(
+                    StatusCode::NOT_FOUND,
+                    &format!("No commit found for the ref {rev}"),
+                ),
+                Err(e) => internal(e),
+            };
+        }
+        Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
+        Err(e) => return internal(e),
+    };
     // A directory answers 404 here where GitHub would return a listing —
     // accepted divergence, because a consumer reading contents fetches a file
     // and treats exactly 404 as absent.
-    let blob_sha = match store::rev_parse(&bare, &spec) {
+    let blob_sha = match store::rev_parse(&bare, &format!("{commit}:{path}")) {
         Ok(Some(sha)) => sha,
         Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
         Err(e) => return internal(e),
@@ -611,15 +629,61 @@ pub(crate) async fn get_branch_ref(
         .expect("static response parts are valid")
 }
 
+/// The object a caller's revision names, or `None` when it names nothing.
+/// One that reads a branch's history, as `main@{1}` does, reads the moves
+/// the world logged for that branch.
+pub(crate) fn resolve(
+    face: &GithubFace,
+    repo: &orrery_world::Repo,
+    bare: &std::path::Path,
+    rev: &str,
+) -> Result<Option<String>, orrery_face_git::GitFaceError> {
+    let Some(branch) = store::history_branch(bare, rev)? else {
+        return store::rev_parse(bare, rev);
+    };
+    let tips = face.world.ref_history(repo.id, &branch)?;
+    store::rev_parse_in_history(bare, rev, &held(&tips), face.world.clock()?)
+}
+
+/// Whether a revision [`resolve`] found nothing for is one git dies of.
+fn history_read_dies(
+    face: &GithubFace,
+    repo: &orrery_world::Repo,
+    bare: &std::path::Path,
+    rev: &str,
+) -> Result<bool, orrery_face_git::GitFaceError> {
+    let Some(branch) = store::history_branch(bare, rev)? else {
+        return Ok(false);
+    };
+    let tips = face.world.ref_history(repo.id, &branch)?;
+    store::history_read_dies(bare, rev, &held(&tips), face.world.clock()?)
+}
+
+fn held(tips: &[orrery_world::RefTip]) -> Vec<store::Held<'_>> {
+    tips.iter()
+        .map(|tip| store::Held {
+            at: tip.clock_unix,
+            oid: &tip.sha,
+        })
+        .collect()
+}
+
 /// A commit-ish as a commit id, or `None` when it names nothing.
 pub(crate) fn resolve_commit(
+    face: &GithubFace,
+    repo: &orrery_world::Repo,
     bare: &std::path::Path,
     rev: &str,
 ) -> Result<Option<String>, orrery_face_git::GitFaceError> {
     if rev.is_empty() {
         return Ok(None);
     }
-    store::rev_parse(bare, &format!("{rev}^{{commit}}"))
+    // The revision is read whole before it is read as a commit: `:/fix`
+    // searches the messages for all that follows it.
+    match resolve(face, repo, bare, rev)? {
+        Some(object) => store::rev_parse(bare, &format!("{object}^{{commit}}")),
+        None => Ok(None),
+    }
 }
 
 fn compare_json(
@@ -682,7 +746,7 @@ pub(crate) async fn compare(
     let refs = face.git.read_lock(repo.id).await;
     let mut ends = [String::new(), String::new()];
     for (end, rev) in ends.iter_mut().zip([base_rev, head_rev]) {
-        match resolve_commit(&bare, rev) {
+        match resolve_commit(&face, &repo, &bare, rev) {
             Ok(Some(sha)) => *end = sha,
             Ok(None) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
             Err(e) => return internal(e),

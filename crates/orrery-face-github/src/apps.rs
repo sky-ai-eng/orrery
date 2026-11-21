@@ -103,6 +103,7 @@ pub fn app_router(face: GithubFace) -> Router {
     Router::new()
         .merge(as_client)
         .merge(as_app)
+        .layer(middleware::from_fn(crate::read_body_as_github))
         .with_state(face)
 }
 

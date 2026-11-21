@@ -218,28 +218,250 @@ pub fn ref_lock_files(bare: &Path) -> Result<Vec<PathBuf>, GitFaceError> {
 /// a revision, so such a name resolves to nothing without running git. A
 /// branch whose name starts with `-` still resolves by its `refs/heads/` name.
 pub fn rev_parse(bare: &Path, rev: &str) -> Result<Option<String>, GitFaceError> {
-    if rev.starts_with('-') {
+    // A revision git would read as an option, or that cannot be handed to
+    // it as one argument, names nothing.
+    if rev.starts_with('-') || rev.contains('\0') || rev.len() > MAX_REV_BYTES {
         return Ok(None);
     }
     let (status, stdout, _) =
         run_raw(hermetic_git(bare).args(["rev-parse", "--verify", "--quiet", rev]))?;
-    if !status.success() {
+    let oid = stdout.trim();
+    // git answers `^main` with the commit's id behind a `^`, which is a
+    // range and names no object.
+    if !status.success() || !is_oid(oid) {
         return Ok(None);
     }
-    Ok(Some(stdout.trim().to_string()))
+    if host_folds_case(bare) && !names_ref_exactly(bare, name_of(rev))? {
+        return Ok(None);
+    }
+    Ok(Some(oid.to_string()))
+}
+
+/// A commit a branch held, and the time it came to hold it, by the world's
+/// clock.
+#[derive(Debug, Clone, Copy)]
+pub struct Held<'a> {
+    pub at: i64,
+    pub oid: &'a str,
+}
+
+/// Where the `@{` of a revision begins when git reads it as a mark on a
+/// ref's name, as in `main@{1}` and `main@{yesterday}:README.md`. A `:`
+/// before it begins a path or a search, which may hold any text, and a `^`
+/// or a `~` before it leaves no name for it to mark.
+fn history_mark(rev: &str) -> Option<usize> {
+    let at = rev.find("@{")?;
+    (!rev[..at].contains(['~', '^', ':'])).then_some(at)
+}
+
+/// The branch whose history `rev` reads, by its full name, when `rev` reads
+/// one: `refs/heads/main` for `main@{1}` and `heads/main@{1}`, and the
+/// branch `HEAD` names for `@{1}` and `HEAD@{1}`. `None` for any other
+/// revision, [`rev_parse`]'s to read, and for one that marks a name that is
+/// no branch's exactly: git keeps a history for branches and none for tags.
+pub fn history_branch(bare: &Path, rev: &str) -> Result<Option<String>, GitFaceError> {
+    if rev.starts_with('-') || rev.contains('\0') || rev.len() > MAX_REV_BYTES {
+        return Ok(None);
+    }
+    let Some(at) = history_mark(rev) else {
+        return Ok(None);
+    };
+    let name = &rev[..at];
+    if matches!(name, "" | "@" | "HEAD") {
+        let (status, stdout, _) =
+            run_raw(hermetic_git(bare).args(["symbolic-ref", "--quiet", "HEAD"]))?;
+        let branch = stdout.trim();
+        return Ok((status.success() && branch.starts_with("refs/heads/")).then(|| branch.into()));
+    }
+    // The names git tries for a ref, in its order, that could be a
+    // branch's.
+    for full in [
+        name.to_string(),
+        format!("refs/{name}"),
+        format!("refs/heads/{name}"),
+    ] {
+        if !full.starts_with("refs/heads/") {
+            continue;
+        }
+        // A listing reads each ref's own name, in its own case.
+        let (_, listed, _) =
+            run_raw(hermetic_git(bare).args(["for-each-ref", "--format=%(refname)", &full]))?;
+        if listed.lines().any(|line| line == full) {
+            return Ok(Some(full));
+        }
+    }
+    Ok(None)
+}
+
+/// The object `rev` names when it reads the history of the branch
+/// [`history_branch`] found for it, where `held` is each commit that branch
+/// has held, oldest first, and `now` is the world's clock. `None` when it
+/// names nothing: an entry the history does not reach, or text git reads as
+/// no time.
+pub fn rev_parse_in_history(
+    bare: &Path,
+    rev: &str,
+    held: &[Held<'_>],
+    now: i64,
+) -> Result<Option<String>, GitFaceError> {
+    Ok(read_history(bare, rev, held, now)?.0)
+}
+
+/// Whether git gives up on `rev`, a revision [`rev_parse_in_history`] finds
+/// nothing for, with an error of its own, where for most it only answers
+/// that it names nothing: a count the history does not reach, `never`, and
+/// a branch's upstream or push target, which a served repository has none
+/// of.
+pub fn history_read_dies(
+    bare: &Path,
+    rev: &str,
+    held: &[Held<'_>],
+    now: i64,
+) -> Result<bool, GitFaceError> {
+    let Some(at) = history_mark(rev) else {
+        return Ok(false);
+    };
+    let mark = &rev[at + 2..];
+    let mark = mark.split_once('}').map_or(mark, |(mark, _)| mark);
+    if ["u", "upstream", "push"]
+        .iter()
+        .any(|word| mark.eq_ignore_ascii_case(word))
+    {
+        return Ok(true);
+    }
+    Ok(read_history(bare, rev, held, now)?.1)
+}
+
+/// What git makes of a revision that reads a branch's history: the object
+/// it names, and whether git died of it.
+///
+/// A world's repositories keep no reflog: git would write one with the
+/// host's time and the host's account. So git reads the mark from a log
+/// written out for this one call, in a repository of its own that borrows
+/// `bare`'s objects, and with `now` as the time `yesterday` counts from.
+fn read_history(
+    bare: &Path,
+    rev: &str,
+    held: &[Held<'_>],
+    now: i64,
+) -> Result<(Option<String>, bool), GitFaceError> {
+    let (Some(at), Some(tip)) = (history_mark(rev), held.last()) else {
+        return Ok((None, false));
+    };
+    let dir = tempfile::tempdir()?;
+    let git_dir = dir.path();
+    std::fs::create_dir_all(git_dir.join("objects/info"))?;
+    std::fs::create_dir_all(git_dir.join("refs/heads"))?;
+    std::fs::create_dir_all(git_dir.join("logs/refs/heads"))?;
+    std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/held\n")?;
+    std::fs::write(
+        git_dir.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n\tbare = true\n",
+    )?;
+    let objects = std::fs::canonicalize(bare.join("objects"))?;
+    std::fs::write(
+        git_dir.join("objects/info/alternates"),
+        format!("{}\n", objects.display()),
+    )?;
+    std::fs::write(git_dir.join("refs/heads/held"), format!("{}\n", tip.oid))?;
+    let mut log = String::new();
+    let mut before = "0".repeat(tip.oid.len());
+    for entry in held {
+        log.push_str(&format!(
+            "{before} {} orrery <orrery@orrery.invalid> {} +0000\tmoved\n",
+            entry.oid, entry.at
+        ));
+        before = entry.oid.to_string();
+    }
+    std::fs::write(git_dir.join("logs/refs/heads/held"), log)?;
+    let marked = format!("held{}", &rev[at..]);
+    let (status, stdout, _) = run_raw(
+        hermetic_git(git_dir)
+            .env("GIT_DIR", git_dir)
+            .env("GIT_TEST_DATE_NOW", now.to_string())
+            .args(["rev-parse", "--verify", "--quiet", &marked]),
+    )?;
+    let oid = stdout.trim();
+    let named = (status.success() && is_oid(oid)).then(|| oid.to_string());
+    // git exits 1 for a revision that names nothing and 128 when it dies.
+    Ok((named, status.code() == Some(128)))
+}
+
+/// The longest revision git is asked for, in bytes. A ref's name is a path
+/// and cannot be longer.
+const MAX_REV_BYTES: usize = 4096;
+
+/// Whether the host's file system finds a file under a name in another
+/// case. git finds a loose ref through the file system, so on such a host
+/// it finds `refs/heads/main` for `MAIN` and `HEAD` for `head`, which no
+/// world may take from its host.
+fn host_folds_case(bare: &Path) -> bool {
+    bare.join("head").exists()
+}
+
+/// What of a revision git looks up as a name: `main` of `main~1`, of
+/// `main^{commit}`, of `main:README.md`, and of `main@{1}`.
+fn name_of(rev: &str) -> &str {
+    let end = rev
+        .find(['~', '^', ':'])
+        .into_iter()
+        .chain(rev.find("@{"))
+        .min()
+        .unwrap_or(rev.len());
+    &rev[..end]
+}
+
+/// Whether `name`, where git reads it as a ref, is a ref spelled exactly
+/// so. `true` for a name git reads as no ref, such as a sha.
+fn names_ref_exactly(bare: &Path, name: &str) -> Result<bool, GitFaceError> {
+    if name.is_empty() {
+        return Ok(true);
+    }
+    let args = [
+        "rev-parse",
+        "--symbolic-full-name",
+        "--verify",
+        "--quiet",
+        name,
+    ];
+    let (status, stdout, _) = run_raw(hermetic_git(bare).args(args))?;
+    let full = stdout.trim();
+    if !status.success() || full.is_empty() {
+        return Ok(true);
+    }
+    // `HEAD` and `@` are the names git follows to a ref of another name.
+    let named = matches!(name, "HEAD" | "@") || full == name || full.ends_with(&format!("/{name}"));
+    if !named {
+        return Ok(false);
+    }
+    // A listing reads each ref's own name, in its own case.
+    let (_, listed, _) =
+        run_raw(hermetic_git(bare).args(["for-each-ref", "--format=%(refname)", full]))?;
+    Ok(listed.lines().any(|line| line == full))
 }
 
 /// The commit a branch points at; `None` when the repository has no branch
 /// of exactly that name. This reads no revision syntax, which [`rev_parse`]
 /// does: `main~1` names no branch.
 pub fn branch_tip(bare: &Path, branch: &str) -> Result<Option<String>, GitFaceError> {
-    let name = format!("refs/heads/{branch}");
-    let (status, stdout, _) =
-        run_raw(hermetic_git(bare).args(["show-ref", "--verify", "--hash", &name]))?;
-    if !status.success() {
+    if branch.contains('\0') || branch.len() > MAX_REV_BYTES {
         return Ok(None);
     }
-    Ok(Some(stdout.trim().to_string()))
+    let name = format!("refs/heads/{branch}");
+    // A listing reads each ref's own name, so it finds no `main` for
+    // `MAIN` on a host whose file system would.
+    let args = ["for-each-ref", "--format=%(objectname) %(refname)", &name];
+    let (status, stdout, stderr) = run_raw(hermetic_git(bare).args(args))?;
+    if !status.success() {
+        return Err(GitFaceError::Git {
+            args: args.join(" "),
+            stderr,
+        });
+    }
+    Ok(stdout.lines().find_map(|line| {
+        let (oid, listed) = line.split_once(' ')?;
+        (listed == name).then(|| oid.to_string())
+    }))
 }
 
 /// Each of `revs` resolved as [`rev_parse`] resolves it, by one `git cat-file
@@ -277,7 +499,8 @@ pub fn rev_parse_many(bare: &Path, revs: &[&str]) -> Result<Vec<Option<String>>,
         if line == format!("{rev} missing") || line == format!("{rev} ambiguous") {
             oids.push(None);
         } else if is_oid(line) {
-            oids.push(Some(line.to_string()));
+            let exact = !host_folds_case(bare) || names_ref_exactly(bare, name_of(rev))?;
+            oids.push(exact.then(|| line.to_string()));
         } else {
             return Err(GitFaceError::Cgi(format!(
                 "cat-file --batch-check answered {line:?} for {rev:?}"

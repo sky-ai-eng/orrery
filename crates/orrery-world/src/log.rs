@@ -332,50 +332,101 @@ impl World {
     /// count as the ref events they were.
     pub fn logged_refs(&self) -> Result<BTreeMap<i64, BTreeMap<String, String>>> {
         let conn = self.lock();
-        let by_name: BTreeMap<String, i64> = queries::list_repos(&conn)?
-            .into_iter()
-            .map(|r| (r.full_name(), r.id))
-            .collect();
-        let mut stmt = conn.prepare(
-            "SELECT seq, type, body FROM action_log
-             WHERE type IN ('ref:created', 'ref:updated', 'ref:deleted', 'ref.update')
-             ORDER BY seq",
-        )?;
-        let mut rows = stmt.query([])?;
         let mut refs: BTreeMap<i64, BTreeMap<String, String>> = BTreeMap::new();
-        while let Some(row) = rows.next()? {
-            let seq: i64 = row.get(0)?;
-            let kind: String = row.get(1)?;
-            let body: String = row.get(2)?;
-            let malformed = |e: &dyn std::fmt::Display| {
-                conversion_failure(2, format!("log entry {seq} ({kind}): {e}"))
+        each_ref_move(&conn, |moved| {
+            let repo = refs.entry(moved.repo_id).or_default();
+            match moved.sha {
+                Some(sha) => repo.insert(moved.name, sha),
+                None => repo.remove(&moved.name),
             };
-            let (repo_id, name, sha) = if kind == "ref.update" {
-                let entry: LegacyRefUpdate =
-                    serde_json::from_str(&body).map_err(|e| malformed(&e))?;
-                let repo_id = *by_name
-                    .get(&entry.repo)
-                    .ok_or_else(|| malformed(&format!("no repository {}", entry.repo)))?;
-                let deleted = entry.new.bytes().all(|b| b == b'0');
-                (repo_id, entry.name, (!deleted).then_some(entry.new))
-            } else {
-                let entry: RefEntry = serde_json::from_str(&body).map_err(|e| malformed(&e))?;
-                let sha = match (kind.as_str(), entry.object, entry.changes) {
-                    ("ref:created", Some(object), _) => Some(object.sha),
-                    ("ref:updated", _, Some(RefChanges { sha: Some(sha), .. })) => Some(sha.to),
-                    ("ref:deleted", _, _) => None,
-                    _ => return Err(malformed(&"it names no sha").into()),
-                };
-                (entry.subject.repo.id, entry.subject.name, sha)
-            };
-            let repo = refs.entry(repo_id).or_default();
-            match sha {
-                Some(sha) => repo.insert(name, sha),
-                None => repo.remove(&name),
-            };
-        }
+        })?;
         Ok(refs)
     }
+
+    /// Each sha a ref has held since it was last created, oldest first, with
+    /// the clock at the write that brought it there: what the log's ref
+    /// events say of it, as [`World::logged_refs`] reads them. Empty for a
+    /// ref no event made, and for one the last event about it deleted.
+    pub fn ref_history(&self, repo_id: i64, name: &str) -> Result<Vec<RefTip>> {
+        let conn = self.lock();
+        let mut tips = Vec::new();
+        each_ref_move(&conn, |moved| {
+            if moved.repo_id != repo_id || moved.name != name {
+                return;
+            }
+            match moved.sha {
+                Some(sha) => tips.push(RefTip {
+                    clock_unix: moved.clock_unix,
+                    sha,
+                }),
+                None => tips.clear(),
+            }
+        })?;
+        Ok(tips)
+    }
+}
+
+/// A sha a ref held, and the clock when it came to hold it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefTip {
+    pub clock_unix: i64,
+    pub sha: String,
+}
+
+/// One ref event of the log: the ref, and the sha the event left it at, or
+/// none for a delete.
+struct RefMoved {
+    clock_unix: i64,
+    repo_id: i64,
+    name: String,
+    sha: Option<String>,
+}
+
+/// Every ref event of the log, in its order.
+fn each_ref_move(conn: &Connection, mut each: impl FnMut(RefMoved)) -> Result<()> {
+    let by_name: BTreeMap<String, i64> = queries::list_repos(conn)?
+        .into_iter()
+        .map(|r| (r.full_name(), r.id))
+        .collect();
+    let mut stmt = conn.prepare(
+        "SELECT seq, type, body, clock_unix FROM action_log
+         WHERE type IN ('ref:created', 'ref:updated', 'ref:deleted', 'ref.update')
+         ORDER BY seq",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let seq: i64 = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let body: String = row.get(2)?;
+        let clock_unix: i64 = row.get(3)?;
+        let malformed = |e: &dyn std::fmt::Display| {
+            conversion_failure(2, format!("log entry {seq} ({kind}): {e}"))
+        };
+        let (repo_id, name, sha) = if kind == "ref.update" {
+            let entry: LegacyRefUpdate = serde_json::from_str(&body).map_err(|e| malformed(&e))?;
+            let repo_id = *by_name
+                .get(&entry.repo)
+                .ok_or_else(|| malformed(&format!("no repository {}", entry.repo)))?;
+            let deleted = entry.new.bytes().all(|b| b == b'0');
+            (repo_id, entry.name, (!deleted).then_some(entry.new))
+        } else {
+            let entry: RefEntry = serde_json::from_str(&body).map_err(|e| malformed(&e))?;
+            let sha = match (kind.as_str(), entry.object, entry.changes) {
+                ("ref:created", Some(object), _) => Some(object.sha),
+                ("ref:updated", _, Some(RefChanges { sha: Some(sha), .. })) => Some(sha.to),
+                ("ref:deleted", _, _) => None,
+                _ => return Err(malformed(&"it names no sha").into()),
+            };
+            (entry.subject.repo.id, entry.subject.name, sha)
+        };
+        each(RefMoved {
+            clock_unix,
+            repo_id,
+            name,
+            sha,
+        });
+    }
+    Ok(())
 }
 
 /// The fields of a ref event that say where it left the ref. The commits it

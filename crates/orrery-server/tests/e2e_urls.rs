@@ -485,8 +485,10 @@ fn check(rendered: &Rendered, roots: &Roots) {
             keys.insert(key.clone());
             match key.as_str() {
                 // An App's `external_url` is its page, as the world has no
-                // site of the App's own to name.
-                "html_url" | "clone_url" | "external_url" | "diff_url" | "patch_url" => {
+                // site of the App's own to name, and a check run sent no
+                // `details_url` has its App's.
+                "html_url" | "clone_url" | "external_url" | "details_url" | "diff_url"
+                | "patch_url" => {
                     assert!(page(&url), "{what} {path}: {url}")
                 }
                 // Avatars are never served, at a host that can't resolve.

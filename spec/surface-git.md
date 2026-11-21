@@ -32,6 +32,8 @@ Each repository is a bare repository at `<world>/repos/<owner>/<repo>.git`, crea
 | `receive.hideRefs = refs/pull` | A push to a pull request's ref is refused, as on GitHub ("Pull request refs") |
 | `gc.auto = 0` | Object files are never rewritten, so a snapshot can share them with the live world |
 
+A repository keeps no reflog: git would write one with the host's time and the host's account. What a branch held before is read from the world's log, which records every move of a ref with the world's clock (`surface-github.md` §1.8, "A branch's history").
+
 Every `git` the engine runs, `http-backend` included, runs hermetically, so nothing of the operator's git setup changes a world. Its environment starts empty and holds only:
 
 - `PATH`, copied from the engine's own, since git finds the programs it runs through it, `ssh-keygen` among them;
