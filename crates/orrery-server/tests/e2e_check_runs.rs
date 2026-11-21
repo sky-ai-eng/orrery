@@ -290,6 +290,14 @@ async fn a_revision_reads_a_branchs_history_as_github_reads_it() {
     );
     let clone_url = repo["clone_url"].as_str().unwrap();
     let authed_url = clone_url.replace("http://", &format!("http://x-access-token:{alice}@"));
+    // git reads `hist@{+1}` and `hist@{ 1}` as the first of the month. The
+    // world starts on a first, so every commit would fall after that day;
+    // GitHub was seen on the 21st, where the first is before them all.
+    common::control_post(
+        &base,
+        "/_orrery/clock/advance",
+        json!({ "seconds": 10 * 86_400 }),
+    );
     let started = inst.world.clock().unwrap();
     let work = tempfile::tempdir().unwrap();
     let src = work.path();
