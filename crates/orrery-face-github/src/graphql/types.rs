@@ -1090,12 +1090,18 @@ impl GqlCheckRun {
         self.run.completed_clock_unix.map(rfc3339)
     }
 
-    /// A job's is its page, as REST answers it.
+    /// As REST answers it: a job's is its page, and a check run sent none
+    /// has its App's.
     async fn details_url(&self, ctx: &Context<'_>) -> Result<Option<String>, Error> {
-        let Some(job) = &self.run.job else {
-            return Ok(self.run.details_url.clone());
-        };
         let face = face(ctx);
+        let Some(job) = &self.run.job else {
+            if self.run.details_url.is_some() {
+                return Ok(self.run.details_url.clone());
+            }
+            let app =
+                crate::render::check_run_app(face, &self.run.creator_login).map_err(internal)?;
+            return Ok(crate::render::app_page(face, &app));
+        };
         let repo = face.world.repo_by_id(self.run.repo_id).map_err(internal)?;
         Ok(repo.map(|repo| crate::actions::job_html_url(face, &repo, job.run_id, self.run.id)))
     }

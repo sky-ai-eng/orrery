@@ -2,6 +2,7 @@
 //! generously (rule 1: fields liberal, endpoints strict). The fields each
 //! object carries are listed in spec/surface-github.md §1.0.
 
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 use orrery_face_git::{GitFaceError, store};
@@ -389,7 +390,28 @@ pub(crate) fn check_run_json(
     let html_url = job_url
         .clone()
         .unwrap_or_else(|| format!("{web}/{full_name}/runs/{}", run.id));
-    let details_url = job_url.or_else(|| run.details_url.clone());
+    let app = check_run_app(face, &run.creator_login)?;
+    let details_url = job_url
+        .or_else(|| run.details_url.clone())
+        .or_else(|| app_page(face, &app));
+    // GitHub answers a string always: nothing for a check run sent none,
+    // and for a job an id of its runner's making, which a world derives
+    // from the job's own.
+    let external_id = match (&run.external_id, &run.job) {
+        (Some(id), _) => id.clone(),
+        (None, None) => String::new(),
+        (None, Some(_)) => {
+            let hash = hex::encode(Sha256::digest(format!("job external id {}", run.id)));
+            format!(
+                "{}-{}-{}-{}-{}",
+                &hash[..8],
+                &hash[8..12],
+                &hash[12..16],
+                &hash[16..20],
+                &hash[20..32]
+            )
+        }
+    };
     // GitHub answers these three of what a check run was sent as its
     // output, and null for each it was not.
     let said = |key: &str| {
@@ -406,7 +428,7 @@ pub(crate) fn check_run_json(
         "head_sha": run.head_sha,
         "status": run.status.as_str(),
         "conclusion": run.conclusion.map(|c| c.as_str()),
-        "external_id": run.external_id,
+        "external_id": external_id,
         "details_url": details_url,
         "url": format!("{api}/repos/{full_name}/check-runs/{}", run.id),
         "html_url": html_url,
@@ -423,8 +445,17 @@ pub(crate) fn check_run_json(
             ),
         },
         "check_suite": { "id": run.suite_id },
-        "app": check_run_app(face, &run.creator_login)?,
+        "app": app,
     }))
+}
+
+/// What a check run sent no `details_url` answers as one: its App's page,
+/// which GitHub answers as the App's `external_url`.
+pub(crate) fn app_page(face: &GithubFace, app: &serde_json::Value) -> Option<String> {
+    let page = app.get("external_url").and_then(|url| url.as_str());
+    let slug = app.get("slug").and_then(|slug| slug.as_str());
+    page.map(str::to_string)
+        .or_else(|| slug.map(|slug| format!("{}/apps/{slug}", face.layout.web())))
 }
 
 /// The App a check run names as its creator: the bot's App, as `GET /app`
@@ -461,10 +492,30 @@ pub(crate) fn owner_type(kind: ActorKind) -> &'static str {
     }
 }
 
+/// A time as GitHub writes one: `2026-01-02T03:04:05Z`. Every second of
+/// every year a time is sent with, 0000 to 9999, has a spelling, so the
+/// calendar is worked here and not by a library with narrower bounds.
 pub(crate) fn rfc3339(unix: i64) -> String {
-    jiff::Timestamp::from_second(unix)
-        .map(|t| t.to_string())
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+    let (days, second) = (unix.div_euclid(86_400), unix.rem_euclid(86_400));
+    // Days are counted from 0000-03-01, in eras of 400 years, so a leap
+    // day is the last of its year.
+    let shifted = days + 719_468;
+    let (era, of_era) = (shifted.div_euclid(146_097), shifted.rem_euclid(146_097));
+    let year_of_era = (of_era - of_era / 1_460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * of_year + 2) / 153;
+    let day = of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = match shifted_month < 10 {
+        true => shifted_month + 3,
+        false => shifted_month - 9,
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        second / 3600,
+        second % 3600 / 60,
+        second % 60
+    )
 }
 
 /// GitHub's label object, holding what a pull's label carries. Orrery keeps

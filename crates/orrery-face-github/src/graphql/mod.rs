@@ -56,7 +56,7 @@ pub async fn handle(
     caller: Caller,
     body: &[u8],
 ) -> Response<Body> {
-    let Ok(req) = serde_json::from_slice::<HttpRequest>(body) else {
+    let Ok(req) = serde_json::from_slice::<HttpRequest>(&crate::sent::as_github_reads(body)) else {
         return crate::github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON");
     };
     let parsed = async_graphql::parser::parse_query(&req.query);

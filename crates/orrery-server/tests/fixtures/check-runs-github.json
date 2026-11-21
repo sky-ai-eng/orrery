@@ -1,0 +1,1044 @@
+{
+"observed": "2026-11-21",
+"scenarios": [
+{"from": "round 18", "steps": [
+  {"label": "empty object", "method": "POST", "body": "{}", "status": 422, "message": "Invalid request.\n\n\"head_sha\", \"name\" weren't supplied."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "name alone", "method": "POST", "body": "{\"name\": \"p\"}", "status": 422, "message": "Invalid request.\n\n\"head_sha\" wasn't supplied."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "head_sha alone", "method": "POST", "body": "{\"head_sha\": \"{sha}\"}", "status": 422, "message": "Invalid request.\n\n\"name\" wasn't supplied."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "an array", "method": "POST", "body": "[]", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', [] is not an object."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "a string", "method": "POST", "body": "\"x\"", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', \"x\" is not an object."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "a number", "method": "POST", "body": "5", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', 5 is not an object."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "null", "method": "POST", "body": "null", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', nil is not an object."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "no body", "method": "POST", "body": "", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', nil is not an object."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "not JSON", "method": "POST", "body": "{", "status": 422, "message": "Invalid request.\n\n\"head_sha\", \"name\" weren't supplied."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "an unknown key", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"bogus\": 1}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "name a number", "method": "POST", "body": "{\"name\": 5, \"head_sha\": \"{sha}\"}", "status": 422, "message": "Invalid request.\n\nFor 'properties/name', 5 is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "name null", "method": "POST", "body": "{\"name\": null, \"head_sha\": \"{sha}\"}", "status": 422, "message": "Invalid request.\n\nFor 'properties/name', nil is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "name empty", "method": "POST", "body": "{\"name\": \"\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "name spaces", "method": "POST", "body": "{\"name\": \"   \", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "   ", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "name true", "method": "POST", "body": "{\"name\": true, \"head_sha\": \"{sha}\"}", "status": 422, "message": "Invalid request.\n\nFor 'properties/name', true is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "name an array", "method": "POST", "body": "{\"name\": [], \"head_sha\": \"{sha}\"}", "status": 422, "message": "Invalid request.\n\nFor 'properties/name', [] is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "name 300 long", "method": "POST", "body": "{\"name\": \"{rep:n:300}\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "{rep:n:300}", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "name 70000 long", "method": "POST", "body": "{\"name\": \"{rep:n:70000}\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "{rep:n:1024}", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "head_sha a number", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": 5}", "status": 422, "message": "Invalid request.\n\nFor 'properties/head_sha', 5 is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "head_sha null", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": null}", "status": 422, "message": "Invalid request.\n\nFor 'properties/head_sha', nil is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "head_sha empty", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"\"}", "status": 422, "message": "No commit found for SHA: "}
+]},
+{"from": "round 18", "steps": [
+  {"label": "head_sha three letters", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"abc\"}", "status": 422, "message": "No commit found for SHA: abc"}
+]},
+{"from": "round 18", "steps": [
+  {"label": "head_sha of no commit", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"0000000000000000000000000000000000000000\"}", "status": 422, "message": "No commit found for SHA: 0000000000000000000000000000000000000000"}
+]},
+{"from": "round 18", "steps": [
+  {"label": "head_sha abbreviated", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha7}\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "head_sha a branch", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"main\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "head_sha in capitals", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{SHA}\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "head_sha 41 long", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}0\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "head_sha 40 letters, not hex", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"}", "status": 422, "message": "No commit found for SHA: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}
+]},
+{"from": "round 18", "steps": [
+  {"label": "details_url a number", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"details_url\": 5}", "status": 422, "message": "Invalid request.\n\nFor 'properties/details_url', 5 is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "details_url null", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"details_url\": null}", "status": 422, "message": "Invalid request.\n\nFor 'properties/details_url', nil is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "details_url empty", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"details_url\": \"\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]}
+]},
+{"from": "round 18", "steps": [
+  {"label": "details_url no url", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"details_url\": \"not a url\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 18", "steps": [
+  {"label": "details_url ftp", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"details_url\": \"ftp://example.com/x\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]}
+]},
+{"from": "round 18", "steps": [
+  {"label": "details_url https", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/details\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https://example.com/details", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "details_url 3000 long", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"details_url\": \"{rep:u:3000}\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]}
+]},
+{"from": "round 18", "steps": [
+  {"label": "external_id a number", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"external_id\": 5}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 5 is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "external_id null", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"external_id\": null}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', nil is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "external_id empty", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"external_id\": \"\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "external_id given", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"external_id\": \"ext-1\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "ext-1"}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "external_id 300 long", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"external_id\": \"{rep:e:300}\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "{rep:e:255}"}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "external_id 70000 long", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"external_id\": \"{rep:e:70000}\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "{rep:e:255}"}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status bogus", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"bogus\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\nbogus is not a member of [\"queued\", \"in_progress\", \"completed\"].\nbogus is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\nbogus is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status a number", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": 5}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n5 is not a member of [\"queued\", \"in_progress\", \"completed\"].\nFor 'properties/status', 5 is not a string.\n5 is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\n5 is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status null", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": null}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n is not a member of [\"queued\", \"in_progress\", \"completed\"].\nFor 'properties/status', nil is not a string.\n is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\n is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status empty", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n is not a member of [\"queued\", \"in_progress\", \"completed\"].\n is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\n is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status waiting", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"waiting\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\nwaiting is not a member of [\"queued\", \"in_progress\", \"completed\"].\nwaiting is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\nwaiting is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status requested", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"requested\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\nrequested is not a member of [\"queued\", \"in_progress\", \"completed\"].\nrequested is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\nrequested is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status pending", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"pending\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\npending is not a member of [\"queued\", \"in_progress\", \"completed\"].\npending is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\npending is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status capitals", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"COMPLETED\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\nCOMPLETED is not a member of [\"queued\", \"in_progress\", \"completed\"].\nCOMPLETED is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\nCOMPLETED is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status queued", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"queued\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status in_progress", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"in_progress\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "in_progress", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status completed, no conclusion", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"completed\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n\"conclusion\" wasn't supplied.\ncompleted is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "conclusion bogus, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"conclusion\": \"bogus\"}", "status": 422, "message": "Invalid request.\n\nbogus is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "conclusion a number, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"conclusion\": 5}", "status": 422, "message": "Invalid request.\n\n5 is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"].\nFor 'properties/conclusion', 5 is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "conclusion null, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"conclusion\": null}", "status": 422, "message": "Invalid request.\n\n is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"].\nFor 'properties/conclusion', nil is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "conclusion empty, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"conclusion\": \"\"}", "status": 422, "message": "Invalid request.\n\n is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "conclusion capitals, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"conclusion\": \"SUCCESS\"}", "status": 422, "message": "Invalid request.\n\nSUCCESS is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "conclusion success, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"conclusion\": \"success\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "completed", "conclusion": "success", "started_at": "{now}", "completed_at": "{now}", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "conclusion stale, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"conclusion\": \"stale\"}", "status": 422, "message": "Invalid request.\n\nstale is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "conclusion action_required, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"conclusion\": \"action_required\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "completed", "conclusion": "action_required", "started_at": "{now}", "completed_at": "{now}", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "conclusion skipped, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"conclusion\": \"skipped\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "completed", "conclusion": "skipped", "started_at": "{now}", "completed_at": "{now}", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "conclusion startup_failure, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"conclusion\": \"startup_failure\"}", "status": 422, "message": "Invalid request.\n\nstartup_failure is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status queued, conclusion failure", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"queued\", \"conclusion\": \"failure\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "{now}", "completed_at": "{now}", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status in_progress, conclusion failure", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"in_progress\", \"conclusion\": \"failure\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "{now}", "completed_at": "{now}", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status completed, conclusion failure", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"completed\", \"conclusion\": \"failure\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "{now}", "completed_at": "{now}", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status bogus, conclusion failure", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"bogus\", \"conclusion\": \"failure\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\nbogus is not a member of [\"queued\", \"in_progress\", \"completed\"].\nbogus is not a member of [\"completed\"].\nbogus is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status completed, conclusion bogus", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"completed\", \"conclusion\": \"bogus\"}", "status": 422, "message": "Invalid request.\n\nbogus is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status completed, conclusion null", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"completed\", \"conclusion\": null}", "status": 422, "message": "Invalid request.\n\n is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"].\nFor 'properties/conclusion', nil is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "status bogus, conclusion bogus", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"bogus\", \"conclusion\": \"bogus\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\nbogus is not a member of [\"queued\", \"in_progress\", \"completed\"].\nbogus is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"].\nbogus is not a member of [\"completed\"].\nbogus is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at a word", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": \"x\"}", "status": 422, "message": "Invalid request.\n\nx is not a valid date-time."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at a number", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": 5}", "status": 422, "message": "Invalid request.\n\nFor 'properties/started_at', 5 is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at null", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": null}", "status": 422, "message": "Invalid request.\n\nFor 'properties/started_at', nil is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at empty", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": \"\"}", "status": 422, "message": "Invalid request.\n\n is not a valid date-time."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at a date", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02\"}", "status": 422, "message": "Invalid request.\n\n2026-01-02 is not a valid date-time."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at utc", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05Z\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at an offset", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05+02:00\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-02T01:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at a fraction", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05.678Z\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at a space", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02 03:04:05\"}", "status": 422, "message": "Invalid request.\n\n2026-01-02 03:04:05 is not a valid date-time."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at no zone", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05\"}", "status": 422, "message": "Invalid request.\n\n2026-01-02T03:04:05 is not a valid date-time."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at month 13", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-13-02T03:04:05Z\"}", "status": 500, "empty": true}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at small letters", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02t03:04:05z\"}", "status": 422, "message": "Invalid request.\n\n2026-01-02t03:04:05z is not a valid date-time."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "started_at years ahead", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"started_at\": \"2099-01-02T03:04:05Z\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2099-01-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "completed_at a word", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"completed_at\": \"y\"}", "status": 422, "message": "Invalid request.\n\ny is not a valid date-time."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "completed_at a number", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"completed_at\": 5}", "status": 422, "message": "Invalid request.\n\nFor 'properties/completed_at', 5 is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "completed_at null", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"completed_at\": null}", "status": 422, "message": "Invalid request.\n\nFor 'properties/completed_at', nil is not a string."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "completed_at utc, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"completed_at\": \"2026-01-02T03:04:05Z\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "missing_field", "field": "conclusion"}]}
+]},
+{"from": "round 18", "steps": [
+  {"label": "completed_at with status queued", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"queued\", \"completed_at\": \"2026-01-02T03:04:05Z\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "missing_field", "field": "conclusion"}]}
+]},
+{"from": "round 18", "steps": [
+  {"label": "completed_at with status in_progress", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"in_progress\", \"completed_at\": \"2026-01-02T03:04:05Z\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "missing_field", "field": "conclusion"}]}
+]},
+{"from": "round 18", "steps": [
+  {"label": "completed with both times", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"completed\", \"conclusion\": \"success\", \"started_at\": \"2026-01-02T03:04:05Z\", \"completed_at\": \"2026-01-02T03:14:05Z\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "completed", "conclusion": "success", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T03:14:05Z", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "completed before it started", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"completed\", \"conclusion\": \"success\", \"started_at\": \"2026-01-02T03:14:05Z\", \"completed_at\": \"2026-01-02T03:04:05Z\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "completed", "conclusion": "success", "started_at": "2026-01-02T03:14:05Z", "completed_at": "2026-01-02T03:04:05Z", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "conclusion with completed_at, no status", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"conclusion\": \"neutral\", \"completed_at\": \"2026-01-02T03:04:05Z\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "completed", "conclusion": "neutral", "started_at": "{now}", "completed_at": "2026-01-02T03:04:05Z", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "output a number", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"output\": 5}", "status": 422, "message": "Invalid request.\n\nFor 'properties/output', 5 is not an object or null."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "output an array", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"output\": []}", "status": 422, "message": "Invalid request.\n\nFor 'properties/output', [] is not an object or null."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "output a string", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"output\": \"x\"}", "status": 422, "message": "Invalid request.\n\nFor 'properties/output', \"x\" is not an object or null."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "output null", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"output\": null}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 18", "steps": [
+  {"label": "output fault and completed without conclusion", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"completed\", \"output\": {\"title\": \"T\"}}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n\"summary\" wasn't supplied.\n\"conclusion\" wasn't supplied.\ncompleted is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "a queued run", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "empty object", "method": "PATCH", "body": "{}", "status": 200},
+  {"label": "an array", "method": "PATCH", "body": "[]", "status": 422, "message": "Invalid request.\n\nFor 'links/1/schema', [] is not an object or null."},
+  {"label": "a string", "method": "PATCH", "body": "\"x\"", "status": 422, "message": "Invalid request.\n\nFor 'links/1/schema', \"x\" is not an object or null."},
+  {"label": "null", "method": "PATCH", "body": "null", "status": 200},
+  {"label": "no body", "method": "PATCH", "body": "", "status": 200},
+  {"label": "not JSON", "method": "PATCH", "body": "{", "status": 200},
+  {"label": "an unknown key", "method": "PATCH", "body": "{\"bogus\": 1}", "status": 200},
+  {"label": "name empty", "method": "PATCH", "body": "{\"name\": \"\"}", "status": 200},
+  {"label": "name null", "method": "PATCH", "body": "{\"name\": null}", "status": 422, "message": "Invalid request.\n\nFor 'properties/name', nil is not a string."},
+  {"label": "name spaces", "method": "PATCH", "body": "{\"name\": \"   \"}", "status": 200},
+  {"label": "name given", "method": "PATCH", "body": "{\"name\": \"renamed\"}", "status": 200},
+  {"label": "head_sha of another commit", "method": "PATCH", "body": "{\"head_sha\": \"{parent}\"}", "status": 200},
+  {"label": "head_sha a number", "method": "PATCH", "body": "{\"head_sha\": 5}", "status": 200},
+  {"label": "head_sha three letters", "method": "PATCH", "body": "{\"head_sha\": \"abc\"}", "status": 200},
+  {"label": "head_sha null", "method": "PATCH", "body": "{\"head_sha\": null}", "status": 200},
+  {"label": "details_url no url", "method": "PATCH", "body": "{\"details_url\": \"not a url\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]},
+  {"label": "details_url empty", "method": "PATCH", "body": "{\"details_url\": \"\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]},
+  {"label": "details_url null", "method": "PATCH", "body": "{\"details_url\": null}", "status": 422, "message": "Invalid request.\n\nFor 'properties/details_url', nil is not a string."},
+  {"label": "details_url https", "method": "PATCH", "body": "{\"details_url\": \"https://example.com/later\"}", "status": 200},
+  {"label": "external_id empty", "method": "PATCH", "body": "{\"external_id\": \"\"}", "status": 200},
+  {"label": "external_id null", "method": "PATCH", "body": "{\"external_id\": null}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', nil is not a string."},
+  {"label": "external_id given", "method": "PATCH", "body": "{\"external_id\": \"ext-2\"}", "status": 200},
+  {"label": "status bogus", "method": "PATCH", "body": "{\"status\": \"bogus\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\nbogus is not a member of [\"queued\", \"in_progress\", \"completed\"].\nbogus is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\nbogus is not a member of [\"queued\", \"in_progress\"]."},
+  {"label": "status a number", "method": "PATCH", "body": "{\"status\": 5}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n5 is not a member of [\"queued\", \"in_progress\", \"completed\"].\nFor 'properties/status', 5 is not a string.\n5 is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\n5 is not a member of [\"queued\", \"in_progress\"]."},
+  {"label": "status null", "method": "PATCH", "body": "{\"status\": null}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n is not a member of [\"queued\", \"in_progress\", \"completed\"].\nFor 'properties/status', nil is not a string.\n is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\n is not a member of [\"queued\", \"in_progress\"]."},
+  {"label": "status waiting", "method": "PATCH", "body": "{\"status\": \"waiting\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\nwaiting is not a member of [\"queued\", \"in_progress\", \"completed\"].\nwaiting is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\nwaiting is not a member of [\"queued\", \"in_progress\"]."},
+  {"label": "status requested", "method": "PATCH", "body": "{\"status\": \"requested\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\nrequested is not a member of [\"queued\", \"in_progress\", \"completed\"].\nrequested is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\nrequested is not a member of [\"queued\", \"in_progress\"]."},
+  {"label": "status pending", "method": "PATCH", "body": "{\"status\": \"pending\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\npending is not a member of [\"queued\", \"in_progress\", \"completed\"].\npending is not a member of [\"completed\"].\n\"conclusion\" wasn't supplied.\npending is not a member of [\"queued\", \"in_progress\"]."},
+  {"label": "conclusion bogus", "method": "PATCH", "body": "{\"conclusion\": \"bogus\"}", "status": 422, "message": "Invalid request.\n\nbogus is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"]."},
+  {"label": "conclusion null", "method": "PATCH", "body": "{\"conclusion\": null}", "status": 422, "message": "Invalid request.\n\n is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"].\nFor 'properties/conclusion', nil is not a string."},
+  {"label": "conclusion a number", "method": "PATCH", "body": "{\"conclusion\": 5}", "status": 422, "message": "Invalid request.\n\n5 is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"].\nFor 'properties/conclusion', 5 is not a string."},
+  {"label": "started_at a word", "method": "PATCH", "body": "{\"started_at\": \"x\"}", "status": 422, "message": "Invalid request.\n\nx is not a valid date-time."},
+  {"label": "started_at null", "method": "PATCH", "body": "{\"started_at\": null}", "status": 422, "message": "Invalid request.\n\nFor 'properties/started_at', nil is not a string."},
+  {"label": "started_at a date", "method": "PATCH", "body": "{\"started_at\": \"2026-01-02\"}", "status": 422, "message": "Invalid request.\n\n2026-01-02 is not a valid date-time."},
+  {"label": "started_at an offset", "method": "PATCH", "body": "{\"started_at\": \"2026-01-02T03:04:05+02:00\"}", "status": 200},
+  {"label": "started_at utc", "method": "PATCH", "body": "{\"started_at\": \"2026-01-02T03:04:05Z\"}", "status": 200},
+  {"label": "completed_at on a queued run", "method": "PATCH", "body": "{\"completed_at\": \"2026-01-02T03:04:05Z\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "missing_field", "field": "conclusion"}]},
+  {"label": "completed_at a word", "method": "PATCH", "body": "{\"completed_at\": \"y\"}", "status": 422, "message": "Invalid request.\n\ny is not a valid date-time."},
+  {"label": "status queued, conclusion success", "method": "PATCH", "body": "{\"status\": \"queued\", \"conclusion\": \"success\"}", "status": 200},
+  {"label": "status in_progress", "method": "PATCH", "body": "{\"status\": \"in_progress\"}", "status": 200},
+  {"label": "status in_progress, conclusion success", "method": "PATCH", "body": "{\"status\": \"in_progress\", \"conclusion\": \"success\"}", "status": 200},
+  {"label": "status completed, no conclusion", "method": "PATCH", "body": "{\"status\": \"completed\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n\"conclusion\" wasn't supplied.\ncompleted is not a member of [\"queued\", \"in_progress\"]."},
+  {"label": "status completed, conclusion bogus", "method": "PATCH", "body": "{\"status\": \"completed\", \"conclusion\": \"bogus\"}", "status": 422, "message": "Invalid request.\n\nbogus is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"]."},
+  {"label": "status bogus, conclusion success", "method": "PATCH", "body": "{\"status\": \"bogus\", \"conclusion\": \"success\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\nbogus is not a member of [\"queued\", \"in_progress\", \"completed\"].\nbogus is not a member of [\"completed\"].\nbogus is not a member of [\"queued\", \"in_progress\"]."},
+  {"label": "conclusion success alone", "method": "PATCH", "body": "{\"conclusion\": \"success\"}", "status": 200},
+  {"label": "status completed alone, already completed", "method": "PATCH", "body": "{\"status\": \"completed\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n\"conclusion\" wasn't supplied.\ncompleted is not a member of [\"queued\", \"in_progress\"]."},
+  {"label": "conclusion null, already completed", "method": "PATCH", "body": "{\"conclusion\": null}", "status": 422, "message": "Invalid request.\n\n is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"].\nFor 'properties/conclusion', nil is not a string."},
+  {"label": "conclusion failure, already completed", "method": "PATCH", "body": "{\"conclusion\": \"failure\"}", "status": 200},
+  {"label": "name alone, already completed", "method": "PATCH", "body": "{\"name\": \"renamed again\"}", "status": 200},
+  {"label": "started_at after it completed", "method": "PATCH", "body": "{\"started_at\": \"2098-01-02T03:04:05Z\"}", "status": 200},
+  {"label": "completed_at alone, already completed", "method": "PATCH", "body": "{\"completed_at\": \"2026-01-02T05:00:00Z\"}", "status": 200},
+  {"label": "status queued, after completed", "method": "PATCH", "body": "{\"status\": \"queued\"}", "status": 200},
+  {"label": "empty object, after queued again", "method": "PATCH", "body": "{}", "status": 200},
+  {"label": "status in_progress, after queued again", "method": "PATCH", "body": "{\"status\": \"in_progress\"}", "status": 200},
+  {"label": "status completed, conclusion neutral, completed_at", "method": "PATCH", "body": "{\"status\": \"completed\", \"conclusion\": \"neutral\", \"completed_at\": \"2026-01-02T06:00:00Z\"}", "status": 200},
+  {"label": "conclusion stale", "method": "PATCH", "body": "{\"conclusion\": \"stale\"}", "status": 422, "message": "Invalid request.\n\nstale is not a member of [\"success\", \"failure\", \"neutral\", \"cancelled\", \"timed_out\", \"action_required\", \"skipped\"]."},
+  {"label": "conclusion action_required", "method": "PATCH", "body": "{\"conclusion\": \"action_required\"}", "status": 200},
+  {"label": "conclusion skipped", "method": "PATCH", "body": "{\"conclusion\": \"skipped\"}", "status": 200},
+  {"label": "conclusion timed_out", "method": "PATCH", "body": "{\"conclusion\": \"timed_out\"}", "status": 200},
+  {"label": "conclusion cancelled", "method": "PATCH", "body": "{\"conclusion\": \"cancelled\"}", "status": 200},
+  {"label": "status in_progress, after completed", "method": "PATCH", "body": "{\"status\": \"in_progress\"}", "status": 200},
+  {"label": "output fault and completed without conclusion", "method": "PATCH", "body": "{\"status\": \"completed\", \"output\": {\"title\": \"T\"}}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n\"summary\" wasn't supplied.\n\"conclusion\" wasn't supplied.\ncompleted is not a member of [\"queued\", \"in_progress\"]."}
+]},
+{"from": "round 18", "steps": [
+  {"label": "a completed run", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"completed\", \"conclusion\": \"failure\", \"started_at\": \"2026-01-02T03:04:05Z\", \"completed_at\": \"2026-01-02T03:14:05Z\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T03:14:05Z", "details_url": "{app_url}", "external_id": ""}},
+  {"label": "empty object", "method": "PATCH", "body": "{}", "status": 200},
+  {"label": "status in_progress", "method": "PATCH", "body": "{\"status\": \"in_progress\"}", "status": 200},
+  {"label": "status queued", "method": "PATCH", "body": "{\"status\": \"queued\"}", "status": 200},
+  {"label": "conclusion success", "method": "PATCH", "body": "{\"conclusion\": \"success\"}", "status": 200},
+  {"label": "completed_at alone", "method": "PATCH", "body": "{\"completed_at\": \"2026-01-02T07:00:00Z\"}", "status": 200},
+  {"label": "started_at alone", "method": "PATCH", "body": "{\"started_at\": \"2026-01-02T01:00:00Z\"}", "status": 200}
+]},
+{"from": "round 18", "steps": [
+  {"label": "a run in progress", "method": "POST", "body": "{\"name\": \"p\", \"head_sha\": \"{sha}\", \"status\": \"in_progress\", \"started_at\": \"2026-01-02T03:04:05Z\"}", "status": 201, "run": {"name": "p", "head_sha": "{sha}", "status": "in_progress", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "status queued", "method": "PATCH", "body": "{\"status\": \"queued\"}", "status": 200},
+  {"label": "status completed, conclusion success", "method": "PATCH", "body": "{\"status\": \"completed\", \"conclusion\": \"success\"}", "status": 200},
+  {"label": "conclusion with status absent", "method": "PATCH", "body": "{\"conclusion\": \"failure\"}", "status": 200}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at february 30", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-02-30T03:04:05Z\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-03-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at day 32", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-32T03:04:05Z\"}", "status": 500, "empty": true}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at february 30", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-02-30T03:04:05Z\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-03-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at day 32", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-32T03:04:05Z\"}", "status": 500, "empty": true}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at day 00", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-00T03:04:05Z\"}", "status": 500, "empty": true}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at month 00", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-00-10T03:04:05Z\"}", "status": 500, "empty": true}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at hour 24", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T24:00:00Z\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-03T00:00:00Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at hour 25", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T25:00:00Z\"}", "status": 500, "empty": true}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at minute 60", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:60:05Z\"}", "status": 422, "message": "Invalid request.\n\n2026-01-02T03:60:05Z is not a valid date-time."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at second 60", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:60Z\"}", "status": 422, "message": "Invalid request.\n\n2026-01-02T03:04:60Z is not a valid date-time."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at second 61", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:61Z\"}", "status": 422, "message": "Invalid request.\n\n2026-01-02T03:04:61Z is not a valid date-time."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at offset 25", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05+25:00\"}", "status": 500, "empty": true}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at offset minus zero", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05-00:00\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at year 0000", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"0000-01-02T03:04:05Z\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "0000-01-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at february 29, no leap", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2025-02-29T03:04:05Z\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2025-03-01T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at nine fraction digits", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05.123456789Z\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at fraction .9", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05.9Z\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "started_at a space before", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \" 2026-01-02T03:04:05Z\"}", "status": 422, "message": "Invalid request.\n\n 2026-01-02T03:04:05Z is not a valid date-time."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "completed_at month 13, with conclusion", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"conclusion\": \"success\", \"completed_at\": \"2026-13-02T03:04:05Z\"}", "status": 500, "empty": true}
+]},
+{"from": "round 19", "steps": [
+  {"label": "completed_at month 13, no conclusion", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"completed_at\": \"2026-13-02T03:04:05Z\"}", "status": 500, "empty": true}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url http alone", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"http://\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "http://", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url https alone", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https://", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url capitals", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"HTTP://EXAMPLE.COM/X\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "HTTP://EXAMPLE.COM/X", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url one slash", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"http:/x\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "http:/x", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url no scheme", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"//example.com/x\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url mailto", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"mailto:x@example.com\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a space inside", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://exa mple.com\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a letter outside ASCII", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/ü\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url javascript", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"javascript:alert(1)\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url an open bracket", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"http://[::1\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url angle brackets", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/<x>\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a space in the path", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/a b\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a space before", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \" https://example.com/x\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a space after", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/x \"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url 3000 long, https", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/{rep:p:3000}\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https://example.com/{rep:p:3000}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a bad escape", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/%zz\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a fragment", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/x#frag\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https://example.com/x#frag", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url any scheme", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"x:y\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url no slashes", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https:example.com\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https:example.com", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a bar", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/a|b\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a backslash", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/a\\\\b\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a quote", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/a\\\"b\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url braces", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/a{b}\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url caret and backtick", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/a^b`c\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url brackets in the path", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/a[b]\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a lone percent", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/a%b\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url an underscore host", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://exa_mple.com/\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https://exa_mple.com/", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url userinfo and port", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://user:pw@example.com:8080/x?y=1\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https://user:pw@example.com:8080/x?y=1", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "details_url a port of letters", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com:port/\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body an open object", "method": "POST", "body": "{\"name\": \"q\"", "status": 422, "message": "Invalid request.\n\n\"head_sha\" wasn't supplied."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a word", "method": "POST", "body": "nonsense", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a brace too many", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\"}}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body an open array", "method": "POST", "body": "[1,", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', [1] is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a trailing comma", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\",}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body spaces", "method": "POST", "body": "   ", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', nil is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body an empty object", "method": "POST", "body": "{}", "status": 422, "message": "Invalid request.\n\n\"head_sha\", \"name\" weren't supplied."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body true", "method": "POST", "body": "true", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', true is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a name twice", "method": "POST", "body": "{\"name\": \"a\", \"name\": \"b\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "b", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut inside a string value", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\": \"abc", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', \"external_id\" is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut after a colon", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\":", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', \"external_id\" is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut after a comma", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\",", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut inside a key", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"ext", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut after a key", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\"", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', \"external_id\" is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut inside true", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\": \"x\", \"status\": tru", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', \"status\" is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut inside null", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\": \"x\", \"output\": nul", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', \"output\" is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut after a number", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"a\", \"message\": \"m\", \"annotation_level\": \"w\", \"end_line\": 1, \"start_line\": 12", "status": 422, "message": "Invalid request.\n\n\"head_sha\", \"name\" weren't supplied."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut inside a number", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"a\", \"message\": \"m\", \"annotation_level\": \"w\", \"end_line\": 1, \"start_line\": 1.", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', \"start_line\" is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut after a minus", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"a\", \"message\": \"m\", \"annotation_level\": \"w\", \"end_line\": 1, \"start_line\": -", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', \"start_line\" is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a space after", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\"} ", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a word after", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\"} x", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body two objects", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\"}{\"name\": \"second\"}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a bracket too many", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\"}]", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a byte order mark", "method": "POST", "body": "﻿{\"name\": \"q\", \"head_sha\": \"{sha}\"}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut after a backslash", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\": \"a\\", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', \"external_id\" is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body cut inside an escape", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\": \"a\\u00", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', \"external_id\" is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a raw tab in a string", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\": \"tab\there\"}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body NaN", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\": NaN}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body single quotes", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\": 'x'}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a comment", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", /* c */ \"external_id\": \"x\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "x"}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a missing comma", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\": \"x\" \"status\": \"queued\"}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a missing colon", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\" \"x\"}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a leading zero", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\": 01}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body closed by the wrong bracket", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"external_id\": \"x\"]", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body two open braces", "method": "POST", "body": "{", "status": 422, "message": "Invalid request.\n\n\"head_sha\", \"name\" weren't supplied."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body an open bracket", "method": "POST", "body": "[", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', [] is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body an open string", "method": "POST", "body": "\"abc", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', nil is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body tru", "method": "POST", "body": "tru", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', nil is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a number alone", "method": "POST", "body": "12", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', 12 is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "body a minus alone", "method": "POST", "body": "-", "status": 422, "message": "Invalid request.\n\nFor 'links/0/schema', nil is not an object."}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"{sha}zzzz\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}zzzz\"}", "status": 422, "message": "No commit found for SHA: {sha}zzzz"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"{sha39}\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha39}\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"{sha4}\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha4}\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"{sha3}\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha3}\"}", "status": 422, "message": "No commit found for SHA: {sha3}"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"HEAD\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"HEAD\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"main~1\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"main~1\"}", "status": 201, "run": {"name": "q", "head_sha": "{parent}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"refs/heads/main\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"refs/heads/main\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"heads/main\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"heads/main\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"main^{commit}\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"main^{commit}\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \" {sha}\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \" {sha}\"}", "status": 422, "message": "No commit found for SHA:  {sha}"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"{sha} \"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha} \"}", "status": 422, "message": "No commit found for SHA: {sha} "}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"MAIN\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"MAIN\"}", "status": 422, "message": "No commit found for SHA: MAIN"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"origin/main\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"origin/main\"}", "status": 422, "message": "No commit found for SHA: origin/main"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"{SHA20}\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{SHA20}\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"main:README.md\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"main:README.md\"}", "status": 422, "message": "No commit found for SHA: main:README.md"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "head_sha \"{sha}^\"", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}^\"}", "status": 201, "run": {"name": "q", "head_sha": "{parent}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 19", "steps": [
+  {"label": "no commit and a bad url", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"0000000000000000000000000000000000000000\", \"details_url\": \"not a url\"}", "status": 422, "message": "No commit found for SHA: 0000000000000000000000000000000000000000"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "no commit and completed_at without conclusion", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"0000000000000000000000000000000000000000\", \"completed_at\": \"2026-01-02T03:04:05Z\"}", "status": 422, "message": "No commit found for SHA: 0000000000000000000000000000000000000000"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "a bad url and completed_at without conclusion", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"ftp://x\", \"completed_at\": \"2026-01-02T03:04:05Z\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "missing_field", "field": "conclusion"}, {"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "a bad url and an annotation left out", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"ftp://x\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}]}}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "invalid", "field": "annotations"}, {"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "completed_at without conclusion and an annotation left out", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"completed_at\": \"2026-01-02T03:04:05Z\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}]}}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "invalid", "field": "annotations"}, {"resource": "CheckRun", "code": "missing_field", "field": "conclusion"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "no commit and an annotation left out", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"0000000000000000000000000000000000000000\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}]}}", "status": 422, "message": "No commit found for SHA: 0000000000000000000000000000000000000000"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "no commit and an annotation that fails", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"0000000000000000000000000000000000000000\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": 5, \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}]}}", "status": 422, "message": "No commit found for SHA: 0000000000000000000000000000000000000000"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "a bad url and an annotation that fails", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"details_url\": \"ftp://x\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": 5, \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}]}}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "an annotation left out and one that fails", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}, {\"path\": 5, \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}]}}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "invalid", "field": "annotations"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "one that fails and an annotation left out", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": 5, \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}, {\"path\": \"\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}]}}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "invalid", "field": "annotations"}]}
+]},
+{"from": "round 19", "steps": [
+  {"label": "a time that is no time and a bad url", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-13-02T03:04:05Z\", \"details_url\": \"ftp://x\"}", "status": 500, "empty": true}
+]},
+{"from": "round 19", "steps": [
+  {"label": "a time that is no time and no commit", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"0000000000000000000000000000000000000000\", \"started_at\": \"2026-13-02T03:04:05Z\"}", "status": 422, "message": "No commit found for SHA: 0000000000000000000000000000000000000000"}
+]},
+{"from": "round 19", "steps": [
+  {"label": "a run to update", "method": "POST", "body": "{\"name\": \"q\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "q", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "body an open object", "method": "PATCH", "body": "{\"name\": \"q\"", "status": 200},
+  {"label": "body a word", "method": "PATCH", "body": "nonsense", "status": 400, "message": "Problems parsing JSON"},
+  {"label": "body an open array", "method": "PATCH", "body": "[1,", "status": 422, "message": "Invalid request.\n\nFor 'links/1/schema', [1] is not an object or null."},
+  {"label": "body spaces", "method": "PATCH", "body": "   ", "status": 200},
+  {"label": "body true", "method": "PATCH", "body": "true", "status": 422, "message": "Invalid request.\n\nFor 'links/1/schema', true is not an object or null."},
+  {"label": "body a number", "method": "PATCH", "body": "5", "status": 422, "message": "Invalid request.\n\nFor 'links/1/schema', 5 is not an object or null."},
+  {"label": "body a name twice", "method": "PATCH", "body": "{\"name\": \"twice-a\", \"name\": \"twice-b\"}", "status": 200},
+  {"label": "a bad url and completed_at without conclusion", "method": "PATCH", "body": "{\"details_url\": \"ftp://x\", \"completed_at\": \"2026-01-02T03:04:05Z\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "missing_field", "field": "conclusion"}, {"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]},
+  {"label": "a bad url and an annotation left out", "method": "PATCH", "body": "{\"details_url\": \"ftp://x\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}]}}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]},
+  {"label": "a bad url and an annotation that fails", "method": "PATCH", "body": "{\"details_url\": \"ftp://x\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": 5, \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}]}}", "status": 500, "empty": true},
+  {"label": "an annotation left out and one that fails", "method": "PATCH", "body": "{\"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}, {\"path\": 5, \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}]}}", "status": 500, "empty": true},
+  {"label": "started_at month 13", "method": "PATCH", "body": "{\"started_at\": \"2026-13-02T03:04:05Z\"}", "status": 200},
+  {"label": "name 70000 long", "method": "PATCH", "body": "{\"name\": \"{rep:n:70000}\"}", "status": 200},
+  {"label": "external_id 300 long", "method": "PATCH", "body": "{\"external_id\": \"{rep:e:300}\"}", "status": 200},
+  {"label": "empty object, to read it back", "method": "PATCH", "body": "{}", "status": 200}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 1e5", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 1e5}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 100000.0 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 1E+2", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 1E+2}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 100.0 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number -0", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": -0}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 0 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number -0.0", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": -0.0}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', -0.0 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 1.50", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 1.50}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 1.5 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 23 digits", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 12345678901234567890123}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 12345678901234567890123 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 1e400", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 1e400}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', Infinity is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 1.0e-7", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 1.0e-7}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 1.0e-07 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number a long float", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 123456789012345678.0}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 1.2345678901234568e+17 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 1e16", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 1e16}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 1.0e+16 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 1e15", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 1e15}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 1.0e+15 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 0.0001", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 0.0001}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 0.0001 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 0.00001", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 0.00001}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 1.0e-05 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 2.5e-5", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 2.5e-5}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', 2.5e-05 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number .5", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": .5}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number +1", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": +1}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number 1.", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": 1.}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number Infinity", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": Infinity}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 20", "steps": [
+  {"label": "number an array of all kinds", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": [1, 2.0, \"a\", null, true, {\"k\": [ ]}]}", "status": 422, "message": "Invalid request.\n\nFor 'properties/external_id', [1, 2.0, \"a\", nil, true, {\"k\" => []}] is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "string escapes", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"\\u00e9\\n\\t\\\"\\\\\\/\"}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "é\n\t\"\\/"}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "string a surrogate pair", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"\\ud83d\\ude00\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "external_id", "message": "external_id doesn't accept 4-byte Unicode"}]}
+]},
+{"from": "round 20", "steps": [
+  {"label": "string a lone surrogate", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"\\ud800\"}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "?"}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "string an unknown escape", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"\\q\"}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 20", "steps": [
+  {"label": "string a delete character", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"ab\"}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "ab"}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "string a control character", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"a\u001fb\"}", "status": 400, "message": "Problems parsing JSON"}
+]},
+{"from": "round 20", "steps": [
+  {"label": "string an escaped nul", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"\\u0000\"}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "\u0000"}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "string letters outside ASCII", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"é😀\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "external_id", "message": "external_id doesn't accept 4-byte Unicode"}]}
+]},
+{"from": "round 20", "steps": [
+  {"label": "body with a line comment", "method": "POST", "body": "{\"name\": \"r\", // c\n \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "body cut inside a comment", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\" /* c", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "body keys of every kind twice", "method": "POST", "body": "{\"name\": \"a\", \"head_sha\": \"{sha}\", \"name\": 5}", "status": 422, "message": "Invalid request.\n\nFor 'properties/name', 5 is not a string."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "started_at hour 24 and a half", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T24:30:00Z\"}", "status": 500, "empty": true}
+]},
+{"from": "round 20", "steps": [
+  {"label": "started_at hour 24 and a second", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T24:00:01Z\"}", "status": 500, "empty": true}
+]},
+{"from": "round 20", "steps": [
+  {"label": "started_at offset minutes 99", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05+02:99\"}", "status": 422, "message": "Invalid request.\n\n2026-01-02T03:04:05+02:99 is not a valid date-time."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "started_at offset 23:99", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05+23:99\"}", "status": 422, "message": "Invalid request.\n\n2026-01-02T03:04:05+23:99 is not a valid date-time."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "started_at offset 24", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05+24:00\"}", "status": 500, "empty": true}
+]},
+{"from": "round 20", "steps": [
+  {"label": "started_at offset minus 23:59", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05-23:59\"}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-03T03:03:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "started_at april 31", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-04-31T03:04:05Z\"}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-05-01T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "started_at year 9999", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"started_at\": \"9999-12-31T23:59:59Z\"}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "9999-12-31T23:59:59Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "started_at a point and no digits", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"started_at\": \"2026-01-02T03:04:05.Z\"}", "status": 422, "message": "Invalid request.\n\n2026-01-02T03:04:05.Z is not a valid date-time."}
+]},
+{"from": "round 20", "steps": [
+  {"label": "name of 2000 two-byte letters", "method": "POST", "body": "{\"name\": \"{rep:é:2000}\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "{rep:é:512}", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "name of 2000 four-byte letters", "method": "POST", "body": "{\"name\": \"{rep:😀:2000}\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "{rep:😀:256}", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "external_id of 300 two-byte letters", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"{rep:é:300}\"}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "{rep:é:255}"}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "external_id of 300 four-byte letters", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"{rep:😀:300}\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "external_id", "message": "external_id doesn't accept 4-byte Unicode"}]}
+]},
+{"from": "round 20", "steps": [
+  {"label": "name with spaces around", "method": "POST", "body": "{\"name\": \"  padded  \", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "padded", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "create: seq-queued", "method": "POST", "body": "{\"name\": \"seq-queued\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "seq-queued", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "empty object", "method": "PATCH", "body": "{}", "status": 200, "run": {"name": "seq-queued", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "name empty", "method": "PATCH", "body": "{\"name\": \"\"}", "status": 200, "run": {"name": "", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "name given", "method": "PATCH", "body": "{\"name\": \"seq-queued-renamed\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "head_sha of another commit", "method": "PATCH", "body": "{\"head_sha\": \"0000000000000000000000000000000000000000\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "details_url given", "method": "PATCH", "body": "{\"details_url\": \"https://example.com/later\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "external_id given", "method": "PATCH", "body": "{\"external_id\": \"ext-2\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https://example.com/later", "external_id": "ext-2"}},
+  {"label": "external_id empty", "method": "PATCH", "body": "{\"external_id\": \"\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "started_at an offset", "method": "PATCH", "body": "{\"started_at\": \"2026-01-02T03:04:05+02:00\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-02T01:04:05Z", "completed_at": null, "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "started_at month 13", "method": "PATCH", "body": "{\"started_at\": \"2026-13-02T03:04:05Z\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "started_at day 32", "method": "PATCH", "body": "{\"started_at\": \"2026-01-32T03:04:05Z\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "started_at february 30", "method": "PATCH", "body": "{\"started_at\": \"2026-02-30T03:04:05Z\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-03-02T03:04:05Z", "completed_at": null, "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "started_at utc", "method": "PATCH", "body": "{\"started_at\": \"2026-01-02T03:04:05Z\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "completed_at without conclusion", "method": "PATCH", "body": "{\"completed_at\": \"2026-01-02T03:04:05Z\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "missing_field", "field": "conclusion"}]},
+  {"label": "completed_at month 13 without conclusion", "method": "PATCH", "body": "{\"completed_at\": \"2026-13-02T03:04:05Z\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "status in_progress", "method": "PATCH", "body": "{\"status\": \"in_progress\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "in_progress", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "status queued again", "method": "PATCH", "body": "{\"status\": \"queued\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "status in_progress again", "method": "PATCH", "body": "{\"status\": \"in_progress\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "in_progress", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "status in_progress, conclusion success", "method": "PATCH", "body": "{\"status\": \"in_progress\", \"conclusion\": \"success\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "completed", "conclusion": "success", "started_at": "2026-01-02T03:04:05Z", "completed_at": "{now}", "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "status completed alone, already completed", "method": "PATCH", "body": "{\"status\": \"completed\"}", "status": 422, "message": "Invalid request.\n\nNo subschema in \"anyOf\" matched.\n\"conclusion\" wasn't supplied.\ncompleted is not a member of [\"queued\", \"in_progress\"]."},
+  {"label": "conclusion failure, already completed", "method": "PATCH", "body": "{\"conclusion\": \"failure\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "{now}", "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "conclusion failure again", "method": "PATCH", "body": "{\"conclusion\": \"failure\"}", "status": 200, "run": {"name": "seq-queued-renamed", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "{now}", "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "name alone, already completed", "method": "PATCH", "body": "{\"name\": \"seq-queued-done\"}", "status": 200, "run": {"name": "seq-queued-done", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "{now}", "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "completed_at alone, already completed", "method": "PATCH", "body": "{\"completed_at\": \"2026-01-02T05:00:00Z\"}", "status": 200, "run": {"name": "seq-queued-done", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T05:00:00Z", "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "completed_at month 13, already completed", "method": "PATCH", "body": "{\"completed_at\": \"2026-13-02T03:04:05Z\"}", "status": 200, "run": {"name": "seq-queued-done", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "{now}", "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "status queued, after completed", "method": "PATCH", "body": "{\"status\": \"queued\"}", "status": 200, "run": {"name": "seq-queued-done", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "{now}", "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "status in_progress, after completed", "method": "PATCH", "body": "{\"status\": \"in_progress\"}", "status": 200, "run": {"name": "seq-queued-done", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "{now}", "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "status completed, conclusion neutral, completed_at", "method": "PATCH", "body": "{\"status\": \"completed\", \"conclusion\": \"neutral\", \"completed_at\": \"2026-01-02T06:00:00Z\"}", "status": 200, "run": {"name": "seq-queued-done", "head_sha": "{sha}", "status": "completed", "conclusion": "neutral", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T06:00:00Z", "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "status queued, conclusion skipped", "method": "PATCH", "body": "{\"status\": \"queued\", \"conclusion\": \"skipped\"}", "status": 200, "run": {"name": "seq-queued-done", "head_sha": "{sha}", "status": "completed", "conclusion": "skipped", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T06:00:00Z", "details_url": "https://example.com/later", "external_id": ""}},
+  {"label": "output alone, already completed", "method": "PATCH", "body": "{\"output\": {\"title\": \"T\", \"summary\": \"S\"}}", "status": 200, "run": {"name": "seq-queued-done", "head_sha": "{sha}", "status": "completed", "conclusion": "skipped", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T06:00:00Z", "details_url": "https://example.com/later", "external_id": "", "output": {"title": "T", "summary": "S", "text": null}}},
+  {"label": "empty object, at the end", "method": "PATCH", "body": "{}", "status": 200, "run": {"name": "seq-queued-done", "head_sha": "{sha}", "status": "completed", "conclusion": "skipped", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T06:00:00Z", "details_url": "https://example.com/later", "external_id": "", "output": {"title": "T", "summary": "S", "text": null}}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "create: seq-completed", "method": "POST", "body": "{\"name\": \"seq-completed\", \"head_sha\": \"{sha}\", \"status\": \"completed\", \"conclusion\": \"failure\", \"started_at\": \"2026-01-02T03:04:05Z\", \"completed_at\": \"2026-01-02T03:14:05Z\"}", "status": 201, "run": {"name": "seq-completed", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T03:14:05Z", "details_url": "{app_url}", "external_id": ""}},
+  {"label": "status in_progress", "method": "PATCH", "body": "{\"status\": \"in_progress\"}", "status": 200, "run": {"name": "seq-completed", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T03:14:05Z", "details_url": "{app_url}", "external_id": ""}},
+  {"label": "conclusion success", "method": "PATCH", "body": "{\"conclusion\": \"success\"}", "status": 200, "run": {"name": "seq-completed", "head_sha": "{sha}", "status": "completed", "conclusion": "success", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T03:14:05Z", "details_url": "{app_url}", "external_id": ""}},
+  {"label": "conclusion success, completed_at month 13", "method": "PATCH", "body": "{\"conclusion\": \"success\", \"completed_at\": \"2026-13-02T03:04:05Z\"}", "status": 200, "run": {"name": "seq-completed", "head_sha": "{sha}", "status": "completed", "conclusion": "success", "started_at": "2026-01-02T03:04:05Z", "completed_at": "{now}", "details_url": "{app_url}", "external_id": ""}},
+  {"label": "started_at alone", "method": "PATCH", "body": "{\"started_at\": \"2026-01-02T01:00:00Z\"}", "status": 200, "run": {"name": "seq-completed", "head_sha": "{sha}", "status": "completed", "conclusion": "success", "started_at": "2026-01-02T01:00:00Z", "completed_at": "{now}", "details_url": "{app_url}", "external_id": ""}},
+  {"label": "empty object, at the end", "method": "PATCH", "body": "{}", "status": 200, "run": {"name": "seq-completed", "head_sha": "{sha}", "status": "completed", "conclusion": "success", "started_at": "2026-01-02T01:00:00Z", "completed_at": "{now}", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "create: seq-progress", "method": "POST", "body": "{\"name\": \"seq-progress\", \"head_sha\": \"{sha}\", \"status\": \"in_progress\", \"started_at\": \"2026-01-02T03:04:05Z\"}", "status": 201, "run": {"name": "seq-progress", "head_sha": "{sha}", "status": "in_progress", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "status queued", "method": "PATCH", "body": "{\"status\": \"queued\"}", "status": 200, "run": {"name": "seq-progress", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "2026-01-02T03:04:05Z", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "conclusion with completed_at", "method": "PATCH", "body": "{\"conclusion\": \"cancelled\", \"completed_at\": \"2026-01-02T04:00:00Z\"}", "status": 200, "run": {"name": "seq-progress", "head_sha": "{sha}", "status": "completed", "conclusion": "cancelled", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T04:00:00Z", "details_url": "{app_url}", "external_id": ""}},
+  {"label": "conclusion with status absent", "method": "PATCH", "body": "{\"conclusion\": \"failure\"}", "status": 200, "run": {"name": "seq-progress", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T04:00:00Z", "details_url": "{app_url}", "external_id": ""}},
+  {"label": "empty object, at the end", "method": "PATCH", "body": "{}", "status": 200, "run": {"name": "seq-progress", "head_sha": "{sha}", "status": "completed", "conclusion": "failure", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T04:00:00Z", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 20", "steps": [
+  {"label": "create: seq-conclude", "method": "POST", "body": "{\"name\": \"seq-conclude\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "seq-conclude", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "conclusion and completed_at month 13", "method": "PATCH", "body": "{\"conclusion\": \"success\", \"completed_at\": \"2026-13-02T03:04:05Z\"}", "status": 200, "run": {"name": "seq-conclude", "head_sha": "{sha}", "status": "completed", "conclusion": "success", "started_at": "{now}", "completed_at": "{now}", "details_url": "{app_url}", "external_id": ""}},
+  {"label": "empty object, at the end", "method": "PATCH", "body": "{}", "status": 200, "run": {"name": "seq-conclude", "head_sha": "{sha}", "status": "completed", "conclusion": "success", "started_at": "{now}", "completed_at": "{now}", "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 21", "steps": [
+  {"label": "four-byte external_id, a bad url, completed_at without conclusion, an annotation left out", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"😀\", \"details_url\": \"ftp://x\", \"completed_at\": \"2026-01-02T03:04:05Z\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m\"}]}}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "invalid", "field": "annotations"}, {"resource": "CheckRun", "code": "missing_field", "field": "conclusion"}, {"resource": "CheckRun", "code": "custom", "field": "external_id", "message": "external_id doesn't accept 4-byte Unicode"}, {"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]}
+]},
+{"from": "round 21", "steps": [
+  {"label": "four-byte external_id after 260 letters", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"{rep:e:260}😀\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "external_id", "message": "external_id doesn't accept 4-byte Unicode"}]}
+]},
+{"from": "round 21", "steps": [
+  {"label": "four-byte external_id at letter 255", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"{rep:e:254}😀\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "external_id", "message": "external_id doesn't accept 4-byte Unicode"}]}
+]},
+{"from": "round 21", "steps": [
+  {"label": "three-byte letters in external_id", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"external_id\": \"{rep:€:300}\"}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "{rep:€:255}"}}
+]},
+{"from": "round 21", "steps": [
+  {"label": "name of one letter and 2000 two-byte letters", "method": "POST", "body": "{\"name\": \"a{rep:é:2000}\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "a{rep:é:511}", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 21", "steps": [
+  {"label": "name of two letters and 2000 four-byte letters", "method": "POST", "body": "{\"name\": \"ab{rep:😀:2000}\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "ab{rep:😀:255}", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 21", "steps": [
+  {"label": "name with a tab and a line break around", "method": "POST", "body": "{\"name\": \"\\tname\\n\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "name", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 21", "steps": [
+  {"label": "name with no-break spaces around", "method": "POST", "body": "{\"name\": \" name \", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": " name ", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 21", "steps": [
+  {"label": "name of 1030 letters with spaces before", "method": "POST", "body": "{\"name\": \"   {rep:n:1030}\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "{rep:n:1021}", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 21", "steps": [
+  {"label": "name of a tab", "method": "POST", "body": "{\"name\": \"\\t\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "\t", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 21", "steps": [
+  {"label": "four-byte details_url", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"details_url\": \"https://example.com/😀\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url is not a valid URL"}]}
+]},
+{"from": "round 21", "steps": [
+  {"label": "four-byte title and summary", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"😀\", \"summary\": \"😀\", \"text\": \"😀\", \"annotations\": [{\"path\": \"😀\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"😀\", \"message\": \"😀\", \"title\": \"😀\", \"raw_details\": \"😀\"}]}}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "invalid", "field": "annotations"}]}
+]},
+{"from": "round 21", "steps": [
+  {"label": "a run to update", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\"}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "four-byte external_id and a bad url", "method": "PATCH", "body": "{\"external_id\": \"😀\", \"details_url\": \"ftp://x\"}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "custom", "field": "external_id", "message": "external_id doesn't accept 4-byte Unicode"}, {"resource": "CheckRun", "code": "custom", "field": "details_url", "message": "details_url must use the http or https scheme"}]},
+  {"label": "name with spaces around", "method": "PATCH", "body": "{\"name\": \"  again  \"}", "status": 200, "run": {"name": "  again  ", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}},
+  {"label": "empty object, to read it back", "method": "PATCH", "body": "{}", "status": 200, "run": {"name": "  again  ", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 22", "steps": [
+  {"label": "four-byte title, summary, and text", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"t😀\", \"summary\": \"s😀\", \"text\": \"x😀\"}}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "", "output": {"title": "t😀", "summary": "s😀", "text": "x😀"}}}
+]},
+{"from": "round 22", "steps": [
+  {"label": "a run to annotate", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\"}}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "", "output": {"title": "T", "summary": "S", "text": null}}},
+  {"label": "an annotation with a four-byte letter in each field in turn", "method": "PATCH", "body": "{\"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"p😀\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"message 1\"}, {\"path\": \"README.md\", \"start_line\": 2, \"end_line\": 2, \"annotation_level\": \"l😀\", \"message\": \"message 2\"}, {\"path\": \"README.md\", \"start_line\": 3, \"end_line\": 3, \"annotation_level\": \"warning\", \"message\": \"message 3 😀\"}, {\"path\": \"README.md\", \"start_line\": 4, \"end_line\": 4, \"annotation_level\": \"warning\", \"message\": \"message 4\", \"title\": \"t😀\"}, {\"path\": \"README.md\", \"start_line\": 5, \"end_line\": 5, \"annotation_level\": \"warning\", \"message\": \"message 5\", \"raw_details\": \"r😀\"}, {\"path\": \"README.md\", \"start_line\": 6, \"end_line\": 6, \"annotation_level\": \"warning\", \"message\": \"message 6\"}]}}", "status": 500, "empty": true}
+]},
+{"from": "round 23", "steps": [
+  {"label": "create with an annotation whose path has a four-byte letter", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"p😀\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"message 1\"}]}}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "", "output": {"title": "T", "summary": "S", "text": null}}}
+]},
+{"from": "round 23", "steps": [
+  {"label": "create with an annotation whose annotation_level has a four-byte letter", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"README.md\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"l😀\", \"message\": \"message 1\"}]}}", "status": 500, "empty": true}
+]},
+{"from": "round 23", "steps": [
+  {"label": "create with an annotation whose message has a four-byte letter", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"README.md\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"m😀\"}]}}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "", "output": {"title": "T", "summary": "S", "text": null}}}
+]},
+{"from": "round 23", "steps": [
+  {"label": "create with an annotation whose title has a four-byte letter", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"README.md\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"message 1\", \"title\": \"t😀\"}]}}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "", "output": {"title": "T", "summary": "S", "text": null}}}
+]},
+{"from": "round 23", "steps": [
+  {"label": "create with an annotation whose raw_details has a four-byte letter", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"README.md\", \"start_line\": 1, \"end_line\": 1, \"annotation_level\": \"warning\", \"message\": \"message 1\", \"raw_details\": \"r😀\"}]}}", "status": 422, "message": "Validation Failed", "errors": [{"resource": "CheckRun", "code": "invalid", "field": "annotations"}]}
+]},
+{"from": "round 23", "steps": [
+  {"label": "a run to annotate", "method": "POST", "body": "{\"name\": \"r\", \"head_sha\": \"{sha}\", \"output\": {\"title\": \"T\", \"summary\": \"S\"}}", "status": 201, "run": {"name": "r", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": "", "output": {"title": "T", "summary": "S", "text": null}}},
+  {"label": "an annotation whose path has a four-byte letter", "method": "PATCH", "body": "{\"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"README.md\", \"start_line\": 10, \"end_line\": 10, \"annotation_level\": \"warning\", \"message\": \"message 10\"}, {\"path\": \"p😀\", \"start_line\": 11, \"end_line\": 11, \"annotation_level\": \"warning\", \"message\": \"message 11\"}]}}", "status": 200},
+  {"label": "an annotation whose annotation_level has a four-byte letter", "method": "PATCH", "body": "{\"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"README.md\", \"start_line\": 20, \"end_line\": 20, \"annotation_level\": \"warning\", \"message\": \"message 20\"}, {\"path\": \"README.md\", \"start_line\": 21, \"end_line\": 21, \"annotation_level\": \"l😀\", \"message\": \"message 21\"}]}}", "status": 500, "empty": true},
+  {"label": "an annotation whose message has a four-byte letter", "method": "PATCH", "body": "{\"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"README.md\", \"start_line\": 30, \"end_line\": 30, \"annotation_level\": \"warning\", \"message\": \"message 30\"}, {\"path\": \"README.md\", \"start_line\": 31, \"end_line\": 31, \"annotation_level\": \"warning\", \"message\": \"m😀\"}]}}", "status": 200},
+  {"label": "an annotation whose title has a four-byte letter", "method": "PATCH", "body": "{\"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"README.md\", \"start_line\": 40, \"end_line\": 40, \"annotation_level\": \"warning\", \"message\": \"message 40\"}, {\"path\": \"README.md\", \"start_line\": 41, \"end_line\": 41, \"annotation_level\": \"warning\", \"message\": \"message 41\", \"title\": \"t😀\"}]}}", "status": 200},
+  {"label": "an annotation whose raw_details has a four-byte letter", "method": "PATCH", "body": "{\"output\": {\"title\": \"T\", \"summary\": \"S\", \"annotations\": [{\"path\": \"README.md\", \"start_line\": 50, \"end_line\": 50, \"annotation_level\": \"warning\", \"message\": \"message 50\"}, {\"path\": \"README.md\", \"start_line\": 51, \"end_line\": 51, \"annotation_level\": \"warning\", \"message\": \"message 51\", \"raw_details\": \"r😀\"}]}}", "status": 200}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha a caret before a branch", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"^main\"}", "status": 422, "message": "No commit found for SHA: ^main"}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha a caret before a sha", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"^{sha}\"}", "status": 422, "message": "No commit found for SHA: ^{sha}"}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha a nul inside", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"a\\u0000b\"}", "status": 422, "message": "No commit found for SHA: a\u0000b"}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha a nul after a sha", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"{sha}\\u0000\"}", "status": 422, "message": "No commit found for SHA: {sha}\u0000"}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha a dash before a branch", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"-main\"}", "status": 422, "message": "No commit found for SHA: -main"}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha an option", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"--all\"}", "status": 422, "message": "No commit found for SHA: --all"}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha a reflog entry", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"main@{0}\"}", "status": 201, "run": {"name": "s", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha an at sign", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"@\"}", "status": 201, "run": {"name": "s", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha head in small letters", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"head\"}", "status": 422, "message": "No commit found for SHA: head"}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha a range", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"main..main\"}", "status": 422, "message": "No commit found for SHA: main..main"}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha 5000 letters", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"{rep:m:5000}\"}", "status": 422, "message": "No commit found for SHA: {rep:m:5000}"}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha a full ref in capitals", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"refs/heads/MAIN\"}", "status": 422, "message": "No commit found for SHA: refs/heads/MAIN"}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha a search of messages", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \":/Add\"}", "status": 201, "run": {"name": "s", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha a tree", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"main^{tree}\"}", "status": 422, "message": "No commit found for SHA: main^{tree}"}
+]},
+{"from": "round 24", "steps": [
+  {"label": "head_sha caret zero", "method": "POST", "body": "{\"name\": \"s\", \"head_sha\": \"main^0\"}", "status": 201, "run": {"name": "s", "head_sha": "{sha}", "status": "queued", "conclusion": null, "started_at": "{now}", "completed_at": null, "details_url": "{app_url}", "external_id": ""}}
+]}
+]
+}

@@ -239,10 +239,10 @@ async fn pull_request_lifecycle() {
             "PATCH",
             &format!("{}/{run_id}", checks_url),
             &s.ci_token,
-            serde_json::json!({ "status": "queued", "conclusion": "success" }),
+            serde_json::json!({ "status": "completed" }),
         ),
         Err(422),
-        "conclusion contradicting an explicit non-completed status"
+        "completed with no conclusion"
     );
     let done = face_ok(
         "PATCH",

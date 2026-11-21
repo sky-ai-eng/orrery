@@ -868,11 +868,24 @@ async fn an_installation_token_changes_its_own_account_alone() {
     assert_eq!(call("POST", &teams, &on_acme, Some(team)).0, 201);
 
     // A check run names the App that made it, as `GET /app` answers it.
+    let head = {
+        let clock = s.inst.world.clock().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let src = work.path();
+        git(src, clock, &["init", "-q", "-b", "main", "."]);
+        std::fs::write(src.join("README.md"), "# web\n").unwrap();
+        git(src, clock, &["add", "."]);
+        git(src, clock, &["commit", "-q", "-m", "init"]);
+        let remote = format!("{}/acme/web.git", s.base)
+            .replace("http://", &format!("http://x-access-token:{}@", s.alice));
+        git(src, clock, &["push", "-q", &remote, "main"]);
+        git(src, clock, &["rev-parse", "HEAD"]).trim().to_string()
+    };
     let (status, _, run) = call(
         "POST",
         &format!("{api}/repos/acme/web/check-runs"),
         &on_acme,
-        Some(serde_json::json!({ "name": "build", "head_sha": "a".repeat(40) })),
+        Some(serde_json::json!({ "name": "build", "head_sha": head })),
     );
     assert_eq!(status, 201, "{run}");
     assert_eq!(run["app"]["id"], s.app_id);
@@ -885,7 +898,7 @@ async fn an_installation_token_changes_its_own_account_alone() {
         "POST",
         &format!("{api}/repos/acme/web/check-runs"),
         &ci,
-        serde_json::json!({ "name": "lint", "head_sha": "a".repeat(40) }),
+        serde_json::json!({ "name": "lint", "head_sha": head }),
     );
     assert_eq!(
         run["app"],

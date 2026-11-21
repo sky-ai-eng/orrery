@@ -5,8 +5,6 @@
 //! GitHub's opaque "not accessible by integration" — a documented divergence
 //! that teaches the caller which door to use.
 
-use std::collections::BTreeMap;
-
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, Response, StatusCode};
@@ -15,28 +13,408 @@ use orrery_world::{
     Door, NewCheckRun, Repo,
 };
 
+use orrery_face_git::store;
+
 use crate::render::check_run_json;
+use crate::schema::{Kind, Schema, instant};
 use crate::{
-    GithubFace, Sent, github_error, internal, invalid_request, json_response, media,
-    orrery_unsupported_field, resolve_repo, validation_custom, validation_invalid,
-    validation_missing,
+    GithubFace, Sent, github_error, internal, json_response, media, orrery_unsupported_field,
+    resolve_repo,
 };
 
-#[derive(serde::Deserialize)]
-struct CheckRunBody {
-    name: Option<String>,
-    head_sha: Option<String>,
-    status: Option<String>,
-    conclusion: Option<String>,
-    started_at: Option<String>,
-    completed_at: Option<String>,
-    details_url: Option<String>,
-    external_id: Option<String>,
-    output: Option<Sent>,
-    #[serde(flatten)]
-    rest: BTreeMap<String, serde_json::Value>,
+/// What GitHub checks of an annotation's shape. It asks nothing of a
+/// field's type: a wrong one is kept, left out, or fails, as [`annotation`]
+/// has it.
+const ANNOTATION: Schema = Schema {
+    kind: Some(Kind::Object),
+    required: &[
+        "annotation_level",
+        "end_line",
+        "message",
+        "path",
+        "start_line",
+    ],
+    ..Schema::ANY
+};
+
+/// What GitHub checks of an image, which it then keeps nowhere a read
+/// shows.
+const IMAGE: Schema = Schema {
+    kind: Some(Kind::Object),
+    required: &["alt", "image_url"],
+    ..Schema::ANY
+};
+
+const OUTPUT: Schema = Schema {
+    kind: Some(Kind::ObjectOrNull),
+    properties: &[
+        ("title", Schema::STRING),
+        (
+            "summary",
+            Schema {
+                max_length: Some(MAX_TEXT),
+                ..Schema::STRING
+            },
+        ),
+        (
+            "text",
+            Schema {
+                max_length: Some(MAX_TEXT),
+                ..Schema::STRING
+            },
+        ),
+        (
+            "images",
+            Schema {
+                kind: Some(Kind::Array),
+                items: Some(&IMAGE),
+                ..Schema::ANY
+            },
+        ),
+        (
+            "annotations",
+            Schema {
+                kind: Some(Kind::Array),
+                items: Some(&ANNOTATION),
+                max_items: Some(MAX_ANNOTATIONS),
+                ..Schema::ANY
+            },
+        ),
+    ],
+    required: &["summary", "title"],
+    ..Schema::ANY
+};
+
+const STATUS: Schema = Schema {
+    members: &["queued", "in_progress", "completed"],
+    ..Schema::STRING
+};
+
+/// The conclusions an App may give. `stale` is GitHub's own to give.
+const CONCLUSION: Schema = Schema {
+    members: &[
+        "success",
+        "failure",
+        "neutral",
+        "cancelled",
+        "timed_out",
+        "action_required",
+        "skipped",
+    ],
+    ..Schema::STRING
+};
+
+const TIME: Schema = Schema {
+    date_time: true,
+    ..Schema::STRING
+};
+
+/// A body passes one of these: `completed` with a conclusion, or a status
+/// that is not `completed`. One with no status passes the second.
+const STATUS_AND_CONCLUSION: &[Schema] = &[
+    Schema {
+        properties: &[(
+            "status",
+            Schema {
+                members: &["completed"],
+                ..Schema::ANY
+            },
+        )],
+        required: &["conclusion"],
+        ..Schema::ANY
+    },
+    Schema {
+        properties: &[(
+            "status",
+            Schema {
+                members: &["queued", "in_progress"],
+                ..Schema::ANY
+            },
+        )],
+        ..Schema::ANY
+    },
+];
+
+/// What GitHub checks of a new check run's body, its members in the order
+/// GitHub names their faults.
+const NEW_CHECK_RUN: Schema = Schema {
+    any_of: STATUS_AND_CONCLUSION,
+    kind: Some(Kind::Object),
+    properties: &[
+        ("head_sha", Schema::STRING),
+        ("name", Schema::STRING),
+        ("details_url", Schema::STRING),
+        ("external_id", Schema::STRING),
+        ("status", STATUS),
+        ("conclusion", CONCLUSION),
+        ("started_at", TIME),
+        ("completed_at", TIME),
+        ("output", OUTPUT),
+    ],
+    required: &["head_sha", "name"],
+    ..Schema::ANY
+};
+
+/// What GitHub checks of an update's body. It has no `head_sha`, which an
+/// update ignores whatever it is, and a body that holds nothing passes.
+const CHECK_RUN_UPDATE: Schema = Schema {
+    any_of: STATUS_AND_CONCLUSION,
+    kind: Some(Kind::ObjectOrNull),
+    properties: &[
+        ("name", Schema::STRING),
+        ("details_url", Schema::STRING),
+        ("external_id", Schema::STRING),
+        ("status", STATUS),
+        ("conclusion", CONCLUSION),
+        ("started_at", TIME),
+        ("completed_at", TIME),
+        ("output", OUTPUT),
+    ],
+    ..Schema::ANY
+};
+
+/// The longest name GitHub keeps, in bytes.
+const MAX_NAME_BYTES: usize = 1024;
+
+/// The longest `external_id` GitHub keeps, in characters.
+const MAX_EXTERNAL_ID: usize = 255;
+
+/// The fields of a body that passed its schema, apart from its times and
+/// its output.
+struct Fields<'a> {
+    name: Option<&'a str>,
+    details_url: Option<&'a str>,
+    external_id: Option<&'a str>,
+    status: Option<CheckStatus>,
+    conclusion: Option<CheckConclusion>,
 }
 
+impl<'a> Fields<'a> {
+    fn read(sent: &'a Sent) -> Fields<'a> {
+        Fields {
+            name: sent.at("name").as_str(),
+            details_url: sent.at("details_url").as_str(),
+            external_id: sent.at("external_id").as_str(),
+            status: sent.at("status").as_str().and_then(|status| match status {
+                "queued" => Some(CheckStatus::Queued),
+                "in_progress" => Some(CheckStatus::InProgress),
+                "completed" => Some(CheckStatus::Completed),
+                _ => None,
+            }),
+            conclusion: sent
+                .at("conclusion")
+                .as_str()
+                .and_then(|conclusion| match conclusion {
+                    "success" => Some(CheckConclusion::Success),
+                    "failure" => Some(CheckConclusion::Failure),
+                    "neutral" => Some(CheckConclusion::Neutral),
+                    "cancelled" => Some(CheckConclusion::Cancelled),
+                    "timed_out" => Some(CheckConclusion::TimedOut),
+                    "action_required" => Some(CheckConclusion::ActionRequired),
+                    "skipped" => Some(CheckConclusion::Skipped),
+                    _ => None,
+                }),
+        }
+    }
+
+    /// What GitHub's own checks refuse of these fields, in its order.
+    fn faults(&self) -> Vec<serde_json::Value> {
+        let mut faults = Vec::new();
+        if self
+            .external_id
+            .is_some_and(|id| id.chars().any(|c| c.len_utf8() == 4))
+        {
+            faults.push(fault(
+                "custom",
+                "external_id",
+                Some("external_id doesn't accept 4-byte Unicode"),
+            ));
+        }
+        if let Some(message) = self.details_url.and_then(url_fault) {
+            faults.push(fault("custom", "details_url", Some(message)));
+        }
+        faults
+    }
+
+    /// The `external_id` GitHub keeps: its first 255 characters.
+    fn kept_external_id(&self) -> Option<String> {
+        self.external_id
+            .map(|id| id.chars().take(MAX_EXTERNAL_ID).collect())
+    }
+}
+
+/// One entry of a "Validation Failed" answer's `errors`.
+fn fault(code: &str, field: &str, message: Option<&str>) -> serde_json::Value {
+    let mut fault = serde_json::json!({ "resource": "CheckRun", "code": code, "field": field });
+    if let Some(message) = message {
+        fault["message"] = message.into();
+    }
+    fault
+}
+
+/// GitHub's `422` for what its own checks refuse, all of it at once.
+fn validation_failed(faults: Vec<serde_json::Value>) -> Response<Body> {
+    json_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        serde_json::json!({ "message": "Validation Failed", "errors": faults }),
+    )
+}
+
+/// The name GitHub keeps: no more than 1,024 bytes of it, whole characters
+/// only. A new check run's name loses the spaces around it too, unless
+/// that would leave nothing.
+fn kept_name(name: &str, new: bool) -> String {
+    let mut end = name.len().min(MAX_NAME_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = &name[..end];
+    let trimmed = cut.trim_matches(['\t', '\n', '\x0b', '\x0c', '\r', ' ', '\0']);
+    match new && !trimmed.is_empty() {
+        true => trimmed.to_string(),
+        false => cut.to_string(),
+    }
+}
+
+/// What GitHub says of a `details_url` it refuses: one that is no URL at
+/// all, or one whose scheme is neither `http` nor `https`. It asks nothing
+/// more, so `http://` alone passes.
+fn url_fault(url: &str) -> Option<&'static str> {
+    let Some(scheme) = url_scheme(url) else {
+        return Some("details_url is not a valid URL");
+    };
+    match scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+        true => None,
+        false => Some("details_url must use the http or https scheme"),
+    }
+}
+
+/// The scheme of a URI reference as RFC 3986 writes one, which is empty
+/// for a reference that has none, or `None` for text that is no URI
+/// reference: one with a character the grammar has no place for, an
+/// escape that is not two hex digits, a bracket outside a host, or a port
+/// that is not a number.
+fn url_scheme(url: &str) -> Option<&str> {
+    let unreserved = |c: char| c.is_ascii_alphanumeric() || "-._~".contains(c);
+    let sub_delim = |c: char| "!$&'()*+,;=".contains(c);
+    // Every `%` begins an escape of two hex digits.
+    let bytes = url.as_bytes();
+    for (at, byte) in bytes.iter().enumerate() {
+        let escapes = |i: usize| bytes.get(i).is_some_and(u8::is_ascii_hexdigit);
+        if *byte == b'%' && !(escapes(at + 1) && escapes(at + 2)) {
+            return None;
+        }
+    }
+    let (rest, fragment) = match url.split_once('#') {
+        Some((rest, fragment)) => (rest, fragment),
+        None => (url, ""),
+    };
+    let (rest, query) = match rest.split_once('?') {
+        Some((rest, query)) => (rest, query),
+        None => (rest, ""),
+    };
+    let in_path = |c: char| unreserved(c) || sub_delim(c) || ":@/%".contains(c);
+    let in_tail = |c: char| in_path(c) || c == '?';
+    if !query.chars().all(in_tail) || !fragment.chars().all(in_tail) {
+        return None;
+    }
+    // A scheme is what comes before the first colon, when no slash comes
+    // before that.
+    let (scheme, rest) = match rest.split_once(':') {
+        Some((scheme, after)) if !scheme.contains('/') => {
+            let mut letters = scheme.chars();
+            let named = letters.next().is_some_and(|c| c.is_ascii_alphabetic())
+                && letters.all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
+            if !named {
+                return None;
+            }
+            (scheme, after)
+        }
+        _ => ("", rest),
+    };
+    let path = match rest.strip_prefix("//") {
+        Some(after) => {
+            let (authority, path) = match after.find('/') {
+                Some(at) => after.split_at(at),
+                None => (after, ""),
+            };
+            let host = match authority.rsplit_once('@') {
+                Some((user, host)) => {
+                    if !user
+                        .chars()
+                        .all(|c| unreserved(c) || sub_delim(c) || ":%".contains(c))
+                    {
+                        return None;
+                    }
+                    host
+                }
+                None => authority,
+            };
+            let (host, port) = match host.strip_prefix('[') {
+                Some(literal) => {
+                    let (address, after) = literal.split_once(']')?;
+                    if !address
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() || ":.".contains(c))
+                    {
+                        return None;
+                    }
+                    (
+                        "",
+                        after.strip_prefix(':').or(after.is_empty().then_some(""))?,
+                    )
+                }
+                None => match host.split_once(':') {
+                    Some((host, port)) => (host, port),
+                    None => (host, ""),
+                },
+            };
+            let named = host
+                .chars()
+                .all(|c| unreserved(c) || sub_delim(c) || c == '%');
+            if !named || !port.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            path
+        }
+        None => rest,
+    };
+    path.chars().all(in_path).then_some(scheme)
+}
+
+/// The commit a new check run's `head_sha` names, as GitHub resolves one:
+/// whatever git reads as a commit the repository holds, which is a sha in
+/// either case, an abbreviated one, a branch, or a revision such as
+/// `main~1`. Of a run of more than 40 hex digits it reads the first 40. The
+/// caller holds the gate.
+async fn commit_named(
+    face: &GithubFace,
+    repo: &Repo,
+    given: &str,
+) -> Result<Option<String>, Box<Response<Body>>> {
+    let overlong = given.len() > 40 && given.bytes().all(|b| b.is_ascii_hexdigit());
+    let name = match overlong {
+        true => &given[..40],
+        false => given,
+    };
+    let _refs = face.git.read_lock(repo.id).await;
+    let bare = store::bare_dir(&face.world.repos_dir(), &repo.owner_login, &repo.name);
+    crate::reads::resolve_commit(&bare, name).map_err(|e| Box::new(internal(e)))
+}
+
+/// A time a body's member names. `Ok(None)` for a member that was not
+/// sent, and `Err` for a time that passed the schema and GitHub still
+/// cannot read.
+fn time_of(sent: &Sent, key: &str) -> Result<Option<i64>, ()> {
+    match sent.at(key).as_str() {
+        None => Ok(None),
+        Some(text) => instant(text).map(Some).ok_or(()),
+    }
+}
+
+/// `POST /repos/{o}/{r}/check-runs`. GitHub's checks run in this order,
+/// each answering alone: the body's shape, the commit, the times, its own
+/// rules for the fields, and last an annotation it fails on.
 pub(crate) async fn create_check_run(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name)): UrlPath<(String, String)>,
@@ -46,6 +424,9 @@ pub(crate) async fn create_check_run(
 ) -> Response<Body> {
     let by = caller.via(Door::Rest);
     let actor = caller.actor;
+    // The commit is read from the bare repository, which a restore replaces
+    // under the gate.
+    let _gate = face.git.gate().read_owned().await;
     let (repo, _) = match resolve_repo(&face, &owner, &repo_name) {
         Ok(x) => x,
         Err(resp) => return *resp,
@@ -56,64 +437,74 @@ pub(crate) async fn create_check_run(
     if let Some(refused) = media::refuse_unrendered(&headers, "CheckRun") {
         return refused;
     }
-    let parsed: CheckRunBody = match serde_json::from_slice(&body) {
-        Ok(p) => p,
-        Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
+    let Ok(sent) = Sent::parse(&body) else {
+        return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON");
     };
-    if parsed.rest.contains_key("actions") {
+    if sent.member("actions").is_some() {
         return orrery_unsupported_field("CheckRun", "actions");
     }
-    let output = match Output::read(parsed.output.as_ref()) {
-        Ok(output) => output,
-        Err(resp) => return *resp,
-    };
-    let Some(name) = parsed.name.as_deref().filter(|n| !n.is_empty()) else {
-        return validation_missing("CheckRun", "name");
-    };
-    let Some(head_sha) = parsed.head_sha.as_deref() else {
-        return validation_missing("CheckRun", "head_sha");
-    };
-    if !is_full_sha(head_sha) {
-        return validation_invalid("CheckRun", "head_sha");
+    if let Some(refused) = NEW_CHECK_RUN.refuse(&sent, "links/0/schema") {
+        return refused;
     }
-    // GitHub takes a sha in either case and answers the commit's own.
-    let head_sha = &head_sha.to_ascii_lowercase();
-    let fields = match resolve_status_fields(&parsed, None) {
-        Ok(f) => f,
+    let given = sent.at("head_sha").as_str().unwrap_or_default();
+    let head_sha = match commit_named(&face, &repo, given).await {
+        Ok(Some(sha)) => sha,
+        Ok(None) => {
+            return github_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("No commit found for SHA: {given}"),
+            );
+        }
         Err(resp) => return *resp,
     };
+    let (Ok(started), Ok(completed)) =
+        (time_of(&sent, "started_at"), time_of(&sent, "completed_at"))
+    else {
+        return crash();
+    };
+    let fields = Fields::read(&sent);
+    let output = Output::read(sent.at("output"));
+    let mut faults = Vec::new();
+    // A new check run is refused for an annotation an update would leave
+    // out.
+    if output.left_out {
+        faults.push(fault("invalid", "annotations", None));
+    }
+    if completed.is_some() && fields.conclusion.is_none() {
+        faults.push(fault("missing_field", "conclusion", None));
+    }
+    faults.extend(fields.faults());
+    if !faults.is_empty() {
+        return validation_failed(faults);
+    }
+    if output.crashes {
+        return crash();
+    }
     let clock = match face.world.clock() {
         Ok(c) => c,
         Err(e) => return internal(e),
     };
-    // GitHub stamps started_at at creation regardless of status; explicit
-    // timestamps are caller inputs (deterministic, like commit dates).
-    let started = fields.started.unwrap_or(clock);
-    let completed = match fields.completed {
-        Some(c) => Some(c),
-        None if fields.status == CheckStatus::Completed => Some(clock),
-        None => None,
+    // A conclusion completes the run, whatever status came with it.
+    let status = match fields.conclusion {
+        Some(_) => CheckStatus::Completed,
+        None => fields.status.unwrap_or(CheckStatus::Queued),
     };
-    if output.crashes {
-        return crash();
-    }
-    // A new check run is refused for an annotation an update would leave
-    // out.
-    if output.left_out {
-        return validation_invalid("CheckRun", "annotations");
-    }
+    let completed = completed.or((status == CheckStatus::Completed).then_some(clock));
+    let name = kept_name(fields.name.unwrap_or_default(), true);
+    let external_id = fields.kept_external_id().unwrap_or_default();
     let created = face.world.create_check_run(
         by,
         NewCheckRun {
             repo_id: repo.id,
-            head_sha,
-            name,
-            status: fields.status,
+            head_sha: &head_sha,
+            name: &name,
+            status,
             conclusion: fields.conclusion,
-            details_url: parsed.details_url.as_deref(),
-            external_id: parsed.external_id.as_deref(),
+            details_url: fields.details_url,
+            external_id: Some(&external_id),
             output: output.said.as_ref(),
-            started_clock_unix: Some(started),
+            // GitHub stamps started_at at creation whatever the status.
+            started_clock_unix: Some(started.unwrap_or(clock)),
             completed_clock_unix: completed,
             annotations: &output.annotations,
         },
@@ -125,6 +516,9 @@ pub(crate) async fn create_check_run(
     }
 }
 
+/// `PATCH /repos/{o}/{r}/check-runs/{id}`. GitHub checks the body's shape,
+/// then fails on an annotation it cannot keep, then applies its own rules
+/// for the fields.
 pub(crate) async fn patch_check_run(
     State(face): State<GithubFace>,
     UrlPath((owner, repo_name, id)): UrlPath<(String, String, String)>,
@@ -141,13 +535,9 @@ pub(crate) async fn patch_check_run(
     if actor.kind != ActorKind::Bot {
         return bot_only(&actor);
     }
-    let Ok(run_id) = id.parse::<i64>() else {
-        return github_error(StatusCode::NOT_FOUND, "Not Found");
-    };
-    let existing = match face.world.check_run_by_id(run_id) {
-        Ok(Some(r)) if r.repo_id == repo.id => r,
-        Ok(_) => return github_error(StatusCode::NOT_FOUND, "Not Found"),
-        Err(e) => return internal(e),
+    let existing = match check_run_in(&face, &repo, &id) {
+        Ok(run) => run,
+        Err(resp) => return *resp,
     };
     if let Some(refused) = media::refuse_unrendered(&headers, "CheckRun") {
         return refused;
@@ -167,56 +557,69 @@ pub(crate) async fn patch_check_run(
             ),
         );
     }
-    let parsed: CheckRunBody = match serde_json::from_slice(&body) {
-        Ok(p) => p,
-        Err(_) => return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON"),
+    let Ok(sent) = Sent::parse(&body) else {
+        return github_error(StatusCode::BAD_REQUEST, "Problems parsing JSON");
     };
-    if parsed.rest.contains_key("actions") {
+    if sent.member("actions").is_some() {
         return orrery_unsupported_field("CheckRun", "actions");
     }
-    let output = match Output::read(parsed.output.as_ref()) {
-        Ok(output) => output,
-        Err(resp) => return *resp,
-    };
-    // Rebinding a check run to another commit is not a thing GitHub's PATCH
-    // does; refuse rather than silently ignore the field.
-    if parsed.head_sha.is_some() {
-        return orrery_unsupported_field(
-            "CheckRun",
-            "head_sha (a check run cannot be moved to another commit)",
-        );
+    if let Some(refused) = CHECK_RUN_UPDATE.refuse(&sent, "links/1/schema") {
+        return refused;
     }
-    let fields = match resolve_status_fields(&parsed, Some(existing.status)) {
-        Ok(f) => f,
-        Err(resp) => return *resp,
-    };
+    let output = Output::read(sent.at("output"));
+    if output.crashes {
+        return crash();
+    }
+    let fields = Fields::read(&sent);
     let clock = match face.world.clock() {
         Ok(c) => c,
         Err(e) => return internal(e),
     };
-    let completed = match fields.completed {
-        Some(c) => Some(c),
-        None if fields.status == CheckStatus::Completed
-            && existing.completed_clock_unix.is_none() =>
-        {
-            Some(clock)
-        }
+    let was_complete = existing.status == CheckStatus::Completed;
+    // On an update, a time GitHub cannot read is a time it does not keep,
+    // and the field falls back to what it holds unset: the time of the
+    // write for `started_at`, and for `completed_at` of a complete run.
+    let started = sent
+        .at("started_at")
+        .as_str()
+        .map(|text| instant(text).unwrap_or(clock));
+    let completed_sent = sent.at("completed_at").as_str();
+    let completed = completed_sent.and_then(instant);
+    let mut faults = Vec::new();
+    if completed.is_some() && fields.conclusion.is_none() && !was_complete {
+        faults.push(fault("missing_field", "conclusion", None));
+    }
+    faults.extend(fields.faults());
+    if !faults.is_empty() {
+        return validation_failed(faults);
+    }
+    // A conclusion completes the run whatever status came with it, and a
+    // complete run stays complete whatever status it is sent, which the
+    // write holds to on the run as it finds it.
+    let completes = fields.conclusion.is_some() || was_complete;
+    let status = match fields.conclusion {
+        Some(_) => Some(CheckStatus::Completed),
+        None => fields.status,
+    };
+    let completed = match completed {
+        Some(at) => Some(at),
+        None if completes && (!was_complete || completed_sent.is_some()) => Some(clock),
         None => None,
     };
-    if output.crashes {
-        return crash();
-    }
+    let name = fields.name.map(|name| kept_name(name, false));
+    let external_id = fields.kept_external_id();
     let updated = face.world.update_check_run(
-        run_id,
+        existing.id,
         by,
         CheckRunPatch {
-            name: parsed.name.as_deref(),
-            status: Some(fields.status),
+            name: name.as_deref(),
+            status,
+            keep_completed: true,
             conclusion: fields.conclusion,
-            details_url: parsed.details_url.as_deref(),
-            external_id: parsed.external_id.as_deref(),
+            details_url: fields.details_url,
+            external_id: external_id.as_deref(),
             output: output.said.as_ref(),
-            started_clock_unix: fields.started,
+            started_clock_unix: started,
             completed_clock_unix: completed,
             annotations: &output.annotations,
         },
@@ -244,8 +647,7 @@ fn crash() -> Response<Body> {
         .expect("static response parts are valid")
 }
 
-/// What a request's `output` holds, once it has passed the checks GitHub
-/// makes of its shape.
+/// What a request's `output` holds, once it has passed GitHub's schema.
 #[derive(Default)]
 struct Output {
     /// The title, summary, and text to store, or `None` for a request that
@@ -267,76 +669,22 @@ enum Read {
 }
 
 impl Output {
-    /// Read `output` as GitHub does, or its `422` for a shape it refuses.
-    /// GitHub checks every member and names every fault, one to a line: the
-    /// members in the order its schema has them, then the ones the output
-    /// lacks.
-    fn read(output: Option<&Sent>) -> Result<Output, Box<Response<Body>>> {
-        let refuse = |detail: String| Box::new(invalid_request(&detail));
-        let output = match output {
-            None | Some(Sent::Null) => return Ok(Output::default()),
-            Some(output @ Sent::Object(_)) => output,
-            Some(other) => {
-                return Err(refuse(format!(
-                    "For 'properties/output', {} is not an object or null.",
-                    other.spelled()
-                )));
-            }
-        };
-        let mut faults: Vec<String> = Vec::new();
-        for key in ["title", "summary", "text"] {
-            match output.member(key) {
-                None => {}
-                Some(Sent::String(text)) => {
-                    let length = text.chars().count();
-                    if key != "title" && length > MAX_TEXT {
-                        faults.push(format!(
-                            "Only {MAX_TEXT} characters are allowed; {length} were supplied."
-                        ));
-                    }
-                }
-                Some(other) => faults.push(format!(
-                    "For 'properties/{key}', {} is not a string.",
-                    other.spelled()
-                )),
-            }
+    /// Read an `output` that passed [`OUTPUT`]. A null one, like one that
+    /// was not sent, is no output.
+    fn read(output: &Sent) -> Output {
+        if !matches!(output, Sent::Object(_)) {
+            return Output::default();
         }
-        // An image is checked and then kept nowhere: no read answers one.
-        objects_of(output, "images", &["alt", "image_url"], None, &mut faults);
-        let items = objects_of(
-            output,
-            "annotations",
-            &[
-                "annotation_level",
-                "end_line",
-                "message",
-                "path",
-                "start_line",
-            ],
-            Some(MAX_ANNOTATIONS),
-            &mut faults,
-        );
-        let missing: Vec<&str> = ["summary", "title"]
-            .into_iter()
-            .filter(|key| output.member(key).is_none())
-            .collect();
-        if !missing.is_empty() {
-            faults.push(not_supplied(&missing));
-        }
-        if !faults.is_empty() {
-            return Err(refuse(faults.join("\n")));
-        }
-        let text = |key: &str| match output.member(key) {
-            Some(Sent::String(text)) => Some(text.as_str()),
-            _ => None,
-        };
         let mut read = Output {
             said: Some(serde_json::json!({
-                "title": text("title"),
-                "summary": text("summary"),
-                "text": text("text"),
+                "title": output.at("title").as_str(),
+                "summary": output.at("summary").as_str(),
+                "text": output.at("text").as_str(),
             })),
             ..Output::default()
+        };
+        let Sent::Array(items) = output.at("annotations") else {
+            return read;
         };
         for item in items {
             match annotation(item) {
@@ -345,63 +693,7 @@ impl Output {
                 Read::Crashes => read.crashes = true,
             }
         }
-        Ok(read)
-    }
-}
-
-/// The objects in the array `output` holds as `key`, with GitHub's words
-/// for each fault of the array's shape added to `faults`: an item that is
-/// no object and an item that lacks a field of `required`, each where it
-/// comes, then more items than `most`.
-fn objects_of<'a>(
-    output: &'a Sent,
-    key: &str,
-    required: &[&str],
-    most: Option<usize>,
-    faults: &mut Vec<String>,
-) -> Vec<&'a Sent> {
-    let sent = match output.member(key) {
-        None => return Vec::new(),
-        Some(Sent::Array(sent)) => sent,
-        Some(other) => {
-            faults.push(format!(
-                "For 'properties/{key}', {} is not an array.",
-                other.spelled()
-            ));
-            return Vec::new();
-        }
-    };
-    let mut objects = Vec::with_capacity(sent.len());
-    for item in sent {
-        if !matches!(item, Sent::Object(_)) {
-            faults.push(format!("For 'items', {} is not an object.", item.spelled()));
-            continue;
-        }
-        let missing: Vec<&str> = required
-            .iter()
-            .copied()
-            .filter(|name| item.member(name).is_none())
-            .collect();
-        if !missing.is_empty() {
-            faults.push(not_supplied(&missing));
-        }
-        objects.push(item);
-    }
-    if let Some(most) = most.filter(|most| sent.len() > *most) {
-        faults.push(format!(
-            "No more than {most} items are allowed; {} were supplied.",
-            sent.len()
-        ));
-    }
-    objects
-}
-
-/// GitHub's words for required fields a request lacks.
-fn not_supplied(names: &[&str]) -> String {
-    let quoted: Vec<String> = names.iter().map(|name| format!("\"{name}\"")).collect();
-    match quoted.len() {
-        1 => format!("{} wasn't supplied.", quoted[0]),
-        _ => format!("{} weren't supplied.", quoted.join(", ")),
+        read
     }
 }
 
@@ -411,7 +703,8 @@ fn not_supplied(names: &[&str]) -> String {
 /// else.
 fn whole(value: &Sent) -> Option<i64> {
     match value {
-        Sent::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        Sent::Integer(_) => value.as_i64(),
+        Sent::Float(n) => Some(*n as i64),
         Sent::String(s) => {
             let s = s.trim_start();
             let (sign, digits) = match s.strip_prefix('-') {
@@ -439,7 +732,9 @@ fn kept(text: &str) -> String {
 /// ends before it starts, and one with a column whose lines are not one
 /// line. Of the rest it keeps a level it does not define, a line below 1,
 /// and a title of any length, and it fails on a path, a message, or a title
-/// that is something other than a string.
+/// that is something other than a string. A character of four bytes leaves
+/// the annotation out when it is in `raw_details`, and fails when it is in
+/// the level.
 fn annotation(item: &Sent) -> Read {
     let (path, message) = (item.at("path"), item.at("message"));
     if path.is_blank() || message.is_blank() {
@@ -464,22 +759,27 @@ fn annotation(item: &Sent) -> Read {
     if end_line < start_line || (columns && start_line != end_line) || backwards {
         return Read::LeftOut;
     }
+    let wide = |text: &str| text.chars().any(|c| c.len_utf8() == 4);
+    let raw_details = match item.at("raw_details") {
+        Sent::Null => None,
+        Sent::String(raw) if wide(raw) => return Read::LeftOut,
+        Sent::String(raw) => Some(kept(raw)),
+        Sent::Bool(true) => Some("t".to_string()),
+        Sent::Bool(false) => Some("f".to_string()),
+        other => Some(kept(&other.spelled())),
+    };
     // GitHub fails on a type only in an annotation it would keep.
     let (Sent::String(path), Sent::String(message)) = (path, message) else {
         return Read::Crashes;
     };
+    if wide(&level) {
+        return Read::Crashes;
+    }
     let title = match item.at("title") {
         Sent::Null => None,
         Sent::String(title) => Some(title.clone()),
         nothing if nothing.is_blank() => Some(nothing.spelled()),
         _ => return Read::Crashes,
-    };
-    let raw_details = match item.at("raw_details") {
-        Sent::Null => None,
-        Sent::String(raw) => Some(kept(raw)),
-        Sent::Bool(true) => Some("t".to_string()),
-        Sent::Bool(false) => Some("f".to_string()),
-        other => Some(kept(&other.spelled())),
     };
     Read::Kept(Annotation {
         path: path.clone(),
@@ -640,88 +940,6 @@ fn annotations_page(
     )
 }
 
-struct StatusFields {
-    status: CheckStatus,
-    conclusion: Option<CheckConclusion>,
-    started: Option<i64>,
-    completed: Option<i64>,
-}
-
-/// Parse and couple status/conclusion the way GitHub does: a conclusion
-/// forces `completed`, and contradicting that explicitly is a 422.
-/// `current` is the stored status on PATCH (None on create, where the
-/// default is `queued`).
-fn resolve_status_fields(
-    body: &CheckRunBody,
-    current: Option<CheckStatus>,
-) -> Result<StatusFields, Box<Response<Body>>> {
-    let explicit = match body.status.as_deref() {
-        None => None,
-        Some("queued") => Some(CheckStatus::Queued),
-        Some("in_progress") => Some(CheckStatus::InProgress),
-        Some("completed") => Some(CheckStatus::Completed),
-        Some(_) => return Err(Box::new(validation_invalid("CheckRun", "status"))),
-    };
-    let conclusion = match body.conclusion.as_deref() {
-        None => None,
-        Some(c) => Some(
-            parse_conclusion(c)
-                .ok_or_else(|| Box::new(validation_invalid("CheckRun", "conclusion")))?,
-        ),
-    };
-    let status = if conclusion.is_some() {
-        match explicit {
-            Some(s) if s != CheckStatus::Completed => {
-                return Err(Box::new(validation_custom(
-                    "CheckRun",
-                    "conclusion can only be provided when the status is completed",
-                )));
-            }
-            _ => CheckStatus::Completed,
-        }
-    } else {
-        explicit.or(current).unwrap_or(CheckStatus::Queued)
-    };
-    let started = match body.started_at.as_deref() {
-        None => None,
-        Some(t) => Some(
-            parse_timestamp(t)
-                .ok_or_else(|| Box::new(validation_invalid("CheckRun", "started_at")))?,
-        ),
-    };
-    let completed = match body.completed_at.as_deref() {
-        None => None,
-        Some(t) => Some(
-            parse_timestamp(t)
-                .ok_or_else(|| Box::new(validation_invalid("CheckRun", "completed_at")))?,
-        ),
-    };
-    Ok(StatusFields {
-        status,
-        conclusion,
-        started,
-        completed,
-    })
-}
-
-fn parse_conclusion(s: &str) -> Option<CheckConclusion> {
-    Some(match s {
-        "success" => CheckConclusion::Success,
-        "failure" => CheckConclusion::Failure,
-        "neutral" => CheckConclusion::Neutral,
-        "cancelled" => CheckConclusion::Cancelled,
-        "skipped" => CheckConclusion::Skipped,
-        "stale" => CheckConclusion::Stale,
-        "timed_out" => CheckConclusion::TimedOut,
-        "action_required" => CheckConclusion::ActionRequired,
-        _ => return None,
-    })
-}
-
-fn parse_timestamp(s: &str) -> Option<i64> {
-    s.parse::<jiff::Timestamp>().ok().map(|t| t.as_second())
-}
-
 fn bot_only(actor: &Actor) -> Response<Body> {
     let body = serde_json::json!({
         "message": format!(
@@ -737,23 +955,75 @@ fn bot_only(actor: &Actor) -> Response<Body> {
     crate::json_response(StatusCode::FORBIDDEN, body)
 }
 
-fn is_full_sha(s: &str) -> bool {
-    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Each as github.com answered it as a check run's `details_url` on
+    /// 2026-11-21.
     #[test]
-    fn an_output_is_read_in_the_order_it_was_sent() {
-        let body: CheckRunBody = serde_json::from_str(
-            r#"{"name": "x", "output": {"summary": "S", "annotations": {"path": "x", "end_line": 1}}, "more": 1}"#,
-        )
-        .unwrap();
+    fn a_details_url_is_refused_as_github_refuses_it() {
+        const NO_URL: Option<&str> = Some("details_url is not a valid URL");
+        const SCHEME: Option<&str> = Some("details_url must use the http or https scheme");
+        for (url, said) in [
+            ("https://example.com/details", None),
+            ("http://", None),
+            ("https://", None),
+            ("HTTP://EXAMPLE.COM/X", None),
+            ("http:/x", None),
+            ("https:example.com", None),
+            ("https://example.com/x#frag", None),
+            ("https://exa_mple.com/", None),
+            ("https://user:pw@example.com:8080/x?y=1", None),
+            ("", SCHEME),
+            ("uuuu", SCHEME),
+            ("ftp://example.com/x", SCHEME),
+            ("//example.com/x", SCHEME),
+            ("mailto:x@example.com", SCHEME),
+            ("javascript:alert(1)", SCHEME),
+            ("x:y", SCHEME),
+            ("not a url", NO_URL),
+            ("https://exa mple.com", NO_URL),
+            ("https://example.com/\u{fc}", NO_URL),
+            ("https://example.com/\u{1f600}", NO_URL),
+            ("http://[::1", NO_URL),
+            ("https://example.com/<x>", NO_URL),
+            ("https://example.com/a b", NO_URL),
+            (" https://example.com/x", NO_URL),
+            ("https://example.com/x ", NO_URL),
+            ("https://example.com/%zz", NO_URL),
+            ("https://example.com/a|b", NO_URL),
+            ("https://example.com/a\\b", NO_URL),
+            ("https://example.com/a\"b", NO_URL),
+            ("https://example.com/a{b}", NO_URL),
+            ("https://example.com/a^b`c", NO_URL),
+            ("https://example.com/a[b]", NO_URL),
+            ("https://example.com/a%b", NO_URL),
+            ("https://example.com:port/", NO_URL),
+        ] {
+            assert_eq!(url_fault(url), said, "{url}");
+        }
+    }
+
+    /// Each as github.com kept it on 2026-11-21.
+    #[test]
+    fn a_name_is_kept_as_github_keeps_it() {
+        assert_eq!(kept_name("  padded  ", true), "padded");
+        assert_eq!(kept_name("\tname\n", true), "name");
+        assert_eq!(kept_name("\u{a0}name\u{a0}", true), "\u{a0}name\u{a0}");
+        assert_eq!(kept_name("   ", true), "   ");
+        assert_eq!(kept_name("\t", true), "\t");
+        assert_eq!(kept_name("", true), "");
+        assert_eq!(kept_name("  again  ", false), "  again  ");
+        assert_eq!(kept_name(&"n".repeat(70_000), true).len(), 1024);
+        assert_eq!(kept_name(&"\u{e9}".repeat(2000), true).chars().count(), 512);
         assert_eq!(
-            body.output.unwrap().at("annotations").spelled(),
-            r#"{"path" => "x", "end_line" => 1}"#
+            kept_name(&"\u{1f600}".repeat(2000), true).chars().count(),
+            256
         );
+        let mixed = format!("a{}", "\u{e9}".repeat(2000));
+        assert_eq!(kept_name(&mixed, true).len(), 1023);
+        let spaced = format!("   {}", "n".repeat(1030));
+        assert_eq!(kept_name(&spaced, true).len(), 1021);
     }
 }

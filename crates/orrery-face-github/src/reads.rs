@@ -619,7 +619,12 @@ pub(crate) fn resolve_commit(
     if rev.is_empty() {
         return Ok(None);
     }
-    store::rev_parse(bare, &format!("{rev}^{{commit}}"))
+    // The revision is read whole before it is read as a commit: `:/fix`
+    // searches the messages for all that follows it.
+    match store::rev_parse(bare, rev)? {
+        Some(object) => store::rev_parse(bare, &format!("{object}^{{commit}}")),
+        None => Ok(None),
+    }
 }
 
 fn compare_json(

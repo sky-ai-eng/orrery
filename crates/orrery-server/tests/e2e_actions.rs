@@ -2961,6 +2961,13 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
             "{field} {value}"
         );
     }
+    // A level with a character of four bytes fails the same way, where a
+    // path, a message, and a title keep one.
+    let wide = patch(
+        id,
+        json!({ "output": output(json!([with(62, json!({ "annotation_level": "l\u{1f600}" }))])) }),
+    );
+    assert_eq!((wide.status, wide.body.len()), (500, 0));
     assert_eq!(listed(id).len(), 18);
 
     // The types GitHub takes that are not the ones it describes, each kept
@@ -2987,6 +2994,8 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
                 with(10, json!({ "start_line": true })),
                 with(11, json!({ "start_column": false, "end_column": true })),
                 with(12, json!({ "start_column": [2] })),
+                with(13, json!({ "path": "p\u{1f600}", "message": "m\u{1f600}",
+                                 "title": "t\u{1f600}" })),
                 with(20, json!({ "message": false })),
                 with(21, json!({ "message": [] })),
                 with(22, json!({ "message": {} })),
@@ -2998,13 +3007,14 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
                 with(28, json!({ "start_line": 9, "end_line": 4, "message": 5 })),
                 with(29, json!({ "annotation_level": null, "path": 5 })),
                 with(30, json!({ "start_line": null, "title": 5 })),
+                with(31, json!({ "raw_details": "r\u{1f600}" })),
             ] } }),
     );
     assert_eq!(taken.status, 200, "{}", taken.text());
     assert_eq!(
         taken.json()["output"],
         json!({
-            "title": "T", "summary": "S", "text": null, "annotations_count": 12,
+            "title": "T", "summary": "S", "text": null, "annotations_count": 13,
             "annotations_url": annotations_url(typed),
         })
     );
@@ -3043,6 +3053,7 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
             [1, null, null, "warning", "README.md#L1-L10", null],
             [11, 0, 1, "warning", "README.md#L11", null],
             [12, null, null, "warning", "README.md#L12", null],
+            [13, null, null, "warning", "t\u{1f600}", null],
         ])
     );
 
@@ -3233,6 +3244,14 @@ async fn a_check_run_keeps_the_annotations_github_keeps_and_lists_them() {
     assert_eq!(status, 200);
     let job = s.get(&format!("check-runs/{lint}"));
     assert_eq!(job["output"]["annotations_count"], 3);
+    // A job's `external_id` is an id of GitHub's shape, the same each time.
+    let external_id = job["external_id"].as_str().unwrap();
+    let groups: Vec<usize> = external_id.split('-').map(str::len).collect();
+    assert_eq!(groups, [8, 4, 4, 4, 12], "{external_id}");
+    assert_eq!(
+        s.get(&format!("check-runs/{lint}"))["external_id"],
+        external_id
+    );
     assert_eq!(
         Value::Array(listed(lint)),
         json!([
