@@ -11,7 +11,7 @@ use orrery_world::{
 };
 
 use crate::actions::{page_links, repo_by_id};
-use crate::reads::{paginate, query_param};
+use crate::reads::{page_up_to_100 as page_of, paginate};
 use crate::render::{repo_json, rfc3339, user_json};
 use crate::suites::is_full_sha;
 use crate::{GithubFace, github_error, internal, json_response, media, resolve_repo};
@@ -57,21 +57,6 @@ fn validation_failed(faults: &[&str]) -> Response<Body> {
             "errors": format!("Validation failed: {}", faults.join(", ")),
         }),
     )
-}
-
-/// The page a status list answers, read as GitHub reads it for these
-/// lists: a `per_page` above 100 is 100, and one that is no positive number
-/// is the default, 30.
-fn page_of(query: &str) -> (usize, usize) {
-    let per_page = match query_param(query, "per_page").and_then(|v| v.parse::<usize>().ok()) {
-        Some(0) | None => 30,
-        Some(n) => n.min(100),
-    };
-    let page = query_param(query, "page")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(1)
-        .max(1);
-    (per_page, page)
 }
 
 /// `POST /repos/{o}/{r}/statuses/{sha}`: the commit gets a status. One of

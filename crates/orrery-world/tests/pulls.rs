@@ -799,6 +799,7 @@ fn check_run_create_and_patch_return_stored_rows() {
                 output: Some(&serde_json::json!({ "title": "queued" })),
                 started_clock_unix: Some(DEFAULT_T0_UNIX),
                 completed_clock_unix: None,
+                annotations: &[],
             },
             DEFAULT_T0_UNIX,
         )

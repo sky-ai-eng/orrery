@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::types::{
-    ActorEmail, ActorKind, AlertScope, AlertSeverity, AlertState, AlertUpdateState,
+    ActorEmail, ActorKind, AlertScope, AlertSeverity, AlertState, AlertUpdateState, Annotation,
     CheckConclusion, CheckStatus, ClockMode, DeliveryFailure, DeliveryState, DismissReason,
     JobSpec, OrgRole, Permissions, PullState, RepositorySelection, ReviewState, RunCancel,
     StatusState, Step, TeamRole,
@@ -1180,6 +1180,8 @@ bodies! {
     DependencyAlertCreated { subject: DependencyAlertSubject, object: DependencyAlertObject }
     DependencyAlertChanged { subject: DependencyAlertSubject, changes: DependencyAlertChanges }
     CheckRunChanged { subject: CheckRunSubject, changes: CheckRunChanges }
+    /// Annotations a check run was given, after those it had.
+    CheckRunAnnotated { subject: CheckRunSubject, annotations: Vec<Annotation> }
     /// Lines a runner wrote to a job's log.
     CheckRunLogged {
         subject: CheckRunSubject,
@@ -1193,7 +1195,7 @@ bodies! {
         /// How many lines it held.
         lines: i64,
     }
-    /// The check run as it was. A job's log goes with it.
+    /// The check run as it was. A job's log and its annotations go with it.
     CheckRunDeleted { subject: CheckRunSubject, object: CheckRunObject }
     CheckSuiteCreated { subject: CheckSuiteSubject, object: CheckSuiteObject }
     CheckSuiteChanged { subject: CheckSuiteSubject, changes: CheckSuiteChanges }
@@ -1351,6 +1353,9 @@ event_types! {
     /// A new attempt of a workflow run listed a job it does not run again,
     /// as the job finished in the attempt before.
     CheckRunCarried(CheckRunCreated) = "check_run:carried",
+    /// A check run was given annotations, which it keeps after those it
+    /// had.
+    CheckRunAnnotated(CheckRunAnnotated) = "check_run:annotated",
     /// A runner wrote lines to the log of the step of a job it is on.
     CheckRunLogged(CheckRunLogged) = "check_run:logged",
     /// A job's log was deleted with the logs of its run.

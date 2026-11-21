@@ -20,6 +20,8 @@ pub struct NewCheckRun<'a> {
     pub output: Option<&'a serde_json::Value>,
     pub started_clock_unix: Option<i64>,
     pub completed_clock_unix: Option<i64>,
+    /// What the run says of lines of files, to start with.
+    pub annotations: &'a [Annotation],
 }
 
 #[derive(Default)]
@@ -32,6 +34,8 @@ pub struct CheckRunPatch<'a> {
     pub output: Option<&'a serde_json::Value>,
     pub started_clock_unix: Option<i64>,
     pub completed_clock_unix: Option<i64>,
+    /// More of what the run says of lines of files, kept after what it has.
+    pub annotations: &'a [Annotation],
 }
 
 impl World {
@@ -79,8 +83,13 @@ impl World {
                 subject: objects::check_run_subject(tx, run.id)?,
                 object: objects::check_run_object(tx, run.id)?,
             }));
+            let given = annotate(w, run.id, new.annotations)?;
             suites::settle(w, suite)?;
-            Ok(run)
+            // The row was returned before its annotations were stored.
+            Ok(CheckRun {
+                annotations_count: given,
+                ..run
+            })
         })
     }
 
@@ -134,14 +143,22 @@ impl World {
                 .ok_or(WorldError::NoSuchCheckRun(id))?;
             let changes =
                 events::CheckRunChanges::between(&before, &objects::check_run_object(tx, id)?);
-            if !changes.is_empty() {
+            let changed = !changes.is_empty();
+            if changed {
                 w.operation(EventBody::CheckRunUpdated(events::CheckRunChanged {
                     subject: objects::check_run_subject(tx, id)?,
                     changes,
                 }));
+            }
+            let given = annotate(w, id, patch.annotations)?;
+            if changed {
                 suites::settle(w, run.suite_id)?;
             }
-            Ok(run)
+            // The row was returned before the new annotations were stored.
+            Ok(CheckRun {
+                annotations_count: run.annotations_count + given,
+                ..run
+            })
         })
     }
 
@@ -153,4 +170,75 @@ impl World {
     pub fn check_run_by_id(&self, id: i64) -> Result<Option<CheckRun>> {
         self.with_conn(|conn| queries::check_run_by_id(conn, id))
     }
+
+    /// A check run's annotations, in the order it was given them.
+    pub fn list_check_run_annotations(&self, check_run_id: i64) -> Result<Vec<Annotation>> {
+        self.with_conn(|conn| queries::list_check_run_annotations(conn, check_run_id))
+    }
+
+    /// Give a job the annotations its runner makes of it, after those it
+    /// has. Only a job a runner is on takes them.
+    pub fn annotate_workflow_job(
+        &self,
+        job_id: i64,
+        annotations: &[Annotation],
+        by: Attribution,
+    ) -> Result<CheckRun> {
+        self.write(by, |w| {
+            let job = queries::check_run_by_id(w.tx, job_id)?
+                .filter(|run| run.job.is_some())
+                .ok_or(WorldError::NoSuchWorkflowJob(job_id))?;
+            if job.status != CheckStatus::InProgress {
+                return Err(WorldError::JobNotInProgress(job_id));
+            }
+            let given = annotate(w, job_id, annotations)?;
+            Ok(CheckRun {
+                annotations_count: job.annotations_count + given,
+                ..job
+            })
+        })
+    }
+}
+
+/// Store `annotations` after those the check run has, and say so: as the
+/// write's operation when nothing came before it, and otherwise as a
+/// consequence. Answers how many were stored.
+pub(crate) fn annotate(
+    w: &mut crate::log::Write<'_>,
+    check_run_id: i64,
+    annotations: &[Annotation],
+) -> Result<i64> {
+    if annotations.is_empty() {
+        return Ok(0);
+    }
+    let tx = w.tx;
+    for a in annotations {
+        tx.execute(
+            "INSERT INTO check_run_annotations (check_run_id, path, start_line, end_line,
+                                                start_column, end_column, level, message,
+                                                title, raw_details)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                check_run_id,
+                a.path,
+                a.start_line,
+                a.end_line,
+                a.start_column,
+                a.end_column,
+                a.level,
+                a.message,
+                a.title,
+                a.raw_details
+            ],
+        )?;
+    }
+    let event = EventBody::CheckRunAnnotated(events::CheckRunAnnotated {
+        subject: objects::check_run_subject(tx, check_run_id)?,
+        annotations: annotations.to_vec(),
+    });
+    match w.has_operation() {
+        true => w.emit(event),
+        false => w.operation(event),
+    }
+    Ok(annotations.len() as i64)
 }

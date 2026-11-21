@@ -13,8 +13,8 @@
 use std::path::Path;
 
 use orrery_world::{
-    AccessLevel, ActorEmail, ActorKind, Attribution, CheckConclusion, CheckRunPatch, CheckStatus,
-    CommitFacts, CommitSignature, DEFAULT_T0_UNIX, Door, JobSpec, NewApp, NewCheckRun,
+    AccessLevel, ActorEmail, ActorKind, Annotation, Attribution, CheckConclusion, CheckRunPatch,
+    CheckStatus, CommitFacts, CommitSignature, DEFAULT_T0_UNIX, Door, JobSpec, NewApp, NewCheckRun,
     NewCommitStatus, NewPull, NewWorkflow, NewWorkflowRun, OrgRole, Permissions, RefChange,
     RefMove, Rerun, ReviewState, SCHEMA_VERSION, SYSTEM_ACTOR_LOGIN, StatusState, StepConclusion,
     StepSpec, TeamRole, World, WorldSecret,
@@ -200,6 +200,17 @@ fn populate(w: &World) -> orrery_world::Result<()> {
             output: Some(&serde_json::json!({ "title": "Building", "summary": "" })),
             started_clock_unix: Some(DEFAULT_T0_UNIX + 3600),
             completed_clock_unix: None,
+            annotations: &[Annotation {
+                path: "src/lib.rs".to_string(),
+                start_line: 3,
+                end_line: 3,
+                start_column: Some(1),
+                end_column: Some(8),
+                level: "warning".to_string(),
+                message: "unused import".to_string(),
+                title: None,
+                raw_details: None,
+            }],
         },
         w.clock()?,
     )?;

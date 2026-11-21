@@ -192,6 +192,14 @@ pub fn router(face: GithubFace) -> Router {
             get(suites::get_check_run).patch(checks::patch_check_run),
         )
         .route(
+            "/repos/{owner}/{repo}/check-runs/{id}/annotations",
+            get(checks::list_annotations),
+        )
+        .route(
+            "/repositories/{id}/check-runs/{check_run_id}/annotations",
+            get(checks::list_annotations_by_id),
+        )
+        .route(
             "/repos/{owner}/{repo}/actions/workflows",
             get(actions::list_workflows),
         )
@@ -634,10 +642,24 @@ pub(crate) fn invalid_request(detail: &str) -> Response<Body> {
     )
 }
 
-/// A value as GitHub's schema messages spell it: JSON, but `nil` for null.
+/// A value as GitHub's schema messages spell it, which is as Ruby prints
+/// one: JSON, but `nil` for null, and an object's members as `"key" => value`.
 pub(crate) fn schema_value(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => "nil".to_string(),
+        serde_json::Value::Array(items) => {
+            let items: Vec<String> = items.iter().map(schema_value).collect();
+            format!("[{}]", items.join(", "))
+        }
+        serde_json::Value::Object(members) => {
+            let members: Vec<String> = members
+                .iter()
+                .map(|(key, value)| {
+                    format!("{} => {}", serde_json::json!(key), schema_value(value))
+                })
+                .collect();
+            format!("{{{}}}", members.join(", "))
+        }
         other => other.to_string(),
     }
 }

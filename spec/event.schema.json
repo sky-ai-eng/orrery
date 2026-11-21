@@ -312,6 +312,63 @@
       ],
       "type": "string"
     },
+    "Annotation": {
+      "description": "What a check run says of some lines of a file.",
+      "properties": {
+        "end_column": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "end_line": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "level": {
+          "description": "How serious its writer says the finding is, in the writer's word.",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "raw_details": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_column": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start_line": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "start_line",
+        "end_line",
+        "level",
+        "message"
+      ],
+      "type": "object"
+    },
     "AppChanged": {
       "properties": {
         "changes": {
@@ -1180,6 +1237,25 @@
       ],
       "type": "string"
     },
+    "CheckRunAnnotated": {
+      "description": "Annotations a check run was given, after those it had.",
+      "properties": {
+        "annotations": {
+          "items": {
+            "$ref": "#/$defs/Annotation"
+          },
+          "type": "array"
+        },
+        "subject": {
+          "$ref": "#/$defs/CheckRunSubject"
+        }
+      },
+      "required": [
+        "subject",
+        "annotations"
+      ],
+      "type": "object"
+    },
     "CheckRunChanged": {
       "properties": {
         "changes": {
@@ -1582,7 +1658,7 @@
       "type": "object"
     },
     "CheckRunDeleted": {
-      "description": "The check run as it was. A job's log goes with it.",
+      "description": "The check run as it was. A job's log and its annotations go with it.",
       "properties": {
         "object": {
           "$ref": "#/$defs/CheckRunObject"
@@ -8482,6 +8558,20 @@
       "properties": {
         "type": {
           "const": "check_run:carried",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/CheckRunAnnotated",
+      "description": "A check run was given annotations, which it keeps after those it\nhad.",
+      "properties": {
+        "type": {
+          "const": "check_run:annotated",
           "type": "string"
         }
       },

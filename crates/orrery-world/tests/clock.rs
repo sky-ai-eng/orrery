@@ -169,6 +169,7 @@ fn a_write_dated_with_a_time_the_world_answered_advances_to_that_time() {
                 output: None,
                 started_clock_unix: Some(at),
                 completed_clock_unix: None,
+                annotations: &[],
             },
             at,
         )

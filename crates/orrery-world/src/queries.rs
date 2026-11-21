@@ -59,7 +59,9 @@ pub(crate) const CHECK_RUN_COLUMNS: &str = "id, repo_id, head_sha, name, status,
     details_url, external_id, output,
     (SELECT login FROM actors WHERE actors.id = check_runs.creator_id),
     started_clock_unix, completed_clock_unix, created_clock_unix, suite_id,
-    workflow_run_id, run_attempt, steps, carried_from";
+    workflow_run_id, run_attempt, steps, carried_from,
+    (SELECT COUNT(*) FROM check_run_annotations
+     WHERE check_run_annotations.check_run_id = check_runs.id)";
 
 pub(crate) const COMMIT_STATUS_COLUMNS: &str = "id, repo_id, sha, context, state, description,
     target_url, (SELECT login FROM actors WHERE actors.id = commit_statuses.creator_id),
@@ -263,7 +265,34 @@ pub(crate) fn row_to_check_run(r: &Row<'_>) -> rusqlite::Result<CheckRun> {
                 carried_from: r.get(17)?,
             }),
         },
+        annotations_count: r.get(18)?,
     })
+}
+
+/// A check run's annotations, in the order it was given them.
+pub(crate) fn list_check_run_annotations(
+    conn: &Connection,
+    check_run_id: i64,
+) -> Result<Vec<Annotation>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, start_line, end_line, start_column, end_column, level, message, title,
+                raw_details
+         FROM check_run_annotations WHERE check_run_id = ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map(params![check_run_id], |r| {
+        Ok(Annotation {
+            path: r.get(0)?,
+            start_line: r.get(1)?,
+            end_line: r.get(2)?,
+            start_column: r.get(3)?,
+            end_column: r.get(4)?,
+            level: r.get(5)?,
+            message: r.get(6)?,
+            title: r.get(7)?,
+            raw_details: r.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// A JSON column's value, or the type's default for a column that holds

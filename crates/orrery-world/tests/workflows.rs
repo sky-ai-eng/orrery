@@ -372,6 +372,7 @@ fn runs_of_a_workflow_are_numbered_and_each_has_its_own_suite() {
                 output: None,
                 started_clock_unix: None,
                 completed_clock_unix: None,
+                annotations: &[],
             },
             at,
         )

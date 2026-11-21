@@ -132,9 +132,10 @@ A merge through the REST face is one write of four events. Hashes are shortened.
 | `comment:created` | commenting | `object` | `pull:updated` when `updated_unix` moves |
 | `check_run:created` | creating a check run | `object` | `check_suite:created` when its creator had no suite on the commit, then `check_suite:updated` when the suite comes to something else |
 | `check_run:carried` | a consequence only: a re-run listing, in its new attempt, a job it does not run again, as the job finished in the attempt before and under a new id | `object` | |
+| `check_run:annotated` | giving a check run annotations: an update that changes nothing else, or a runner annotating its job. Also a consequence of `check_run:created` and of `check_run:updated`, for the annotations the check run was given with it | the `annotations`, in the order they are kept after those the check run had | none |
 | `check_run:logged` | a runner writing lines to the log of a job, in the step in progress | the `step`'s number and the `lines` | none |
 | `check_run:log_deleted` | a consequence only: of deleting a run's logs, for each job that had lines of its own | how many `lines` it held | |
-| `check_run:deleted` | a consequence only: of deleting a workflow run, for each job of every attempt | `object`, the check run as it was; its log goes with it | |
+| `check_run:deleted` | a consequence only: of deleting a workflow run, for each job of every attempt | `object`, the check run as it was; its log and its annotations go with it | |
 | `check_run:updated` | updating one, or a runner's work on a job: taking it, finishing a step, or finishing it | `changes` | for a job that finished, a `check_run:created` for each job its finish listed; then `check_suite:updated` when the suite comes to something else |
 | `check_suite:created` | a consequence only: of a push or a merge that brings a commit to a branch's tip, for each app that may write checks there, of a check run on a commit its creator has no suite for, and of the start of a workflow run, which has a suite to itself | `object` | |
 | `check_suite:deleted` | a consequence only: of deleting the workflow run whose suite it is | `object`, the suite as it was | |

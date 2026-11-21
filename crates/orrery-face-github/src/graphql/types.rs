@@ -949,6 +949,49 @@ pub struct CheckStepConnection {
     pub nodes: Vec<GqlCheckStep>,
 }
 
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+pub enum CheckAnnotationLevel {
+    Failure,
+    Notice,
+    Warning,
+}
+
+#[derive(SimpleObject)]
+#[graphql(name = "CheckAnnotationPosition")]
+pub struct CheckAnnotationPosition {
+    pub line: i64,
+    pub column: Option<i64>,
+}
+
+#[derive(SimpleObject)]
+#[graphql(name = "CheckAnnotationSpan")]
+pub struct CheckAnnotationSpan {
+    pub start: CheckAnnotationPosition,
+    pub end: CheckAnnotationPosition,
+}
+
+#[derive(SimpleObject)]
+#[graphql(name = "CheckAnnotation")]
+pub struct GqlCheckAnnotation {
+    pub path: String,
+    /// Null for a level GitHub's schema does not define, which REST keeps
+    /// as it was sent.
+    pub annotation_level: Option<CheckAnnotationLevel>,
+    pub message: String,
+    pub title: Option<String>,
+    pub raw_details: Option<String>,
+    pub blob_url: String,
+    pub location: CheckAnnotationSpan,
+}
+
+#[derive(SimpleObject)]
+#[graphql(name = "CheckAnnotationConnection")]
+pub struct CheckAnnotationConnection {
+    pub total_count: i64,
+    pub page_info: PageInfo,
+    pub nodes: Vec<GqlCheckAnnotation>,
+}
+
 pub struct GqlCheckSuite {
     pub suite: world::CheckSuite,
 }
@@ -1103,6 +1146,91 @@ impl GqlCheckRun {
             .check_suite_by_id(self.run.suite_id)
             .map_err(internal)?;
         Ok(suite.map(|suite| GqlCheckSuite { suite }))
+    }
+
+    async fn title(&self) -> Option<String> {
+        self.said("title")
+    }
+
+    async fn summary(&self) -> Option<String> {
+        self.said("summary")
+    }
+
+    async fn text(&self) -> Option<String> {
+        self.said("text")
+    }
+
+    /// The check run's annotations, in the order it was given them, as
+    /// REST lists them.
+    async fn annotations(
+        &self,
+        ctx: &Context<'_>,
+        first: Option<i32>,
+    ) -> Result<CheckAnnotationConnection, Error> {
+        let face = face(ctx);
+        let kept = face
+            .world
+            .list_check_run_annotations(self.run.id)
+            .map_err(internal)?;
+        let repo = face.world.repo_by_id(self.run.repo_id).map_err(internal)?;
+        let blob = |path: &str| match &repo {
+            Some(repo) => format!(
+                "{}/{}/blob/{}/{path}",
+                face.layout.web(),
+                repo.full_name(),
+                self.run.head_sha
+            ),
+            None => String::new(),
+        };
+        let annotations: Vec<GqlCheckAnnotation> = kept
+            .iter()
+            .map(|a| GqlCheckAnnotation {
+                path: a.path.clone(),
+                annotation_level: match a.level.as_str() {
+                    "failure" => Some(CheckAnnotationLevel::Failure),
+                    "notice" => Some(CheckAnnotationLevel::Notice),
+                    "warning" => Some(CheckAnnotationLevel::Warning),
+                    _ => None,
+                },
+                message: a.message.clone(),
+                title: Some(
+                    a.title
+                        .clone()
+                        .unwrap_or_else(|| crate::checks::default_title(a)),
+                ),
+                raw_details: a.raw_details.clone(),
+                blob_url: blob(&a.path),
+                location: CheckAnnotationSpan {
+                    start: CheckAnnotationPosition {
+                        line: a.start_line,
+                        column: a.start_column,
+                    },
+                    end: CheckAnnotationPosition {
+                        line: a.end_line,
+                        column: a.end_column,
+                    },
+                },
+            })
+            .collect();
+        let total_count = annotations.len() as i64;
+        let (nodes, page_info) = take_first("annotations", annotations, first)?;
+        Ok(CheckAnnotationConnection {
+            total_count,
+            page_info,
+            nodes,
+        })
+    }
+}
+
+impl GqlCheckRun {
+    /// One of the three things a check run's output says, when it was sent.
+    fn said(&self, key: &str) -> Option<String> {
+        self.run
+            .output
+            .as_ref()?
+            .get(key)?
+            .as_str()
+            .map(str::to_string)
     }
 }
 

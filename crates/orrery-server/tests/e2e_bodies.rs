@@ -131,6 +131,16 @@ fn routes() -> Vec<Route> {
         },
         Route {
             method: "POST",
+            path: "/repos/alice/web/workflow-jobs/1/annotations",
+            accepted: json!({ "annotations": [{
+                "path": "README.md", "start_line": 1, "end_line": 1, "level": "notice",
+                "message": "a finding",
+            }] }),
+            required: &["annotations"],
+            mistyped: ("annotations", json!("a finding")),
+        },
+        Route {
+            method: "POST",
             path: "/repos/alice/web/workflow-jobs/1/complete-step",
             accepted: json!({ "conclusion": "success" }),
             required: &["conclusion"],

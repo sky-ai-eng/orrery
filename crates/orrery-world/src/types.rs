@@ -547,6 +547,25 @@ pub struct CheckRun {
     pub created_clock_unix: i64,
     /// What a check run that is a job of a workflow run holds beside.
     pub job: Option<Job>,
+    /// How many annotations it has been given.
+    pub annotations_count: i64,
+}
+
+/// What a check run says of some lines of a file.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct Annotation {
+    pub path: String,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub start_column: Option<i64>,
+    pub end_column: Option<i64>,
+    /// How serious its writer says the finding is, in the writer's word.
+    pub level: String,
+    pub message: String,
+    pub title: Option<String>,
+    pub raw_details: Option<String>,
 }
 
 /// A check run's place in a workflow run, and how far its runner has
